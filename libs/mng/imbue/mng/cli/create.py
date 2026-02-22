@@ -2,6 +2,8 @@ import os
 import shlex
 import sys
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import assert_never
 from typing import cast
@@ -685,7 +687,7 @@ def _handle_create(
 
             # Handle --edit-message if editor session was started,
             # or send initial message directly if --message/--message-file was provided
-            try:
+            with _editor_cleanup_scope(editor_session):
                 if editor_session is not None:
                     _handle_editor_message(
                         editor_session=editor_session,
@@ -697,13 +699,6 @@ def _handle_create(
                     agent.send_message(initial_message)
                 else:
                     pass
-            finally:
-                # Clean up editor session on success or failure
-                if editor_session is not None and not editor_session.is_finished():
-                    editor_session.cleanup()
-                # Ensure logging suppression is disabled on any exit path
-                if LoggingSuppressor.is_suppressed():
-                    LoggingSuppressor.disable_and_replay(clear_screen=True)
 
             create_result = CreateAgentResult(agent=agent, host=host)
             return create_result, connection_opts, output_opts, opts, mng_ctx
@@ -794,8 +789,8 @@ def _handle_create(
         return
 
     # Call the API create function (synchronously)
-    # Wrap in try/finally to ensure editor cleanup on failure
-    try:
+    # Wrap in context manager to ensure editor cleanup on failure
+    with _editor_cleanup_scope(editor_session):
         create_result = api_create(
             source_location=source_location,
             target_host=resolved_target_host,
@@ -811,13 +806,6 @@ def _handle_create(
                 editor_session=editor_session,
                 agent=create_result.agent,
             )
-    finally:
-        # Clean up editor session on success or failure
-        if editor_session is not None and not editor_session.is_finished():
-            editor_session.cleanup()
-        # Ensure logging suppression is disabled on any exit path
-        if LoggingSuppressor.is_suppressed():
-            LoggingSuppressor.disable_and_replay(clear_screen=True)
 
     return create_result, connection_opts, output_opts, opts, mng_ctx
 
@@ -860,6 +848,22 @@ def _on_editor_exit() -> None:
     LoggingSuppressor.disable_and_replay(clear_screen=True)
 
 
+@contextmanager
+def _editor_cleanup_scope(editor_session: EditorSession | None) -> Iterator[None]:
+    """Ensure editor session cleanup and logging suppressor restoration on exit.
+
+    Safe to nest: EditorSession.cleanup() is idempotent, and
+    LoggingSuppressor.disable_and_replay() is a no-op when not suppressed.
+    """
+    try:
+        yield
+    finally:
+        if editor_session is not None:
+            editor_session.cleanup()
+        if LoggingSuppressor.is_suppressed():
+            LoggingSuppressor.disable_and_replay(clear_screen=True)
+
+
 def _handle_editor_message(
     editor_session: EditorSession,
     agent: AgentInterface,
@@ -876,7 +880,7 @@ def _handle_editor_message(
     as soon as the editor process exits. By the time wait_for_result() returns,
     the callback has already restored logging.
     """
-    try:
+    with _editor_cleanup_scope(editor_session):
         with log_span("Waiting for editor to finish..."):
             edited_message = editor_session.wait_for_result()
 
@@ -890,13 +894,6 @@ def _handle_editor_message(
         logger.info("Sending edited message...")
         agent.send_message(edited_message)
         logger.debug("Message sent successfully")
-
-    finally:
-        editor_session.cleanup()
-        # Make sure suppression is disabled even if an exception occurred
-        # (e.g., if the callback wasn't called for some reason)
-        if LoggingSuppressor.is_suppressed():
-            LoggingSuppressor.disable_and_replay(clear_screen=True)
 
 
 def _create_agent_in_background(
