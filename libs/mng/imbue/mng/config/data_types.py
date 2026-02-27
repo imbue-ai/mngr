@@ -479,6 +479,12 @@ class MngConfig(FrozenModel):
         description="Custom command to run instead of the builtin connect when create or start connects to agents. "
         "The environment variables MNG_AGENT_NAME and MNG_SESSION_NAME are set before running the command.",
     )
+    is_tmux_isolated_for_local_agents: bool = Field(
+        default_factory=lambda: "PYTEST_CURRENT_TEST" not in os.environ,
+        description="Whether to isolate local agent tmux sessions from the user's global tmux server "
+        "by setting TMUX_TMPDIR to a mng-specific directory (default_host_dir / 'tmux'). "
+        "When False, local agents use the global tmux server.",
+    )
     is_nested_tmux_allowed: bool = Field(
         default=False,
         description="Allow attaching to tmux sessions from within an existing tmux session by unsetting $TMUX",
@@ -610,6 +616,11 @@ class MngConfig(FrozenModel):
             override.connect_command if override.connect_command is not None else self.connect_command
         )
 
+        # Merge is_tmux_isolated_for_local_agents (scalar - override wins if not None)
+        merged_is_tmux_isolated_for_local_agents = self.is_tmux_isolated_for_local_agents
+        if override.is_tmux_isolated_for_local_agents is not None:
+            merged_is_tmux_isolated_for_local_agents = override.is_tmux_isolated_for_local_agents
+
         # Merge is_nested_tmux_allowed (scalar - override wins if not None)
         merged_is_nested_tmux_allowed = self.is_nested_tmux_allowed
         if override.is_nested_tmux_allowed is not None:
@@ -650,6 +661,7 @@ class MngConfig(FrozenModel):
             is_remote_agent_installation_allowed=is_remote_agent_installation_allowed,
             connect_command=merged_connect_command,
             logging=merged_logging,
+            is_tmux_isolated_for_local_agents=merged_is_tmux_isolated_for_local_agents,
             is_nested_tmux_allowed=merged_is_nested_tmux_allowed,
             is_error_reporting_enabled=merged_is_error_reporting_enabled,
             is_allowed_in_pytest=is_allowed_in_pytest,

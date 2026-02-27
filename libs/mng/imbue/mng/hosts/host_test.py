@@ -14,6 +14,7 @@ from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.config.data_types import AgentTypeConfig
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.hosts.host import Host
@@ -23,6 +24,7 @@ from imbue.mng.hosts.host import _build_start_agent_shell_command
 from imbue.mng.hosts.host import _is_socket_closed_os_error
 from imbue.mng.hosts.host import _parse_boot_time_output
 from imbue.mng.hosts.host import _parse_uptime_output
+from imbue.mng.hosts.host import _prefix_tmux_cmd
 from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NamedCommand
@@ -678,6 +680,89 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     assert "set-hook" not in result
     assert "display-popup" not in result
     assert "client-attached" not in result
+
+
+# =========================================================================
+# Tests for tmux isolation
+# =========================================================================
+
+
+def test_prefix_tmux_cmd_with_tmpdir() -> None:
+    """_prefix_tmux_cmd should prepend TMUX_TMPDIR= when a tmpdir is given."""
+    result = _prefix_tmux_cmd("tmux list-sessions", Path("/home/user/.mng/tmux"))
+    assert result == "TMUX_TMPDIR=/home/user/.mng/tmux tmux list-sessions"
+
+
+def test_prefix_tmux_cmd_without_tmpdir() -> None:
+    """_prefix_tmux_cmd should return the command unchanged when tmpdir is None."""
+    result = _prefix_tmux_cmd("tmux list-sessions", None)
+    assert result == "tmux list-sessions"
+
+
+def test_build_start_agent_shell_command_with_tmux_tmpdir(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """When tmux_tmpdir is provided, the command should start with export TMUX_TMPDIR."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    tmux_tmpdir = Path("/home/user/.mng/tmux")
+    result = _build_start_agent_shell_command(
+        agent=agent,
+        session_name=f"mng-{agent.name}",
+        command="sleep 1000",
+        additional_commands=[],
+        env_shell_cmd="bash -c 'exec \"${MNG_SAVED_DEFAULT_TMUX_COMMAND:-bash}\"'",
+        tmux_config_path=Path("/tmp/tmux.conf"),
+        unset_vars=[],
+        host_dir=temp_host_dir,
+        tmux_tmpdir=tmux_tmpdir,
+    )
+
+    # The command should start with export TMUX_TMPDIR=...
+    assert result.startswith("export TMUX_TMPDIR=")
+    assert "/home/user/.mng/tmux" in result
+    # The rest of the command should still be present
+    assert "tmux" in result
+    assert "new-session" in result
+
+
+def test_build_start_agent_shell_command_without_tmux_tmpdir(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """When tmux_tmpdir is None, the command should not contain TMUX_TMPDIR."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    assert "TMUX_TMPDIR" not in result
+
+
+def test_create_agent_state_stores_is_tmux_isolated(
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """create_agent_state should store is_tmux_isolated in data.json."""
+    host = local_provider.create_host(HostName("localhost"))
+    assert isinstance(host, Host)
+
+    agent = host.create_agent_state(
+        temp_work_dir,
+        CreateAgentOptions(
+            name=AgentName("test-isolated"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 1000"),
+        ),
+    )
+
+    data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
+    data = json.loads(data_path.read_text())
+    # In tests, the default is False (due to PYTEST_CURRENT_TEST detection)
+    assert "is_tmux_isolated" in data
+    assert data["is_tmux_isolated"] is False
 
 
 # =========================================================================

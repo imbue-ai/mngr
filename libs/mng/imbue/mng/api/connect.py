@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 from pathlib import Path
@@ -19,6 +20,20 @@ from imbue.mng.utils.interactive_subprocess import run_interactive_subprocess
 # whether to destroy or stop the agent locally.
 SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
+
+
+def _read_agent_is_tmux_isolated(host: OnlineHostInterface, agent: AgentInterface) -> bool:
+    """Read is_tmux_isolated from agent's data.json.
+
+    Returns False if the field is missing (pre-migration agent) or data.json is unreadable.
+    """
+    data_path = host.host_dir / "agents" / str(agent.id) / "data.json"
+    try:
+        content = host.read_text_file(data_path)
+        data = json.loads(content)
+        return bool(data.get("is_tmux_isolated"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
 
 
 def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, agent_command: str) -> str:
@@ -200,6 +215,15 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
+
+        # Set TMUX_TMPDIR if the agent uses isolated tmux
+        is_tmux_isolated = _read_agent_is_tmux_isolated(host, agent)
+        if is_tmux_isolated:
+            tmux_tmpdir = mng_ctx.config.default_host_dir.expanduser() / "tmux"
+            if env is os.environ:
+                env = dict(os.environ)
+            env["TMUX_TMPDIR"] = str(tmux_tmpdir)
+
         os.execvpe("tmux", ["tmux", "attach", "-t", session_name], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)

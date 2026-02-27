@@ -1458,6 +1458,8 @@ class Host(BaseHost, OnlineHostInterface):
             )
             command_str = str(command)
 
+            is_tmux_isolated = self.is_local and self.mng_ctx.config.is_tmux_isolated_for_local_agents
+
             data = {
                 "id": str(agent_id),
                 "name": str(agent_name),
@@ -1476,6 +1478,7 @@ class Host(BaseHost, OnlineHostInterface):
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
+                "is_tmux_isolated": is_tmux_isolated,
             }
 
             data_path = state_dir / "data.json"
@@ -1754,10 +1757,13 @@ class Host(BaseHost, OnlineHostInterface):
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mng_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mng_ctx.config.prefix}{new_name}"
-            result = self.execute_command(
+            tmux_tmpdir = self._get_agent_tmux_tmpdir(agent.id)
+            rename_cmd = _prefix_tmux_cmd(
                 f"tmux has-session -t {shlex.quote(old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote(old_session_name)} {shlex.quote(new_session_name)} || true"
+                f"tmux rename-session -t {shlex.quote(old_session_name)} {shlex.quote(new_session_name)} || true",
+                tmux_tmpdir,
             )
+            result = self.execute_command(rename_cmd)
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
             # Update the MNG_AGENT_NAME env var in the agent's env file
@@ -1799,6 +1805,37 @@ class Host(BaseHost, OnlineHostInterface):
 
                 # Remove persisted agent data from external storage (e.g., Modal volume)
                 self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
+
+    def _get_tmux_tmpdir(self) -> Path:
+        """Get the TMUX_TMPDIR path for isolated local agent tmux sessions."""
+        return self.mng_ctx.config.default_host_dir.expanduser() / "tmux"
+
+    def _ensure_tmux_tmpdir(self) -> Path:
+        """Create the TMUX_TMPDIR directory if it doesn't exist, with restricted permissions."""
+        tmux_tmpdir = self._get_tmux_tmpdir()
+        if not tmux_tmpdir.exists():
+            tmux_tmpdir.mkdir(parents=True, exist_ok=True)
+            tmux_tmpdir.chmod(0o700)
+        return tmux_tmpdir
+
+    def _get_agent_is_tmux_isolated(self, agent_id: AgentId) -> bool:
+        """Read is_tmux_isolated from agent's data.json.
+
+        Returns False if the field is missing (pre-migration agent) or data.json is unreadable.
+        """
+        data_path = self.host_dir / "agents" / str(agent_id) / "data.json"
+        try:
+            content = self.read_text_file(data_path)
+            data = json.loads(content)
+            return bool(data.get("is_tmux_isolated"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+
+    def _get_agent_tmux_tmpdir(self, agent_id: AgentId) -> Path | None:
+        """Get the TMUX_TMPDIR for an agent, or None if it uses the global tmux server."""
+        if self._get_agent_is_tmux_isolated(agent_id):
+            return self._get_tmux_tmpdir()
+        return None
 
     def _build_env_shell_command(self, agent: AgentInterface) -> str:
         """Build a shell command that sources env files and then execs into a shell.
@@ -1943,6 +1980,9 @@ class Host(BaseHost, OnlineHostInterface):
                         onboarding_text = ONBOARDING_TEXT
 
                 session_name = f"{self.mng_ctx.config.prefix}{agent.name}"
+                tmux_tmpdir = self._get_agent_tmux_tmpdir(agent.id)
+                if tmux_tmpdir is not None:
+                    self._ensure_tmux_tmpdir()
                 with log_span("Starting agent {} in tmux session {}", agent.name, session_name):
                     # Build and execute a single combined shell command for this agent
                     combined_command = _build_start_agent_shell_command(
@@ -1955,6 +1995,7 @@ class Host(BaseHost, OnlineHostInterface):
                         unset_vars=self.mng_ctx.config.unset_vars,
                         host_dir=self.host_dir,
                         onboarding_text=onboarding_text,
+                        tmux_tmpdir=tmux_tmpdir,
                     )
                     result = self.execute_command(combined_command, cwd=agent.work_dir)
                     if not result.success:
@@ -1976,14 +2017,18 @@ class Host(BaseHost, OnlineHostInterface):
 
         return descendant_pids
 
-    def _collect_session_pids(self, session_name: str) -> list[str]:
+    def _collect_session_pids(self, session_name: str, tmux_tmpdir: Path | None = None) -> list[str]:
         """Collect all pane PIDs and their descendants for a tmux session.
 
         Uses -s flag to list panes across ALL windows in the session, not just the
         current window. This is important for sessions with additional command windows.
         """
         all_pids: list[str] = []
-        result = self.execute_command(f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true")
+        tmux_cmd = _prefix_tmux_cmd(
+            f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true",
+            tmux_tmpdir,
+        )
+        result = self.execute_command(tmux_cmd)
         if result.success and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):
                 if pane_pid:
@@ -2003,16 +2048,17 @@ class Host(BaseHost, OnlineHostInterface):
         with log_span("Stopping {} agent(s) with timeout={}s", len(agent_ids), timeout_seconds):
             all_pids: list[str] = []
 
-            current_agents: list[AgentInterface] = []
+            current_agents: list[tuple[AgentInterface, Path | None]] = []
 
             for agent_id in agent_ids:
                 agent = self._get_agent_by_id(agent_id)
                 if agent is None:
                     continue
 
-                current_agents.append(agent)
+                tmux_tmpdir = self._get_agent_tmux_tmpdir(agent_id)
+                current_agents.append((agent, tmux_tmpdir))
                 session_name = f"{self.mng_ctx.config.prefix}{agent.name}"
-                all_pids.extend(self._collect_session_pids(session_name))
+                all_pids.extend(self._collect_session_pids(session_name, tmux_tmpdir))
 
             if all_pids:
                 pid_list = " ".join(all_pids)
@@ -2029,9 +2075,13 @@ class Host(BaseHost, OnlineHostInterface):
                 )
 
             # Finally kill the tmux sessions themselves
-            for agent in current_agents:
+            for agent, tmux_tmpdir in current_agents:
                 session_name = f"{self.mng_ctx.config.prefix}{agent.name}"
-                self.execute_command(f"tmux kill-session -t '{session_name}' 2>/dev/null || true")
+                kill_cmd = _prefix_tmux_cmd(
+                    f"tmux kill-session -t '{session_name}' 2>/dev/null || true",
+                    tmux_tmpdir,
+                )
+                self.execute_command(kill_cmd)
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
@@ -2171,6 +2221,14 @@ This popup won't show again in future sessions."""
 
 
 @pure
+def _prefix_tmux_cmd(cmd: str, tmux_tmpdir: Path | None) -> str:
+    """Prefix a shell command with TMUX_TMPDIR= if tmux isolation is needed."""
+    if tmux_tmpdir is not None:
+        return f"TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))} {cmd}"
+    return cmd
+
+
+@pure
 def _build_start_agent_shell_command(
     agent: AgentInterface,
     session_name: str,
@@ -2181,6 +2239,7 @@ def _build_start_agent_shell_command(
     unset_vars: Sequence[str],
     host_dir: Path,
     onboarding_text: str | None = None,
+    tmux_tmpdir: Path | None = None,
 ) -> str:
     """Build a single shell command that starts an agent and its tmux session.
 
@@ -2193,6 +2252,10 @@ def _build_start_agent_shell_command(
 
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
+
+    If tmux_tmpdir is provided, all tmux commands will use that directory for
+    the tmux server socket (via export TMUX_TMPDIR), isolating agent sessions
+    from the user's global tmux server.
     """
     # Bail out early if the session already exists (using ; so that a failed
     # has-session check doesn't break the && chain that follows)
@@ -2327,7 +2390,10 @@ def _build_start_agent_shell_command(
     monitor_cmd = f"(nohup bash -c {shlex.quote(monitor_script)} </dev/null >/dev/null 2>&1 &)"
     steps.append(monitor_cmd)
 
-    return guard + "; " + " && ".join(steps)
+    command_body = guard + "; " + " && ".join(steps)
+    if tmux_tmpdir is not None:
+        return f"export TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))}; {command_body}"
+    return command_body
 
 
 @pure

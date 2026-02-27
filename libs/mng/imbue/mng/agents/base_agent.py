@@ -78,6 +78,18 @@ class BaseAgent(AgentInterface):
         logger.trace("Assembled command: {}", command)
         return command
 
+    def _get_tmux_cmd_prefix(self) -> str:
+        """Return a TMUX_TMPDIR=... prefix for tmux commands if this agent uses isolated tmux.
+
+        Reads is_tmux_isolated from data.json. Returns empty string if not isolated
+        (including pre-migration agents where the field is absent).
+        """
+        data = self._read_data()
+        if data.get("is_tmux_isolated"):
+            tmux_tmpdir = self.mng_ctx.config.default_host_dir.expanduser() / "tmux"
+            return f"TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))} "
+        return ""
+
     def _get_agent_dir(self) -> Path:
         """Get the agent's state directory path."""
         return self.host.host_dir / "agents" / str(self.id)
@@ -161,10 +173,11 @@ class BaseAgent(AgentInterface):
         """
         try:
             session_name = f"{self.mng_ctx.config.prefix}{self.name}"
+            tmux_prefix = self._get_tmux_cmd_prefix()
 
             # Get pane state and pid in one command
             result = self.host.execute_command(
-                f"tmux list-panes -t '{session_name}:0' "
+                f"{tmux_prefix}tmux list-panes -t '{session_name}:0' "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
                 timeout_seconds=5.0,
             )
@@ -294,12 +307,13 @@ class BaseAgent(AgentInterface):
 
     def _send_message_simple(self, session_name: str, message: str) -> None:
         """Send a message without marker-based synchronization."""
-        send_msg_cmd = f"tmux send-keys -t '{session_name}' -l {shlex.quote(message)}"
+        tmux_prefix = self._get_tmux_cmd_prefix()
+        send_msg_cmd = f"{tmux_prefix}tmux send-keys -t '{session_name}' -l {shlex.quote(message)}"
         result = self.host.execute_command(send_msg_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
 
-        send_enter_cmd = f"tmux send-keys -t '{session_name}' Enter"
+        send_enter_cmd = f"{tmux_prefix}tmux send-keys -t '{session_name}' Enter"
         result = self.host.execute_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
@@ -324,7 +338,8 @@ class BaseAgent(AgentInterface):
         message_with_marker = message + marker
 
         # Send the message with marker
-        send_msg_cmd = f"tmux send-keys -t '{session_name}' -l {shlex.quote(message_with_marker)}"
+        tmux_prefix = self._get_tmux_cmd_prefix()
+        send_msg_cmd = f"{tmux_prefix}tmux send-keys -t '{session_name}' -l {shlex.quote(message_with_marker)}"
         result = self.host.execute_command(send_msg_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
@@ -356,9 +371,10 @@ class BaseAgent(AgentInterface):
         a state after backspaces where Enter is interpreted as a literal newline.
         Sending any key (even a no-op) before Enter fixes this.
         """
+        tmux_prefix = self._get_tmux_cmd_prefix()
         if count > 0:
             backspace_keys = " ".join(["BSpace"] * count)
-            backspace_cmd = f"tmux send-keys -t '{session_name}' {backspace_keys}"
+            backspace_cmd = f"{tmux_prefix}tmux send-keys -t '{session_name}' {backspace_keys}"
             result = self.host.execute_command(backspace_cmd)
             if not result.success:
                 raise SendMessageError(
@@ -366,15 +382,16 @@ class BaseAgent(AgentInterface):
                 )
 
         # Send a no-op key sequence (Left then Right) to reset input handler state
-        noop_cmd = f"tmux send-keys -t '{session_name}' Left Right"
+        noop_cmd = f"{tmux_prefix}tmux send-keys -t '{session_name}' Left Right"
         result = self.host.execute_command(noop_cmd)
         if not result.success:
             logger.warning("Failed to send noop keys: {}", result.stderr or result.stdout)
 
     def _capture_pane_content(self, session_name: str) -> str | None:
         """Capture the current pane content, returning None on failure."""
+        tmux_prefix = self._get_tmux_cmd_prefix()
         result = self.host.execute_command(
-            f"tmux capture-pane -t '{session_name}' -p",
+            f"{tmux_prefix}tmux capture-pane -t '{session_name}' -p",
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
         )
         if result.success:
@@ -492,11 +509,12 @@ class BaseAgent(AgentInterface):
 
         Returns True if signal received, False if timeout.
         """
+        tmux_prefix = self._get_tmux_cmd_prefix()
         timeout_secs = _ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
         cmd = (
             f"bash -c '"
-            f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '
-            f'tmux send-keys -t "$1" Enter; '
+            f'timeout {timeout_secs} {tmux_prefix}tmux wait-for "$0" & W=$!; '
+            f'{tmux_prefix}tmux send-keys -t "$1" Enter; '
             f"wait $W"
             f"' {shlex.quote(wait_channel)} {shlex.quote(session_name)}"
         )
