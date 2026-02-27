@@ -503,6 +503,11 @@ class MngConfig(FrozenModel):
         "Can be overridden per provider via destroyed_host_persisted_seconds in the provider config.",
     )
 
+    @property
+    def tmux_tmpdir(self) -> Path:
+        """The TMUX_TMPDIR path used to isolate local agent tmux sessions."""
+        return self.default_host_dir.expanduser() / "tmux"
+
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 

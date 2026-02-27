@@ -81,8 +81,7 @@ class BaseAgent(AgentInterface):
     def _get_tmux_cmd_prefix(self) -> str:
         """Return a TMUX_TMPDIR=... prefix for tmux commands if this agent uses isolated tmux."""
         if self.is_tmux_isolated:
-            tmux_tmpdir = self.mng_ctx.config.default_host_dir.expanduser() / "tmux"
-            return f"TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))} "
+            return f"TMUX_TMPDIR={shlex.quote(str(self.mng_ctx.config.tmux_tmpdir))} "
         return ""
 
     def _get_agent_dir(self) -> Path:

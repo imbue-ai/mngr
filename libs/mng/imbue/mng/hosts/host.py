@@ -1807,13 +1807,9 @@ class Host(BaseHost, OnlineHostInterface):
                 # Remove persisted agent data from external storage (e.g., Modal volume)
                 self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
 
-    def _get_tmux_tmpdir(self) -> Path:
-        """Get the TMUX_TMPDIR path for isolated local agent tmux sessions."""
-        return self.mng_ctx.config.default_host_dir.expanduser() / "tmux"
-
     def _ensure_tmux_tmpdir(self) -> Path:
         """Create the TMUX_TMPDIR directory if it doesn't exist, with restricted permissions."""
-        tmux_tmpdir = self._get_tmux_tmpdir()
+        tmux_tmpdir = self.mng_ctx.config.tmux_tmpdir
         if not tmux_tmpdir.exists():
             tmux_tmpdir.mkdir(parents=True, exist_ok=True)
             tmux_tmpdir.chmod(0o700)
@@ -1822,7 +1818,7 @@ class Host(BaseHost, OnlineHostInterface):
     def _get_agent_tmux_tmpdir(self, agent: AgentInterface) -> Path | None:
         """Get the TMUX_TMPDIR for an agent, or None if it uses the global tmux server."""
         if agent.is_tmux_isolated:
-            return self._get_tmux_tmpdir()
+            return self.mng_ctx.config.tmux_tmpdir
         return None
 
     def _build_env_shell_command(self, agent: AgentInterface) -> str:

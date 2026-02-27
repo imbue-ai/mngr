@@ -203,7 +203,7 @@ def connect_to_agent(
 
         # Set TMUX_TMPDIR if the agent uses isolated tmux
         if agent.is_tmux_isolated:
-            tmux_tmpdir = mng_ctx.config.default_host_dir.expanduser() / "tmux"
+            tmux_tmpdir = mng_ctx.config.tmux_tmpdir
             if env is os.environ:
                 env = dict(os.environ)
             env["TMUX_TMPDIR"] = str(tmux_tmpdir)
