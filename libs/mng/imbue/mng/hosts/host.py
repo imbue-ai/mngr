@@ -1439,7 +1439,14 @@ class Host(BaseHost, OnlineHostInterface):
             self._mkdirs([state_dir, state_dir / "logs"])
 
             create_time = datetime.now(timezone.utc)
-            is_tmux_isolated = self.is_local and self.mng_ctx.config.is_tmux_isolated_for_local_agents
+            # Isolate tmux when the host is local, the config enables it, AND
+            # TMUX_TMPDIR is not already set (an existing TMUX_TMPDIR means the
+            # caller -- or the test harness -- has already arranged isolation).
+            is_tmux_isolated = (
+                self.is_local
+                and self.mng_ctx.config.is_tmux_isolated_for_local_agents
+                and not os.environ.get("TMUX_TMPDIR")
+            )
 
             agent = cast(type[BaseAgent], resolved.agent_class)(
                 id=agent_id,

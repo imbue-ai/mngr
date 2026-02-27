@@ -480,9 +480,10 @@ class MngConfig(FrozenModel):
         "The environment variables MNG_AGENT_NAME and MNG_SESSION_NAME are set before running the command.",
     )
     is_tmux_isolated_for_local_agents: bool = Field(
-        default_factory=lambda: "PYTEST_CURRENT_TEST" not in os.environ,
+        default=True,
         description="Whether to isolate local agent tmux sessions from the user's global tmux server "
         "by setting TMUX_TMPDIR to a mng-specific directory (default_host_dir / 'tmux'). "
+        "When TMUX_TMPDIR is already set in the environment, it is respected and not overridden. "
         "When False, local agents use the global tmux server.",
     )
     is_nested_tmux_allowed: bool = Field(
