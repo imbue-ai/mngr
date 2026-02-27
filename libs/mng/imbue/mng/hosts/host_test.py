@@ -690,7 +690,7 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
 def test_prefix_tmux_cmd_with_tmpdir() -> None:
     """_prefix_tmux_cmd should prepend TMUX_TMPDIR= when a tmpdir is given."""
     result = _prefix_tmux_cmd("tmux list-sessions", Path("/home/user/.mng/tmux"))
-    assert result == "TMUX_TMPDIR=/home/user/.mng/tmux tmux list-sessions"
+    assert result == "TMUX_TMPDIR=/home/user/.mng/tmux TMUX= tmux list-sessions"
 
 
 def test_prefix_tmux_cmd_without_tmpdir() -> None:
@@ -719,9 +719,10 @@ def test_build_start_agent_shell_command_with_tmux_tmpdir(
         tmux_tmpdir=tmux_tmpdir,
     )
 
-    # The command should start with export TMUX_TMPDIR=...
+    # The command should start with export TMUX_TMPDIR=... and unset TMUX
     assert result.startswith("export TMUX_TMPDIR=")
     assert "/home/user/.mng/tmux" in result
+    assert "unset TMUX" in result
     # The rest of the command should still be present
     assert "tmux" in result
     assert "new-session" in result

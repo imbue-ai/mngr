@@ -2213,9 +2213,13 @@ This popup won't show again in future sessions."""
 
 @pure
 def _prefix_tmux_cmd(cmd: str, tmux_tmpdir: Path | None) -> str:
-    """Prefix a shell command with TMUX_TMPDIR= if tmux isolation is needed."""
+    """Prefix a shell command with TMUX_TMPDIR= and TMUX= if tmux isolation is needed.
+
+    TMUX is cleared so that tmux doesn't ignore TMUX_TMPDIR in favor of the
+    current session's server (TMUX takes precedence when set).
+    """
     if tmux_tmpdir is not None:
-        return f"TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))} {cmd}"
+        return f"TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))} TMUX= {cmd}"
     return cmd
 
 
@@ -2383,7 +2387,10 @@ def _build_start_agent_shell_command(
 
     command_body = guard + "; " + " && ".join(steps)
     if tmux_tmpdir is not None:
-        return f"export TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))}; {command_body}"
+        # Export TMUX_TMPDIR so all tmux commands use the isolated server,
+        # and unset TMUX so tmux doesn't ignore TMUX_TMPDIR in favor of the
+        # current session's server (TMUX takes precedence when set).
+        return f"export TMUX_TMPDIR={shlex.quote(str(tmux_tmpdir))}; unset TMUX; {command_body}"
     return command_body
 
 
