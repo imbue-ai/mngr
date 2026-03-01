@@ -51,14 +51,15 @@ get_default_model() {
     else
         # Fall back to settings.toml, then hardcoded default
         python3 -c "
-import tomllib, pathlib
+import tomllib, pathlib, sys
 p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')
 try:
     s = tomllib.loads(p.read_text()) if p.exists() else {}
     print(s.get('chat', {}).get('model', 'claude-opus-4-6'))
-except Exception:
+except Exception as e:
+    print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
     print('claude-opus-4-6')
-" 2>/dev/null || echo "claude-opus-4-6"
+" 2>>"$LOG_FILE" || echo "claude-opus-4-6"
     fi
 }
 
@@ -202,7 +203,8 @@ if Path(messages_file).exists():
             if cid and ts:
                 if cid not in updated_at or ts > updated_at[cid]:
                     updated_at[cid] = ts
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f'WARNING: malformed message event line: {e}', file=sys.stderr)
             continue
 
 for cid, event in convs.items():

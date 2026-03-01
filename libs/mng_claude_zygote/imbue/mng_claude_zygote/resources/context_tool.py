@@ -20,6 +20,7 @@ where they cannot import from each other or from the mng_claude_zygote package.
 
 import json
 import os
+import sys
 from pathlib import Path
 
 _TAIL_CHUNK_SIZE = 8192
@@ -34,12 +35,14 @@ def _load_settings() -> dict:
     try:
         import tomllib
     except ImportError:
+        print("WARNING: tomllib not available, using default settings", file=sys.stderr)
         return {}
     settings_path = Path(os.environ.get("MNG_AGENT_STATE_DIR", "")) / "settings.toml"
     try:
         with settings_path.open("rb") as f:
             return tomllib.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
         return {}
 
 
@@ -70,7 +73,8 @@ def _read_tail_lines(file_path: Path, n: int) -> list[str]:
     key = str(file_path)
     try:
         size = file_path.stat().st_size
-    except OSError:
+    except OSError as e:
+        print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []
     if size == 0:
         return []
@@ -116,7 +120,8 @@ def _get_new_lines(file_path: Path) -> list[str]:
 
     try:
         current_size = file_path.stat().st_size
-    except OSError:
+    except OSError as e:
+        print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []
 
     if current_size <= last_size:
@@ -126,7 +131,8 @@ def _get_new_lines(file_path: Path) -> list[str]:
         with file_path.open("rb") as f:
             f.seek(last_size)
             new_data = f.read()
-    except OSError:
+    except OSError as e:
+        print(f"WARNING: failed to read new data from {file_path}: {e}", file=sys.stderr)
         return []
 
     if new_data.endswith(b"\n"):
@@ -196,7 +202,8 @@ def gather_context() -> str:
                     cid = event.get("conversation_id", "")
                     if cid and cid != current_cid:
                         other_convs.setdefault(cid, []).append(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    print(f"WARNING: malformed JSON in messages events: {e}", file=sys.stderr)
                     continue
             for cid, msgs in other_convs.items():
                 recent = msgs[-_MAX_MESSAGES_PER_CONVERSATION:]
@@ -211,7 +218,8 @@ def gather_context() -> str:
                     event = json.loads(line.strip())
                     if event.get("conversation_id", "") != current_cid:
                         other_msgs.append(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    print(f"WARNING: malformed JSON in new messages: {e}", file=sys.stderr)
                     continue
             if other_msgs:
                 formatted = _format_events(other_msgs)

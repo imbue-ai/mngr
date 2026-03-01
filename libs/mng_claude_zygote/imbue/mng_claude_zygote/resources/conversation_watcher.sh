@@ -25,15 +25,17 @@ MESSAGES_EVENTS="$AGENT_DATA_DIR/logs/messages/events.jsonl"
 LOG_FILE="$HOST_DIR/logs/conversation_watcher.log"
 
 # Read poll interval from settings.toml, fall back to default
+mkdir -p "$(dirname "$LOG_FILE")"
 POLL_INTERVAL=$(python3 -c "
-import tomllib, pathlib
+import tomllib, pathlib, sys
 p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')
 try:
     s = tomllib.loads(p.read_text()) if p.exists() else {}
     print(s.get('watchers', {}).get('conversation_poll_interval_seconds', 5))
-except Exception:
+except Exception as e:
+    print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
     print(5)
-" 2>/dev/null || echo 5)
+" 2>>"$LOG_FILE" || echo 5)
 
 log() {
     local ts
@@ -108,7 +110,8 @@ def sync():
                     continue
                 try:
                     tracked_cids.add(json.loads(line)["conversation_id"])
-                except (json.JSONDecodeError, KeyError):
+                except (json.JSONDecodeError, KeyError) as e:
+                    print(f"WARNING: malformed conversation event line: {e}", file=sys.stderr)
                     continue
 
     if not tracked_cids:
@@ -125,7 +128,8 @@ def sync():
                     continue
                 try:
                     file_event_ids.add(json.loads(line)["event_id"])
-                except (json.JSONDecodeError, KeyError):
+                except (json.JSONDecodeError, KeyError) as e:
+                    print(f"WARNING: malformed message event line: {e}", file=sys.stderr)
                     continue
 
     if not os.path.isfile(db_path):

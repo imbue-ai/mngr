@@ -31,8 +31,9 @@ OFFSETS_DIR="$AGENT_DATA_DIR/logs/.event_offsets"
 LOG_FILE="$HOST_DIR/logs/event_watcher.log"
 
 # Read settings from settings.toml, fall back to defaults
+mkdir -p "$(dirname "$LOG_FILE")"
 _SETTINGS_JSON=$(python3 -c "
-import tomllib, pathlib, json
+import tomllib, pathlib, json, sys
 p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')
 try:
     s = tomllib.loads(p.read_text()) if p.exists() else {}
@@ -41,9 +42,10 @@ try:
         'poll': w.get('event_poll_interval_seconds', 3),
         'sources': w.get('watched_event_sources', ['messages', 'scheduled', 'mng_agents', 'stop'])
     }))
-except Exception:
+except Exception as e:
+    print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
     print(json.dumps({'poll': 3, 'sources': ['messages', 'scheduled', 'mng_agents', 'stop']}))
-" 2>/dev/null || echo '{"poll": 3, "sources": ["messages", "scheduled", "mng_agents", "stop"]}')
+" 2>>"$LOG_FILE" || echo '{"poll": 3, "sources": ["messages", "scheduled", "mng_agents", "stop"]}')
 
 POLL_INTERVAL=$(echo "$_SETTINGS_JSON" | python3 -c "import json, sys; print(json.load(sys.stdin)['poll'])" 2>/dev/null || echo 3)
 

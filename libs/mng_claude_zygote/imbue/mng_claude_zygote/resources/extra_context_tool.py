@@ -31,12 +31,14 @@ def _load_settings() -> dict:
     try:
         import tomllib
     except ImportError:
+        print("WARNING: tomllib not available, using default settings", file=sys.stderr)
         return {}
     settings_path = Path(os.environ.get("MNG_AGENT_STATE_DIR", "")) / "settings.toml"
     try:
         with settings_path.open("rb") as f:
             return tomllib.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
         return {}
 
 
@@ -100,8 +102,8 @@ def gather_extra_context() -> str:
                     sections.append(
                         f"## Extended Inner Monologue (last {len(recent)} of {len(lines)} entries)\n{formatted}"
                     )
-            except OSError:
-                pass
+            except OSError as e:
+                print(f"WARNING: failed to read transcript file {transcript}: {e}", file=sys.stderr)
 
         # Full conversation list (from logs/conversations/events.jsonl)
         conversations_file = agent_data_dir / "logs" / "conversations" / "events.jsonl"
@@ -117,7 +119,8 @@ def gather_extra_context() -> str:
                         event = json.loads(line)
                         cid = event["conversation_id"]
                         convs[cid] = event
-                    except (json.JSONDecodeError, KeyError):
+                    except (json.JSONDecodeError, KeyError) as e:
+                        print(f"WARNING: malformed conversation event: {e}", file=sys.stderr)
                         continue
                 if convs:
                     conv_lines = []
@@ -126,8 +129,8 @@ def gather_extra_context() -> str:
                             f"  {cid}: model={event.get('model', '?')}, created={event.get('timestamp', '?')}"
                         )
                     sections.append("## All Conversations\n" + "\n".join(conv_lines))
-            except OSError:
-                pass
+            except OSError as e:
+                print(f"WARNING: failed to read conversations file {conversations_file}: {e}", file=sys.stderr)
 
     return "\n\n".join(sections) if sections else "No extra context available."
 
