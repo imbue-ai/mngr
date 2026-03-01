@@ -159,7 +159,9 @@ The CLI is built with [Click](https://click.palletsprojects.com/) and organized 
 
 **Primary** (agent management): `create` (default), `destroy`, `connect`, `list`, `stop`, `start`, `exec`, `rename`
 
-**Data transfer**: `pull`, `push`, `pair`, `message`, `provision`
+**Data transfer**: `pull`, `push`, `pair`, `message`
+
+**Setup**: `provision`
 
 **Secondary**: `cleanup`, `logs`, `gc`, `snapshot`, `limit`, `clone`, `migrate`, `ask`, `config`, `plugin`
 
