@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.cli.create import create
@@ -68,6 +69,7 @@ def test_rename_stopped_agent_updates_data_json(
     assert agent_name not in agent_names
 
 
+@pytest.mark.tmux
 def test_rename_running_agent_renames_tmux_session(
     cli_runner: CliRunner,
     temp_work_dir: Path,

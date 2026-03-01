@@ -37,15 +37,19 @@ _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 10.0
 _TUI_READY_TIMEOUT_SECONDS: Final[float] = 10.0
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# Constants for signal-based synchronization
-# Note that this does need to be fairly long, since it can takea little while for the machine to respond if you're unlucky
-_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
+# Default timeout for signal-based synchronization
+# Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
+_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 class BaseAgent(AgentInterface):
     """Concrete agent implementation that stores data on the host filesystem."""
 
     host: OnlineHostInterface = Field(description="The host this agent runs on (must be online)")
+    enter_submission_timeout_seconds: float = Field(
+        default=_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS,
+        description="Timeout in seconds for waiting on the enter submission signal",
+    )
 
     def get_host(self) -> OnlineHostInterface:
         return self.host
@@ -494,7 +498,7 @@ class BaseAgent(AgentInterface):
 
         self._raise_send_timeout(
             session_name,
-            f"Timeout waiting for message submission signal (waited {_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS}s)",
+            f"Timeout waiting for message submission signal (waited {self.enter_submission_timeout_seconds}s)",
         )
 
     def _send_enter_and_wait_for_signal(self, session_name: str, wait_channel: str) -> bool:
@@ -510,7 +514,7 @@ class BaseAgent(AgentInterface):
 
         Returns True if signal received, False if timeout.
         """
-        timeout_secs = _ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
+        timeout_secs = self.enter_submission_timeout_seconds
         cmd = (
             f"bash -c '"
             f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '

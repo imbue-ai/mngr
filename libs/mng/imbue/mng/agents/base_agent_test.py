@@ -476,6 +476,8 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
 ) -> None:
     """Test that _send_enter_and_wait_for_signal returns False when signal times out."""
     test_agent = create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    # Use a shorter timeout so the test doesn't wait the full 2 seconds
+    test_agent.enter_submission_timeout_seconds = 0.2
     session_name = f"{test_agent.mng_ctx.config.prefix}{test_agent.name}"
     # Use a unique channel that won't be signaled
     wait_channel = f"mng-submit-never-signaled-{session_name}"

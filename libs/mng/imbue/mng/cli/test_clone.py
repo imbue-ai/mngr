@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.cli.clone import clone
@@ -13,6 +14,7 @@ from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
 
+@pytest.mark.tmux
 def test_clone_creates_agent_from_source(
     cli_runner: CliRunner,
     temp_work_dir: Path,

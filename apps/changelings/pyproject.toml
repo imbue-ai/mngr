@@ -42,6 +42,7 @@ junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.changelings",
   "--cov-report=term-missing",
   "--cov-report=html",

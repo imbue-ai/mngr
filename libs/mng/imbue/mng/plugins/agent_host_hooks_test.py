@@ -8,6 +8,7 @@ from typing import Any
 from typing import cast
 
 import pluggy
+import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mng import hookimpl
@@ -113,6 +114,7 @@ def _get_local_host(ctx: MngContext) -> OnlineHostInterface:
 # --- Create flow tests ---
 
 
+@pytest.mark.tmux
 def test_create_hooks_fire_in_order_with_existing_host(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -149,6 +151,7 @@ def test_create_hooks_fire_in_order_with_existing_host(
     ]
 
 
+@pytest.mark.tmux
 def test_create_hooks_fire_in_order_with_new_host(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -191,6 +194,7 @@ def test_create_hooks_fire_in_order_with_new_host(
     ]
 
 
+@pytest.mark.tmux
 def test_create_hooks_receive_correct_data(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -230,6 +234,7 @@ def test_create_hooks_receive_correct_data(
     assert tracker.hook_data["work_dir_path"] is not None
 
 
+@pytest.mark.tmux
 def test_create_without_work_dir_skips_file_copy_hooks(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -268,6 +273,7 @@ def test_create_without_work_dir_skips_file_copy_hooks(
 # --- Destroy flow tests ---
 
 
+@pytest.mark.tmux
 def test_destroy_agent_hooks_fire_in_order(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,

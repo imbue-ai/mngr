@@ -56,6 +56,7 @@ testpaths = [
 ]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov=imbue.imbue_common",
   "--cov=imbue.mng_opencode",

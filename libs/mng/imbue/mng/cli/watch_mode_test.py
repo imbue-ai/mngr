@@ -22,7 +22,7 @@ def test_run_watch_loop_runs_iteration_function() -> None:
             raise _StopLoop()
 
     with pytest.raises(_StopLoop):
-        run_watch_loop(iteration_fn, interval_seconds=1)
+        run_watch_loop(iteration_fn, interval_seconds=0.05)
 
     # Should have called the function at least once before stopping
     assert call_count[0] >= 1
@@ -37,16 +37,15 @@ def test_run_watch_loop_waits_between_iterations() -> None:
         if len(timestamps) >= 2:
             raise _StopLoop()
 
-    # Use interval_seconds=2 so we can verify the parameter actually controls wait duration
+    # Use interval_seconds=0.3 so we can verify the parameter actually controls wait duration.
+    # Asserting >= 0.2 ensures the interval parameter is actually used (a zero-wait would fail).
     with pytest.raises(_StopLoop):
-        run_watch_loop(iteration_fn, interval_seconds=2)
+        run_watch_loop(iteration_fn, interval_seconds=0.3)
 
     # Should have at least 2 calls
     assert len(timestamps) >= 2
-    # The gap should reflect the 2-second interval. Asserting >= 1.5 ensures the interval
-    # parameter is actually used (a hardcoded 1s wait would fail this check).
     gap = timestamps[1] - timestamps[0]
-    assert gap >= 1.5, f"Expected gap >= 1.5s (interval=2), got {gap:.2f}s"
+    assert gap >= 0.2, f"Expected gap >= 0.2s (interval=0.3), got {gap:.2f}s"
 
 
 def test_run_watch_loop_continues_on_mng_error_by_default() -> None:
@@ -61,7 +60,7 @@ def test_run_watch_loop_continues_on_mng_error_by_default() -> None:
             raise _StopLoop()
 
     with pytest.raises(_StopLoop):
-        run_watch_loop(iteration_fn, interval_seconds=1, on_error_continue=True)
+        run_watch_loop(iteration_fn, interval_seconds=0.05, on_error_continue=True)
 
     # Should have continued past the error
     assert call_count[0] >= 2
@@ -76,7 +75,7 @@ def test_run_watch_loop_stops_on_mng_error_when_configured() -> None:
         raise MngError("Test error")
 
     with pytest.raises(MngError, match="Test error"):
-        run_watch_loop(iteration_fn, interval_seconds=1, on_error_continue=False)
+        run_watch_loop(iteration_fn, interval_seconds=0.05, on_error_continue=False)
 
     # Should have stopped after the first error
     assert call_count[0] == 1

@@ -239,6 +239,7 @@ def test_try_reuse_existing_agent_filters_by_host(temp_mng_ctx: MngContext) -> N
 # -- Tests using real local provider infrastructure --
 
 
+@pytest.mark.tmux
 def test_try_reuse_existing_agent_found_and_started(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,

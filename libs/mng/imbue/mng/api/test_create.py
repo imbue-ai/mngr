@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pluggy
+import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mng import hookimpl
@@ -82,6 +83,7 @@ def _setup_claude_trust_config(work_dir: Path, tmp_home_dir: Path) -> None:
     (tmp_home_dir / ".claude.json").write_text(json.dumps(claude_config))
 
 
+@pytest.mark.tmux
 def test_create_simple_echo_agent(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -115,6 +117,7 @@ def test_create_simple_echo_agent(
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
 
 
+@pytest.mark.tmux
 def test_create_agent_with_new_host(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -149,6 +152,7 @@ def test_create_agent_with_new_host(
         assert tmux_session_exists(session_name)
 
 
+@pytest.mark.tmux
 def test_create_agent_work_dir_is_created(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -180,6 +184,7 @@ def test_create_agent_work_dir_is_created(
         assert result.host.id is not None
 
 
+@pytest.mark.tmux
 def test_agent_state_is_persisted(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -226,6 +231,7 @@ def test_agent_state_is_persisted(
 # =============================================================================
 
 
+@pytest.mark.tmux
 def test_create_agent_with_unknown_type_uses_type_as_command(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -266,6 +272,8 @@ def test_create_agent_with_unknown_type_uses_type_as_command(
 # =============================================================================
 
 
+@pytest.mark.tmux
+@pytest.mark.git
 def test_create_agent_with_worktree(
     temp_mng_ctx: MngContext,
     temp_git_repo: Path,
@@ -322,6 +330,8 @@ def test_create_agent_with_worktree(
                 )
 
 
+@pytest.mark.tmux
+@pytest.mark.git
 def test_worktree_with_custom_branch_name(
     tmp_home_dir: Path,
     temp_mng_ctx: MngContext,
@@ -394,6 +404,7 @@ def test_worktree_with_custom_branch_name(
 # =============================================================================
 
 
+@pytest.mark.tmux
 def test_in_place_mode_sets_is_generated_work_dir_false(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -435,6 +446,8 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
         )
 
 
+@pytest.mark.tmux
+@pytest.mark.git
 def test_worktree_mode_sets_is_generated_work_dir_true(
     tmp_home_dir: Path,
     temp_mng_ctx: MngContext,
@@ -492,6 +505,7 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
                 )
 
 
+@pytest.mark.tmux
 def test_target_path_different_from_source_sets_is_generated_work_dir_true(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -537,6 +551,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
         )
 
 
+@pytest.mark.tmux
 def test_target_path_same_as_source_sets_is_generated_work_dir_false(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -584,6 +599,7 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
 # =============================================================================
 
 
+@pytest.mark.tmux
 def test_create_work_dir_false_uses_target_path(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
@@ -625,6 +641,7 @@ def test_create_work_dir_false_uses_target_path(
         )
 
 
+@pytest.mark.tmux
 def test_create_work_dir_false_without_target_path_uses_source(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,

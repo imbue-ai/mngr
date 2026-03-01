@@ -82,6 +82,7 @@ def test_send_message_to_agents_returns_empty_result_when_no_agents_match(
     assert result.failed_agents == []
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_calls_success_callback(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -157,6 +158,7 @@ def test_send_message_to_agents_fails_for_stopped_agent(
     assert "no tmux session" in result.failed_agents[0][1]
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -199,6 +201,7 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     assert len(error_agents) == 0
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_with_include_filter(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
