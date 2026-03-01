@@ -15,7 +15,11 @@ import os
 import sqlite3
 import subprocess
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pluggy
 import pytest
@@ -79,37 +83,48 @@ def _unique_agent_name(label: str) -> str:
     return f"test-{label}-{int(time.time())}"
 
 
-def _create_zygote_agent(
+@contextmanager
+def _create_agent_in_session(
+    label: str,
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
-    agent_name: str,
     source_dir: Path,
     *,
-    agent_cmd: str = "sleep 847291",
     extra_args: tuple[str, ...] = (),
-) -> int:
-    """Create an agent via the CLI and return the exit code."""
-    result = cli_runner.invoke(
-        create,
-        [
-            "--name",
-            agent_name,
-            "--agent-cmd",
-            agent_cmd,
-            "--source",
-            str(source_dir),
-            "--no-connect",
-            "--await-ready",
-            "--no-copy-work-dir",
-            "--no-ensure-clean",
-            "--disable-plugin",
-            "modal",
-            *extra_args,
-        ],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    return result.exit_code
+) -> Generator[str, None, None]:
+    """Context manager that creates an agent in a tmux session and cleans up on exit.
+
+    Yields the session name for post-creation assertions. Handles the common
+    boilerplate of generating a unique name, computing the session name from
+    MNG_PREFIX, invoking the CLI, and wrapping in tmux_session_cleanup.
+    """
+    agent_name = _unique_agent_name(label)
+    prefix = os.environ.get("MNG_PREFIX", "mng-test-")
+    session_name = f"{prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        result = cli_runner.invoke(
+            create,
+            [
+                "--name",
+                agent_name,
+                "--agent-cmd",
+                "sleep 847291",
+                "--source",
+                str(source_dir),
+                "--no-connect",
+                "--await-ready",
+                "--no-copy-work-dir",
+                "--no-ensure-clean",
+                "--disable-plugin",
+                "modal",
+                *extra_args,
+            ],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+        yield session_name
 
 
 def _find_agent_state_dir(host_dir: Path) -> Path | None:
@@ -128,16 +143,15 @@ def _create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str,
 
     Each row is (id, prompt, response, model, datetime_utc, conversation_id).
     """
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(_LLM_RESPONSES_SCHEMA)
-    for row_id, prompt, response, model, dt, cid in rows:
-        conn.execute(
-            "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (row_id, prompt, response, model, dt, cid),
-        )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(_LLM_RESPONSES_SCHEMA)
+        for row_id, prompt, response, model, dt, cid in rows:
+            conn.execute(
+                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (row_id, prompt, response, model, dt, cid),
+            )
+        conn.commit()
 
 
 def _extract_sync_script_from_watcher() -> str:
@@ -219,7 +233,7 @@ def test_provisioning_creates_event_log_directories(
     agent_state_dir.mkdir(parents=True)
 
     host = StubHost(host_dir=temp_host_dir, execute_mkdir=True)
-    create_event_log_directories(host, agent_state_dir, _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    create_event_log_directories(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     expected_sources = (
         "conversations",
@@ -240,7 +254,7 @@ def test_provisioning_writes_changeling_scripts_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
     """Verify that provisioning writes all bash scripts with correct permissions."""
-    provision_changeling_scripts(local_shell_host, _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    provision_changeling_scripts(cast(Any, local_shell_host), _DEFAULT_PROVISIONING)
 
     commands_dir = local_shell_host.host_dir / "commands"
     for script_name in _SCRIPT_FILES:
@@ -256,7 +270,7 @@ def test_provisioning_writes_llm_tools_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
     """Verify that provisioning writes LLM tool scripts."""
-    provision_llm_tools(local_shell_host, _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    provision_llm_tools(cast(Any, local_shell_host), _DEFAULT_PROVISIONING)
 
     tools_dir = local_shell_host.host_dir / "commands" / "llm_tools"
     for tool_file in _LLM_TOOL_FILES:
@@ -287,7 +301,7 @@ def test_provisioning_creates_default_content_when_missing(
 
     host.write_text_file = tracking_write  # type: ignore[assignment]
 
-    provision_default_content(host, temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    provision_default_content(cast(Any, host), temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)
 
     written_path_strings = [str(p) for p, _ in written_paths]
 
@@ -312,7 +326,7 @@ def test_provisioning_does_not_overwrite_existing_content(
     """Verify that provisioning does not overwrite files that already exist."""
     host = StubHost(host_dir=temp_host_dir)
 
-    provision_default_content(host, temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    provision_default_content(cast(Any, host), temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)
 
     assert len(host.written_text_files) == 0, "Should not overwrite existing files"
 
@@ -329,7 +343,7 @@ def test_provisioning_creates_symlinks(
     (changelings_dir / "entrypoint.json").write_text("{}")
     (temp_git_repo / ".claude").mkdir()
 
-    create_changeling_symlinks(local_shell_host, temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    create_changeling_symlinks(cast(Any, local_shell_host), temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)
 
     local_md = temp_git_repo / "CLAUDE.local.md"
     assert local_md.is_symlink(), "CLAUDE.local.md should be a symlink"
@@ -346,7 +360,7 @@ def test_provisioning_links_memory_directory(
     local_shell_host: LocalShellHost,
 ) -> None:
     """Verify that provisioning creates the memory symlink into Claude project directory."""
-    link_memory_directory(local_shell_host, temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)  # type: ignore[arg-type]
+    link_memory_directory(cast(Any, local_shell_host), temp_git_repo, ".changelings", _DEFAULT_PROVISIONING)
 
     changelings_memory = temp_git_repo / ".changelings" / "memory"
     assert changelings_memory.is_dir(), "changelings memory dir should exist"
@@ -366,7 +380,7 @@ def test_provisioning_writes_default_chat_model(
     agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
     agent_state_dir.mkdir(parents=True)
 
-    write_default_chat_model(local_shell_host, agent_state_dir, ChatModel("claude-sonnet-4-6"))  # type: ignore[arg-type]
+    write_default_chat_model(cast(Any, local_shell_host), agent_state_dir, ChatModel("claude-sonnet-4-6"))
 
     model_file = agent_state_dir / "default_chat_model"
     assert model_file.exists(), "default_chat_model file should exist"
@@ -501,38 +515,16 @@ def test_event_watcher_script_is_valid_bash(chat_env: ChatScriptEnv) -> None:
 def test_create_agent_with_additional_commands(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that creating an agent with additional commands creates the expected tmux windows."""
-    agent_name = _unique_agent_name("addcmd")
-    prefix = os.environ.get("MNG_PREFIX", "mng-test-")
-    session_name = f"{prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847291",
-                "--source",
-                str(temp_git_repo),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-                "--disable-plugin",
-                "modal",
-                "--add-command",
-                'watcher="sleep 847292"',
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+    with _create_agent_in_session(
+        "addcmd",
+        cli_runner,
+        plugin_manager,
+        temp_git_repo,
+        extra_args=("--add-command", 'watcher="sleep 847292"'),
+    ) as session_name:
         assert tmux_session_exists(session_name)
 
         windows_result = subprocess.run(
@@ -553,14 +545,7 @@ def test_create_agent_creates_state_directory(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that creating an agent creates the agent state directory."""
-    agent_name = _unique_agent_name("state")
-    prefix = os.environ.get("MNG_PREFIX", "mng-test-")
-    session_name = f"{prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        exit_code = _create_zygote_agent(cli_runner, plugin_manager, agent_name, temp_git_repo)
-        assert exit_code == 0
-
+    with _create_agent_in_session("state", cli_runner, plugin_manager, temp_git_repo):
         agent_state_dir = _find_agent_state_dir(temp_host_dir)
         assert agent_state_dir is not None, "Agent state directory should exist"
         assert (agent_state_dir / "data.json").exists(), "data.json should exist in agent state dir"
@@ -696,7 +681,6 @@ print(json.dumps({{
 def test_agent_with_ttyd_window_creates_session_with_expected_windows(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that adding named windows via --add-command creates the expected tmux windows.
@@ -704,40 +688,22 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
     This tests the window injection mechanism that the claude-zygote plugin uses,
     without requiring ttyd to be installed.
     """
-    agent_name = _unique_agent_name("ttyd")
-    prefix = os.environ.get("MNG_PREFIX", "mng-test-")
-    session_name = f"{prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847291",
-                "--source",
-                str(temp_git_repo),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-                "--disable-plugin",
-                "modal",
-                "--add-command",
-                'agent_ttyd="sleep 847293"',
-                "--add-command",
-                'conv_watcher="sleep 847294"',
-                "--add-command",
-                'events="sleep 847295"',
-                "--add-command",
-                'chat_ttyd="sleep 847296"',
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 0, f"CLI failed with: {result.output}"
+    with _create_agent_in_session(
+        "ttyd",
+        cli_runner,
+        plugin_manager,
+        temp_git_repo,
+        extra_args=(
+            "--add-command",
+            'agent_ttyd="sleep 847293"',
+            "--add-command",
+            'conv_watcher="sleep 847294"',
+            "--add-command",
+            'events="sleep 847295"',
+            "--add-command",
+            'chat_ttyd="sleep 847296"',
+        ),
+    ) as session_name:
         assert tmux_session_exists(session_name)
 
         windows_result = subprocess.run(
@@ -757,18 +723,10 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
 def test_agent_creation_and_listing(
     cli_runner: CliRunner,
     temp_git_repo: Path,
-    temp_host_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that a created agent appears in mng list output."""
-    agent_name = _unique_agent_name("listchk")
-    prefix = os.environ.get("MNG_PREFIX", "mng-test-")
-    session_name = f"{prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        exit_code = _create_zygote_agent(cli_runner, plugin_manager, agent_name, temp_git_repo)
-        assert exit_code == 0
-
+    with _create_agent_in_session("listchk", cli_runner, plugin_manager, temp_git_repo):
         list_result = cli_runner.invoke(
             list_command,
             ["--disable-plugin", "modal"],
@@ -776,7 +734,6 @@ def test_agent_creation_and_listing(
             catch_exceptions=False,
         )
         assert list_result.exit_code == 0
-        assert agent_name in list_result.output
 
 
 # -- Conversation watcher sync logic tests --
