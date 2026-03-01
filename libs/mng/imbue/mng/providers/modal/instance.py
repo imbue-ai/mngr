@@ -36,7 +36,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import trace_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.data_types import HostLifecycleOptions
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostNameConflictError
 from imbue.mng.errors import HostNotFoundError
@@ -56,6 +55,7 @@ from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CpuResources
 from imbue.mng.interfaces.data_types import HostConfig
 from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.data_types import SSHInfo

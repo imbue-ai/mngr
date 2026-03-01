@@ -170,18 +170,12 @@ layers = [
     "imbue.mng.agents",
     "imbue.mng.providers",
     "imbue.mng.hosts",
+    "imbue.mng.plugins",
     "imbue.mng.interfaces",
     "imbue.mng.config",
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
-]
-ignore_imports = [
-    "imbue.mng.hosts.test_host -> imbue.mng.providers.local.instance",
-    "imbue.mng.cli.test_create -> imbue.mng.main",
-    "imbue.mng.utils.logging_test -> imbue.mng.config.data_types",
-    "imbue.mng.utils.testing -> imbue.mng.providers.local.instance",
-    "imbue.mng.utils.testing -> imbue.mng.config.data_types",
 ]
 
 [[tool.importlinter.contracts]]

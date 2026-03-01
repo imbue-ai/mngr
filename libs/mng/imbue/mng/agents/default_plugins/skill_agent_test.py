@@ -6,10 +6,7 @@ import pluggy
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.agents.agent_registry import get_agent_class
-from imbue.mng.agents.agent_registry import get_agent_config_class
 from imbue.mng.agents.agent_registry import list_registered_agent_types
-from imbue.mng.agents.agent_registry import resolve_agent_type
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.code_guardian_agent import CodeGuardianAgent
@@ -22,6 +19,9 @@ from imbue.mng.agents.default_plugins.fixme_fairy_agent import _FIXME_FAIRY_SKIL
 from imbue.mng.agents.default_plugins.fixme_fairy_agent import _SKILL_NAME as FIXME_FAIRY_SKILL_NAME
 from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgent
 from imbue.mng.agents.default_plugins.skill_agent import _install_skill_locally
+from imbue.mng.config.agent_class_registry import get_agent_class
+from imbue.mng.config.agent_config_registry import get_agent_config_class
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.conftest import make_mng_ctx

@@ -11,7 +11,6 @@ from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import HookDefinition
-from imbue.mng.config.data_types import LoggingConfig
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import ProviderInstanceConfig
@@ -27,6 +26,7 @@ from imbue.mng.primitives import Permission
 from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.logging import LoggingConfig
 
 
 def test_logging_config_merge_overrides_all_fields() -> None:

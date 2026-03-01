@@ -5,14 +5,17 @@ from typing import Any
 
 import click
 import pluggy
+from click_option_group import GroupedOption
+from click_option_group import OptionGroup
+from pydantic import Field
 
-from imbue.mng.api.data_types import OnBeforeCreateArgs
-from imbue.mng.cli.data_types import OptionStackItem
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import ProviderInstanceConfig
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import HostInterface
+from imbue.mng.interfaces.host import NewHostOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mng.primitives import HostName
@@ -177,6 +180,77 @@ def on_agent_destroyed(agent: AgentInterface, host: OnlineHostInterface) -> None
     """
 
 
+class OptionStackItem(FrozenModel):
+    """Specification for a CLI option that plugins can register.
+
+    This provides a typed interface for plugins to add custom CLI options
+    to mng subcommands. The fields correspond to click.Option parameters.
+    """
+
+    param_decls: tuple[str, ...] = Field(description="Option names, e.g. ('--my-option', '-m')")
+    type: Any = Field(
+        default=str,
+        description="The click type for the option value",
+    )
+    default: Any = Field(
+        default=None,
+        description="Default value if option not provided",
+    )
+    help: str | None = Field(
+        default=None,
+        description="Help text shown in --help output",
+    )
+    is_flag: bool = Field(
+        default=False,
+        description="Whether this is a boolean flag (no value needed)",
+    )
+    multiple: bool = Field(
+        default=False,
+        description="Whether the option can be specified multiple times",
+    )
+    required: bool = Field(
+        default=False,
+        description="Whether the option is required",
+    )
+    envvar: str | None = Field(
+        default=None,
+        description="Environment variable to read value from",
+    )
+
+    def to_click_option(self, group: OptionGroup | None = None) -> click.Option:
+        """Convert this spec to a click.Option instance.
+
+        If a group is provided, returns a GroupedOption that belongs to that group.
+        Otherwise returns a regular click.Option.
+        """
+        option_class: type[click.Option] = GroupedOption if group else click.Option
+        group_kwargs: dict[str, Any] = {"group": group} if group else {}
+
+        # For flag options, don't pass type - click handles it internally
+        if self.is_flag:
+            return option_class(
+                self.param_decls,
+                default=self.default,
+                help=self.help,
+                is_flag=True,
+                multiple=self.multiple,
+                required=self.required,
+                envvar=self.envvar,
+                **group_kwargs,
+            )
+        return option_class(
+            self.param_decls,
+            type=self.type,
+            default=self.default,
+            help=self.help,
+            is_flag=False,
+            multiple=self.multiple,
+            required=self.required,
+            envvar=self.envvar,
+            **group_kwargs,
+        )
+
+
 @hookspec
 def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem]] | None:
     """Register custom CLI options for a mng subcommand.
@@ -318,6 +392,26 @@ def modify_env_vars_for_deploy(
     delete keys (via pop/del) to remove them. Plugins are called in
     registration order, so later plugins see changes made by earlier ones.
     """
+
+
+class OnBeforeCreateArgs(FrozenModel):
+    """Arguments passed to and returned from the on_before_create hook.
+
+    This bundles all the modifiable arguments to the create() API function.
+    Plugins can return a modified copy of this object to change the create behavior.
+
+    Note: source_host is not included because it represents the resolved source
+    location which should not typically be modified by plugins. The source_path
+    within the resolved location can still be modified if needed via the path field.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    target_host: OnlineHostInterface | NewHostOptions = Field(
+        description="The target host (or options to create one) for the agent"
+    )
+    agent_options: CreateAgentOptions = Field(description="Options for creating the agent")
+    create_work_dir: bool = Field(description="Whether to create a work directory")
 
 
 @hookspec

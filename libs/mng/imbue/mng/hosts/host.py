@@ -16,7 +16,6 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
-from typing import cast
 
 from loguru import logger
 from paramiko import SSHException
@@ -37,8 +36,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.agents.agent_registry import resolve_agent_type
-from imbue.mng.agents.base_agent import BaseAgent
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
@@ -908,7 +906,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_type = AgentTypeName(data["type"])
         resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
-        return cast(type[BaseAgent], resolved.agent_class)(
+        return resolved.agent_class(
             id=AgentId(data["id"]),
             name=AgentName(data["name"]),
             agent_type=agent_type,
@@ -1461,7 +1459,7 @@ class Host(BaseHost, OnlineHostInterface):
 
             create_time = datetime.now(timezone.utc)
 
-            agent = cast(type[BaseAgent], resolved.agent_class)(
+            agent = resolved.agent_class(
                 id=agent_id,
                 name=agent_name,
                 agent_type=agent_type,

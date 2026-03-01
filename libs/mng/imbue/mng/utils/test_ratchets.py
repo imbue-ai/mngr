@@ -57,6 +57,7 @@ from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extensio
 from imbue.imbue_common.ratchet_testing.core import clear_ratchet_caches
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
@@ -211,6 +212,11 @@ def test_prevent_literal_with_multiple_options() -> None:
 def test_no_ruff_errors() -> None:
     """Ensure the codebase has zero ruff linting errors."""
     check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)
+
+
+def test_no_import_layer_violations() -> None:
+    """Ensure production code has zero import layer violations."""
+    check_no_import_lint_errors(Path(__file__).parent.parent.parent.parent.parent.parent)
 
 
 def test_prevent_if_elif_without_else() -> None:

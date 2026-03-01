@@ -9,8 +9,6 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.mng.api.list import _warn_on_duplicate_host_names
-from imbue.mng.cli.completion_writer import AGENT_COMPLETIONS_CACHE_FILENAME
-from imbue.mng.cli.completion_writer import write_agent_names_cache
 from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.primitives import AgentId
@@ -22,6 +20,8 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.completion_writer import AGENT_COMPLETIONS_CACHE_FILENAME
+from imbue.mng.utils.completion_writer import write_agent_names_cache
 
 # =============================================================================
 # Helpers

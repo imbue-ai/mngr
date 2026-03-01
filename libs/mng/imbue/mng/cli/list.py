@@ -23,7 +23,6 @@ from imbue.mng.api.list import list_agents as api_list_agents
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
-from imbue.mng.cli.completion_writer import write_cli_completions_cache
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import AbortError
@@ -37,6 +36,7 @@ from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.completion_writer import write_cli_completions_cache
 from imbue.mng.utils.terminal import ANSI_DIM_GRAY
 from imbue.mng.utils.terminal import ANSI_ERASE_LINE
 from imbue.mng.utils.terminal import ANSI_ERASE_TO_END

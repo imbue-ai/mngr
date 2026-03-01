@@ -22,6 +22,7 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CommandResult
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.data_types import SnapshotInfo
@@ -33,8 +34,11 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
+from imbue.mng.primitives import HostNameStyle
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import Permission
+from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import WorkDirCopyMode
 
 # Default timeout for waiting for agent readiness before sending messages.
@@ -530,7 +534,7 @@ class AgentLifecycleOptions(FrozenModel):
     """Lifecycle options for the agent.
 
     Note: Host-level idle detection options (idle_timeout_seconds, idle_mode,
-    activity_sources) are configured via HostLifecycleOptions in api/data_types.py,
+    activity_sources) are configured via HostLifecycleOptions in interfaces/data_types.py,
     not here. This class only contains agent-level lifecycle options.
     """
 
@@ -761,4 +765,83 @@ class CreateAgentOptions(FrozenModel):
     provisioning: AgentProvisioningOptions = Field(
         default_factory=AgentProvisioningOptions,
         description="Simple provisioning options",
+    )
+
+
+# =========================================================================
+# Host Option Types (parallel to Agent option types above)
+# =========================================================================
+
+
+class NewHostBuildOptions(FrozenModel):
+    """Options for building a new host image."""
+
+    snapshot: SnapshotName | None = Field(
+        default=None,
+        description="Use existing snapshot instead of building",
+    )
+    context_path: Path | None = Field(
+        default=None,
+        description="Build context directory [default: local .git root]",
+    )
+    build_args: tuple[str, ...] = Field(
+        default=(),
+        description="Arguments for the build command",
+    )
+    start_args: tuple[str, ...] = Field(
+        default=(),
+        description="Arguments for the start command",
+    )
+
+
+class HostEnvironmentOptions(FrozenModel):
+    """Environment variable configuration for a host."""
+
+    env_vars: tuple[EnvVar, ...] = Field(
+        default=(),
+        description="Environment variables to set (KEY=VALUE)",
+    )
+    env_files: tuple[Path, ...] = Field(
+        default=(),
+        description="Files to load environment variables from",
+    )
+    known_hosts: tuple[str, ...] = Field(
+        default=(),
+        description="SSH known_hosts entries to add to the host (for outbound SSH connections)",
+    )
+    authorized_keys: tuple[str, ...] = Field(
+        default=(),
+        description="SSH authorized_keys entries to add to the host (for inbound SSH connections)",
+    )
+
+
+class NewHostOptions(FrozenModel):
+    """Options for creating a new host."""
+
+    provider: ProviderInstanceName = Field(
+        description="Provider to use for creating the host (docker, modal, local, ...)",
+    )
+    name: HostName | None = Field(
+        default=None,
+        description="Name for the new host (None means use provider default or auto-generate)",
+    )
+    name_style: HostNameStyle = Field(
+        default=HostNameStyle.ASTRONOMY,
+        description="Style for auto-generated host name (used when name is None and provider has no default)",
+    )
+    tags: dict[str, str] = Field(
+        default_factory=dict,
+        description="Metadata tags for the host",
+    )
+    build: NewHostBuildOptions = Field(
+        default_factory=NewHostBuildOptions,
+        description="Build options for the host image",
+    )
+    environment: HostEnvironmentOptions = Field(
+        default_factory=HostEnvironmentOptions,
+        description="Environment variable configuration",
+    )
+    lifecycle: HostLifecycleOptions = Field(
+        default_factory=HostLifecycleOptions,
+        description="Lifecycle and idle detection options",
     )

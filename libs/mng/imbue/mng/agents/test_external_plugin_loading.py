@@ -4,8 +4,8 @@ These tests verify that external plugins (like mng_opencode) are properly
 discovered and registered when installed in the same environment.
 """
 
-from imbue.mng.agents.agent_registry import get_agent_config_class
 from imbue.mng.agents.agent_registry import list_registered_agent_types
+from imbue.mng.config.agent_config_registry import get_agent_config_class
 from imbue.mng_opencode.plugin import OpenCodeAgentConfig
 
 
