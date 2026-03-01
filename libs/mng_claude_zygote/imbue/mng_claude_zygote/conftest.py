@@ -1,7 +1,53 @@
+import os
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mng.utils.testing import init_git_repo_with_config
+
+register_plugin_test_fixtures(globals())
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tmux_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
+    """Give each test its own isolated tmux server.
+
+    Overrides the version from plugin_testing to use subprocess.run for cleanup
+    instead of ConcurrencyGroup, which raises ProcessSetupError when no tmux
+    server was started (common for unit tests that don't create tmux sessions).
+    """
+    tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mng-tmux-", dir="/tmp"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
+    monkeypatch.delenv("TMUX", raising=False)
+
+    yield
+
+    tmux_tmpdir_str = str(tmux_tmpdir)
+    assert tmux_tmpdir_str.startswith("/tmp/mng-tmux-"), (
+        f"TMUX_TMPDIR safety check failed! Expected /tmp/mng-tmux-* path but got: {tmux_tmpdir_str}. "
+        "Refusing to run 'tmux kill-server' to avoid killing the real tmux server."
+    )
+    socket_path = Path(tmux_tmpdir_str) / f"tmux-{os.getuid()}" / "default"
+    kill_env = os.environ.copy()
+    kill_env.pop("TMUX", None)
+    kill_env["TMUX_TMPDIR"] = tmux_tmpdir_str
+    try:
+        subprocess.run(
+            ["tmux", "-S", str(socket_path), "kill-server"],
+            capture_output=True,
+            env=kill_env,
+        )
+    except OSError:
+        pass
+    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
 class StubCommandResult:
@@ -62,3 +108,12 @@ class StubHost:
 def stub_host() -> StubHost:
     """Provide a fresh StubHost instance."""
     return StubHost()
+
+
+@pytest.fixture()
+def temp_git_repo(tmp_path: Path) -> Path:
+    """Create a temporary git repo with an initial commit and local git config."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    init_git_repo_with_config(repo_dir)
+    return repo_dir
