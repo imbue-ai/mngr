@@ -209,7 +209,7 @@ my_plugin = "my_package.plugin"
 
 Core types and patterns shared across all projects:
 
-- **`primitives.py`** -- constrained types: `NonEmptyStr`, `PositiveInt`, `Probability`, etc.
+- **`primitives.py`** -- constrained types: `NonEmptyStr`, etc.
 - **`ids.py`** -- `RandomId` base class for UUID4-based identifiers with type prefixes
 - **`frozen_model.py`** -- `FrozenModel(BaseModel)`: immutable Pydantic models with `model_copy_update()`
 - **`mutable_model.py`** -- `MutableModel`: for cases where mutation is necessary (used sparingly)
