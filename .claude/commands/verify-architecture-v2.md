@@ -57,7 +57,7 @@ git worktree add --detach $worktree_path $base_hash
 Read the subagent prompt from [analyze-architecture.md](analyze-architecture.md). Spawn a single Task subagent (`subagent_type: "general-purpose"`, leaving model as default) with that prompt, prepending:
 - The problem description from Phase 1
 - The base commit hash ($base_hash) and feature branch tip hash ($tip_hash)
-- An instruction to `cd` into `$worktree_path` before starting
+- The worktree path ($worktree_path)
 
 ## Phase 5: Cleanup and Report
 
