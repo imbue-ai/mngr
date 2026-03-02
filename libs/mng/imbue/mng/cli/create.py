@@ -551,6 +551,7 @@ def create(ctx: click.Context, **kwargs) -> None:
 
     # Resolve defaults that depend on other args. error_if_param_explicit raises if the
     # user explicitly passed a conflicting value.
+    overrides = []
 
     # --await-agent-stopped implies --no-connect
     if opts.await_agent_stopped and opts.connect:
@@ -559,7 +560,7 @@ def create(ctx: click.Context, **kwargs) -> None:
             "connect",
             "Cannot use --await-agent-stopped and --connect together. Pass --no-connect to just wait.",
         )
-        opts = opts.model_copy_update(to_update(opts.field_ref().connect, False))
+        overrides.append(to_update(opts.field_ref().connect, False))
 
     # --await-agent-stopped implies --await-ready
     if opts.await_agent_stopped and not opts.await_ready:
@@ -568,16 +569,18 @@ def create(ctx: click.Context, **kwargs) -> None:
             "await_ready",
             "Cannot use --await-agent-stopped and --no-await-ready together.",
         )
-        opts = opts.model_copy_update(to_update(opts.field_ref().await_ready, True))
+        overrides.append(to_update(opts.field_ref().await_ready, True))
+
+    resolved_opts = opts.model_copy_update(*overrides) if overrides else opts
 
     # Per-invocation setup (validation, editor session, source resolution, etc.)
-    setup = _setup_create(mng_ctx, output_opts, opts, logging_config)
+    setup = _setup_create(mng_ctx, output_opts, resolved_opts, logging_config)
 
     # Create agent
-    result = _create_one_agent(mng_ctx, output_opts, opts, setup)
+    result = _create_one_agent(mng_ctx, output_opts, resolved_opts, setup)
     if result is not None:
         create_result, connection_opts = result
-        _post_create_one_agent(create_result, connection_opts, opts, mng_ctx)
+        _post_create_one_agent(create_result, connection_opts, resolved_opts, mng_ctx)
         _finish_create(create_result, setup, output_opts)
     else:
         _finish_create(None, setup, output_opts)
