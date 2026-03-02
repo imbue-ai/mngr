@@ -362,8 +362,8 @@ def _poll_agent_list_forever() -> None:
 
                     with _agent_list_lock:
                         _cached_agents = agents_raw
-                except json.JSONDecodeError:
-                    _log("Failed to parse mng list JSON output")
+                except json.JSONDecodeError as e:
+                    _log(f"Failed to parse mng list JSON output: {e}")
         except subprocess.TimeoutExpired:
             _log("mng list timed out")
         except FileNotFoundError:

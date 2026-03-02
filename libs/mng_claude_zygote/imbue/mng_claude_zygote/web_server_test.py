@@ -6,6 +6,7 @@ The web_server.py script is loaded as a module for testing purposes.
 
 import io
 import json
+import threading
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -366,3 +367,110 @@ def test_ensure_agent_tmux_ttyd_uses_shlex_quote(web_server_module: types.Module
     assert len(captured_commands) == 1
     shell_cmd = captured_commands[0][-1]
     assert "'" in shell_cmd
+
+
+# -- _start_ttyd_for_command internal logic tests --
+
+
+def _make_alive_entry(web_server_module: types.ModuleType, port: int = 5000) -> object:
+    """Create a _TtydEntry with a mock process that appears alive."""
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    return web_server_module._TtydEntry(process=mock_proc, port=port)
+
+
+def _make_dead_entry(web_server_module: types.ModuleType, port: int = 5000) -> object:
+    """Create a _TtydEntry with a mock process that has exited."""
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = 1
+    return web_server_module._TtydEntry(process=mock_proc, port=port)
+
+
+def test_start_ttyd_reuses_alive_entry(web_server_module: types.ModuleType) -> None:
+    """Verify that an existing alive ttyd is reused without spawning a new one."""
+    alive = _make_alive_entry(web_server_module, port=7777)
+
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        web_server_module._ttyd_by_server_name["test-server"] = alive
+
+        result = web_server_module._start_ttyd_for_command("test-server", ["bash"])
+
+        assert result is alive
+        # Clean up
+        del web_server_module._ttyd_by_server_name["test-server"]
+
+
+def test_start_ttyd_removes_dead_entry_before_spawn(web_server_module: types.ModuleType) -> None:
+    """Verify that a dead entry is removed and spawn is attempted."""
+    dead = _make_dead_entry(web_server_module)
+
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        web_server_module._ttyd_by_server_name["test-server"] = dead
+
+        # Popen will raise FileNotFoundError (ttyd not found), which is fine --
+        # we just want to verify the dead entry was cleaned up
+        with patch("subprocess.Popen", side_effect=FileNotFoundError):
+            result = web_server_module._start_ttyd_for_command("test-server", ["bash"])
+
+        assert result is None
+        assert "test-server" not in web_server_module._ttyd_by_server_name
+
+
+def test_start_ttyd_enforces_max_limit(web_server_module: types.ModuleType) -> None:
+    """Verify that the MAX_TTYD_PROCESSES limit is enforced."""
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        with patch.object(web_server_module, "MAX_TTYD_PROCESSES", 2):
+            # Fill up to the limit with alive entries
+            for i in range(2):
+                web_server_module._ttyd_by_server_name[f"existing-{i}"] = _make_alive_entry(
+                    web_server_module, port=5000 + i
+                )
+
+            result = web_server_module._start_ttyd_for_command("new-server", ["bash"])
+            assert result is None
+
+            # Clean up
+            for i in range(2):
+                del web_server_module._ttyd_by_server_name[f"existing-{i}"]
+
+
+def test_start_ttyd_cleans_dead_before_limit_check(web_server_module: types.ModuleType) -> None:
+    """Verify that dead entries are cleaned up before checking the limit."""
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        with patch.object(web_server_module, "MAX_TTYD_PROCESSES", 2):
+            # One alive, one dead
+            web_server_module._ttyd_by_server_name["alive"] = _make_alive_entry(web_server_module)
+            web_server_module._ttyd_by_server_name["dead"] = _make_dead_entry(web_server_module)
+
+            # Spawn attempt should proceed (1 alive < limit of 2) after cleaning dead
+            with patch("subprocess.Popen", side_effect=FileNotFoundError):
+                web_server_module._start_ttyd_for_command("new-server", ["bash"])
+
+            # Dead entry should have been cleaned up
+            assert "dead" not in web_server_module._ttyd_by_server_name
+            # Clean up
+            web_server_module._ttyd_by_server_name.pop("alive", None)
+            web_server_module._ttyd_by_server_name.pop("new-server", None)
+
+
+def test_start_ttyd_sentinel_prevents_duplicate_spawn(web_server_module: types.ModuleType) -> None:
+    """Verify that a spawning sentinel prevents a second spawn for the same name."""
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        # Simulate another thread spawning this server
+        web_server_module._ttyd_by_server_name["test-server"] = web_server_module._SPAWNING_SENTINEL
+
+        result = web_server_module._start_ttyd_for_command("test-server", ["bash"])
+        assert result is None
+
+        # Clean up
+        del web_server_module._ttyd_by_server_name["test-server"]
+
+
+def test_start_ttyd_clears_sentinel_on_spawn_failure(web_server_module: types.ModuleType) -> None:
+    """Verify that the sentinel is removed if Popen fails."""
+    with patch.object(web_server_module, "_ttyd_lock", threading.Lock()):
+        with patch("subprocess.Popen", side_effect=FileNotFoundError):
+            result = web_server_module._start_ttyd_for_command("fail-server", ["bash"])
+
+        assert result is None
+        assert "fail-server" not in web_server_module._ttyd_by_server_name
