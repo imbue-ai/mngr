@@ -32,7 +32,7 @@ class EventSource(NonEmptyStr):
 
 
 class EventId(NonEmptyStr):
-    """Unique identifier for an event (typically timestamp + random hex)."""
+    """Unique identifier for an event (e.g. 'evt-a1b2c3d4e5f67890a1b2c3d4e5f67890')."""
 
 
 class EventEnvelope(FrozenModel):

@@ -35,7 +35,7 @@ mng separates three distinct concerns:
 Every log line uses the same event envelope as all other structured events:
 
 ```json
-{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"mng","event_id":"log-...","source":"mng","level":"INFO","message":"Created agent","pid":12345,"command":"create"}
+{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"mng","event_id":"evt-a1b2c3d4e5f6...","source":"mng","level":"INFO","message":"Created agent","pid":12345,"command":"create"}
 ```
 
 Envelope fields: `timestamp`, `type`, `event_id`, `source`
@@ -106,7 +106,7 @@ Logs are rotated by loguru when the file exceeds `max_log_size_mb`. Rotated file
 Each line is a JSON object following the EventEnvelope schema:
 - `timestamp`: ISO 8601 with nanosecond precision (e.g., `2026-03-01T12:00:00.123456789Z`)
 - `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
-- `event_id`: Unique identifier (e.g., `log-1709280000123456789-12345-1`)
+- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
 - `source`: Matches the folder under `logs/` (e.g., `mng`, `event_watcher`)
 - `level`: Log level (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
 - `message`: The log message text

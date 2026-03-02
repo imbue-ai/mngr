@@ -40,6 +40,7 @@ LOG_FILE="$_MNG_LOG_FILE"
 
 # Read settings from settings.toml, fall back to defaults
 mkdir -p "$(dirname "$LOG_FILE")"
+_DEFAULT_SETTINGS='{"poll":3,"sources":["messages","scheduled","mng_agents","stop"]}'
 _settings_stderr=$(mktemp)
 _SETTINGS_JSON=$(python3 -c "
 import tomllib, pathlib, json, sys
@@ -54,12 +55,11 @@ try:
 except Exception as e:
     print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
     print(json.dumps({'poll': 3, 'sources': ['messages', 'scheduled', 'mng_agents', 'stop']}))
-" 2>"$_settings_stderr") || true
+" 2>"$_settings_stderr") || _SETTINGS_JSON="$_DEFAULT_SETTINGS"
 if [ -s "$_settings_stderr" ]; then
     log_error "Failed to load settings: $(cat "$_settings_stderr")"
 fi
 rm -f "$_settings_stderr"
-_SETTINGS_JSON="${_SETTINGS_JSON:-'{"poll": 3, "sources": ["messages", "scheduled", "mng_agents", "stop"]}'}"
 
 POLL_INTERVAL=$(echo "$_SETTINGS_JSON" | python3 -c "import json, sys; print(json.load(sys.stdin)['poll'])" 2>/dev/null || echo 3)
 
