@@ -55,4 +55,5 @@ jobs:
           fi
 
       - name: Run acceptance tests via offload
+        continue-on-error: true  # Experimental - failures are logged but don't block
         run: just test-offload-acceptance
