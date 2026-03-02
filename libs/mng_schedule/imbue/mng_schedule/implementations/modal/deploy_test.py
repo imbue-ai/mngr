@@ -12,7 +12,7 @@ from dotenv import dotenv_values
 
 from imbue.mng import hookimpl
 from imbue.mng.config.data_types import MngContext
-from imbue.mng_schedule.data_types import MngInstallMode
+from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mng_schedule.data_types import ScheduledMngCommand
 from imbue.mng_schedule.errors import ScheduleDeployError

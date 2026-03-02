@@ -7,7 +7,7 @@
 #      whenever the agent is actively processing (indicated by the
 #      $MNG_AGENT_STATE_DIR/active file)
 #   2. Transcript export: periodically exports the conversation transcript
-#      to $MNG_AGENT_STATE_DIR/logs/transcript.jsonl
+#      to $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
@@ -52,9 +52,10 @@ while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
     # Task 2: Export transcript if the export script is available
     # Uses temp file + mv for atomic replacement so readers never see a truncated file
     if [ -x "$EXPORT_SCRIPT" ]; then
-        _TRANSCRIPT_TMP="$MNG_AGENT_STATE_DIR/logs/transcript.jsonl.tmp"
+        mkdir -p "$MNG_AGENT_STATE_DIR/logs/claude_transcript"
+        _TRANSCRIPT_TMP="$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl.tmp"
         if "$EXPORT_SCRIPT" > "$_TRANSCRIPT_TMP" 2>/dev/null; then
-            mv "$_TRANSCRIPT_TMP" "$MNG_AGENT_STATE_DIR/logs/transcript.jsonl"
+            mv "$_TRANSCRIPT_TMP" "$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
         else
             rm -f "$_TRANSCRIPT_TMP"
         fi

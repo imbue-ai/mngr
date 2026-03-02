@@ -190,7 +190,7 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "--timeout=120",
             # use our dockerfile since it should end up being cached and faster
             "-b",
-            "--dockerfile=libs/mng/imbue/mng/resources/Dockerfile",
+            "--file=libs/mng/imbue/mng/resources/Dockerfile",
             "-b",
             "context-dir=.mng/dev/build/",
             "--",

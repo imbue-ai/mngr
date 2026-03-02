@@ -10,6 +10,8 @@ Each aspect of python software engineering is covered below in more detail in th
 
 Always follow these style directives. Keep the style consistent throughout the codebase
 
+Note that individual projects may have their own style_guide.md files--if they do, those are to be treated as *deltas* to this style guide (any directives there override the rules here) 
+
 # Primitives
 
 Avoid using primitives directly
@@ -370,6 +372,8 @@ Never validate data using ad-hoc code in functions--always use pydantic models o
 
 # Errors
 
+## Exception hierarchy
+
 All raised Exceptions should inherit from a base class that is specific to that library or app.
 
 Never raise built-in Exceptions directly (except NotImplementedError). Instead, create a new type that inherits from both the base error class for the package and the built-in. Avoid creating and raising such exceptions unless it very obviously applies (ex: this is clearly a timeout error)
@@ -443,6 +447,8 @@ def example_exception_handling_with_chaining() -> None:
 Never use a blanket `except:` clause! Always catch the narrowest specific exception type that can be caught at a given point.
 
 Always log errors that are caught (at the appropriate level--trace or debug if this is expected, or warning if this is from us trying to make the code more robust and there's no other choice, error only if this is a more general top level error handler)
+
+## Try/except
 
 Each try/except blocks should only span a single statement, and should catch precisely the errors that we want to handle from that statement.
 
@@ -534,6 +540,15 @@ class TodoNotificationService(MutableModel):
 ```
 
 Be very conservative with what exceptions are caught. Prefer to crash instead of catching errors.
+
+## Timeouts
+
+When calling external commands or making network requests, always use a two-threshold timeout pattern:
+
+1. **Hard timeout**: Set a generous timeout that represents "this is definitely broken" (e.g. 15s for filesystem ops, 60s for network calls, 300s for installations). This prevents infinite hangs.
+2. **Warning threshold**: After the command completes successfully, check if it took longer than a "suspicious" duration (e.g. 2s for filesystem ops, 15s for network calls). If so, emit a warning so we notice things becoming slow *before* they become totally broken.
+
+This pattern allows us to notice degradation and diagnose slowdowns before they become outright failures.
 
 # Docstrings
 
@@ -1381,6 +1396,42 @@ def main() -> None:
     ...
 
 ```
+
+# Event logging to disk
+
+When persisting structured event data (conversations, agent actions, state transitions, etc.), always use append-only JSONL files following these conventions:
+
+## Standard directory structure
+
+Store event files at `logs/<source>/events.jsonl` where `<source>` is a static, human-readable name describing the category of events:
+- Source names should be lowercase, use underscores for multi-word names
+- Source names must NOT contain dates, IDs, or dynamically generated values
+- Source CAN be nested folders (e.g. `logs/foo/bar/events.jsonl`) with source field `"foo/bar"`, but prefer flat structure when possible
+
+## Standard event envelope
+
+Every JSONL line must include these envelope fields:
+
+```json
+{"timestamp": "2026-02-28T12:00:00.123456789Z", "type": "message", "event_id": "evt-1709...", "source": "messages", ...}
+```
+
+- `timestamp`: nanosecond-precision UTC ISO 8601 (always include full precision even if the source doesn't provide it)
+- `type`: what kind of event this is (e.g. `"conversation_created"`, `"message"`, `"scheduled"`)
+- `event_id`: unique identifier for this specific event
+- `source`: must match the folder name under `logs/` where this event is stored
+
+## Self-describing events
+
+Include enough context in each line to be self-describing. Every event should have a timestamp, an event type, and enough identifiers (conversation ID, agent name, source, etc.) that you could split the data in different ways later if you change your mind. This is the most important principle: if each line is self-contained, your file organization becomes a performance/convenience choice rather than a correctness one. You should never need to know the name of the file that an event came from.
+
+## Append-only semantics
+
+Event log files are always append-only. Never modify or delete individual lines. If an event needs to be "corrected", append a new event that supersedes it (e.g. a `model_changed` event rather than editing a `conversation_created` event).
+
+## Rotation
+
+Event files can be rotated (by date, by size) if they get too large. Rotation should preserve the file naming convention (`events.jsonl`) and archive old files with a date suffix (e.g. `events.2026-02-28.jsonl.gz`). Not all sources should (or even can) be rotated.
 
 # Configuration
 

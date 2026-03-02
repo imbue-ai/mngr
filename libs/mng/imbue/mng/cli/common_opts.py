@@ -29,6 +29,7 @@ from imbue.mng.errors import ParseSpecError
 from imbue.mng.errors import UserInputError
 from imbue.mng.primitives import LogLevel
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import setup_logging
 
 # The set of built-in format names (case-insensitive). Any --format value not
@@ -156,6 +157,10 @@ def setup_command_context(
 
     Set is_format_template_supported=True for commands that handle
     output_opts.format_template.
+
+    The resolved LoggingConfig (with CLI overrides applied) is stored on the
+    click context at ctx.meta["logging_config"] for callers that need logging
+    levels (e.g., LoggingSuppressor).
     """
     # First parse options from CLI args to extract common parameters
     initial_opts = command_class(**ctx.params)
@@ -179,9 +184,9 @@ def setup_command_context(
     mng_ctx = load_config(
         pm,
         cg,
-        context_dir,
-        initial_opts.plugin,
-        initial_opts.disable_plugin,
+        context_dir=context_dir,
+        enabled_plugins=initial_opts.plugin,
+        disabled_plugins=initial_opts.disable_plugin,
         is_interactive=is_interactive,
     )
 
@@ -201,10 +206,8 @@ def setup_command_context(
     # Resolve --json / --jsonl flags into output_format before parsing output options.
     effective_format = _resolve_format_flags(ctx, opts)
 
-    # Parse output options after all defaults and overrides have been applied,
-    # so that config defaults and plugin overrides for logging-related params
-    # (verbose, quiet, log_file, etc.) are taken into consideration.
-    output_opts = parse_output_options(
+    # Parse output options and resolve logging config with CLI overrides applied.
+    output_opts, resolved_logging_config = parse_output_options(
         output_format=effective_format,
         quiet=opts.quiet,
         verbose=opts.verbose,
@@ -222,8 +225,11 @@ def setup_command_context(
             "Use --format human, --format json, or --format jsonl."
         )
 
-    # Set up logging (needs mng_ctx)
-    setup_logging(output_opts, mng_ctx)
+    # Store resolved logging config on the click context for callers that need it
+    ctx.meta["logging_config"] = resolved_logging_config
+
+    # Set up logging
+    setup_logging(resolved_logging_config, default_host_dir=mng_ctx.config.default_host_dir)
 
     # Enter a log span for the command lifetime
     span = log_span("Started {} command", command_name)
@@ -277,8 +283,11 @@ def parse_output_options(
     log_command_output: bool | None,
     log_env_vars: bool | None,
     config: MngConfig,
-) -> OutputOptions:
+) -> tuple[OutputOptions, LoggingConfig]:
     """Parse output-related CLI options. CLI flags can override config values.
+
+    Returns a tuple of (OutputOptions, resolved LoggingConfig). The resolved
+    LoggingConfig contains the TOML defaults with CLI overrides applied.
 
     If output_format is a built-in format name (human, json, jsonl), it is parsed
     as an OutputFormat enum. Otherwise it is treated as a format template string:
@@ -323,15 +332,27 @@ def parse_output_options(
 
     is_log_env_vars = log_env_vars if log_env_vars is not None else config.logging.is_logging_env_vars
 
-    return OutputOptions(
+    # Build the resolved logging config with CLI overrides applied to TOML defaults
+    resolved_logging_config = LoggingConfig(
+        file_level=config.logging.file_level,
+        log_dir=config.logging.log_dir,
+        max_log_files=config.logging.max_log_files,
+        max_log_size_mb=config.logging.max_log_size_mb,
+        console_level=console_level,
+        log_level=config.logging.log_level,
+        log_file_path=log_file_path,
+        is_logging_commands=is_log_commands,
+        is_logging_command_output=is_log_command_output,
+        is_logging_env_vars=is_log_env_vars,
+    )
+
+    output_opts = OutputOptions(
         output_format=parsed_output_format,
         format_template=format_template,
-        console_level=console_level,
-        log_file_path=log_file_path,
-        is_log_commands=is_log_commands,
-        is_log_command_output=is_log_command_output,
-        is_log_env_vars=is_log_env_vars,
+        is_quiet=quiet,
     )
+
+    return output_opts, resolved_logging_config
 
 
 @pure

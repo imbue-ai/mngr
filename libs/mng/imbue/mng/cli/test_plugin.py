@@ -430,6 +430,7 @@ def _run_isolated_mng(
     return result
 
 
+@pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_plugin_add_path_and_remove_lifecycle(isolated_mng_venv: Path) -> None:
     """Test `mng plugin add --path` and `mng plugin remove` using the real mng-opencode plugin.

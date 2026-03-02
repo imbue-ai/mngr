@@ -194,7 +194,7 @@ def test_mng_create_with_dockerfile_on_modal(
     """Test creating an agent on Modal using a custom Dockerfile.
 
     This verifies that:
-    1. The --dockerfile build arg is correctly parsed by the modal provider
+    1. The --file build arg is correctly parsed by the modal provider
     2. Modal builds an image from the Dockerfile
     3. The sandbox runs with the custom image
     """
@@ -237,7 +237,7 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "--source",
             str(temp_source_dir),
             "-b",
-            f"--dockerfile={dockerfile_path}",
+            f"--file={dockerfile_path}",
             "--",
             expected_output,
         ],
@@ -297,7 +297,7 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
             "--source",
             str(temp_source_dir),
             "-b",
-            f"--dockerfile={dockerfile_path}",
+            f"--file={dockerfile_path}",
             "--",
             "should-not-reach-here",
         ],
@@ -492,7 +492,7 @@ def test_mng_create_with_default_dockerfile_on_modal(
             "--source",
             str(temp_source_dir),
             "-b",
-            f"--dockerfile={dockerfile_path}",
+            f"--file={dockerfile_path}",
             "-b",
             f"context-dir={temp_dir_with_tar}",
             "--target-path",

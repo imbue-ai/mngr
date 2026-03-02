@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import platform
+import shlex
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
 
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.interfaces.data_types import ACTIVITY_SOURCES_BY_IDLE_MODE
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentTypeName
@@ -17,6 +20,22 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import IdleMode
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
+
+
+def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
+    """Add a git safe.directory entry on a remote host.
+
+    On remote hosts (Docker/Modal), file ownership may differ from the SSH user
+    (e.g., after rsync from a local machine with a different UID). This tells
+    git to trust the given directory regardless of ownership.
+
+    No-op for local hosts, where the current user already owns the directories.
+    """
+    if host.is_local:
+        return
+    host.execute_command(
+        f"git config --global --add safe.directory {shlex.quote(str(path))}",
+    )
 
 
 @pure
@@ -38,57 +57,9 @@ HOST_LEVEL_ACTIVITY_SOURCES: Final[frozenset[ActivitySource]] = frozenset(
 def get_activity_sources_for_idle_mode(idle_mode: IdleMode) -> tuple[ActivitySource, ...]:
     """Get the activity sources that should be monitored for a given idle mode.
 
-    This mapping is defined in docs/concepts/idle_detection.md.
+    Delegates to the canonical mapping in interfaces/data_types.py.
     """
-    if idle_mode == IdleMode.IO:
-        return (
-            ActivitySource.USER,
-            ActivitySource.AGENT,
-            ActivitySource.SSH,
-            ActivitySource.CREATE,
-            ActivitySource.START,
-            ActivitySource.BOOT,
-        )
-    elif idle_mode == IdleMode.USER:
-        return (
-            ActivitySource.USER,
-            ActivitySource.SSH,
-            ActivitySource.CREATE,
-            ActivitySource.START,
-            ActivitySource.BOOT,
-        )
-    elif idle_mode == IdleMode.AGENT:
-        return (
-            ActivitySource.AGENT,
-            ActivitySource.SSH,
-            ActivitySource.CREATE,
-            ActivitySource.START,
-            ActivitySource.BOOT,
-        )
-    elif idle_mode == IdleMode.SSH:
-        return (
-            ActivitySource.SSH,
-            ActivitySource.CREATE,
-            ActivitySource.START,
-            ActivitySource.BOOT,
-        )
-    elif idle_mode == IdleMode.CREATE:
-        return (ActivitySource.CREATE,)
-    elif idle_mode == IdleMode.BOOT:
-        return (ActivitySource.BOOT,)
-    elif idle_mode == IdleMode.START:
-        return (ActivitySource.START, ActivitySource.BOOT)
-    elif idle_mode == IdleMode.RUN:
-        return (
-            ActivitySource.CREATE,
-            ActivitySource.START,
-            ActivitySource.BOOT,
-            ActivitySource.PROCESS,
-        )
-    elif idle_mode == IdleMode.DISABLED:
-        return ()
-    else:
-        raise SwitchError(idle_mode)
+    return ACTIVITY_SOURCES_BY_IDLE_MODE[idle_mode]
 
 
 # =========================================================================

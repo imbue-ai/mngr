@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -15,9 +15,14 @@ members = [
     "imbue",
     "imbue-common",
     "mng",
+    "mng-claude-zygote",
+    "mng-elena-code",
+    "mng-kanpan",
     "mng-opencode",
     "mng-pair",
+    "mng-recursive",
     "mng-schedule",
+    "mng-ttyd",
     "mng-tutor",
     "sculptor-web",
 ]
@@ -522,12 +527,20 @@ dependencies = [
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group" },
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "imbue-common" },
+    { name = "itsdangerous" },
+    { name = "jinja2" },
     { name = "loguru" },
     { name = "mng" },
     { name = "modal" },
+    { name = "paramiko" },
     { name = "pydantic" },
+    { name = "tabulate" },
     { name = "tomlkit" },
+    { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -535,12 +548,20 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },
     { name = "mng", editable = "libs/mng" },
     { name = "modal", specifier = ">=1.3.1" },
+    { name = "paramiko", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tomlkit", specifier = ">=0.12.0" },
+    { name = "uvicorn", specifier = ">=0.32.0" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 
 [[package]]
@@ -1833,6 +1854,53 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mng-claude-zygote"
+version = "0.1.0"
+source = { editable = "libs/mng_claude_zygote" }
+dependencies = [
+    { name = "mng" },
+    { name = "mng-ttyd" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mng", editable = "libs/mng" },
+    { name = "mng-ttyd", editable = "libs/mng_ttyd" },
+]
+
+[[package]]
+name = "mng-elena-code"
+version = "0.1.0"
+source = { editable = "libs/mng_elena_code" }
+dependencies = [
+    { name = "mng" },
+    { name = "mng-claude-zygote" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mng", editable = "libs/mng" },
+    { name = "mng-claude-zygote", editable = "libs/mng_claude_zygote" },
+]
+
+[[package]]
+name = "mng-kanpan"
+version = "0.1.0"
+source = { editable = "libs/mng_kanpan" }
+dependencies = [
+    { name = "click" },
+    { name = "click-option-group" },
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "click-option-group", specifier = ">=0.5.6" },
+    { name = "mng", editable = "libs/mng" },
+]
+
+[[package]]
 name = "mng-opencode"
 version = "0.1.0"
 source = { editable = "libs/mng_opencode" }
@@ -1859,6 +1927,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mng-recursive"
+version = "0.1.0"
+source = { editable = "libs/mng_recursive" }
+dependencies = [
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mng", editable = "libs/mng" }]
+
+[[package]]
 name = "mng-schedule"
 version = "0.1.0"
 source = { editable = "libs/mng_schedule" }
@@ -1880,6 +1959,17 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
 ]
+
+[[package]]
+name = "mng-ttyd"
+version = "0.1.0"
+source = { editable = "libs/mng_ttyd" }
+dependencies = [
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-tutor"

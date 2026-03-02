@@ -318,7 +318,7 @@ def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             if "CI" in os.environ:
                 # this limit applies to the test suite that runs against all branches *except* "release" in GitHub CI (and which is basically just used for calculating coverage)
                 # typically integration tests and unit tests are run locally, so we want them to be fast
-                max_duration = 100.0
+                max_duration = 130.0
             else:
                 # this limit applies to the entire test suite when run locally
                 max_duration = 300.0

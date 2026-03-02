@@ -10,7 +10,6 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplateName
-from imbue.mng.config.data_types import LoggingConfig
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import get_or_create_user_id
 from imbue.mng.config.loader import _apply_plugin_overrides
@@ -35,6 +34,7 @@ from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.registry import load_all_registries
+from imbue.mng.utils.logging import LoggingConfig
 
 hookimpl = pluggy.HookimplMarker("mng")
 
@@ -595,7 +595,11 @@ def test_on_load_config_hook_is_called(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify hook was called
     assert hook_called, "on_load_config hook was not called"
@@ -626,7 +630,11 @@ def test_on_load_config_hook_can_modify_config(
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify the config was modified
     assert mng_ctx.config.prefix == "modified-by-plugin-"
@@ -658,7 +666,11 @@ def test_on_load_config_hook_can_add_new_fields(
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify the agent type was added
     assert AgentTypeName("custom-agent") in mng_ctx.config.agent_types
@@ -864,7 +876,11 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     settings_path = profile_dir / "settings.toml"
     settings_path.write_text("default_destroyed_host_persisted_seconds = 86400.0\n")
 
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     assert mng_ctx.config.default_destroyed_host_persisted_seconds == 86400.0
 

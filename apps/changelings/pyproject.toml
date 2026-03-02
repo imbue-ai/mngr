@@ -7,12 +7,20 @@ dependencies = [
     "click>=8.0",
     "click-option-group>=0.5.6",
     "concurrency-group",
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+    "imbue-common",
+    "itsdangerous>=2.2.0",
+    "jinja2>=3.1.0",
     "loguru",
     "mng",
-    "imbue-common",
     "modal>=1.3.1",
+    "paramiko>=3.0",
     "pydantic>=2.0",
+    "tabulate>=0.9.0",
     "tomlkit>=0.12.0",
+    "uvicorn>=0.32.0",
+    "websockets>=13.0",
 ]
 
 [project.scripts]
@@ -42,6 +50,7 @@ junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.changelings",
   "--cov-report=term-missing",
   "--cov-report=html",
@@ -58,16 +67,13 @@ addopts = [
 
 [tool.coverage.run]
 parallel = true
-concurrency = ["multiprocessing"]
+concurrency = ["multiprocessing", "thread"]
 omit = [
   "*_test.py",
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
-  "*/deploy/cron_runner.py",
-  "*/deploy/remote_runner.py",
-  "*/deploy/verification.py",
 ]
 
 [tool.inline-snapshot]

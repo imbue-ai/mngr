@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from imbue.mng.api.create import _write_host_env_vars
-from imbue.mng.api.data_types import HostEnvironmentOptions
 from imbue.mng.config.data_types import EnvVar
+from imbue.mng.interfaces.host import HostEnvironmentOptions
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 

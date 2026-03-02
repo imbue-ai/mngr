@@ -4,6 +4,8 @@ import json
 import os
 import random
 import shlex
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -18,6 +20,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mng import hookimpl
 from imbue.mng.agents.base_agent import BaseAgent
@@ -38,6 +41,7 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentStartError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import PluginMngError
+from imbue.mng.errors import SendMessageError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import is_macos
 from imbue.mng.interfaces.agent import AgentInterface
@@ -110,6 +114,12 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="Pin the Claude Code version to install (e.g., '2.1.50'). "
         "When set, installation uses this specific version and provisioning verifies the installed version matches. "
         "If None, uses the latest available version.",
+    )
+    trust_working_directory: bool = Field(
+        default=False,
+        description="Automatically add the agent's working directory to Claude's trusted directories "
+        "in ~/.claude.json before startup. This prevents the trust dialog from appearing. "
+        "Also dismisses the effort callout dialog.",
     )
 
 
@@ -410,6 +420,72 @@ def _has_api_credentials_available(
     return False
 
 
+class DialogIndicator(FrozenModel, ABC):
+    """Base class for dialog indicators that can block agent input."""
+
+    @abstractmethod
+    def get_match_string(self) -> str:
+        """Return the string to look for in the tmux pane content."""
+        ...
+
+    @abstractmethod
+    def get_description(self) -> str:
+        """Return a human-readable description for error messages."""
+        ...
+
+
+class DialogDetectedError(SendMessageError):
+    """A dialog is blocking the agent's input in the terminal."""
+
+    def __init__(self, agent_name: str, dialog_description: str) -> None:
+        self.dialog_description = dialog_description
+        super().__init__(
+            agent_name,
+            f"A dialog is blocking the agent's input ({dialog_description} detected in terminal). "
+            f"Connect to the agent with 'mng connect {agent_name}' to resolve it.",
+        )
+
+
+class PermissionDialogIndicator(DialogIndicator):
+    """Detects Claude Code permission dialogs (e.g., tool approval prompts)."""
+
+    def get_match_string(self) -> str:
+        return "Do you want to proceed?"
+
+    def get_description(self) -> str:
+        return "permission dialog"
+
+
+class TrustDialogIndicator(DialogIndicator):
+    """Detects the Claude Code workspace trust dialog shown on first launch in a directory."""
+
+    def get_match_string(self) -> str:
+        return "Yes, I trust this folder"
+
+    def get_description(self) -> str:
+        return "trust dialog"
+
+
+class ThemeSelectionIndicator(DialogIndicator):
+    """Detects the Claude Code theme selection prompt shown during onboarding."""
+
+    def get_match_string(self) -> str:
+        return "Choose the text style that looks best with your terminal"
+
+    def get_description(self) -> str:
+        return "theme selection dialog"
+
+
+class EffortCalloutIndicator(DialogIndicator):
+    """Detects the Claude Code effort callout shown after model selection."""
+
+    def get_match_string(self) -> str:
+        return "You can always change effort in /model later."
+
+    def get_description(self) -> str:
+        return "effort callout"
+
+
 class ClaudeAgent(BaseAgent):
     """Agent implementation for Claude with session resumption support."""
 
@@ -446,6 +522,29 @@ class ClaudeAgent(BaseAgent):
         which would cause the input to be lost or appear as raw text.
         """
         return "Claude Code"
+
+    _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
+        PermissionDialogIndicator(),
+        TrustDialogIndicator(),
+        ThemeSelectionIndicator(),
+        EffortCalloutIndicator(),
+    )
+
+    def _preflight_send_message(self, session_name: str) -> None:
+        """Check for blocking dialogs before sending a message.
+
+        Captures the tmux pane and checks for known dialog indicators
+        (permission prompts, trust dialogs, theme selection, effort callout).
+        Raises DialogDetectedError if any are found.
+        """
+        content = self._capture_pane_content(session_name)
+        if content is None:
+            return
+
+        for indicator in self._DIALOG_INDICATORS:
+            match_string = indicator.get_match_string()
+            if match_string in content:
+                raise DialogDetectedError(str(self.name), indicator.get_description())
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -719,6 +818,10 @@ class ClaudeAgent(BaseAgent):
 
         For worktree-mode agents, ensures all Claude startup dialogs are
         dismissed and extends trust to the worktree.
+
+        When trust_working_directory is enabled, unconditionally adds trust
+        for the agent's working directory (used by changelings that run
+        --in-place in their own repo directory).
         """
         if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
             git_common_dir = find_git_common_dir(self.work_dir, mng_ctx.concurrency_group)
@@ -728,6 +831,9 @@ class ClaudeAgent(BaseAgent):
                 extend_claude_trust_to_worktree(source_path, self.work_dir)
 
         config = self._get_claude_config()
+
+        if config.trust_working_directory and host.is_local:
+            ensure_claude_dialogs_dismissed(self.work_dir)
 
         # ensure that claude is installed (and at the right version if pinned)
         if config.check_installation:

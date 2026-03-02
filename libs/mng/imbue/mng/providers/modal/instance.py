@@ -36,7 +36,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import trace_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.data_types import HostLifecycleOptions
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostNameConflictError
 from imbue.mng.errors import HostNotFoundError
@@ -56,6 +55,7 @@ from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CpuResources
 from imbue.mng.interfaces.data_types import HostConfig
 from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.data_types import SSHInfo
@@ -1368,7 +1368,7 @@ log "=== Shutdown script completed ==="
         parser.add_argument("--cpu", type=float, default=self.config.default_cpu)
         parser.add_argument("--memory", type=float, default=self.config.default_memory)
         parser.add_argument("--image", type=str, default=self.config.default_image)
-        parser.add_argument("--dockerfile", type=str, default=None)
+        parser.add_argument("--file", type=str, default=None, dest="dockerfile")
         parser.add_argument("--timeout", type=int, default=self.config.default_sandbox_timeout)
         parser.add_argument("--region", type=str, default=self.config.default_region)
         parser.add_argument("--context-dir", type=str, default=None)
@@ -1700,7 +1700,7 @@ log "=== Shutdown script completed ==="
 
         logger.info("Creating host {} in {} ...", name, self.name)
 
-        # Parse build arguments (including --dockerfile if specified)
+        # Parse build arguments (including --file if specified)
         config = self._parse_build_args(build_args)
         base_image = str(image) if image else config.image
         dockerfile_path = Path(config.dockerfile) if config.dockerfile else None
@@ -1709,7 +1709,7 @@ log "=== Shutdown script completed ==="
         if not base_image and not dockerfile_path:
             logger.warning(
                 "No image or Dockerfile specified -- building from mng default Dockerfile. "
-                "Consider using your own Dockerfile (-b --dockerfile=<path>) to include "
+                "Consider using your own Dockerfile (-b --file=<path>) to include "
                 "your project's dependencies for faster startup.",
             )
 
@@ -3136,6 +3136,9 @@ def _substitute_dockerfile_build_args(dockerfile_contents: str, build_args: Sequ
     return result
 
 
+# FIXME: this code that breaks dockefiles up into layers really only needs to chunk the layer when we run into a COPY or RUN command (or when we're finished parsing the commands from the file).
+#  Doing that should make things quite a bit faster, but without really sacrificing any debuggability (since commands like ENV and ARG don't really do much)
+#  Specifically, we should execute the dockerfile commands together in modal, where each batch ends with a RUN or COPY command (or the end of the file), rather than doing *EVERY* command separately
 def _build_image_from_dockerfile_contents(
     dockerfile_contents: str,
     # build context directory for COPY/ADD instructions

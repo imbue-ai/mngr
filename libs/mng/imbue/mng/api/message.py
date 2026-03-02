@@ -280,7 +280,7 @@ def _send_message_to_agent(
         if on_error:
             on_error(agent_name, error_msg)
         if error_behavior == ErrorBehavior.ABORT:
-            raise
+            raise MngError(error_msg) from e
 
 
 def _agent_to_cel_context(agent: AgentInterface, provider_name: str) -> dict[str, Any]:

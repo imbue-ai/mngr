@@ -178,6 +178,9 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     _emit_output(result, output_opts)
 
     if result.failed_agents:
+        if output_opts.output_format == OutputFormat.HUMAN:
+            failed_names = " ".join(name for name, _error in result.failed_agents)
+            write_human_line("Failed agents: {}", failed_names)
         ctx.exit(1)
 
 

@@ -56,12 +56,18 @@ testpaths = [
 ]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov=imbue.imbue_common",
   "--cov=imbue.mng_opencode",
   "--cov=imbue.mng_pair",
   "--cov=imbue.mng_schedule",
+  "--cov=imbue.mng_ttyd",
   "--cov=imbue.mng_tutor",
+  "--cov=imbue.mng_claude_zygote",
+  "--cov=imbue.mng_elena_code",
+  "--cov=imbue.mng_kanpan",
+  "--cov=imbue.mng_recursive",
   "--cov=imbue.changelings",
   "--cov-report=term-missing",
   "--cov-report=html",
@@ -124,7 +130,7 @@ extra-paths = ["scripts"]
 [tool.coverage.run]
 source = ["imbue"]
 parallel = true
-concurrency = ["multiprocessing"]
+concurrency = ["multiprocessing", "thread"]
 omit = [
     "*_test.py",
     "test_*.py",
@@ -148,6 +154,9 @@ omit = [
     # Tutor TUI is interactive and should not have automated tests
     "libs/mng_tutor/imbue/mng_tutor/tui.py",
     "libs/mng_tutor/imbue/mng_tutor/cli.py",
+    # Kanpan TUI is interactive and should not have automated tests
+    "libs/mng_kanpan/imbue/mng_kanpan/tui.py",
+    "libs/mng_kanpan/imbue/mng_kanpan/cli.py",
     # don't bother with anything in scripts
     "scripts/*",
 ]
@@ -165,30 +174,27 @@ layers = [
     "imbue.mng.agents",
     "imbue.mng.providers",
     "imbue.mng.hosts",
+    "imbue.mng.plugins",
     "imbue.mng.interfaces",
     "imbue.mng.config",
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
 ]
-ignore_imports = [
-    "imbue.mng.hosts.test_host -> imbue.mng.providers.local.instance",
-    "imbue.mng.cli.test_create -> imbue.mng.main",
-    "imbue.mng.utils.logging_test -> imbue.mng.config.data_types",
-    "imbue.mng.utils.testing -> imbue.mng.providers.local.instance",
-    "imbue.mng.utils.testing -> imbue.mng.config.data_types",
-]
 
 [[tool.importlinter.contracts]]
 name = "changelings layers contract"
 type = "layers"
 layers = [
-    "imbue.changelings.main",
+    "imbue.changelings.desktop_client",
     "imbue.changelings.cli",
-    "imbue.changelings.deploy",
+    "imbue.changelings.deployment",
+    "imbue.changelings.forwarding_server",
+    "imbue.changelings.core",
+    "imbue.changelings.interfaces",
     "imbue.changelings.config",
-    "imbue.changelings.mng_commands",
-    "imbue.changelings.data_types",
     "imbue.changelings.errors",
+    "imbue.changelings.data_types",
+    "imbue.changelings.utils",
     "imbue.changelings.primitives",
 ]

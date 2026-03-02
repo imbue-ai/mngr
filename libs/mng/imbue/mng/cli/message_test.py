@@ -7,6 +7,28 @@ from imbue.mng.cli.message import _emit_human_output
 from imbue.mng.cli.message import _emit_json_output
 from imbue.mng.cli.message import _get_message_content
 
+_DEFAULT_OPTS = MessageCliOptions(
+    agents=(),
+    agent_list=(),
+    all_agents=False,
+    include=(),
+    exclude=(),
+    stdin=False,
+    message_content=None,
+    on_error="continue",
+    start=False,
+    output_format="human",
+    quiet=False,
+    verbose=0,
+    log_file=None,
+    log_commands=None,
+    log_command_output=None,
+    log_env_vars=None,
+    project_context_path=None,
+    plugin=(),
+    disable_plugin=(),
+)
+
 
 def test_message_cli_options_has_expected_fields() -> None:
     """Test that MessageCliOptions has all expected fields."""
