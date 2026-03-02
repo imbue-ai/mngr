@@ -9,40 +9,49 @@ event_id, and source fields. Events are read from logs/<source>/events.jsonl.
 Settings are read from $MNG_AGENT_STATE_DIR/settings.toml (provisioned
 during agent setup). Missing file or keys fall back to built-in defaults.
 
-NOTE: _format_events() is duplicated in context_tool.py because these
+NOTE: _format_extra_events() is duplicated in context_tool.py because these
 files are deployed as standalone scripts to the agent host via --functions,
 where they cannot import from each other or from the mng_claude_zygote package.
 """
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 
-def _load_settings() -> dict:
-    """Load settings from $MNG_AGENT_STATE_DIR/settings.toml.
+def _load_extra_settings() -> dict:
+    """Load settings from .changelings/settings.toml in the work dir or agent state dir.
 
-    NOTE: This function is intentionally duplicated in context_tool.py.
-    These files are deployed as standalone scripts and cannot share imports.
+    NOTE: This is the same logic as _load_settings in context_tool.py,
+    renamed to avoid duplicate tool registration by llm --functions.
     """
     try:
         import tomllib
     except ImportError:
         print("WARNING: tomllib not available, using default settings", file=sys.stderr)
         return {}
-    settings_path = Path(os.environ.get("MNG_AGENT_STATE_DIR", "")) / "settings.toml"
-    try:
-        with settings_path.open("rb") as f:
-            return tomllib.load(f)
-    except (OSError, ValueError) as e:
-        print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
-        return {}
+    candidates = []
+    work_dir = os.environ.get("MNG_AGENT_WORK_DIR", "")
+    if work_dir:
+        candidates.append(pathlib.Path(work_dir) / ".changelings" / "settings.toml")
+    state_dir = os.environ.get("MNG_AGENT_STATE_DIR", "")
+    if state_dir:
+        candidates.append(pathlib.Path(state_dir) / "settings.toml")
+    for settings_path in candidates:
+        if not settings_path.exists():
+            continue
+        try:
+            with settings_path.open("rb") as f:
+                return tomllib.load(f)
+        except (OSError, ValueError) as e:
+            print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
+    return {}
 
 
-_SETTINGS = _load_settings()
+_SETTINGS = _load_extra_settings()
 _EXTRA = _SETTINGS.get("chat", {}).get("extra_context", {})
 
 _MNG_LIST_HARD_TIMEOUT = _EXTRA.get("mng_list_hard_timeout_seconds", 120)
@@ -89,7 +98,7 @@ def gather_extra_context() -> str:
 
     agent_data_dir_str = os.environ.get("MNG_AGENT_STATE_DIR", "")
     if agent_data_dir_str:
-        agent_data_dir = Path(agent_data_dir_str)
+        agent_data_dir = pathlib.Path(agent_data_dir_str)
 
         # Extended inner monologue (from logs/claude_transcript/events.jsonl)
         transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
@@ -98,7 +107,7 @@ def gather_extra_context() -> str:
                 lines = transcript.read_text().strip().split("\n")
                 recent = lines[-_TRANSCRIPT_LINE_COUNT:] if len(lines) > _TRANSCRIPT_LINE_COUNT else lines
                 if recent and recent[0]:
-                    formatted = _format_events(recent)
+                    formatted = _format_extra_events(recent)
                     sections.append(
                         f"## Extended Inner Monologue (last {len(recent)} of {len(lines)} entries)\n{formatted}"
                     )
@@ -135,7 +144,7 @@ def gather_extra_context() -> str:
     return "\n\n".join(sections) if sections else "No extra context available."
 
 
-def _format_events(lines: list[str]) -> str:
+def _format_extra_events(lines: list[str]) -> str:
     """Format event JSONL lines into a readable summary.
 
     NOTE: This function is intentionally duplicated in context_tool.py.

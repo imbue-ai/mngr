@@ -52,6 +52,39 @@ def test_html_escape_escapes_quotes(web_server_module: Any) -> None:
     assert "&quot;" in web_server_module._html_escape('say "hello"')
 
 
+def _make_conversation_event(
+    conversation_id: str,
+    timestamp: str = "2026-01-01T00:00:00Z",
+    model: str = "claude-sonnet-4-6",
+) -> str:
+    """Create a JSONL line for a conversation_created event."""
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "type": "conversation_created",
+            "event_id": f"evt-{conversation_id}",
+            "source": "conversations",
+            "conversation_id": conversation_id,
+            "model": model,
+        }
+    )
+
+
+def _make_message_event(conversation_id: str, timestamp: str, role: str, content: str) -> str:
+    """Create a JSONL line for a message event."""
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+            "type": "message",
+            "event_id": f"evt-msg-{conversation_id}",
+            "source": "messages",
+        }
+    )
+
+
 # -- _read_conversations tests --
 
 
@@ -63,19 +96,7 @@ def test_read_conversations_empty_when_no_event_files(web_server_module: Any) ->
 def test_read_conversations_parses_conversation_events(web_server_module: Any) -> None:
     events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text(
-        json.dumps(
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "type": "conversation_created",
-                "event_id": "evt-1",
-                "source": "conversations",
-                "conversation_id": "conv-abc-82741",
-                "model": "claude-sonnet-4-6",
-            }
-        )
-        + "\n"
-    )
+    events_path.write_text(_make_conversation_event("conv-abc-82741") + "\n")
 
     result = web_server_module._read_conversations()
 
@@ -88,26 +109,8 @@ def test_read_conversations_sorted_by_most_recent(web_server_module: Any) -> Non
     events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     events_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        json.dumps(
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "conversation_id": "conv-old-82741",
-                "model": "m",
-                "type": "conversation_created",
-                "event_id": "e1",
-                "source": "conversations",
-            }
-        ),
-        json.dumps(
-            {
-                "timestamp": "2026-02-01T00:00:00Z",
-                "conversation_id": "conv-new-82741",
-                "model": "m",
-                "type": "conversation_created",
-                "event_id": "e2",
-                "source": "conversations",
-            }
-        ),
+        _make_conversation_event("conv-old-82741", timestamp="2026-01-01T00:00:00Z"),
+        _make_conversation_event("conv-new-82741", timestamp="2026-02-01T00:00:00Z"),
     ]
     events_path.write_text("\n".join(lines) + "\n")
 
@@ -121,35 +124,11 @@ def test_read_conversations_sorted_by_most_recent(web_server_module: Any) -> Non
 def test_read_conversations_updates_with_message_timestamps(web_server_module: Any) -> None:
     conv_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     conv_path.parent.mkdir(parents=True, exist_ok=True)
-    conv_path.write_text(
-        json.dumps(
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "conversation_id": "conv-1-82741",
-                "model": "m",
-                "type": "conversation_created",
-                "event_id": "e1",
-                "source": "conversations",
-            }
-        )
-        + "\n"
-    )
+    conv_path.write_text(_make_conversation_event("conv-1-82741") + "\n")
+
     msg_path = web_server_module.MESSAGES_EVENTS_PATH
     msg_path.parent.mkdir(parents=True, exist_ok=True)
-    msg_path.write_text(
-        json.dumps(
-            {
-                "timestamp": "2026-03-01T00:00:00Z",
-                "conversation_id": "conv-1-82741",
-                "role": "user",
-                "content": "hello",
-                "type": "message",
-                "event_id": "e2",
-                "source": "messages",
-            }
-        )
-        + "\n"
-    )
+    msg_path.write_text(_make_message_event("conv-1-82741", "2026-03-01T00:00:00Z", "user", "hello") + "\n")
 
     result = web_server_module._read_conversations()
     assert result[0]["updated_at"] == "2026-03-01T00:00:00Z"
@@ -158,20 +137,7 @@ def test_read_conversations_updates_with_message_timestamps(web_server_module: A
 def test_read_conversations_skips_malformed_lines(web_server_module: Any) -> None:
     events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text(
-        "not valid json\n"
-        + json.dumps(
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "conversation_id": "conv-good-82741",
-                "model": "m",
-                "type": "conversation_created",
-                "event_id": "e1",
-                "source": "conversations",
-            }
-        )
-        + "\n"
-    )
+    events_path.write_text("not valid json\n" + _make_conversation_event("conv-good-82741") + "\n")
 
     result = web_server_module._read_conversations()
 
@@ -222,19 +188,7 @@ def test_render_main_page_shows_empty_state_with_no_conversations(web_server_mod
 def test_render_main_page_lists_conversations(web_server_module: Any) -> None:
     events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    events_path.write_text(
-        json.dumps(
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "type": "conversation_created",
-                "event_id": "evt-1",
-                "source": "conversations",
-                "conversation_id": "conv-render-82741",
-                "model": "claude-sonnet-4-6",
-            }
-        )
-        + "\n"
-    )
+    events_path.write_text(_make_conversation_event("conv-render-82741") + "\n")
 
     page = web_server_module._render_main_page()
     assert "conv-render-82741" in page

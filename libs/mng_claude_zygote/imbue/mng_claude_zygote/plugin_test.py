@@ -141,6 +141,23 @@ def test_does_not_modify_when_no_agent_type() -> None:
     assert params["add_command"] == ()
 
 
+def test_injects_windows_for_registered_subclass() -> None:
+    """Verify that a registered agent type that subclasses ClaudeZygoteAgent gets changeling windows."""
+    from imbue.mng.config.agent_class_registry import register_agent_class
+    from imbue.mng.config.agent_class_registry import reset_agent_class_registry
+
+    class _TestSubclassAgent(ClaudeZygoteAgent):
+        """Test subclass for verifying subclass detection."""
+
+    try:
+        register_agent_class("test-subclass-82741", _TestSubclassAgent)
+        params: dict[str, Any] = {"add_command": (), "agent_type": "test-subclass-82741"}
+        override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
+        assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
+    finally:
+        reset_agent_class_registry()
+
+
 def test_preserves_existing_add_commands() -> None:
     params: dict[str, Any] = {"add_command": ('monitor="htop"',), "agent_type": "claude-zygote"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)

@@ -49,13 +49,19 @@ log() {
 get_default_model() {
     python3 -c "
 import tomllib, pathlib, sys
-p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')
-try:
-    s = tomllib.loads(p.read_text()) if p.exists() else {}
-    print(s.get('chat', {}).get('model', 'claude-opus-4.6'))
-except Exception as e:
-    print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
-    print('claude-opus-4.6')
+# Try work dir first (source of truth), then agent state dir (provisioned copy)
+for loc in ['${MNG_AGENT_WORK_DIR:-}/.changelings/settings.toml', '${MNG_AGENT_STATE_DIR}/settings.toml']:
+    p = pathlib.Path(loc)
+    if p.exists():
+        try:
+            s = tomllib.loads(p.read_text())
+            model = s.get('chat', {}).get('model')
+            if model:
+                print(model)
+                sys.exit(0)
+        except Exception as e:
+            print(f'WARNING: failed to load settings from {p}: {e}', file=sys.stderr)
+print('claude-opus-4.6')
 " 2>>"$LOG_FILE" || echo "claude-opus-4.6"
 }
 
@@ -141,10 +147,9 @@ new_conversation() {
         sys_args=(-s "$system_prompt")
     fi
 
+    append_conversation_event "$cid" "$model" "conversation_created"
+
     if [ "$as_agent" = true ]; then
-        # Agent-initiated: record the event with our pre-generated CID and
-        # use --cid to inject into that specific conversation.
-        append_conversation_event "$cid" "$model" "conversation_created"
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $cid"
             llm inject --cid "$cid" -m "$model" "$message"
@@ -152,18 +157,15 @@ new_conversation() {
         fi
         echo "$cid"
     else
-        # Interactive: do NOT pass --cid or record an event here. The llm
-        # tool creates its own conversation ID, and the conversation_watcher
-        # will detect it from llm's database and write the event.
         local tool_args
         tool_args=$(build_tool_args)
-        log "Starting live-chat session: model=$model tool_args='$tool_args'"
+        log "Starting live-chat session: cid=$cid model=$model tool_args='$tool_args'"
         if [ -n "$message" ]; then
             # shellcheck disable=SC2086
-            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args "$message"
+            exec llm live-chat --cid "$cid" -m "$model" "${sys_args[@]}" $tool_args "$message"
         else
             # shellcheck disable=SC2086
-            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args
+            exec llm live-chat --cid "$cid" -m "$model" "${sys_args[@]}" $tool_args
         fi
     fi
 }
