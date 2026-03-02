@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -7,6 +8,23 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 from imbue.mng.errors import MngError
+from imbue.mng.interfaces.host import OnlineHostInterface
+
+
+def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
+    """Add a git safe.directory entry on a remote host.
+
+    On remote hosts (Docker/Modal), file ownership may differ from the SSH user
+    (e.g., after rsync from a local machine with a different UID). This tells
+    git to trust the given directory regardless of ownership.
+
+    No-op for local hosts, where the current user already owns the directories.
+    """
+    if host.is_local:
+        return
+    host.execute_command(
+        f"git config --global --add safe.directory {shlex.quote(str(path))}",
+    )
 
 
 @pure

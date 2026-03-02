@@ -24,6 +24,7 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import SyncMode
 from imbue.mng.primitives import UncommittedChangesMode
 from imbue.mng.utils.deps import RSYNC
+from imbue.mng.utils.git_utils import add_safe_directory_on_remote
 from imbue.mng.utils.git_utils import count_commits_between
 from imbue.mng.utils.git_utils import get_current_branch
 from imbue.mng.utils.git_utils import get_head_commit
@@ -829,6 +830,8 @@ def sync_git(
     remote_git_ctx = RemoteGitContext(host=host)
 
     logger.debug("Syncing git from {} to {} (mode={})", local_path, remote_path, mode)
+
+    add_safe_directory_on_remote(host, remote_path)
 
     # Verify both are git repositories
     if not local_git_ctx.is_git_repository(local_path):
