@@ -1,10 +1,10 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.logs import LogFileEntry
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.logs import LogsCliOptions
 from imbue.mng.cli.logs import _emit_log_content
 from imbue.mng.cli.logs import _emit_log_file_list
@@ -109,82 +109,82 @@ def test_logs_cli_log_filename_does_not_conflict_with_common_log_file(
 # =============================================================================
 
 
-def test_write_and_flush_stdout() -> None:
+def test_write_and_flush_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _write_and_flush_stdout writes to stdout."""
-    with capture_stdout() as buf:
-        _write_and_flush_stdout("hello world")
-    assert buf.getvalue() == "hello world"
+    _write_and_flush_stdout("hello world")
+    captured = capsys.readouterr()
+    assert captured.out == "hello world"
 
 
-def test_emit_log_file_list_human_empty() -> None:
+def test_emit_log_file_list_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_file_list with no log files in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_log_file_list([], "my-agent", output_opts)
-    assert "No log files found for my-agent" in buf.getvalue()
+    _emit_log_file_list([], "my-agent", output_opts)
+    captured = capsys.readouterr()
+    assert "No log files found for my-agent" in captured.out
 
 
-def test_emit_log_file_list_human_with_files() -> None:
+def test_emit_log_file_list_human_with_files(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_file_list with log files in HUMAN format."""
     log_files = [
         LogFileEntry(name="output.log", size=1024),
         LogFileEntry(name="error.log", size=512),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_log_file_list(log_files, "my-agent", output_opts)
-    output = buf.getvalue()
+    _emit_log_file_list(log_files, "my-agent", output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Log files for my-agent" in output
     assert "output.log" in output
     assert "error.log" in output
 
 
-def test_emit_log_file_list_json_format() -> None:
+def test_emit_log_file_list_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_file_list in JSON format."""
     log_files = [
         LogFileEntry(name="output.log", size=1024),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_log_file_list(log_files, "my-agent", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_log_file_list(log_files, "my-agent", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["target"] == "my-agent"
     assert len(data["log_files"]) == 1
     assert data["log_files"][0]["name"] == "output.log"
 
 
-def test_emit_log_file_list_format_template() -> None:
+def test_emit_log_file_list_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_file_list with a format template."""
     log_files = [
         LogFileEntry(name="output.log", size=1024),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    with capture_stdout() as buf:
-        _emit_log_file_list(log_files, "my-agent", output_opts)
-    assert "output.log" in buf.getvalue()
+    _emit_log_file_list(log_files, "my-agent", output_opts)
+    captured = capsys.readouterr()
+    assert "output.log" in captured.out
 
 
-def test_emit_log_content_human_format() -> None:
+def test_emit_log_content_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_content in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_log_content("line 1\nline 2\n", "output.log", output_opts)
-    assert "line 1\nline 2\n" in buf.getvalue()
+    _emit_log_content("line 1\nline 2\n", "output.log", output_opts)
+    captured = capsys.readouterr()
+    assert "line 1\nline 2\n" in captured.out
 
 
-def test_emit_log_content_human_adds_trailing_newline() -> None:
+def test_emit_log_content_human_adds_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_content adds trailing newline if missing."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_log_content("no trailing newline", "output.log", output_opts)
-    assert buf.getvalue().endswith("\n")
+    _emit_log_content("no trailing newline", "output.log", output_opts)
+    captured = capsys.readouterr()
+    assert captured.out.endswith("\n")
 
 
-def test_emit_log_content_json_format() -> None:
+def test_emit_log_content_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_log_content in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_log_content("log content", "output.log", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_log_content("log content", "output.log", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["log_file"] == "output.log"
     assert data["content"] == "log content"

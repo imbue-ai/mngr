@@ -6,7 +6,6 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.message import MessageResult
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.message import MessageCliOptions
 from imbue.mng.cli.message import _emit_human_output
 from imbue.mng.cli.message import _emit_json_output
@@ -84,7 +83,7 @@ def test_emit_human_output_handles_no_agents() -> None:
     _emit_human_output(result)
 
 
-def test_emit_json_output_formats_successful_agents(capsys: pytest.CaptureFixture) -> None:
+def test_emit_json_output_formats_successful_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test that _emit_json_output includes successful agents."""
     result = MessageResult()
     result.successful_agents = ["agent1", "agent2"]
@@ -95,7 +94,7 @@ def test_emit_json_output_formats_successful_agents(capsys: pytest.CaptureFixtur
     assert '"successful_agents": ["agent1", "agent2"]' in captured.out
 
 
-def test_emit_json_output_formats_failed_agents(capsys: pytest.CaptureFixture) -> None:
+def test_emit_json_output_formats_failed_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test that _emit_json_output includes failed agents."""
     result = MessageResult()
     result.failed_agents = [("agent1", "error message")]
@@ -108,7 +107,7 @@ def test_emit_json_output_formats_failed_agents(capsys: pytest.CaptureFixture) -
     assert '"error": "error message"' in captured.out
 
 
-def test_emit_json_output_includes_counts(capsys: pytest.CaptureFixture) -> None:
+def test_emit_json_output_includes_counts(capsys: pytest.CaptureFixture[str]) -> None:
     """Test that _emit_json_output includes counts."""
     result = MessageResult()
     result.successful_agents = ["agent1", "agent2", "agent3"]
@@ -239,24 +238,24 @@ def test_emit_jsonl_error_message(capsys: pytest.CaptureFixture[str]) -> None:
 # =============================================================================
 
 
-def test_emit_output_human_dispatches() -> None:
+def test_emit_output_human_dispatches(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_output dispatches to human output handler."""
     result = MessageResult()
     result.successful_agents = ["agent-1"]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_output(result, output_opts)
-    assert "Message sent to: agent-1" in buf.getvalue()
+    _emit_output(result, output_opts)
+    captured = capsys.readouterr()
+    assert "Message sent to: agent-1" in captured.out
 
 
-def test_emit_output_json_dispatches() -> None:
+def test_emit_output_json_dispatches(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_output dispatches to JSON output handler."""
     result = MessageResult()
     result.successful_agents = ["agent-1"]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_output(result, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_output(result, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["total_sent"] == 1
     assert data["successful_agents"] == ["agent-1"]
 
@@ -274,26 +273,26 @@ def test_emit_output_jsonl_raises() -> None:
 # =============================================================================
 
 
-def test_emit_human_output_successful_agents_with_count() -> None:
+def test_emit_human_output_successful_agents_with_count(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_human_output shows success count."""
     result = MessageResult()
     result.successful_agents = ["agent-1", "agent-2", "agent-3"]
-    with capture_stdout() as buf:
-        _emit_human_output(result)
-    output = buf.getvalue()
+    _emit_human_output(result)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Message sent to: agent-1" in output
     assert "Message sent to: agent-2" in output
     assert "Message sent to: agent-3" in output
     assert "Successfully sent message to 3 agent(s)" in output
 
 
-def test_emit_human_output_only_failed_agents() -> None:
+def test_emit_human_output_only_failed_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_human_output handles case with only failures."""
     result = MessageResult()
     result.failed_agents = [("agent-1", "error1"), ("agent-2", "error2")]
-    with capture_stdout() as buf:
-        _emit_human_output(result)
-    output = buf.getvalue()
+    _emit_human_output(result)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Failed to send message to 2 agent(s)" in output
 
 

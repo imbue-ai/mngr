@@ -3,9 +3,9 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.destroy import DestroyCliOptions
 from imbue.mng.cli.destroy import _DestroyTargets
 from imbue.mng.cli.destroy import _OfflineHostToDestroy
@@ -218,37 +218,37 @@ def test_destroy_session_cannot_combine_with_all(
 # =============================================================================
 
 
-def test_destroy_output_result_human_with_agents() -> None:
+def test_destroy_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with destroyed agents."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _output_result([AgentName("agent-a"), AgentName("agent-b")], output_opts)
-    assert "Successfully destroyed 2 agent(s)" in buf.getvalue()
+    _output_result([AgentName("agent-a"), AgentName("agent-b")], output_opts)
+    captured = capsys.readouterr()
+    assert "Successfully destroyed 2 agent(s)" in captured.out
 
 
-def test_destroy_output_result_json() -> None:
+def test_destroy_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _output_result([AgentName("agent-x")], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result([AgentName("agent-x")], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["destroyed_agents"] == ["agent-x"]
     assert data["count"] == 1
 
 
-def test_destroy_output_result_jsonl() -> None:
+def test_destroy_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _output_result([AgentName("agent-y")], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result([AgentName("agent-y")], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "destroy_result"
     assert data["count"] == 1
 
 
-def test_destroy_output_result_format_template() -> None:
+def test_destroy_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result with a format template."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    with capture_stdout() as buf:
-        _output_result([AgentName("my-agent")], output_opts)
-    assert "my-agent" in buf.getvalue()
+    _output_result([AgentName("my-agent")], output_opts)
+    captured = capsys.readouterr()
+    assert "my-agent" in captured.out

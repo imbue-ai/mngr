@@ -1,9 +1,5 @@
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
-from io import StringIO
 from pathlib import Path
 
 import click
@@ -41,22 +37,6 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
-
-
-@contextmanager
-def capture_stdout() -> Iterator[StringIO]:
-    """Temporarily redirect sys.stdout to a StringIO buffer.
-
-    Use this when testing functions that write directly to sys.stdout
-    (e.g., CLI output helpers that call write_human_line or _write_json_line).
-    """
-    buf = StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = buf
-    try:
-        yield buf
-    finally:
-        sys.stdout = old_stdout
 
 
 def make_test_agent_info(

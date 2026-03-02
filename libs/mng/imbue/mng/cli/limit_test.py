@@ -4,7 +4,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.limit import LimitCliOptions
 from imbue.mng.cli.limit import _build_updated_activity_config
 from imbue.mng.cli.limit import _build_updated_permissions
@@ -450,40 +449,40 @@ def test_has_any_setting_with_no_settings() -> None:
 # =============================================================================
 
 
-def test_limit_output_result_human_with_changes() -> None:
+def test_limit_output_result_human_with_changes(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should show change count in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     changes = [{"setting": "idle_timeout", "value": 300}]
-    with capture_stdout() as buf:
-        _output_result(changes, output_opts)
-    assert "Applied 1 change(s)" in buf.getvalue()
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    assert "Applied 1 change(s)" in captured.out
 
 
-def test_limit_output_result_human_empty() -> None:
+def test_limit_output_result_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should not write in HUMAN format with no changes."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _output_result([], output_opts)
-    assert "Applied" not in buf.getvalue()
+    _output_result([], output_opts)
+    captured = capsys.readouterr()
+    assert "Applied" not in captured.out
 
 
-def test_limit_output_result_json() -> None:
+def test_limit_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should output JSON data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     changes = [{"setting": "idle_timeout", "value": 300}]
-    with capture_stdout() as buf:
-        _output_result(changes, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["count"] == 1
     assert len(data["changes"]) == 1
 
 
-def test_limit_output_result_jsonl() -> None:
+def test_limit_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should output JSONL event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     changes = [{"setting": "idle_timeout", "value": 300}]
-    with capture_stdout() as buf:
-        _output_result(changes, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "limit_result"
     assert data["count"] == 1

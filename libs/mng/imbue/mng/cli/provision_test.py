@@ -3,9 +3,9 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.provision import ProvisionCliOptions
 from imbue.mng.cli.provision import _output_result
 from imbue.mng.cli.provision import provision
@@ -56,34 +56,34 @@ def test_provision_cli_options_can_be_instantiated() -> None:
 # =============================================================================
 
 
-def test_output_result_json_format() -> None:
+def test_output_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should output JSON data for JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _output_result("my-agent", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result("my-agent", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["agent"] == "my-agent"
     assert data["provisioned"] is True
 
 
-def test_output_result_jsonl_format() -> None:
+def test_output_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should output JSONL event for JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _output_result("my-agent", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result("my-agent", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "provision_result"
     assert data["agent"] == "my-agent"
     assert data["provisioned"] is True
 
 
-def test_output_result_human_format() -> None:
+def test_output_result_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_output_result should produce no output for HUMAN format (logs go to stderr)."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _output_result("my-agent", output_opts)
+    _output_result("my-agent", output_opts)
+    captured = capsys.readouterr()
     # HUMAN format does not write anything to stdout for this function
-    assert buf.getvalue() == ""
+    assert captured.out == ""
 
 
 # =============================================================================

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.data_types import GcResult
@@ -184,7 +185,7 @@ def test_format_destroyed_message_unknown_type() -> None:
 # =============================================================================
 
 
-def test_emit_jsonl_summary_empty_result(capsys) -> None:
+def test_emit_jsonl_summary_empty_result(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_jsonl_summary should output correct totals for empty result."""
     result = GcResult()
     _emit_jsonl_summary(result, dry_run=False)
@@ -205,7 +206,7 @@ def test_emit_jsonl_summary_empty_result(capsys) -> None:
     assert output["dry_run"] is False
 
 
-def test_emit_jsonl_summary_with_work_dirs_only(capsys) -> None:
+def test_emit_jsonl_summary_with_work_dirs_only(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_jsonl_summary should count work directories correctly."""
     result = GcResult()
     result.work_dirs_destroyed = [
@@ -224,7 +225,7 @@ def test_emit_jsonl_summary_with_work_dirs_only(capsys) -> None:
     assert output["dry_run"] is True
 
 
-def test_emit_jsonl_summary_with_mixed_resources(capsys) -> None:
+def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_jsonl_summary should aggregate counts and sizes from all resource types."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info(size_bytes=1000)]
@@ -251,7 +252,7 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys) -> None:
     assert output["build_cache_count"] == 1
 
 
-def test_emit_jsonl_summary_handles_none_snapshot_size(capsys) -> None:
+def test_emit_jsonl_summary_handles_none_snapshot_size(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_jsonl_summary should handle snapshots with None size_bytes."""
     result = GcResult()
     # Some providers don't report snapshot size, so include None size_bytes
@@ -270,7 +271,7 @@ def test_emit_jsonl_summary_handles_none_snapshot_size(capsys) -> None:
     assert output["total_size_bytes"] == 1000
 
 
-def test_emit_jsonl_summary_with_errors(capsys) -> None:
+def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_jsonl_summary should include errors in output."""
     result = GcResult()
     result.errors = ["Error 1", "Error 2"]
@@ -404,7 +405,7 @@ def test_gc_cli_options_can_be_instantiated() -> None:
 # =============================================================================
 
 
-def test_emit_destroyed_human_format(capsys) -> None:
+def test_emit_destroyed_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should output message in HUMAN format."""
     work_dir = _create_work_dir_info(path="/home/user/work")
     _emit_destroyed("work_dir", work_dir, OutputFormat.HUMAN, dry_run=False)
@@ -412,7 +413,7 @@ def test_emit_destroyed_human_format(capsys) -> None:
     assert "Destroyed work directory: /home/user/work" in captured.out
 
 
-def test_emit_destroyed_jsonl_format(capsys) -> None:
+def test_emit_destroyed_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should output JSONL event."""
     host = _create_host_info(name="my-machine")
     _emit_destroyed("machine", host, OutputFormat.JSONL, dry_run=False)
@@ -424,7 +425,7 @@ def test_emit_destroyed_jsonl_format(capsys) -> None:
     assert "Destroyed machine: my-machine (docker)" in output["message"]
 
 
-def test_emit_destroyed_json_format_silent(capsys) -> None:
+def test_emit_destroyed_json_format_silent(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should be silent in JSON format (events suppressed)."""
     work_dir = _create_work_dir_info()
     _emit_destroyed("work_dir", work_dir, OutputFormat.JSON, dry_run=True)
@@ -432,7 +433,7 @@ def test_emit_destroyed_json_format_silent(capsys) -> None:
     assert captured.out == ""
 
 
-def test_emit_destroyed_dry_run(capsys) -> None:
+def test_emit_destroyed_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should use 'Would destroy' prefix for dry run."""
     snapshot = _create_snapshot_info(name="snap-test")
     _emit_destroyed("snapshot", snapshot, OutputFormat.HUMAN, dry_run=True)
@@ -440,7 +441,7 @@ def test_emit_destroyed_dry_run(capsys) -> None:
     assert "Would destroy snapshot: snap-test" in captured.out
 
 
-def test_emit_destroyed_with_non_model_resource(capsys) -> None:
+def test_emit_destroyed_with_non_model_resource(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should handle resources without model_dump (fallback to str)."""
     _emit_destroyed("custom", "some-resource-name", OutputFormat.JSONL, dry_run=False)
     captured = capsys.readouterr()
@@ -453,7 +454,7 @@ def test_emit_destroyed_with_non_model_resource(capsys) -> None:
 # =============================================================================
 
 
-def test_emit_final_summary_dispatches_to_json(capsys) -> None:
+def test_emit_final_summary_dispatches_to_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_final_summary should dispatch to JSON summary."""
     result = GcResult()
     _emit_final_summary(result, OutputFormat.JSON, dry_run=False)
@@ -463,7 +464,7 @@ def test_emit_final_summary_dispatches_to_json(capsys) -> None:
     assert output["dry_run"] is False
 
 
-def test_emit_final_summary_dispatches_to_human(capsys) -> None:
+def test_emit_final_summary_dispatches_to_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_final_summary should dispatch to human summary."""
     result = GcResult()
     _emit_final_summary(result, OutputFormat.HUMAN, dry_run=False)
@@ -472,7 +473,7 @@ def test_emit_final_summary_dispatches_to_human(capsys) -> None:
     assert "No resources found" in captured.out
 
 
-def test_emit_final_summary_dispatches_to_jsonl(capsys) -> None:
+def test_emit_final_summary_dispatches_to_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_final_summary should dispatch to JSONL summary."""
     result = GcResult()
     _emit_final_summary(result, OutputFormat.JSONL, dry_run=True)
@@ -487,7 +488,7 @@ def test_emit_final_summary_dispatches_to_jsonl(capsys) -> None:
 # =============================================================================
 
 
-def test_emit_json_summary_empty_result(capsys) -> None:
+def test_emit_json_summary_empty_result(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_json_summary should output correct structure for empty result."""
     result = GcResult()
     _emit_json_summary(result, dry_run=False)
@@ -504,7 +505,7 @@ def test_emit_json_summary_empty_result(capsys) -> None:
     assert output["dry_run"] is False
 
 
-def test_emit_json_summary_with_resources(capsys) -> None:
+def test_emit_json_summary_with_resources(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_json_summary should serialize resource data."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info()]
@@ -525,7 +526,7 @@ def test_emit_json_summary_with_resources(capsys) -> None:
 # =============================================================================
 
 
-def test_emit_human_summary_empty_result_output(capsys) -> None:
+def test_emit_human_summary_empty_result_output(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show 'No resources found' for empty result."""
     result = GcResult()
     _emit_human_summary(result, dry_run=False)
@@ -533,7 +534,7 @@ def test_emit_human_summary_empty_result_output(capsys) -> None:
     assert "No resources found to destroy" in captured.out
 
 
-def test_emit_human_summary_dry_run_header(capsys) -> None:
+def test_emit_human_summary_dry_run_header(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show 'Dry Run' in header for dry run mode."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info()]
@@ -543,7 +544,7 @@ def test_emit_human_summary_dry_run_header(capsys) -> None:
     assert "Would destroy" in captured.out
 
 
-def test_emit_human_summary_shows_total_count(capsys) -> None:
+def test_emit_human_summary_shows_total_count(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show the total count of destroyed resources."""
     result = GcResult()
     result.machines_destroyed = [_create_host_info(), _create_host_info()]
@@ -552,7 +553,7 @@ def test_emit_human_summary_shows_total_count(capsys) -> None:
     assert "Destroyed 2 resource(s) total" in captured.out
 
 
-def test_emit_human_summary_shows_machine_records_deleted(capsys) -> None:
+def test_emit_human_summary_shows_machine_records_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show machine records deleted count."""
     result = GcResult()
     result.machines_deleted = [_create_host_info()]
@@ -561,7 +562,7 @@ def test_emit_human_summary_shows_machine_records_deleted(capsys) -> None:
     assert "Machine records deleted: 1" in captured.out
 
 
-def test_emit_human_summary_errors_displayed(capsys) -> None:
+def test_emit_human_summary_errors_displayed(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should display errors."""
     result = GcResult()
     result.errors = ["Error A", "Error B"]
@@ -572,7 +573,7 @@ def test_emit_human_summary_errors_displayed(capsys) -> None:
     assert "Error B" in captured.out
 
 
-def test_emit_human_summary_with_all_resource_types(capsys) -> None:
+def test_emit_human_summary_with_all_resource_types(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should report all resource types in a combined result."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info(is_local=True, size_bytes=1000)]

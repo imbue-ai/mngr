@@ -10,7 +10,6 @@ from loguru import logger
 
 from imbue.mng.api.exec import ExecResult
 from imbue.mng.api.exec import MultiExecResult
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.exec import ExecCliOptions
 from imbue.mng.cli.exec import _emit_human_output
 from imbue.mng.cli.exec import _emit_json_output
@@ -246,57 +245,57 @@ def test_emit_jsonl_error(capsys: pytest.CaptureFixture[str]) -> None:
 # =============================================================================
 
 
-def test_emit_output_with_format_template() -> None:
+def test_emit_output_with_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_output with a format template produces templated output."""
     result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
     multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{agent}\t{stdout}")
-    with capture_stdout() as buf:
-        _emit_output(multi_result, output_opts)
-    assert "agent-1\thello" in buf.getvalue()
+    _emit_output(multi_result, output_opts)
+    captured = capsys.readouterr()
+    assert "agent-1\thello" in captured.out
 
 
-def test_emit_output_format_template_strips_trailing_newline_from_stdout() -> None:
+def test_emit_output_format_template_strips_trailing_newline_from_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     """Test that format template output strips trailing newlines from stdout/stderr."""
     result1 = ExecResult(agent_name="agent-1", stdout="output\n", stderr="err\n", success=True)
     multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{stdout}|{stderr}")
-    with capture_stdout() as buf:
-        _emit_output(multi_result, output_opts)
+    _emit_output(multi_result, output_opts)
+    captured = capsys.readouterr()
     # Should strip trailing \n from stdout and stderr in format template mode
-    assert "output|err" in buf.getvalue()
+    assert "output|err" in captured.out
 
 
-def test_emit_output_format_template_includes_failed_agents() -> None:
+def test_emit_output_format_template_includes_failed_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test that format template output includes failed agents."""
     multi_result = MultiExecResult(
         successful_results=[],
         failed_agents=[("agent-x", "host offline")],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{agent}: {stderr}")
-    with capture_stdout() as buf:
-        _emit_output(multi_result, output_opts)
-    assert "agent-x: host offline" in buf.getvalue()
+    _emit_output(multi_result, output_opts)
+    captured = capsys.readouterr()
+    assert "agent-x: host offline" in captured.out
 
 
-def test_emit_output_dispatches_to_human() -> None:
+def test_emit_output_dispatches_to_human(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_output dispatches to human output."""
     result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
     multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_output(multi_result, output_opts)
-    assert "hello" in buf.getvalue()
+    _emit_output(multi_result, output_opts)
+    captured = capsys.readouterr()
+    assert "hello" in captured.out
 
 
-def test_emit_output_dispatches_to_json() -> None:
+def test_emit_output_dispatches_to_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_output dispatches to JSON output."""
     result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
     multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_output(multi_result, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_output(multi_result, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["total_executed"] == 1
 
 

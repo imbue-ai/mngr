@@ -17,7 +17,6 @@ from imbue.mng.cli.cleanup import _emit_no_agents_found
 from imbue.mng.cli.cleanup import _emit_result
 from imbue.mng.cli.cleanup import _selected_marker
 from imbue.mng.cli.cleanup import cleanup
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import AgentInfo
@@ -465,7 +464,7 @@ def test_build_cleanup_status_text_stop_action() -> None:
 # =============================================================================
 
 
-def test_emit_result_human_destroyed() -> None:
+def test_emit_result_human_destroyed(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_result with destroyed agents in HUMAN format."""
     result = CleanupResult(
         destroyed_agents=[AgentName("agent-a"), AgentName("agent-b")],
@@ -473,15 +472,15 @@ def test_emit_result_human_destroyed() -> None:
         errors=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    output = buf.getvalue()
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Successfully destroyed 2 agent(s)" in output
     assert "agent-a" in output
     assert "agent-b" in output
 
 
-def test_emit_result_human_stopped() -> None:
+def test_emit_result_human_stopped(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_result with stopped agents in HUMAN format."""
     result = CleanupResult(
         destroyed_agents=[],
@@ -489,14 +488,14 @@ def test_emit_result_human_stopped() -> None:
         errors=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    output = buf.getvalue()
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Successfully stopped 1 agent(s)" in output
     assert "stopped-agent" in output
 
 
-def test_emit_result_human_no_agents() -> None:
+def test_emit_result_human_no_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_result with no agents affected in HUMAN format."""
     result = CleanupResult(
         destroyed_agents=[],
@@ -504,13 +503,13 @@ def test_emit_result_human_no_agents() -> None:
         errors=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    output = buf.getvalue()
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "No agents were affected" in output
 
 
-def test_emit_result_json_format() -> None:
+def test_emit_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_result in JSON format."""
     result = CleanupResult(
         destroyed_agents=[AgentName("agent-x")],
@@ -518,15 +517,15 @@ def test_emit_result_json_format() -> None:
         errors=["some error"],
     )
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    output = json.loads(buf.getvalue().strip())
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
     assert output["destroyed_agents"] == ["agent-x"]
     assert output["destroyed_count"] == 1
     assert output["error_count"] == 1
 
 
-def test_emit_result_jsonl_format() -> None:
+def test_emit_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_result in JSONL format."""
     result = CleanupResult(
         destroyed_agents=[],
@@ -534,9 +533,9 @@ def test_emit_result_jsonl_format() -> None:
         errors=[],
     )
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    output = json.loads(buf.getvalue().strip())
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
     assert output["event"] == "cleanup_result"
     assert output["stopped_agents"] == ["agent-y"]
     assert output["stopped_count"] == 1
@@ -547,55 +546,55 @@ def test_emit_result_jsonl_format() -> None:
 # =============================================================================
 
 
-def test_emit_dry_run_output_human_destroy() -> None:
+def test_emit_dry_run_output_human_destroy(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_dry_run_output with destroy action in HUMAN format."""
     agents = [
         make_test_agent_info(name="dry-run-agent", state=AgentLifecycleState.RUNNING),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_dry_run_output(agents, CleanupAction.DESTROY, output_opts)
-    output = buf.getvalue()
+    _emit_dry_run_output(agents, CleanupAction.DESTROY, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Would destroy" in output
     assert "dry-run-agent" in output
 
 
-def test_emit_dry_run_output_human_stop() -> None:
+def test_emit_dry_run_output_human_stop(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_dry_run_output with stop action in HUMAN format."""
     agents = [
         make_test_agent_info(name="stop-target", state=AgentLifecycleState.RUNNING),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_dry_run_output(agents, CleanupAction.STOP, output_opts)
-    output = buf.getvalue()
+    _emit_dry_run_output(agents, CleanupAction.STOP, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Would stop" in output
     assert "stop-target" in output
 
 
-def test_emit_dry_run_output_json_format() -> None:
+def test_emit_dry_run_output_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_dry_run_output in JSON format."""
     agents = [
         make_test_agent_info(name="json-dry", state=AgentLifecycleState.RUNNING),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_dry_run_output(agents, CleanupAction.DESTROY, output_opts)
-    output = json.loads(buf.getvalue().strip())
+    _emit_dry_run_output(agents, CleanupAction.DESTROY, output_opts)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
     assert output["dry_run"] is True
     assert output["action"] == "destroy"
     assert len(output["agents"]) == 1
 
 
-def test_emit_dry_run_output_jsonl_format() -> None:
+def test_emit_dry_run_output_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _emit_dry_run_output in JSONL format."""
     agents = [
         make_test_agent_info(name="jsonl-dry", state=AgentLifecycleState.RUNNING),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_dry_run_output(agents, CleanupAction.STOP, output_opts)
-    output = json.loads(buf.getvalue().strip())
+    _emit_dry_run_output(agents, CleanupAction.STOP, output_opts)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
     assert output["event"] == "dry_run"
     assert output["action"] == "stop"
 
@@ -605,30 +604,30 @@ def test_emit_dry_run_output_jsonl_format() -> None:
 # =============================================================================
 
 
-def test_emit_no_agents_found_human_format() -> None:
+def test_emit_no_agents_found_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_no_agents_found should output message in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_no_agents_found(output_opts)
-    assert "No agents found matching the specified filters" in buf.getvalue()
+    _emit_no_agents_found(output_opts)
+    captured = capsys.readouterr()
+    assert "No agents found matching the specified filters" in captured.out
 
 
-def test_emit_no_agents_found_json_format() -> None:
+def test_emit_no_agents_found_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_no_agents_found should output JSON data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_no_agents_found(output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_no_agents_found(output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["agents"] == []
     assert "No agents found" in data["message"]
 
 
-def test_emit_no_agents_found_jsonl_format() -> None:
+def test_emit_no_agents_found_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_no_agents_found should output JSONL event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_no_agents_found(output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_no_agents_found(output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "info"
     assert "No agents found" in data["message"]
 
@@ -638,27 +637,27 @@ def test_emit_no_agents_found_jsonl_format() -> None:
 # =============================================================================
 
 
-def test_emit_result_json_with_errors() -> None:
+def test_emit_result_json_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_result should include errors in JSON data."""
     result = CleanupResult()
     result.destroyed_agents = [AgentName("agent-x")]
     result.stopped_agents = [AgentName("agent-y")]
     result.errors = ["error-1"]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["destroyed_count"] == 1
     assert data["stopped_count"] == 1
     assert data["error_count"] == 1
     assert data["errors"] == ["error-1"]
 
 
-def test_emit_result_human_with_errors() -> None:
+def test_emit_result_human_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_result should display errors in HUMAN format."""
     result = CleanupResult()
     result.errors = ["Failed to destroy agent-x", "Timeout on agent-y"]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_result(result, output_opts)
-    assert "No agents were affected" in buf.getvalue()
+    _emit_result(result, output_opts)
+    captured = capsys.readouterr()
+    assert "No agents were affected" in captured.out

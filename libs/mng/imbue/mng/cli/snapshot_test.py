@@ -3,9 +3,9 @@ from datetime import datetime
 from datetime import timezone
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mng.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mng.cli.snapshot import SnapshotListCliOptions
@@ -221,28 +221,28 @@ def test_classify_mixed_identifiers_no_agents_treats_all_as_hosts(
 # =============================================================================
 
 
-def test_emit_create_result_format_template() -> None:
+def test_emit_create_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result renders format templates for created snapshots."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{snapshot_id}")
     created = [
         {"snapshot_id": "snap-abc", "host_id": "host-1", "provider": "local", "agent_names": ["agent1"]},
         {"snapshot_id": "snap-def", "host_id": "host-2", "provider": "local", "agent_names": ["agent2", "agent3"]},
     ]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=[], output_opts=output_opts)
-    lines = buf.getvalue().strip().split("\n")
+    _emit_create_result(created, errors=[], output_opts=output_opts)
+    captured = capsys.readouterr()
+    lines = captured.out.strip().split("\n")
     assert lines == ["snap-abc", "snap-def"]
 
 
-def test_emit_create_result_format_template_agent_names() -> None:
+def test_emit_create_result_format_template_agent_names(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result format template renders agent_names as comma-separated."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{agent_names}")
     created = [
         {"snapshot_id": "snap-abc", "host_id": "host-1", "provider": "local", "agent_names": ["a1", "a2"]},
     ]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=[], output_opts=output_opts)
-    assert buf.getvalue().strip() == "a1, a2"
+    _emit_create_result(created, errors=[], output_opts=output_opts)
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "a1, a2"
 
 
 # =============================================================================
@@ -250,15 +250,15 @@ def test_emit_create_result_format_template_agent_names() -> None:
 # =============================================================================
 
 
-def test_emit_destroy_result_format_template() -> None:
+def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_result renders format templates for destroyed snapshots."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{snapshot_id}\t{host_id}")
     destroyed = [
         {"snapshot_id": "snap-abc", "host_id": "host-1", "provider": "local"},
     ]
-    with capture_stdout() as buf:
-        _emit_destroy_result(destroyed, output_opts=output_opts)
-    assert buf.getvalue().strip() == "snap-abc\thost-1"
+    _emit_destroy_result(destroyed, output_opts=output_opts)
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "snap-abc\thost-1"
 
 
 # =============================================================================
@@ -353,57 +353,57 @@ def test_classify_mixed_identifiers_multiple_unknown_identifiers(
 # =============================================================================
 
 
-def test_emit_create_result_json_format() -> None:
+def test_emit_create_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result emits JSON with snapshots_created."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     created = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": ["a1"]},
     ]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=[], output_opts=output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_create_result(created, errors=[], output_opts=output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["snapshots_created"] == created
     assert data["count"] == 1
     assert "errors" not in data
 
 
-def test_emit_create_result_json_format_with_errors() -> None:
+def test_emit_create_result_json_format_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result emits JSON with errors when present."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     created = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": ["a1"]},
     ]
     errors = [{"host_id": "host-2", "error": "fail"}]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=errors, output_opts=output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_create_result(created, errors=errors, output_opts=output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["errors"] == errors
     assert data["error_count"] == 1
 
 
-def test_emit_create_result_jsonl_format() -> None:
+def test_emit_create_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result emits JSONL create_result event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     created = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": ["a1"]},
     ]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=[], output_opts=output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_create_result(created, errors=[], output_opts=output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "create_result"
     assert data["count"] == 1
 
 
-def test_emit_create_result_human_format() -> None:
+def test_emit_create_result_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result emits human-readable output."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     created = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": ["a1"]},
         {"snapshot_id": "snap-2", "host_id": "host-2", "provider": "local", "agent_names": ["a2"]},
     ]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors=[], output_opts=output_opts)
-    assert "Created 2 snapshot(s)" in buf.getvalue()
+    _emit_create_result(created, errors=[], output_opts=output_opts)
+    captured = capsys.readouterr()
+    assert "Created 2 snapshot(s)" in captured.out
 
 
 # =============================================================================
@@ -425,64 +425,64 @@ def _make_test_snapshot(
     )
 
 
-def test_emit_list_snapshots_human_empty() -> None:
+def test_emit_list_snapshots_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots prints 'No snapshots found' when empty."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_list_snapshots([], output_opts)
-    assert "No snapshots found" in buf.getvalue()
+    _emit_list_snapshots([], output_opts)
+    captured = capsys.readouterr()
+    assert "No snapshots found" in captured.out
 
 
-def test_emit_list_snapshots_human_with_snapshots() -> None:
+def test_emit_list_snapshots_human_with_snapshots(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots prints a table with snapshot info."""
     snap = _make_test_snapshot()
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-1", snap)], output_opts)
-    output = buf.getvalue()
+    _emit_list_snapshots([("host-1", snap)], output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "snap-abc" in output
     assert "test-snapshot" in output
     assert "host-1" in output
 
 
-def test_emit_list_snapshots_json_format() -> None:
+def test_emit_list_snapshots_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots emits JSON with snapshots array."""
     snap = _make_test_snapshot()
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-1", snap)], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_list_snapshots([("host-1", snap)], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["count"] == 1
     assert data["snapshots"][0]["host_id"] == "host-1"
 
 
-def test_emit_list_snapshots_jsonl_format() -> None:
+def test_emit_list_snapshots_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots emits JSONL events per snapshot."""
     snap = _make_test_snapshot()
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-1", snap)], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_list_snapshots([("host-1", snap)], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "snapshot"
     assert data["host_id"] == "host-1"
 
 
-def test_emit_list_snapshots_format_template() -> None:
+def test_emit_list_snapshots_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots renders format templates."""
     snap = _make_test_snapshot()
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{id}\t{name}")
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-1", snap)], output_opts)
-    assert "snap-abc\ttest-snapshot" in buf.getvalue()
+    _emit_list_snapshots([("host-1", snap)], output_opts)
+    captured = capsys.readouterr()
+    assert "snap-abc\ttest-snapshot" in captured.out
 
 
-def test_emit_list_snapshots_human_with_none_size() -> None:
+def test_emit_list_snapshots_human_with_none_size(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots handles None size_bytes correctly."""
     snap = _make_test_snapshot(size_bytes=None)
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-1", snap)], output_opts)
-    output = buf.getvalue()
+    _emit_list_snapshots([("host-1", snap)], output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     # size_bytes=None should display as "-"
     assert "-" in output
 
@@ -492,42 +492,42 @@ def test_emit_list_snapshots_human_with_none_size() -> None:
 # =============================================================================
 
 
-def test_emit_destroy_result_json_format() -> None:
+def test_emit_destroy_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_result emits JSON with destroyed count."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
     destroyed = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local"},
     ]
-    with capture_stdout() as buf:
-        _emit_destroy_result(destroyed, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_destroy_result(destroyed, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["count"] == 1
     assert data["snapshots_destroyed"] == destroyed
 
 
-def test_emit_destroy_result_jsonl_format() -> None:
+def test_emit_destroy_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_result emits JSONL destroy_result event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     destroyed = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local"},
     ]
-    with capture_stdout() as buf:
-        _emit_destroy_result(destroyed, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_destroy_result(destroyed, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "destroy_result"
     assert data["count"] == 1
 
 
-def test_emit_destroy_result_human_format() -> None:
+def test_emit_destroy_result_human_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_result emits human-readable destroy message."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     destroyed = [
         {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local"},
         {"snapshot_id": "snap-2", "host_id": "host-2", "provider": "local"},
     ]
-    with capture_stdout() as buf:
-        _emit_destroy_result(destroyed, output_opts)
-    assert "Destroyed 2 snapshot(s)" in buf.getvalue()
+    _emit_destroy_result(destroyed, output_opts)
+    captured = capsys.readouterr()
+    assert "Destroyed 2 snapshot(s)" in captured.out
 
 
 # =============================================================================
@@ -535,19 +535,19 @@ def test_emit_destroy_result_human_format() -> None:
 # =============================================================================
 
 
-def test_emit_create_result_jsonl_with_errors() -> None:
+def test_emit_create_result_jsonl_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_create_result in JSONL format should include error count."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     created = [{"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": []}]
     errors = [{"host_id": "host-2", "error": "timeout"}]
-    with capture_stdout() as buf:
-        _emit_create_result(created, errors, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_create_result(created, errors, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "create_result"
     assert data["error_count"] == 1
 
 
-def test_emit_list_snapshots_human_table_with_size() -> None:
+def test_emit_list_snapshots_human_table_with_size(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_list_snapshots in HUMAN format should output table with size."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     snap = SnapshotInfo(
@@ -556,9 +556,9 @@ def test_emit_list_snapshots_human_table_with_size() -> None:
         created_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
         size_bytes=1048576,
     )
-    with capture_stdout() as buf:
-        _emit_list_snapshots([("host-abc", snap)], output_opts)
-    output = buf.getvalue()
+    _emit_list_snapshots([("host-abc", snap)], output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "ID" in output
     assert "snap-list-table-1" in output
     assert "my-snapshot" in output

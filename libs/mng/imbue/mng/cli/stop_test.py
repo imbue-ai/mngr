@@ -3,9 +3,9 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.cli.stop import StopCliOptions
 from imbue.mng.cli.stop import _output_result
 from imbue.mng.cli.stop import stop
@@ -233,46 +233,46 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
 # =============================================================================
 
 
-def test_stop_output_result_human_with_agents() -> None:
+def test_stop_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with stopped agents."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _output_result(["agent-1", "agent-2"], output_opts)
-    assert "Successfully stopped 2 agent(s)" in buf.getvalue()
+    _output_result(["agent-1", "agent-2"], output_opts)
+    captured = capsys.readouterr()
+    assert "Successfully stopped 2 agent(s)" in captured.out
 
 
-def test_stop_output_result_human_empty() -> None:
+def test_stop_output_result_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with no agents outputs nothing."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _output_result([], output_opts)
+    _output_result([], output_opts)
+    captured = capsys.readouterr()
     # With no agents, the HUMAN output does not write a success message
-    assert "Successfully stopped" not in buf.getvalue()
+    assert "Successfully stopped" not in captured.out
 
 
-def test_stop_output_result_json() -> None:
+def test_stop_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _output_result(["agent-x"], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result(["agent-x"], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["stopped_agents"] == ["agent-x"]
     assert data["count"] == 1
 
 
-def test_stop_output_result_jsonl() -> None:
+def test_stop_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _output_result(["agent-a"], output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _output_result(["agent-a"], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "stop_result"
     assert data["count"] == 1
 
 
-def test_stop_output_result_format_template() -> None:
+def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result with a format template."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    with capture_stdout() as buf:
-        _output_result(["template-agent"], output_opts)
-    assert "template-agent" in buf.getvalue()
+    _output_result(["template-agent"], output_opts)
+    captured = capsys.readouterr()
+    assert "template-agent" in captured.out

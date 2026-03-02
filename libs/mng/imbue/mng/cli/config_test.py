@@ -25,7 +25,6 @@ from imbue.mng.cli.config import config
 from imbue.mng.cli.config import load_config_file_tomlkit
 from imbue.mng.cli.config import save_config_file
 from imbue.mng.cli.config import set_nested_value
-from imbue.mng.cli.conftest import capture_stdout
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import ConfigKeyNotFoundError
 from imbue.mng.primitives import OutputFormat
@@ -419,267 +418,267 @@ def test_config_get_existing_key(
 # =============================================================================
 
 
-def test_emit_config_value_human() -> None:
+def test_emit_config_value_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_value should display value in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_value("prefix", "mng-", output_opts)
-    assert "mng-" in buf.getvalue()
+    _emit_config_value("prefix", "mng-", output_opts)
+    captured = capsys.readouterr()
+    assert "mng-" in captured.out
 
 
-def test_emit_config_value_json() -> None:
+def test_emit_config_value_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_value should output JSON data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_config_value("prefix", "mng-", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_value("prefix", "mng-", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["key"] == "prefix"
     assert data["value"] == "mng-"
 
 
-def test_emit_config_value_jsonl() -> None:
+def test_emit_config_value_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_value should output JSONL data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_config_value("prefix", "mng-", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_value("prefix", "mng-", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_value"
     assert data["key"] == "prefix"
 
 
-def test_emit_key_not_found_json() -> None:
+def test_emit_key_not_found_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_key_not_found should output JSON error."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_key_not_found("nonexistent.key", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_key_not_found("nonexistent.key", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert "error" in data
     assert data["key"] == "nonexistent.key"
 
 
-def test_emit_key_not_found_jsonl() -> None:
+def test_emit_key_not_found_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_key_not_found should output JSONL error event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_key_not_found("nonexistent.key", output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_key_not_found("nonexistent.key", output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "error"
     assert data["key"] == "nonexistent.key"
 
 
-def test_emit_key_not_found_human() -> None:
+def test_emit_key_not_found_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_key_not_found in HUMAN format should not write to stdout (uses logger)."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_key_not_found("nonexistent.key", output_opts)
-    assert buf.getvalue() == ""
+    _emit_key_not_found("nonexistent.key", output_opts)
+    captured = capsys.readouterr()
+    assert captured.out == ""
 
 
-def test_emit_config_list_human_merged() -> None:
+def test_emit_config_list_human_merged(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should show merged config in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_list({"prefix": "mng-", "debug": True}, output_opts, scope=None, config_path=None)
-    output = buf.getvalue()
+    _emit_config_list({"prefix": "mng-", "debug": True}, output_opts, scope=None, config_path=None)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "Merged configuration" in output
     assert "prefix = mng-" in output
 
 
-def test_emit_config_list_human_scoped() -> None:
+def test_emit_config_list_human_scoped(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should show scoped config with path in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_list(
-            {"prefix": "mng-"},
-            output_opts,
-            scope=ConfigScope.PROJECT,
-            config_path=Path("/test/.mng/settings.toml"),
-        )
-    output = buf.getvalue()
+    _emit_config_list(
+        {"prefix": "mng-"},
+        output_opts,
+        scope=ConfigScope.PROJECT,
+        config_path=Path("/test/.mng/settings.toml"),
+    )
+    captured = capsys.readouterr()
+    output = captured.out
     assert "project" in output
     assert "/test/.mng/settings.toml" in output
 
 
-def test_emit_config_list_human_empty() -> None:
+def test_emit_config_list_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should show (empty) for empty config."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_list({}, output_opts, scope=None, config_path=None)
-    assert "(empty)" in buf.getvalue()
+    _emit_config_list({}, output_opts, scope=None, config_path=None)
+    captured = capsys.readouterr()
+    assert "(empty)" in captured.out
 
 
-def test_emit_config_list_json() -> None:
+def test_emit_config_list_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should output JSON data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["config"]["prefix"] == "mng-"
 
 
-def test_emit_config_list_json_with_scope() -> None:
+def test_emit_config_list_json_with_scope(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should include scope and path in JSON when provided."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_config_list(
-            {"prefix": "mng-"},
-            output_opts,
-            scope=ConfigScope.USER,
-            config_path=Path("/home/user/.mng/settings.toml"),
-        )
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_list(
+        {"prefix": "mng-"},
+        output_opts,
+        scope=ConfigScope.USER,
+        config_path=Path("/home/user/.mng/settings.toml"),
+    )
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["scope"] == "user"
     assert data["path"] == "/home/user/.mng/settings.toml"
 
 
-def test_emit_config_list_jsonl() -> None:
+def test_emit_config_list_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list should output JSONL data."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_list"
 
 
-def test_emit_config_list_format_template() -> None:
+def test_emit_config_list_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_list with format template should produce templated lines."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{key}={value}")
-    with capture_stdout() as buf:
-        _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
-    assert "prefix=mng-" in buf.getvalue()
+    _emit_config_list({"prefix": "mng-"}, output_opts, scope=None, config_path=None)
+    captured = capsys.readouterr()
+    assert "prefix=mng-" in captured.out
 
 
-def test_emit_config_set_result_human() -> None:
+def test_emit_config_set_result_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_set_result should show set message in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    output = buf.getvalue()
+    _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "prefix" in output
     assert "new-val" in output
 
 
-def test_emit_config_set_result_json() -> None:
+def test_emit_config_set_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_set_result should output JSON."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["key"] == "prefix"
     assert data["value"] == "new-val"
 
 
-def test_emit_config_set_result_jsonl() -> None:
+def test_emit_config_set_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_set_result should output JSONL event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_set_result("prefix", "new-val", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_set"
     assert data["key"] == "prefix"
 
 
-def test_emit_config_unset_result_jsonl() -> None:
+def test_emit_config_unset_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_unset_result should output JSONL event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_unset"
     assert data["key"] == "prefix"
 
 
-def test_emit_config_unset_result_human() -> None:
+def test_emit_config_unset_result_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_unset_result should show unset message in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    assert "prefix" in buf.getvalue()
+    _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    assert "prefix" in captured.out
 
 
-def test_emit_config_unset_result_json() -> None:
+def test_emit_config_unset_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_config_unset_result should output JSON."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_config_unset_result("prefix", ConfigScope.PROJECT, Path("/test/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["key"] == "prefix"
 
 
-def test_emit_single_path_human() -> None:
+def test_emit_single_path_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_single_path should show path in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_single_path(ConfigScope.PROJECT, Path("/test/.mng/settings.toml"), output_opts)
-    assert "/test/.mng/settings.toml" in buf.getvalue()
+    _emit_single_path(ConfigScope.PROJECT, Path("/test/.mng/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    assert "/test/.mng/settings.toml" in captured.out
 
 
-def test_emit_single_path_json() -> None:
+def test_emit_single_path_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_single_path should output JSON."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_single_path(ConfigScope.PROJECT, Path("/test/.mng/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_single_path(ConfigScope.PROJECT, Path("/test/.mng/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["path"] == "/test/.mng/settings.toml"
     assert data["scope"] == "project"
 
 
-def test_emit_all_paths_human() -> None:
+def test_emit_all_paths_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_all_paths should show all paths in HUMAN format."""
     paths = [
         {"scope": "user", "path": "/home/user/.mng/settings.toml", "exists": True},
         {"scope": "project", "path": "/project/.mng/settings.toml", "exists": False},
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_all_paths(paths, output_opts)
-    output = buf.getvalue()
+    _emit_all_paths(paths, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "user" in output
     assert "project" in output
 
 
-def test_emit_all_paths_json() -> None:
+def test_emit_all_paths_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_all_paths should output JSON."""
     paths = [
         {"scope": "user", "path": "/home/user/.mng/settings.toml", "exists": True},
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    with capture_stdout() as buf:
-        _emit_all_paths(paths, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_all_paths(paths, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert "paths" in data
 
 
-def test_emit_single_path_jsonl() -> None:
+def test_emit_single_path_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_single_path should output JSONL event."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_single_path(ConfigScope.USER, Path("/tmp/nonexistent/settings.toml"), output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_single_path(ConfigScope.USER, Path("/tmp/nonexistent/settings.toml"), output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_path"
     assert data["scope"] == "user"
 
 
-def test_emit_all_paths_jsonl() -> None:
+def test_emit_all_paths_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_all_paths should output JSONL event."""
     paths = [
         {"scope": "user", "path": "/home/user/.mng/settings.toml", "exists": True},
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    with capture_stdout() as buf:
-        _emit_all_paths(paths, output_opts)
-    data = json.loads(buf.getvalue().strip())
+    _emit_all_paths(paths, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
     assert data["event"] == "config_paths"
 
 
-def test_emit_all_paths_human_with_error() -> None:
+def test_emit_all_paths_human_with_error(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_all_paths should handle entries with errors."""
     paths = [
         {"scope": "user", "error": "permission denied"},
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with capture_stdout() as buf:
-        _emit_all_paths(paths, output_opts)
-    output = buf.getvalue()
+    _emit_all_paths(paths, output_opts)
+    captured = capsys.readouterr()
+    output = captured.out
     assert "user" in output
     assert "permission denied" in output

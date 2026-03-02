@@ -12,8 +12,6 @@ from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
-from imbue.mng.primitives import HostName
-from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.env_utils import parse_env_file
 
 # =============================================================================
@@ -24,13 +22,10 @@ from imbue.mng.utils.env_utils import parse_env_file
 @pytest.mark.tmux
 def test_read_existing_env_content_returns_none_when_no_env_file(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
 ) -> None:
     """_read_existing_env_content should return None when no env file exists."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-no-env"),
@@ -39,9 +34,9 @@ def test_read_existing_env_content_returns_none_when_no_env_file(
         ),
     )
 
-    result = _read_existing_env_content(host, agent)
+    result = _read_existing_env_content(local_host, agent)
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
 
     assert result is None
 
@@ -49,14 +44,11 @@ def test_read_existing_env_content_returns_none_when_no_env_file(
 @pytest.mark.tmux
 def test_read_existing_env_content_reads_existing_env_file(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_mng_ctx: MngContext,
 ) -> None:
     """_read_existing_env_content should return the env file content when it exists."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-with-env"),
@@ -66,13 +58,13 @@ def test_read_existing_env_content_reads_existing_env_file(
     )
 
     # Write an env file manually
-    env_path = host.get_agent_env_path(agent)
+    env_path = local_host.get_agent_env_path(agent)
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("FOO=bar\nBAZ=qux\n")
 
-    result = _read_existing_env_content(host, agent)
+    result = _read_existing_env_content(local_host, agent)
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
 
     assert result == "FOO=bar\nBAZ=qux\n"
 
@@ -85,14 +77,11 @@ def test_read_existing_env_content_reads_existing_env_file(
 @pytest.mark.tmux
 def test_provision_agent_with_no_restart_on_stopped_agent(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_mng_ctx: MngContext,
 ) -> None:
     """provision_agent should provision a stopped agent without attempting restart."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-stopped"),
@@ -108,28 +97,25 @@ def test_provision_agent_with_no_restart_on_stopped_agent(
     # This should not raise and should not try to stop/start the agent
     provision_agent(
         agent=agent,
-        host=host,
+        host=local_host,
         provisioning=provisioning,
         environment=environment,
         mng_ctx=temp_mng_ctx,
         is_restart=False,
     )
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
 
 
 @pytest.mark.tmux
 def test_provision_agent_with_env_vars(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
     """provision_agent should apply environment variables from env files."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-env"),
@@ -149,7 +135,7 @@ def test_provision_agent_with_env_vars(
 
     provision_agent(
         agent=agent,
-        host=host,
+        host=local_host,
         provisioning=provisioning,
         environment=environment,
         mng_ctx=temp_mng_ctx,
@@ -157,25 +143,22 @@ def test_provision_agent_with_env_vars(
     )
 
     # Verify the env vars were written to the agent's env file
-    env_path = host.get_agent_env_path(agent)
+    env_path = local_host.get_agent_env_path(agent)
     assert env_path.exists(), "Env file should exist after provisioning with env_files"
     env_vars = parse_env_file(env_path.read_text())
     assert env_vars["PROV_VAR"] == "provision_value"
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
 
 
 @pytest.mark.tmux
 def test_provision_agent_merges_existing_env_content(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_mng_ctx: MngContext,
 ) -> None:
     """provision_agent should merge existing env content with new env options."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-merge"),
@@ -185,7 +168,7 @@ def test_provision_agent_merges_existing_env_content(
     )
 
     # Write existing env content
-    env_path = host.get_agent_env_path(agent)
+    env_path = local_host.get_agent_env_path(agent)
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text("EXISTING_VAR=existing_value\n")
 
@@ -194,7 +177,7 @@ def test_provision_agent_merges_existing_env_content(
 
     provision_agent(
         agent=agent,
-        host=host,
+        host=local_host,
         provisioning=provisioning,
         environment=environment,
         mng_ctx=temp_mng_ctx,
@@ -206,20 +189,17 @@ def test_provision_agent_merges_existing_env_content(
     env_vars = parse_env_file(env_content)
     assert env_vars["EXISTING_VAR"] == "existing_value"
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
 
 
 @pytest.mark.tmux
 def test_provision_agent_restarts_running_agent(
     temp_work_dir: Path,
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_mng_ctx: MngContext,
 ) -> None:
     """provision_agent should stop and restart a running agent when is_restart=True."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
+    agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
             name=AgentName("provision-restart"),
@@ -229,14 +209,14 @@ def test_provision_agent_restarts_running_agent(
     )
 
     # Start the agent
-    host.start_agents([agent.id])
+    local_host.start_agents([agent.id])
 
     provisioning = AgentProvisioningOptions()
     environment = AgentEnvironmentOptions()
 
     provision_agent(
         agent=agent,
-        host=host,
+        host=local_host,
         provisioning=provisioning,
         environment=environment,
         mng_ctx=temp_mng_ctx,
@@ -246,4 +226,4 @@ def test_provision_agent_restarts_running_agent(
     # Agent should be running again after provision
     assert agent.is_running()
 
-    host.destroy_agent(agent)
+    local_host.destroy_agent(agent)
