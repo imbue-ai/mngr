@@ -8,7 +8,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.clone import args_before_dd_count
-from imbue.mngr.cli.clone import has_name_in_remaining_args
+from imbue.mngr.cli.clone import extract_name_from_args
 from imbue.mngr.cli.clone import parse_source_and_invoke_create
 from imbue.mngr.cli.connect import connect as connect_cmd
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -101,32 +101,13 @@ def _determine_new_agent_name(
 ) -> str:
     """Determine the new agent's name from the args.
 
-    Uses the same logic as _build_create_args: if a name is present in
-    remaining args (positional or --name), the create command will use it.
-    Otherwise, the source agent name is forwarded.
+    Returns the explicit name from *remaining* (via ``--name`` or positional
+    arg) if one was given, otherwise falls back to *source_agent* (since
+    ``preserve_name=True`` forwards it to the create command).
     """
     before_dd_count = args_before_dd_count(remaining, original_argv)
-    has_name = has_name_in_remaining_args(remaining, before_dd_count)
-
-    if not has_name:
-        return source_agent
-
-    check = remaining if before_dd_count is None else remaining[:before_dd_count]
-
-    # Check for --name or -n flag
-    for i, arg in enumerate(check):
-        if arg in ("--name", "-n") and i + 1 < len(check):
-            return check[i + 1]
-        if arg.startswith("--name="):
-            return arg.split("=", 1)[1]
-        if arg.startswith("-n="):
-            return arg.split("=", 1)[1]
-
-    # First positional arg (not starting with -)
-    if check and not check[0].startswith("-"):
-        return check[0]
-
-    return source_agent
+    name = extract_name_from_args(remaining, before_dd_count)
+    return name if name is not None else source_agent
 
 
 @click.command(

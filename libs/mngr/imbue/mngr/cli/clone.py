@@ -37,6 +37,32 @@ def has_name_in_remaining_args(
 
 
 @pure
+def extract_name_from_args(
+    remaining: list[str],
+    before_dd_count: int | None,
+) -> str | None:
+    """Extract the agent name from *remaining* args (before ``--``).
+
+    Returns the name if found via ``--name``/``-n`` flag or as a leading
+    positional argument, otherwise ``None``.
+    """
+    check = remaining if before_dd_count is None else remaining[:before_dd_count]
+
+    for i, arg in enumerate(check):
+        if arg in ("--name", "-n") and i + 1 < len(check):
+            return check[i + 1]
+        if arg.startswith("--name="):
+            return arg.split("=", 1)[1]
+        if arg.startswith("-n="):
+            return arg.split("=", 1)[1]
+
+    if check and not check[0].startswith("-"):
+        return check[0]
+
+    return None
+
+
+@pure
 def _build_create_args(
     source_agent: str,
     remaining: list[str],

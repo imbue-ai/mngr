@@ -9,6 +9,7 @@ from imbue.mngr.cli.clone import _build_create_args
 from imbue.mngr.cli.clone import _reject_source_agent_options
 from imbue.mngr.cli.clone import args_before_dd_count
 from imbue.mngr.cli.clone import clone
+from imbue.mngr.cli.clone import extract_name_from_args
 from imbue.mngr.cli.clone import has_name_in_remaining_args
 from imbue.mngr.main import cli
 
@@ -196,12 +197,12 @@ def test_build_create_args_preserve_name_skips_when_name_flag_given() -> None:
 # --- args_before_dd_count tests ---
 
 
-def testargs_before_dd_count_no_dd() -> None:
+def test_args_before_dd_count_no_dd() -> None:
     """Returns None when -- is not in original_argv."""
     assert args_before_dd_count(["--in", "docker"], ["mngr", "clone", "a", "--in", "docker"]) is None
 
 
-def testargs_before_dd_count_with_dd() -> None:
+def test_args_before_dd_count_with_dd() -> None:
     """Returns count of args before -- boundary."""
     count = args_before_dd_count(
         ["--in", "docker", "--model", "opus"],
@@ -210,7 +211,7 @@ def testargs_before_dd_count_with_dd() -> None:
     assert count == 2
 
 
-def testargs_before_dd_count_trailing_dd() -> None:
+def test_args_before_dd_count_trailing_dd() -> None:
     """Returns full length when -- has nothing after it."""
     count = args_before_dd_count(
         ["--in", "docker"],
@@ -272,3 +273,36 @@ def test_has_name_returns_false_for_empty_remaining() -> None:
 def test_has_name_ignores_positional_after_dd() -> None:
     """A positional arg that appears only after -- is not a name."""
     assert has_name_in_remaining_args(["--in", "docker", "some-arg"], before_dd_count=2) is False
+
+
+# --- extract_name_from_args tests ---
+
+
+def test_extract_name_from_positional() -> None:
+    """A leading non-option string is extracted as the name."""
+    assert extract_name_from_args(["new-agent", "--in", "docker"], before_dd_count=None) == "new-agent"
+
+
+def test_extract_name_from_name_flag() -> None:
+    """The --name flag value is extracted."""
+    assert extract_name_from_args(["--name", "custom", "--in", "docker"], before_dd_count=None) == "custom"
+
+
+def test_extract_name_from_name_equals() -> None:
+    """The --name=value form is extracted."""
+    assert extract_name_from_args(["--name=custom", "--in", "docker"], before_dd_count=None) == "custom"
+
+
+def test_extract_name_from_short_flag() -> None:
+    """The -n flag value is extracted."""
+    assert extract_name_from_args(["-n", "custom", "--in", "docker"], before_dd_count=None) == "custom"
+
+
+def test_extract_name_returns_none_when_absent() -> None:
+    """Returns None when no name is found."""
+    assert extract_name_from_args(["--in", "docker"], before_dd_count=None) is None
+
+
+def test_extract_name_respects_dd_boundary() -> None:
+    """Names after -- are not extracted."""
+    assert extract_name_from_args(["--in", "docker", "some-arg"], before_dd_count=2) is None
