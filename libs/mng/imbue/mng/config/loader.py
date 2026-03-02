@@ -24,6 +24,7 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import ProviderInstanceConfig
 from imbue.mng.config.data_types import split_cli_args_string
+from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.config.plugin_registry import get_plugin_config_class
 from imbue.mng.config.pre_readers import find_profile_dir_lightweight
 from imbue.mng.config.pre_readers import get_user_config_path
@@ -85,9 +86,7 @@ def load_config(
     root_name = os.environ.get("MNG_ROOT_NAME", "mng")
 
     # Determine base directory (may be overridden by env var)
-    env_host_dir = os.environ.get("MNG_HOST_DIR")
-    base_dir = Path(env_host_dir) if env_host_dir else Path(f"~/.{root_name}")
-    base_dir = base_dir.expanduser()
+    base_dir = read_default_host_dir()
 
     # Get/create profile directory first (needed for user config
     profile_dir = get_or_create_profile_dir(base_dir)

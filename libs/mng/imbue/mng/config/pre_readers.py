@@ -8,6 +8,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.utils.git_utils import find_git_worktree_root
 
 # =============================================================================
@@ -107,9 +108,7 @@ def _resolve_config_files(
 ) -> list[dict[str, Any]]:
     """Return parsed config dicts in precedence order (lowest to highest)."""
     root_name = os.environ.get("MNG_ROOT_NAME", "mng")
-    env_host_dir = os.environ.get("MNG_HOST_DIR")
-    base_dir = Path(env_host_dir) if env_host_dir else Path(f"~/.{root_name}")
-    base_dir = base_dir.expanduser()
+    base_dir = read_default_host_dir()
 
     configs: list[dict[str, Any]] = []
 

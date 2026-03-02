@@ -1,6 +1,5 @@
 import json
 import os
-import tempfile
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Final
 import click
 from loguru import logger
 
+from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.utils.click_utils import detect_alias_to_canonical
 from imbue.mng.utils.file_utils import atomic_write
 
@@ -19,15 +19,14 @@ COMMAND_COMPLETIONS_CACHE_FILENAME: Final[str] = ".command_completions.json"
 def get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
-    Uses MNG_COMPLETION_CACHE_DIR if set, otherwise a fixed path under the
-    system temp directory namespaced by uid to avoid collisions between users.
-    The directory is created if it does not exist.
+    Uses MNG_COMPLETION_CACHE_DIR if set, otherwise the mng host directory
+    (MNG_HOST_DIR or ~/.mng). The directory is created if it does not exist.
     """
     env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
     if env_dir:
         cache_dir = Path(env_dir)
     else:
-        cache_dir = Path(tempfile.gettempdir()) / f"mng-completions-{os.getuid()}"
+        cache_dir = read_default_host_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 

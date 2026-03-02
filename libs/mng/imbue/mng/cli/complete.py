@@ -1,4 +1,4 @@
-"""Lightweight tab completion entrypoint -- stdlib only, no third-party imports.
+"""Lightweight tab completion entrypoint -- no heavy third-party imports.
 
 Reads COMP_WORDS and COMP_CWORD from the environment (same protocol click
 uses), resolves the completion context from a JSON cache file, and prints
@@ -12,9 +12,10 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+from imbue.mng.config.host_dir import read_default_host_dir
 
 _COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
 _AGENT_COMPLETIONS_CACHE_FILENAME = ".agent_completions.json"
@@ -24,12 +25,12 @@ _BACKGROUND_REFRESH_COOLDOWN_SECONDS = 30
 def _get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
-    Mirrors get_completion_cache_dir() in completion_writer.py but uses only stdlib.
+    Mirrors get_completion_cache_dir() in completion_writer.py.
     """
     env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
     if env_dir:
         return Path(env_dir)
-    return Path(tempfile.gettempdir()) / f"mng-completions-{os.getuid()}"
+    return read_default_host_dir()
 
 
 def _read_cache() -> dict:
