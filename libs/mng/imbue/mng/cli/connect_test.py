@@ -14,34 +14,65 @@ from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _make_connect_opts(
+    agent: str | None = "my-agent",
+    start: bool = True,
+    reconnect: bool = True,
+    message: str | None = None,
+    message_file: str | None = None,
+    ready_timeout: float = 60.0,
+    retry: int = 3,
+    retry_delay: str = "5s",
+    attach_command: str | None = None,
+    allow_unknown_host: bool = False,
+    output_format: str = "human",
+    quiet: bool = False,
+    verbose: int = 0,
+    log_file: str | None = None,
+    log_commands: bool | None = None,
+    log_command_output: bool | None = None,
+    log_env_vars: bool | None = None,
+    project_context_path: str | None = None,
+    plugin: tuple[str, ...] = (),
+    disable_plugin: tuple[str, ...] = (),
+) -> ConnectCliOptions:
+    """Create a ConnectCliOptions with sensible defaults, allowing overrides."""
+    return ConnectCliOptions(
+        agent=agent,
+        start=start,
+        reconnect=reconnect,
+        message=message,
+        message_file=message_file,
+        ready_timeout=ready_timeout,
+        retry=retry,
+        retry_delay=retry_delay,
+        attach_command=attach_command,
+        allow_unknown_host=allow_unknown_host,
+        output_format=output_format,
+        quiet=quiet,
+        verbose=verbose,
+        log_file=log_file,
+        log_commands=log_commands,
+        log_command_output=log_command_output,
+        log_env_vars=log_env_vars,
+        project_context_path=project_context_path,
+        plugin=plugin,
+        disable_plugin=disable_plugin,
+    )
+
+
+# =============================================================================
 # Tests for ConnectCliOptions
 # =============================================================================
 
 
 def test_connect_cli_options_can_be_instantiated() -> None:
     """Test that ConnectCliOptions can be instantiated with all required fields."""
-    opts = ConnectCliOptions(
-        agent="my-agent",
-        start=True,
-        reconnect=True,
-        message=None,
-        message_file=None,
-        ready_timeout=60.0,
-        retry=3,
-        retry_delay="5s",
-        attach_command=None,
-        allow_unknown_host=False,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
-        plugin=(),
-        disable_plugin=(),
-    )
+    opts = _make_connect_opts()
     assert opts.agent == "my-agent"
     assert opts.start is True
     assert opts.reconnect is True
@@ -188,28 +219,7 @@ def test_handle_search_key_printable_but_no_character() -> None:
 
 def test_build_connection_options_default_values() -> None:
     """_build_connection_options should create ConnectionOptions from CLI options."""
-    opts = ConnectCliOptions(
-        agent="my-agent",
-        start=True,
-        reconnect=True,
-        message=None,
-        message_file=None,
-        ready_timeout=60.0,
-        retry=3,
-        retry_delay="5s",
-        attach_command=None,
-        allow_unknown_host=False,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
-        plugin=(),
-        disable_plugin=(),
-    )
+    opts = _make_connect_opts()
     conn_opts = _build_connection_options(opts)
     assert conn_opts.is_reconnect is True
     assert conn_opts.retry_count == 3
@@ -220,27 +230,12 @@ def test_build_connection_options_default_values() -> None:
 
 def test_build_connection_options_custom_values() -> None:
     """_build_connection_options should map custom CLI values correctly."""
-    opts = ConnectCliOptions(
-        agent="my-agent",
-        start=True,
+    opts = _make_connect_opts(
         reconnect=False,
-        message=None,
-        message_file=None,
-        ready_timeout=60.0,
         retry=5,
         retry_delay="10s",
         attach_command="ssh user@host",
         allow_unknown_host=True,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
-        plugin=(),
-        disable_plugin=(),
     )
     conn_opts = _build_connection_options(opts)
     assert conn_opts.is_reconnect is False

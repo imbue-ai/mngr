@@ -1,6 +1,7 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.cli.conftest import capture_stdout
@@ -425,64 +426,34 @@ def test_limit_all_json_format_no_agents(
 # =============================================================================
 
 
-def test_has_host_level_settings_idle_timeout() -> None:
-    """_has_host_level_settings should return True when idle_timeout is set."""
-    opts = _make_limit_opts(idle_timeout="300")
-    assert _has_host_level_settings(opts) is True
+@pytest.mark.parametrize(
+    ("opts", "expected"),
+    [
+        pytest.param(_make_limit_opts(idle_timeout="300"), True, id="idle_timeout"),
+        pytest.param(_make_limit_opts(idle_mode="ssh"), True, id="idle_mode"),
+        pytest.param(_make_limit_opts(activity_sources="ssh,agent"), True, id="activity_sources"),
+        pytest.param(_make_limit_opts(add_activity_source=("ssh",)), True, id="add_activity_source"),
+        pytest.param(_make_limit_opts(remove_activity_source=("boot",)), True, id="remove_activity_source"),
+        pytest.param(_make_limit_opts(), False, id="none"),
+    ],
+)
+def test_has_host_level_settings(opts: LimitCliOptions, expected: bool) -> None:
+    """_has_host_level_settings should detect whether any host-level setting is set."""
+    assert _has_host_level_settings(opts) is expected
 
 
-def test_has_host_level_settings_idle_mode() -> None:
-    """_has_host_level_settings should return True when idle_mode is set."""
-    opts = _make_limit_opts(idle_mode="ssh")
-    assert _has_host_level_settings(opts) is True
-
-
-def test_has_host_level_settings_activity_sources() -> None:
-    """_has_host_level_settings should return True when activity_sources is set."""
-    opts = _make_limit_opts(activity_sources="ssh,agent")
-    assert _has_host_level_settings(opts) is True
-
-
-def test_has_host_level_settings_add_activity_source() -> None:
-    """_has_host_level_settings should return True when add_activity_source is set."""
-    opts = _make_limit_opts(add_activity_source=("ssh",))
-    assert _has_host_level_settings(opts) is True
-
-
-def test_has_host_level_settings_remove_activity_source() -> None:
-    """_has_host_level_settings should return True when remove_activity_source is set."""
-    opts = _make_limit_opts(remove_activity_source=("boot",))
-    assert _has_host_level_settings(opts) is True
-
-
-def test_has_host_level_settings_none() -> None:
-    """_has_host_level_settings should return False when no host settings are changed."""
-    opts = _make_limit_opts()
-    assert _has_host_level_settings(opts) is False
-
-
-def test_has_agent_level_settings_start_on_boot() -> None:
-    """_has_agent_level_settings should return True when start_on_boot is set."""
-    opts = _make_limit_opts(start_on_boot=True)
-    assert _has_agent_level_settings(opts) is True
-
-
-def test_has_agent_level_settings_grant() -> None:
-    """_has_agent_level_settings should return True when grant is set."""
-    opts = _make_limit_opts(grant=("read",))
-    assert _has_agent_level_settings(opts) is True
-
-
-def test_has_agent_level_settings_revoke() -> None:
-    """_has_agent_level_settings should return True when revoke is set."""
-    opts = _make_limit_opts(revoke=("write",))
-    assert _has_agent_level_settings(opts) is True
-
-
-def test_has_agent_level_settings_none() -> None:
-    """_has_agent_level_settings should return False when no agent settings are changed."""
-    opts = _make_limit_opts()
-    assert _has_agent_level_settings(opts) is False
+@pytest.mark.parametrize(
+    ("opts", "expected"),
+    [
+        pytest.param(_make_limit_opts(start_on_boot=True), True, id="start_on_boot"),
+        pytest.param(_make_limit_opts(grant=("read",)), True, id="grant"),
+        pytest.param(_make_limit_opts(revoke=("write",)), True, id="revoke"),
+        pytest.param(_make_limit_opts(), False, id="none"),
+    ],
+)
+def test_has_agent_level_settings(opts: LimitCliOptions, expected: bool) -> None:
+    """_has_agent_level_settings should detect whether any agent-level setting is set."""
+    assert _has_agent_level_settings(opts) is expected
 
 
 def test_has_any_setting_with_host_settings() -> None:

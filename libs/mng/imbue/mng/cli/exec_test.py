@@ -193,7 +193,7 @@ def test_exec_all_with_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test exec --all with no running agents exits 0."""
+    """Test exec --all with no running agents exits 0 and reports success."""
     result = cli_runner.invoke(
         exec_command,
         ["--all", "echo hello"],
@@ -201,13 +201,16 @@ def test_exec_all_with_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    # Human format should not contain any agent headers or error output
+    assert "Failed" not in result.output
+    assert "error" not in result.output.lower()
 
 
 def test_exec_all_jsonl_format_with_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test exec --all --format jsonl with no running agents exits 0."""
+    """Test exec --all --format jsonl with no running agents exits 0 with no events."""
     result = cli_runner.invoke(
         exec_command,
         ["--all", "--format", "jsonl", "echo hello"],
@@ -215,6 +218,8 @@ def test_exec_all_jsonl_format_with_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    # With no agents, JSONL streaming should emit zero events
+    assert result.output.strip() == ""
 
 
 def test_exec_all_json_format_with_no_agents(
@@ -231,6 +236,9 @@ def test_exec_all_json_format_with_no_agents(
     assert result.exit_code == 0
     data = json.loads(result.output.strip())
     assert data["total_executed"] == 0
+    assert data["total_failed"] == 0
+    assert data["results"] == []
+    assert data["failed_agents"] == []
 
 
 def test_exec_cannot_combine_agents_and_all(

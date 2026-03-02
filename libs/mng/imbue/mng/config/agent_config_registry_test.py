@@ -22,11 +22,6 @@ def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
 
 def test_get_agent_class_raises_when_unknown_and_no_default() -> None:
     """get_agent_class should raise MngError when agent type is unknown and no default is set."""
-    # Save and reset registry state
     reset_agent_class_registry()
-    try:
-        with pytest.raises(MngError, match="Unknown agent type 'nonexistent'"):
-            get_agent_class("nonexistent")
-    finally:
-        # The autouse plugin_manager fixture will fully reset on next test
-        pass
+    with pytest.raises(MngError, match="Unknown agent type 'nonexistent'"):
+        get_agent_class("nonexistent")
