@@ -14,11 +14,14 @@ from imbue.mng.cli.common_opts import _run_pre_command_scripts
 from imbue.mng.cli.common_opts import _run_single_script
 from imbue.mng.cli.common_opts import apply_config_defaults
 from imbue.mng.cli.common_opts import apply_create_template
+from imbue.mng.cli.common_opts import parse_output_options
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.errors import UserInputError
+from imbue.mng.primitives import LogLevel
+from imbue.mng.primitives import OutputFormat
 
 
 def _make_click_context(
@@ -431,3 +434,158 @@ def test_resolve_format_flags_json_with_explicit_format_raises() -> None:
     opts = _make_common_cli_opts(output_format="jsonl", json_flag=True)
     with pytest.raises(click.UsageError, match="mutually exclusive"):
         _resolve_format_flags(ctx, opts)
+
+
+# =============================================================================
+# Tests for parse_output_options
+# =============================================================================
+
+
+def test_parse_output_options_quiet_sets_console_level_none(mng_test_prefix: str) -> None:
+    """parse_output_options should set console_level to NONE when quiet is True."""
+    config = MngConfig(prefix=mng_test_prefix)
+    output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=True,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        config=config,
+    )
+    assert logging_config.console_level == LogLevel.NONE
+    assert output_opts.is_quiet is True
+
+
+def test_parse_output_options_verbose_1_sets_debug(mng_test_prefix: str) -> None:
+    """parse_output_options should set console_level to DEBUG when verbose=1."""
+    config = MngConfig(prefix=mng_test_prefix)
+    output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=1,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        config=config,
+    )
+    assert logging_config.console_level == LogLevel.DEBUG
+
+
+def test_parse_output_options_verbose_2_sets_trace(mng_test_prefix: str) -> None:
+    """parse_output_options should set console_level to TRACE when verbose>=2."""
+    config = MngConfig(prefix=mng_test_prefix)
+    output_opts, logging_config = parse_output_options(
+        output_format="human",
+        quiet=False,
+        verbose=2,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        config=config,
+    )
+    assert logging_config.console_level == LogLevel.TRACE
+
+
+def test_parse_output_options_format_template(mng_test_prefix: str) -> None:
+    """parse_output_options should recognize a non-builtin format as a template string."""
+    config = MngConfig(prefix=mng_test_prefix)
+    output_opts, logging_config = parse_output_options(
+        output_format="{name}\\t{state}",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        config=config,
+    )
+    assert output_opts.output_format == OutputFormat.HUMAN
+    assert output_opts.format_template == "{name}\t{state}"
+
+
+def test_parse_output_options_invalid_template_raises(mng_test_prefix: str) -> None:
+    """parse_output_options should raise UsageError for invalid format templates."""
+    config = MngConfig(prefix=mng_test_prefix)
+    with pytest.raises(click.UsageError, match="Invalid format template"):
+        parse_output_options(
+            output_format="{unclosed",
+            quiet=False,
+            verbose=0,
+            log_file=None,
+            log_commands=None,
+            log_command_output=None,
+            log_env_vars=None,
+            config=config,
+        )
+
+
+# =============================================================================
+# Tests for apply_config_defaults edge cases
+# =============================================================================
+
+
+def test_apply_config_defaults_skips_unknown_param_names(mng_test_prefix: str) -> None:
+    """apply_config_defaults should skip config defaults for params not in context."""
+    ctx = _make_click_context(
+        params={"name": "default"},
+    )
+    config = MngConfig(
+        prefix=mng_test_prefix,
+        commands={"create": CommandDefaults(defaults={"nonexistent_param": "value", "name": "overridden"})},
+    )
+    result = apply_config_defaults(ctx, config, "create")
+    assert result["name"] == "overridden"
+    assert "nonexistent_param" not in result
+
+
+# =============================================================================
+# Tests for apply_create_template edge cases
+# =============================================================================
+
+
+def test_apply_create_template_unknown_template_no_templates_configured(mng_test_prefix: str) -> None:
+    """apply_create_template should raise UserInputError with helpful message when no templates exist."""
+    ctx = _make_click_context(
+        params={"template": ("nonexistent",)},
+    )
+    config = MngConfig(prefix=mng_test_prefix)
+
+    with pytest.raises(UserInputError, match="No templates are configured"):
+        apply_create_template(ctx, ctx.params.copy(), config)
+
+
+def test_apply_create_template_skips_none_values(mng_test_prefix: str) -> None:
+    """apply_create_template should skip template values that are None."""
+    ctx = _make_click_context(
+        params={"template": ("mytemplate",), "new_host": None, "name": "default"},
+    )
+    config = MngConfig(
+        prefix=mng_test_prefix,
+        create_templates={
+            CreateTemplateName("mytemplate"): CreateTemplate(options={"new_host": None, "name": "from-template"}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    # new_host should remain None since the template value is None
+    assert result["new_host"] is None
+    # name should be overridden since its template value is not None
+    assert result["name"] == "from-template"
+
+
+def test_apply_create_template_skips_unknown_params(mng_test_prefix: str) -> None:
+    """apply_create_template should skip template params not in the original params dict."""
+    ctx = _make_click_context(
+        params={"template": ("mytemplate",), "name": "default"},
+    )
+    config = MngConfig(
+        prefix=mng_test_prefix,
+        create_templates={
+            CreateTemplateName("mytemplate"): CreateTemplate(options={"nonexistent_param": "value"}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert "nonexistent_param" not in result

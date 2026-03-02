@@ -14,6 +14,7 @@ from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import get_or_create_user_id
 from imbue.mng.config.loader import _apply_plugin_overrides
 from imbue.mng.config.loader import _merge_command_defaults
+from imbue.mng.config.loader import _normalize_cli_args_for_construct
 from imbue.mng.config.loader import _parse_agent_types
 from imbue.mng.config.loader import _parse_command_env_vars
 from imbue.mng.config.loader import _parse_commands
@@ -941,3 +942,124 @@ def test_block_disabled_plugins_is_idempotent() -> None:
     block_disabled_plugins(pm, frozenset({"modal"}))
 
     assert pm.is_blocked("modal")
+
+
+# =============================================================================
+# Tests for _normalize_cli_args_for_construct
+# =============================================================================
+
+
+def test_normalize_cli_args_no_cli_args_key() -> None:
+    """_normalize_cli_args_for_construct should return the input unchanged when no cli_args key."""
+    raw = {"some_key": "value"}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result == {"some_key": "value"}
+
+
+def test_normalize_cli_args_string_value() -> None:
+    """_normalize_cli_args_for_construct should split a non-empty string into a tuple."""
+    raw = {"cli_args": "--verbose --model opus"}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose", "--model", "opus")
+
+
+def test_normalize_cli_args_empty_string() -> None:
+    """_normalize_cli_args_for_construct should convert an empty string to an empty tuple."""
+    raw = {"cli_args": ""}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ()
+
+
+def test_normalize_cli_args_list_value() -> None:
+    """_normalize_cli_args_for_construct should convert a list to a tuple."""
+    raw = {"cli_args": ["--verbose", "--model", "opus"]}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose", "--model", "opus")
+
+
+def test_normalize_cli_args_tuple_value() -> None:
+    """_normalize_cli_args_for_construct should pass through a tuple."""
+    raw = {"cli_args": ("--verbose",)}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose",)
+
+
+def test_normalize_cli_args_other_type_passes_through() -> None:
+    """_normalize_cli_args_for_construct should pass through unrecognized types."""
+    raw = {"cli_args": 42}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == 42
+
+
+# =============================================================================
+# Tests for _parse_command_env_vars edge cases (lines 544, 557)
+# =============================================================================
+
+
+def test_parse_command_env_vars_empty_suffix_after_prefix() -> None:
+    """_parse_command_env_vars should skip when env key is exactly the prefix with nothing after."""
+    environ = {"MNG_COMMANDS_": "value"}
+    result = _parse_command_env_vars(environ)
+    assert result == {}
+
+
+def test_parse_command_env_vars_empty_command_name() -> None:
+    """_parse_command_env_vars should skip when command name is empty (leading underscore)."""
+    environ = {"MNG_COMMANDS__PARAM": "value"}
+    result = _parse_command_env_vars(environ)
+    assert result == {}
+
+
+# =============================================================================
+# Tests for load_config pytest guard (lines 188-190)
+# =============================================================================
+
+
+def test_load_config_raises_when_in_pytest_and_not_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config should raise ConfigParseError when is_allowed_in_pytest is False and PYTEST_CURRENT_TEST is set."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+
+    # Write config that disables pytest
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mng_dir)
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text("is_allowed_in_pytest = false\n")
+
+    with pytest.raises(ConfigParseError, match="Running mng within pytest is not allowed"):
+        load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
+# =============================================================================
+# Tests for load_config with env command overrides (line 155)
+# =============================================================================
+
+
+def test_load_config_applies_env_command_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config should merge env command overrides into the final config."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_COMMANDS_CREATE_CONNECT", "false")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert "create" in mng_ctx.config.commands
+    assert mng_ctx.config.commands["create"].defaults.get("connect") == "false"

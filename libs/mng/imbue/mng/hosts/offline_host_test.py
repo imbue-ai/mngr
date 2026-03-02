@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.hosts.offline_host import validate_and_create_agent_reference
@@ -477,3 +478,154 @@ def test_load_agent_refs_default_returns_empty_for_no_hosts(
     result = fake_provider.load_agent_refs(cg=temp_mng_ctx.concurrency_group)
 
     assert result == {}
+
+
+# =============================================================================
+# Tests for OfflineHost.is_local
+# =============================================================================
+
+
+def test_offline_host_is_not_local(offline_host: OfflineHost) -> None:
+    """OfflineHost.is_local should always return False."""
+    assert offline_host.is_local is False
+
+
+# =============================================================================
+# Tests for OfflineHost.set_certified_data
+# =============================================================================
+
+
+def test_set_certified_data_calls_callback(fake_provider: MockProviderInstance, temp_mng_ctx: MngContext) -> None:
+    """set_certified_data should invoke the on_updated_host_data callback with stamped data."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="test-host",
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Track callback invocations
+    callback_calls: list[tuple[HostId, CertifiedHostData]] = []
+
+    def on_updated(hid: HostId, data: CertifiedHostData) -> None:
+        callback_calls.append((hid, data))
+
+    host = OfflineHost(
+        id=host_id,
+        certified_host_data=certified_data,
+        provider_instance=fake_provider,
+        mng_ctx=temp_mng_ctx,
+        on_updated_host_data=on_updated,
+    )
+
+    new_data = certified_data.model_copy_update(
+        to_update(certified_data.field_ref().host_name, "updated-host"),
+    )
+    host.set_certified_data(new_data)
+
+    assert len(callback_calls) == 1
+    assert callback_calls[0][0] == host_id
+    # updated_at should have been stamped to a recent time
+    stamped_data = callback_calls[0][1]
+    assert stamped_data.host_name == "updated-host"
+    assert stamped_data.updated_at >= now
+
+
+def test_set_certified_data_asserts_callback_is_set(
+    fake_provider: MockProviderInstance, temp_mng_ctx: MngContext
+) -> None:
+    """set_certified_data should assert that the callback is not None."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="test-host",
+        created_at=now,
+        updated_at=now,
+    )
+
+    host = OfflineHost(
+        id=host_id,
+        certified_host_data=certified_data,
+        provider_instance=fake_provider,
+        mng_ctx=temp_mng_ctx,
+        on_updated_host_data=None,
+    )
+
+    with pytest.raises(AssertionError, match="on_updated_host_data callback is not set"):
+        host.set_certified_data(certified_data)
+
+
+# =============================================================================
+# Tests for get_state with non-shutdown providers (lines 209-215)
+# =============================================================================
+
+
+def test_get_state_returns_destroyed_when_no_shutdown_no_snapshots_but_stop_reason_set(
+    fake_provider: MockProviderInstance, temp_mng_ctx: MngContext
+) -> None:
+    """get_state returns DESTROYED when provider doesn't support shutdown or snapshots but stop_reason is set."""
+    fake_provider.mock_supports_shutdown_hosts = False
+    fake_provider.mock_supports_snapshots = False
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="test-host",
+        stop_reason=HostState.STOPPED.value,
+        created_at=now,
+        updated_at=now,
+    )
+    host = make_offline_host(certified_data, fake_provider, temp_mng_ctx)
+
+    state = host.get_state()
+    assert state == HostState.DESTROYED
+
+
+def test_get_state_returns_destroyed_when_no_shutdown_supports_snapshots_but_empty(
+    fake_provider: MockProviderInstance, temp_mng_ctx: MngContext
+) -> None:
+    """get_state returns DESTROYED when provider supports snapshots but none exist."""
+    fake_provider.mock_supports_shutdown_hosts = False
+    fake_provider.mock_supports_snapshots = True
+    fake_provider.mock_snapshots = []
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="test-host",
+        stop_reason=HostState.STOPPED.value,
+        created_at=now,
+        updated_at=now,
+    )
+    host = make_offline_host(certified_data, fake_provider, temp_mng_ctx)
+
+    state = host.get_state()
+    assert state == HostState.DESTROYED
+
+
+def test_get_state_returns_stop_reason_when_no_shutdown_but_snapshots_exist(
+    fake_provider: MockProviderInstance, temp_mng_ctx: MngContext
+) -> None:
+    """get_state returns the stored stop_reason when provider supports snapshots and they exist."""
+    fake_provider.mock_supports_shutdown_hosts = False
+    fake_provider.mock_supports_snapshots = True
+    fake_provider.mock_snapshots = [
+        SnapshotInfo(
+            id=SnapshotId("snap-test"),
+            name=SnapshotName("snapshot"),
+            created_at=datetime.now(timezone.utc),
+        )
+    ]
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="test-host",
+        stop_reason=HostState.PAUSED.value,
+        created_at=now,
+        updated_at=now,
+    )
+    host = make_offline_host(certified_data, fake_provider, temp_mng_ctx)
+
+    state = host.get_state()
+    assert state == HostState.PAUSED
