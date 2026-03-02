@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Any
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.mng import hookimpl
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
+from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import MngError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -23,7 +26,6 @@ from imbue.mng_claude_zygote.provisioning import provision_llm_tools
 from imbue.mng_claude_zygote.provisioning import validate_talking_role_constraints
 from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
 from imbue.mng_claude_zygote.settings import load_settings_from_host
-from imbue.mng_claude_zygote.settings import provision_settings_file
 from imbue.mng_ttyd.plugin import build_ttyd_server_command
 
 AGENT_TTYD_WINDOW_NAME: Final[str] = "agent"
@@ -56,14 +58,30 @@ EVENT_WATCHER_COMMAND: Final[str] = "python3 $MNG_HOST_DIR/commands/event_watche
 TRANSCRIPT_WATCHER_WINDOW_NAME: Final[str] = "transcript"
 TRANSCRIPT_WATCHER_COMMAND: Final[str] = "python3 $MNG_HOST_DIR/commands/transcript_watcher.py"
 
-# Conversation ttyd: a web terminal that runs the chat script for interactive
-# conversation access via the browser.
+# Web server: serves the main web interface with conversation selector
+# and agent list page.
+WEB_SERVER_WINDOW_NAME: Final[str] = "web_server"
+WEB_SERVER_COMMAND: Final[str] = 'python3 "$MNG_HOST_DIR/commands/web_server.py"'
+
+# Chat ttyd: a ttyd with --url-arg that dispatches to chat.sh.
+# Accessed with ?arg=<conversation_id> to resume, or no arg for a new conversation.
 CHAT_TTYD_WINDOW_NAME: Final[str] = "chat"
 CHAT_TTYD_SERVER_NAME: Final[str] = CHAT_TTYD_WINDOW_NAME
 _CHAT_TTYD_INVOCATION: Final[str] = (
-    "ttyd -p 0 -t disableLeaveAlert=true -W bash -c 'exec \"$MNG_HOST_DIR/commands/chat.sh\"'"
+    'ttyd -p 0 -a -t disableLeaveAlert=true -W bash "$MNG_HOST_DIR/commands/chat_ttyd_handler.sh"'
 )
 CHAT_TTYD_COMMAND: Final[str] = build_ttyd_server_command(_CHAT_TTYD_INVOCATION, CHAT_TTYD_SERVER_NAME)
+
+# Agent-tmux ttyd: a ttyd with --url-arg that attaches to any agent's tmux session.
+# Accessed with ?arg=<agent_name> to connect to that agent.
+AGENT_TMUX_TTYD_WINDOW_NAME: Final[str] = "agent_tmux"
+AGENT_TMUX_TTYD_SERVER_NAME: Final[str] = "agent-tmux"
+_AGENT_TMUX_TTYD_INVOCATION: Final[str] = (
+    'ttyd -p 0 -a -t disableLeaveAlert=true -W bash "$MNG_HOST_DIR/commands/agent_tmux_handler.sh"'
+)
+AGENT_TMUX_TTYD_COMMAND: Final[str] = build_ttyd_server_command(
+    _AGENT_TMUX_TTYD_INVOCATION, AGENT_TMUX_TTYD_SERVER_NAME
+)
 
 
 class ClaudeZygoteConfig(ClaudeAgentConfig):
@@ -105,7 +123,9 @@ class ClaudeZygoteAgent(ClaudeAgent):
     Via tmux windows (injected by override_command_options):
     - Conversation watcher (syncs llm DB to logs/messages/events.jsonl)
     - Event watcher (sends new events to primary agent via mng message)
-    - Chat ttyd (web terminal for conversation access)
+    - Web server (main web interface with conversation selector and agent list)
+    - Chat ttyd (--url-arg ttyd for conversation terminal access)
+    - Agent-tmux ttyd (--url-arg ttyd for connecting to other agents)
     """
 
     def _get_zygote_config(self) -> ClaudeZygoteConfig:
@@ -140,7 +160,6 @@ class ClaudeZygoteAgent(ClaudeAgent):
         7. Event log directory structure (logs/<source>/events.jsonl)
         8. LLM tool scripts for conversation context
         9. Memory directory symlink into Claude project
-        10. Settings file provisioned to agent state dir for script access
         """
         super().provision(host, options, mng_ctx)
 
@@ -166,9 +185,6 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
         link_memory_directory(host, self.work_dir, provisioning)
 
-        # Provision settings.toml to agent state dir so scripts can access it
-        provision_settings_file(host, self.work_dir, config.changelings_dir_name, agent_state_dir)
-
 
 def inject_agent_ttyd(params: dict[str, Any]) -> None:
     """Inject an agent ttyd window into the create command parameters.
@@ -187,11 +203,13 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
     """Inject all changeling tmux windows into the create command parameters.
 
     Adds:
-    - Agent ttyd (web terminal for the primary agent)
+    - Agent ttyd (web terminal for the primary agent's tmux session)
     - Conversation watcher (syncs llm DB to JSONL files)
     - Event watcher (sends new events to primary agent via mng message)
+    - Web server (main web interface with conversation selector and agent list)
+    - Chat ttyd (--url-arg ttyd for conversation access)
+    - Agent-tmux ttyd (--url-arg ttyd for connecting to other agents' tmux sessions)
     - Transcript watcher (converts claude_transcript to common_transcript)
-    - Chat ttyd (web terminal for conversation access)
     """
     inject_agent_ttyd(params)
 
@@ -200,8 +218,10 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
         *existing,
         f'{CONV_WATCHER_WINDOW_NAME}="{CONV_WATCHER_COMMAND}"',
         f'{EVENT_WATCHER_WINDOW_NAME}="{EVENT_WATCHER_COMMAND}"',
+        f'{WEB_SERVER_WINDOW_NAME}="{WEB_SERVER_COMMAND}"',
         f'{TRANSCRIPT_WATCHER_WINDOW_NAME}="{TRANSCRIPT_WATCHER_COMMAND}"',
         f'{CHAT_TTYD_WINDOW_NAME}="{CHAT_TTYD_COMMAND}"',
+        f'{AGENT_TMUX_TTYD_WINDOW_NAME}="{AGENT_TMUX_TTYD_COMMAND}"',
     )
 
 
@@ -216,21 +236,38 @@ def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConf
     return ("claude-zygote", ClaudeZygoteAgent, ClaudeZygoteConfig)
 
 
+def _is_claude_zygote_agent_type(agent_type_name: str) -> bool:
+    """Check whether the given agent type name resolves to a ClaudeZygoteAgent subclass."""
+    try:
+        agent_class = get_agent_class(agent_type_name)
+    except MngError as e:
+        logger.debug("Could not resolve agent type '{}': {}", agent_type_name, e)
+        return False
+    return issubclass(agent_class, ClaudeZygoteAgent)
+
+
 @hookimpl
 def override_command_options(
     command_name: str,
     command_class: type,
     params: dict[str, Any],
 ) -> None:
-    """Add changeling tmux windows when creating claude-zygote agents.
+    """Add changeling tmux windows when creating claude-zygote agents (or subtypes).
 
-    Injects: agent ttyd, conversation watcher, event watcher, and chat ttyd.
+    Injects: agent ttyd, conversation watcher, event watcher, web server,
+    chat ttyd, and agent-tmux ttyd.
+
+    Matches any agent type whose registered class is ClaudeZygoteAgent or
+    a subclass of it (e.g. elena-code, custom changeling types).
     """
     if command_name != "create":
         return
 
     agent_type = get_agent_type_from_params(params)
-    if agent_type != "claude-zygote":
+    if agent_type is None:
+        return
+
+    if not _is_claude_zygote_agent_type(agent_type):
         return
 
     inject_changeling_windows(params)

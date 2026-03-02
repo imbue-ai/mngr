@@ -9,11 +9,12 @@ import pytest
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.interfaces.host import NamedCommand
+from imbue.mng_claude_zygote.plugin import AGENT_TMUX_TTYD_COMMAND
+from imbue.mng_claude_zygote.plugin import AGENT_TMUX_TTYD_WINDOW_NAME
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_COMMAND
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_SERVER_NAME
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_WINDOW_NAME
 from imbue.mng_claude_zygote.plugin import CHAT_TTYD_COMMAND
-from imbue.mng_claude_zygote.plugin import CHAT_TTYD_SERVER_NAME
 from imbue.mng_claude_zygote.plugin import CHAT_TTYD_WINDOW_NAME
 from imbue.mng_claude_zygote.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_zygote.plugin import CONV_WATCHER_WINDOW_NAME
@@ -21,6 +22,8 @@ from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
 from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
 from imbue.mng_claude_zygote.plugin import EVENT_WATCHER_COMMAND
 from imbue.mng_claude_zygote.plugin import EVENT_WATCHER_WINDOW_NAME
+from imbue.mng_claude_zygote.plugin import WEB_SERVER_COMMAND
+from imbue.mng_claude_zygote.plugin import WEB_SERVER_WINDOW_NAME
 from imbue.mng_claude_zygote.plugin import get_agent_type_from_params
 from imbue.mng_claude_zygote.plugin import inject_agent_ttyd
 from imbue.mng_claude_zygote.plugin import inject_changeling_windows
@@ -28,8 +31,8 @@ from imbue.mng_claude_zygote.plugin import override_command_options
 from imbue.mng_claude_zygote.plugin import register_agent_type
 
 # Total number of tmux windows injected by inject_changeling_windows:
-# agent ttyd, conv_watcher, events, transcript, chat ttyd
-_CHANGELING_WINDOW_COUNT = 5
+# agent ttyd, conv_watcher, events, web_server, chat ttyd, agent-tmux ttyd
+_CHANGELING_WINDOW_COUNT = 7
 
 
 class _DummyCommandClass:
@@ -109,8 +112,8 @@ def test_adds_event_watcher_window(zygote_create_params: dict[str, Any]) -> None
     assert EVENT_WATCHER_COMMAND in entries[0]
 
 
-def test_adds_chat_ttyd_window(zygote_create_params: dict[str, Any]) -> None:
-    entries = [c for c in zygote_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
+def test_adds_web_server_window(zygote_create_params: dict[str, Any]) -> None:
+    entries = [c for c in zygote_create_params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(entries) == 1
 
 
@@ -136,6 +139,23 @@ def test_does_not_modify_when_no_agent_type() -> None:
     params: dict[str, Any] = {"add_command": ()}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert params["add_command"] == ()
+
+
+def test_injects_windows_for_registered_subclass() -> None:
+    """Verify that a registered agent type that subclasses ClaudeZygoteAgent gets changeling windows."""
+    from imbue.mng.config.agent_class_registry import register_agent_class
+    from imbue.mng.config.agent_class_registry import reset_agent_class_registry
+
+    class _TestSubclassAgent(ClaudeZygoteAgent):
+        """Test subclass for verifying subclass detection."""
+
+    try:
+        register_agent_class("test-subclass-82741", _TestSubclassAgent)
+        params: dict[str, Any] = {"add_command": (), "agent_type": "test-subclass-82741"}
+        override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
+        assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
+    finally:
+        reset_agent_class_registry()
 
 
 def test_preserves_existing_add_commands() -> None:
@@ -216,20 +236,16 @@ def test_agent_ttyd_command_skips_log_when_no_state_dir() -> None:
     assert 'if [ -n "$MNG_AGENT_STATE_DIR" ]' in AGENT_TTYD_COMMAND
 
 
-# -- Chat ttyd command content tests --
+# -- Web server command content tests --
 
 
-def test_chat_ttyd_command_uses_random_port() -> None:
-    assert "ttyd -p 0" in CHAT_TTYD_COMMAND
+def test_web_server_command_runs_python_script() -> None:
+    assert "python3" in WEB_SERVER_COMMAND
+    assert "web_server.py" in WEB_SERVER_COMMAND
 
 
-def test_chat_ttyd_command_writes_server_log() -> None:
-    assert "servers.jsonl" in CHAT_TTYD_COMMAND
-    assert CHAT_TTYD_SERVER_NAME in CHAT_TTYD_COMMAND
-
-
-def test_chat_ttyd_command_runs_chat_script() -> None:
-    assert "chat.sh" in CHAT_TTYD_COMMAND
+def test_web_server_command_uses_host_dir() -> None:
+    assert "MNG_HOST_DIR" in WEB_SERVER_COMMAND
 
 
 # -- ClaudeZygoteAgent._get_zygote_config tests --
@@ -308,14 +324,56 @@ def test_claude_zygote_config_allows_disabling_trust() -> None:
     assert config.trust_working_directory is False
 
 
-# -- Chat ttyd additional tests --
+# -- Web server additional tests --
 
 
-def test_chat_ttyd_command_is_parseable_as_named_command() -> None:
-    """Verify the chat ttyd command is parseable as a NamedCommand."""
+def test_web_server_command_is_parseable_as_named_command() -> None:
+    """Verify the web server command is parseable as a NamedCommand."""
     params: dict[str, Any] = {}
     inject_changeling_windows(params)
-    chat_entries = [c for c in params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
-    assert len(chat_entries) == 1
-    named_cmd = NamedCommand.from_string(chat_entries[0])
-    assert named_cmd.window_name == CHAT_TTYD_WINDOW_NAME
+    web_entries = [c for c in params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
+    assert len(web_entries) == 1
+    named_cmd = NamedCommand.from_string(web_entries[0])
+    assert named_cmd.window_name == WEB_SERVER_WINDOW_NAME
+
+
+# -- Chat ttyd tests --
+
+
+def test_adds_chat_ttyd_window(zygote_create_params: dict[str, Any]) -> None:
+    entries = [c for c in zygote_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
+    assert len(entries) == 1
+
+
+def test_chat_ttyd_command_uses_url_arg() -> None:
+    assert "-a" in CHAT_TTYD_COMMAND
+    assert "chat_ttyd_handler.sh" in CHAT_TTYD_COMMAND
+
+
+def test_chat_ttyd_command_uses_random_port() -> None:
+    assert "ttyd -p 0" in CHAT_TTYD_COMMAND
+
+
+def test_chat_ttyd_command_writes_server_log() -> None:
+    assert "servers.jsonl" in CHAT_TTYD_COMMAND
+
+
+# -- Agent-tmux ttyd tests --
+
+
+def test_adds_agent_tmux_ttyd_window(zygote_create_params: dict[str, Any]) -> None:
+    entries = [c for c in zygote_create_params["add_command"] if AGENT_TMUX_TTYD_WINDOW_NAME in c]
+    assert len(entries) == 1
+
+
+def test_agent_tmux_ttyd_command_uses_url_arg() -> None:
+    assert "-a" in AGENT_TMUX_TTYD_COMMAND
+    assert "agent_tmux_handler.sh" in AGENT_TMUX_TTYD_COMMAND
+
+
+def test_agent_tmux_ttyd_command_uses_random_port() -> None:
+    assert "ttyd -p 0" in AGENT_TMUX_TTYD_COMMAND
+
+
+def test_agent_tmux_ttyd_command_writes_server_log() -> None:
+    assert "servers.jsonl" in AGENT_TMUX_TTYD_COMMAND

@@ -23,7 +23,11 @@ SERVERS_LOG_FILENAME: Final[str] = "servers.jsonl"
 
 _SUBPROCESS_TIMEOUT_SECONDS: Final[float] = 10.0
 
-_CACHE_TTL_SECONDS: Final[float] = 5.0
+# FIXME: it's a bad idea to set this so high, but it will let us test this out.
+#  The right way to fix this is considerably more complex--rather than using the mng CLI at all, we ought to use mng via the python API directly and do the following:
+#   1. For the call to logs for a single agent, we should be able to get a handle to the BaseAgent instance fairly easily, and then from there we can read the file much more quickly
+#   2. For the call to list all agents, we'll need to wait for a more complex future mechanism that lets other processing more efficiently call list
+_CACHE_TTL_SECONDS: Final[float] = 24 * 60 * 60.0
 
 
 class ServerLogRecord(FrozenModel):

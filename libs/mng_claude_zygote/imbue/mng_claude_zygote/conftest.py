@@ -120,13 +120,19 @@ class ChatScriptEnv:
         self.messages_dir = self.agent_state_dir / "logs" / "messages"
         self.messages_dir.mkdir(parents=True)
 
+        self.work_dir = temp_host_dir / "work"
+        self.work_dir.mkdir(parents=True)
+        self.changelings_dir = self.work_dir / ".changelings"
+        self.changelings_dir.mkdir(parents=True)
+
         self.env = os.environ.copy()
         self.env["MNG_AGENT_STATE_DIR"] = str(self.agent_state_dir)
         self.env["MNG_HOST_DIR"] = str(temp_host_dir)
+        self.env["MNG_AGENT_WORK_DIR"] = str(self.work_dir)
 
     def set_default_model(self, model: str) -> None:
-        """Write the chat model to settings.toml."""
-        (self.agent_state_dir / "settings.toml").write_text(f'[chat]\nmodel = "{model}"\n')
+        """Write the chat model to .changelings/settings.toml in the work dir."""
+        (self.changelings_dir / "settings.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
     def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
         """Run chat.sh with the given arguments."""

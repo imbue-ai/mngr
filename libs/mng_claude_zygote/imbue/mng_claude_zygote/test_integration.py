@@ -563,18 +563,19 @@ def test_event_watcher_reads_settings_for_watched_sources(
 ) -> None:
     """Verify that the event watcher script reads watched_event_sources from settings."""
 
-    agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
-    agent_state_dir.mkdir(parents=True)
+    work_dir = local_shell_host.host_dir / "work"
+    changelings_dir = work_dir / ".changelings"
+    changelings_dir.mkdir(parents=True)
 
     # Write a settings.toml with custom watched sources
     settings_content = '[watchers]\nwatched_event_sources = ["messages", "stop"]\nevent_poll_interval_seconds = 7\n'
-    (agent_state_dir / "settings.toml").write_text(settings_content)
+    (changelings_dir / "settings.toml").write_text(settings_content)
 
     # The event watcher reads settings via a Python snippet at startup.
     # Test that the Python settings-reading logic produces the expected output.
     settings_reader = f"""
 import tomllib, pathlib, json
-p = pathlib.Path('{agent_state_dir}/settings.toml')
+p = pathlib.Path('{changelings_dir}/settings.toml')
 s = tomllib.loads(p.read_text()) if p.exists() else {{}}
 w = s.get('watchers', {{}})
 print(json.dumps({{
@@ -769,7 +770,7 @@ def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScrip
 
     events_file = chat_env.conversations_dir / "events.jsonl"
     event = json.loads(events_file.read_text().strip().split("\n")[-1])
-    assert event["model"] == "claude-opus-4-6", f"Expected hardcoded default, got: {event['model']!r}"
+    assert event["model"] == "claude-opus-4.6", f"Expected hardcoded default, got: {event['model']!r}"
 
 
 @pytest.mark.timeout(30)

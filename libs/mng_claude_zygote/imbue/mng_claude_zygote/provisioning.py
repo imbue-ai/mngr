@@ -18,6 +18,9 @@ from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 # Scripts to provision to $MNG_HOST_DIR/commands/
 _SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
+    "chat_ttyd_handler.sh",
+    "agent_tmux_handler.sh",
+    "web_server.py",
     "conversation_watcher.py",
     "event_watcher.py",
     "transcript_watcher.py",

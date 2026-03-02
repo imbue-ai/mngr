@@ -213,7 +213,7 @@ class ChatSettings(FrozenModel):
     model: ChatModel | None = Field(
         default=None,
         description="Default model for new conversation threads. "
-        "When None, chat.sh falls back to the hardcoded default (claude-opus-4-6).",
+        "When None, chat.sh falls back to the hardcoded default (claude-opus-4.6).",
     )
     context: ContextSettings = Field(
         default_factory=ContextSettings,
