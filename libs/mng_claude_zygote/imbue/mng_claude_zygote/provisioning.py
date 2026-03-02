@@ -51,6 +51,9 @@ _DEFAULT_THINKING_DIR_FILES: Final[tuple[tuple[str, str], ...]] = (
 _DEFAULT_SKILL_DIRS: Final[tuple[str, ...]] = (
     "send-message-to-user",
     "list-conversations",
+    "delegate-task",
+    "list-event-types",
+    "get-event-type-info",
 )
 
 

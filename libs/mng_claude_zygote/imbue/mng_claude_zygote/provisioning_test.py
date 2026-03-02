@@ -1497,10 +1497,14 @@ def test_provision_default_content_writes_missing_files() -> None:
 
     written_paths = [str(path) for path, _ in host.written_text_files]
     assert any("GLOBAL.md" in p for p in written_paths)
+    assert any("talking/PROMPT.md" in p for p in written_paths)
     assert any("thinking/PROMPT.md" in p for p in written_paths)
     assert any("thinking/settings.json" in p for p in written_paths)
     assert any("thinking/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
     assert any("thinking/skills/list-conversations/SKILL.md" in p for p in written_paths)
+    assert any("thinking/skills/delegate-task/SKILL.md" in p for p in written_paths)
+    assert any("thinking/skills/list-event-types/SKILL.md" in p for p in written_paths)
+    assert any("thinking/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
 
 
 def test_provision_default_content_skips_existing_files() -> None:

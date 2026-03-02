@@ -128,14 +128,16 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
         Extends ClaudeAgent provisioning with:
         1. Settings loading from .changelings/settings.toml
-        2. llm + plugin installation
-        3. Default content (GLOBAL.md, thinking/PROMPT.md, thinking/settings.json, skills)
-        4. Symlinks for Claude Code discovery (CLAUDE.md, settings, skills)
-        5. Watcher scripts and chat utilities
-        6. Event log directory structure (logs/<source>/events.jsonl)
-        7. LLM tool scripts for conversation context
-        8. Memory directory symlink into Claude project
-        9. Settings file provisioned to agent state dir for script access
+        2. Talking role constraint validation (no skills or settings allowed)
+        3. llm + plugin installation
+        4. Default content (GLOBAL.md, talking/PROMPT.md, thinking/PROMPT.md,
+           thinking/settings.json, skills)
+        5. Symlinks for Claude Code discovery (CLAUDE.md, settings, skills)
+        6. Watcher scripts and chat utilities
+        7. Event log directory structure (logs/<source>/events.jsonl)
+        8. LLM tool scripts for conversation context
+        9. Memory directory symlink into Claude project
+        10. Settings file provisioned to agent state dir for script access
         """
         super().provision(host, options, mng_ctx)
 
