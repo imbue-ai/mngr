@@ -909,6 +909,89 @@ print("OK")
     assert "OK" in result.stdout
 
 
+@pytest.mark.timeout(30)
+def test_event_watcher_check_and_send_sends_new_events_and_updates_offset(tmp_path: Path) -> None:
+    """Verify _check_and_send_new_events reads new lines, sends them, and updates the offset."""
+    offsets_dir = tmp_path / "offsets"
+    offsets_dir.mkdir()
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text('{"event": 1}\n{"event": 2}\n{"event": 3}\n')
+    # Set offset to 1 so only events 2 and 3 are "new"
+    (offsets_dir / "test_source.offset").write_text("1")
+
+    result = _run_event_watcher_test(
+        f"""
+import types
+
+# Capture the subprocess.run call to verify the message content
+captured_calls = []
+_real_subprocess_run = subprocess.run
+
+def _mock_run(cmd, **kwargs):
+    captured_calls.append((cmd, kwargs))
+    return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+subprocess.run = _mock_run
+
+events_file = Path("{events_file}")
+offsets_dir = Path("{offsets_dir}")
+log = _Logger(TMP / "test.log")
+
+_check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent", log)
+
+# Verify subprocess was called with the right arguments
+assert len(captured_calls) == 1
+cmd = captured_calls[0][0]
+assert cmd[0:4] == ["uv", "run", "mng", "message"]
+assert cmd[4] == "my-agent"
+assert cmd[5] == "-m"
+message_text = cmd[6]
+assert '{{"event": 2}}' in message_text
+assert '{{"event": 3}}' in message_text
+
+# Verify offset was updated to 3 (total lines)
+assert _get_offset(offsets_dir, "test_source") == 3
+print("OK")
+""",
+        tmp_path,
+    )
+    assert result.returncode == 0, f"Failed: {result.stderr}"
+    assert "OK" in result.stdout
+
+
+@pytest.mark.timeout(30)
+def test_event_watcher_check_and_send_does_not_update_offset_on_failure(tmp_path: Path) -> None:
+    """Verify _check_and_send_new_events does not update offset when mng message fails."""
+    offsets_dir = tmp_path / "offsets"
+    offsets_dir.mkdir()
+    events_file = tmp_path / "events.jsonl"
+    events_file.write_text('{"event": 1}\n{"event": 2}\n')
+
+    result = _run_event_watcher_test(
+        f"""
+import types
+
+def _mock_run(cmd, **kwargs):
+    return types.SimpleNamespace(returncode=1, stdout="", stderr="send failed")
+
+subprocess.run = _mock_run
+
+events_file = Path("{events_file}")
+offsets_dir = Path("{offsets_dir}")
+log = _Logger(TMP / "test.log")
+
+_check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent", log)
+
+# Offset should remain at 0 since sending failed
+assert _get_offset(offsets_dir, "test_source") == 0
+print("OK")
+""",
+        tmp_path,
+    )
+    assert result.returncode == 0, f"Failed: {result.stderr}"
+    assert "OK" in result.stdout
+
+
 # -- Tmux window injection integration tests --
 
 
