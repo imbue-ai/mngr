@@ -51,12 +51,13 @@ Every event is self-describing: you never need to know the filename to understan
 - Changeling agents are assumed to run from a specially structured git repo that contains various skills, configuration, prompt files, and the code for any tools they have constructed for themselves. The layout is:
     - `GLOBAL.md` - shared instructions for all agents (symlinked as `CLAUDE.md` so Claude Code discovers it)
     - `settings.json` - shared Claude Code settings (symlinked as `.claude/settings.json`)
+    - `talking/PROMPT.md` - talking agent prompt
     - `thinking/PROMPT.md` - primary/inner monologue agent prompt (symlinked as `CLAUDE.local.md`)
     - `thinking/settings.json` - primary agent Claude Code settings (symlinked as `.claude/settings.local.json`)
     - `thinking/skills/` - skills for the thinking agent (symlinked as `.claude/skills`)
-    - `talking/PROMPT.md` - talking agent prompt (future)
-    - `talking/settings.json` - talking agent settings (future)
-    - `talking/skills/` - skills for the talking agent (future)
+    - `working/PROMPT.md` - working agent prompt
+    - `working/settings.json` - working agent settings
+    - `working/skills/` - skills for the working agent
     - `memory/` - shared memory directory (symlinked into Claude project memory)
 - The `GLOBAL.md` serves as the core system prompt that is *shared* among all agents (the primary agent, any claude subagent it makes, and even any other agents created via mng with this repo as the target). It is symlinked to `CLAUDE.md` at the project root so Claude Code picks it up.
 - The primary agent prompt is stored as `thinking/PROMPT.md` and symlinked as `CLAUDE.local.md` at the project root. Similarly, `thinking/settings.json` is symlinked as `.claude/settings.local.json`, and `thinking/skills/` is symlinked as `.claude/skills`. All of this is handled by the ClaudeZygoteAgent during provisioning.
