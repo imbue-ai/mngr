@@ -239,10 +239,10 @@ def test_main_page_html_uses_chat_ttyd_url_arg(web_server_module: Any) -> None:
     assert "../chat/?arg=" in rendered
 
 
-def test_main_page_html_links_to_chat_for_new_conversations(web_server_module: Any) -> None:
-    """Verify the new conversation button links to the chat ttyd with no arg."""
+def test_main_page_html_links_to_chat_new_for_new_conversations(web_server_module: Any) -> None:
+    """Verify the new conversation button links to the chat ttyd with arg=NEW."""
     rendered = web_server_module._MAIN_PAGE_HTML.format(agent_name="Test")
-    assert "../chat/" in rendered
+    assert "../chat/?arg=NEW" in rendered
 
 
 def test_agents_page_html_contains_agent_list(web_server_module: Any) -> None:

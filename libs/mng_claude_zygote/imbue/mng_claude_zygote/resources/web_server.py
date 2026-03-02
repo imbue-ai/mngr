@@ -376,8 +376,8 @@ _MAIN_PAGE_HTML: Final[str] = """<!DOCTYPE html>
     }}
 
     function onNewConversation() {{
-      // Load the chat ttyd with no arg (starts a new conversation)
-      showFrame('../chat/');
+      // Load the chat ttyd with arg=NEW (starts a new conversation)
+      showFrame('../chat/?arg=NEW');
       // Refresh the conversation list after a delay to pick up the new one
       setTimeout(loadConversations, 5000);
     }}
