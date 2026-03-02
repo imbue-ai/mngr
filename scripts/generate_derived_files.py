@@ -15,6 +15,7 @@ CLI doc content comes from two sources:
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import click
@@ -602,19 +603,105 @@ def _local_path_to_github_url(match: re.Match[str]) -> str:
     return f"]({GITHUB_BASE_URL}{path})"
 
 
+def _convert_gitignore_line(line: str) -> str:
+    """Convert a single .gitignore pattern to .dockerignore syntax.
+
+    .gitignore and .dockerignore have different matching semantics for bare
+    patterns (patterns without '/' except a trailing '/'):
+    - In .gitignore, bare patterns match anywhere in the directory tree.
+    - In .dockerignore, bare patterns only match at the build context root.
+
+    This function prepends '**/' to bare patterns so they behave the same way
+    in .dockerignore as they do in .gitignore. Patterns that contain '/' in
+    a non-trailing position are already anchored in .gitignore and match at
+    root in .dockerignore, so they pass through unchanged.
+
+    Leading '/' is removed because .gitignore uses it to anchor patterns to
+    the root, while .dockerignore patterns without '**/' already match at
+    root by default.
+    """
+    stripped = line.strip()
+
+    # Blank lines and comments pass through
+    if not stripped or stripped.startswith("#"):
+        return line
+
+    # Handle negation prefix
+    negated = False
+    pattern = stripped
+    if pattern.startswith("!"):
+        negated = True
+        pattern = pattern[1:]
+
+    prefix = "!" if negated else ""
+
+    # Leading '/' anchors to root in gitignore; in dockerignore bare patterns
+    # already match at root, so just remove the '/'
+    if pattern.startswith("/"):
+        return prefix + pattern[1:]
+
+    # Already has **/ prefix -- recursive in both formats
+    if pattern.startswith("**/"):
+        return line
+
+    # If the pattern body (ignoring trailing '/') contains '/', it's anchored
+    # in gitignore. Such patterns also match at root in dockerignore. No change.
+    body = pattern.rstrip("/")
+    if "/" in body:
+        return line
+
+    # Bare pattern: matches anywhere in gitignore but only at root in
+    # dockerignore. Prepend **/ to match anywhere.
+    return prefix + "**/" + pattern
+
+
+def _check_no_nested_gitignores(repo_root: Path) -> None:
+    """Fail if any non-root .gitignore files are tracked by git.
+
+    The generated .dockerignore only reflects the root .gitignore, so nested
+    .gitignore files would cause git and Docker to disagree on which files
+    are ignored.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "--", "*.gitignore"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return  # Not in a git repo or git not available; skip check
+
+    nested = [f for f in result.stdout.splitlines() if f.strip() and f.strip() != ".gitignore"]
+    if nested:
+        files = "\n  ".join(nested)
+        raise RuntimeError(
+            f"Found non-root .gitignore files tracked by git:\n  {files}\n\n"
+            "The generated .dockerignore only reflects the root .gitignore, so nested\n"
+            ".gitignore files would cause git and Docker to disagree on which files\n"
+            "are ignored. Move the patterns to the root .gitignore and delete the\n"
+            "nested files."
+        )
+
+
 def generate_dockerignore(repo_root: Path) -> None:
     """Generate .dockerignore from .gitignore with .git/ added.
 
-    Reads the .gitignore file and writes a .dockerignore that includes
-    the same patterns plus .git/ (which is not in .gitignore but should
-    be excluded from Docker build contexts).
+    Reads the root .gitignore, converts patterns to .dockerignore syntax
+    (prepending '**/' to bare patterns so they match anywhere, as they do
+    in .gitignore), and writes the result with .git/ prepended.
+
+    Fails if non-root .gitignore files exist, since they would not be
+    reflected in the generated .dockerignore.
     """
+    _check_no_nested_gitignores(repo_root)
+
     gitignore = repo_root / ".gitignore"
     dockerignore = repo_root / ".dockerignore"
 
-    gitignore_content = gitignore.read_text()
+    gitignore_lines = gitignore.read_text().splitlines()
+    converted_lines = [_convert_gitignore_line(line) for line in gitignore_lines]
 
-    generation_comment = (
+    header = (
         "# This file is auto-generated from .gitignore. Do not edit directly.\n"
         "# To modify, edit .gitignore and run: uv run python scripts/generate_derived_files.py\n"
         "\n"
@@ -622,7 +709,7 @@ def generate_dockerignore(repo_root: Path) -> None:
         ".git/\n"
         "\n"
     )
-    content = generation_comment + gitignore_content
+    content = header + "\n".join(converted_lines) + "\n"
 
     existing_content = dockerignore.read_text() if dockerignore.exists() else None
     if content != existing_content:
