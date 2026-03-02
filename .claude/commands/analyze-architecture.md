@@ -3,7 +3,9 @@
 You are analyzing whether the approach taken on a feature branch is the right way to solve its stated problem. You have been given:
 - A **problem description** (what the branch is trying to accomplish)
 - A **base commit hash** and **tip commit hash** (for diffing)
-- Your cwd is a worktree checked out at the base commit
+- A **worktree path** checked out at the base commit
+
+Start by `cd`-ing into the worktree path. All file reads in Steps 1-2 should be from this worktree (the pre-change codebase).
 
 Perform these steps in order.
 
@@ -11,8 +13,8 @@ Perform these steps in order.
 
 Build a thorough understanding of the code before looking at any changes. Read:
 - Project instructions and conventions: CLAUDE.md, style_guide.md, AGENTS.md
-- Design and architecture docs (anything in docs/ describing system design)
-- The files that were changed on the feature branch, plus their surrounding context (use `git diff --name-only {base}...{tip}` to identify them, then read the base-branch versions and neighboring files)
+- Design and architecture docs
+- The parts of the codebase that are relevant to the stated problem -- the files and modules you would expect to touch if you were implementing a solution yourself
 
 The goal is to understand not just what the code does, but how the codebase is organized: what patterns it uses, how modules relate to each other, and where the boundaries are.
 
