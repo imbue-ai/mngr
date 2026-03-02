@@ -19,5 +19,5 @@ if ! git rev-parse "$CHECKPOINT_HASH" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Use HEAD as the current state of the repository
+# Diff against the working tree so uncommitted changes are included
 git diff "$CHECKPOINT_HASH"
