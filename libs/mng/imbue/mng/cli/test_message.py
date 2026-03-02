@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.utils.testing import get_short_random_string
+from imbue.mng.utils.testing import mng_agent_cleanup
 from imbue.mng.utils.testing import run_mng_subprocess
 from imbue.mng.utils.testing import setup_claude_trust_config_for_subprocess
 
@@ -88,11 +89,6 @@ def _create_agent(
     return run_mng_subprocess(*args, env=env, cwd=cwd)
 
 
-def _destroy_agent(name: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Destroy a Claude agent."""
-    return run_mng_subprocess("destroy", name, "--force", "--disable-plugin", "modal", env=env)
-
-
 def _send_message(
     agent_name: str, message: str, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -110,13 +106,12 @@ def claude_agent(claude_test_env: dict[str, str], temp_git_repo: Path) -> Genera
     """Create a Claude agent for testing and clean it up after."""
     agent_name = f"test-msg-{get_short_random_string()}"
 
-    result = _create_agent(agent_name, env=claude_test_env, cwd=temp_git_repo)
-    if result.returncode != 0:
-        pytest.fail(f"Failed to create agent: {result.stderr}")
+    with mng_agent_cleanup(agent_name, env=claude_test_env, disable_plugins=["modal"]):
+        result = _create_agent(agent_name, env=claude_test_env, cwd=temp_git_repo)
+        if result.returncode != 0:
+            pytest.fail(f"Failed to create agent: {result.stderr}")
 
-    yield agent_name
-
-    _destroy_agent(agent_name, env=claude_test_env)
+        yield agent_name
 
 
 @pytest.mark.acceptance
@@ -129,15 +124,13 @@ def test_mng_create_with_message_succeeds(claude_test_env: dict[str, str], temp_
     agent_name = f"test-create-msg-{get_short_random_string()}"
     message = f"test message {get_short_random_string()}"
 
-    try:
+    with mng_agent_cleanup(agent_name, env=claude_test_env, disable_plugins=["modal"]):
         result = _create_agent(agent_name, message=message, verbose=True, env=claude_test_env, cwd=temp_git_repo)
 
         assert result.returncode == 0, f"mng create failed: {result.stderr}"
         assert _message_was_submitted(result), (
             f"Message submission not confirmed in output:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
-    finally:
-        _destroy_agent(agent_name, env=claude_test_env)
 
 
 @pytest.mark.acceptance
@@ -156,17 +149,18 @@ def test_mng_create_with_message_multiple_times(claude_test_env: dict[str, str],
         agent_name = f"test-multi-{i}-{get_short_random_string()}"
         message = f"test message {i}"
 
-        try:
-            result = _create_agent(agent_name, message=message, verbose=True, env=claude_test_env, cwd=temp_git_repo)
+        with mng_agent_cleanup(agent_name, env=claude_test_env, disable_plugins=["modal"]):
+            try:
+                result = _create_agent(
+                    agent_name, message=message, verbose=True, env=claude_test_env, cwd=temp_git_repo
+                )
 
-            if result.returncode == 0 and _message_was_submitted(result):
-                successes += 1
-            else:
-                failures.append(f"Trial {i}: returncode={result.returncode}, stderr={result.stderr[:500]}")
-        except subprocess.TimeoutExpired:
-            failures.append(f"Trial {i}: timeout")
-        finally:
-            _destroy_agent(agent_name, env=claude_test_env)
+                if result.returncode == 0 and _message_was_submitted(result):
+                    successes += 1
+                else:
+                    failures.append(f"Trial {i}: returncode={result.returncode}, stderr={result.stderr[:500]}")
+            except subprocess.TimeoutExpired:
+                failures.append(f"Trial {i}: timeout")
 
     # Require 100% success rate
     assert successes == trial_count, (

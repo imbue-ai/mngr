@@ -21,6 +21,7 @@ import pytest
 from imbue.mng.errors import MngError
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import mng_agent_cleanup
 from imbue.mng.utils.testing import run_git_command
 from imbue.mng.utils.testing import run_mng_subprocess
 from imbue.mng.utils.testing import setup_claude_trust_config_for_subprocess
@@ -61,24 +62,22 @@ def created_agent(
 
     Destroys the agent after the test completes.
     """
-    result = run_mng_subprocess(
-        "create",
-        "--disable-plugin",
-        "modal",
-        agent_name,
-        "bash",
-        "--no-connect",
-        "--project",
-        str(repo_path),
-        env=sync_test_env,
-        cwd=repo_path,
-    )
-    assert result.returncode == 0, f"Failed to create agent: {result.stderr}"
+    with mng_agent_cleanup(agent_name, env=sync_test_env, disable_plugins=["modal"]):
+        result = run_mng_subprocess(
+            "create",
+            "--disable-plugin",
+            "modal",
+            agent_name,
+            "bash",
+            "--no-connect",
+            "--project",
+            str(repo_path),
+            env=sync_test_env,
+            cwd=repo_path,
+        )
+        assert result.returncode == 0, f"Failed to create agent: {result.stderr}"
 
-    yield agent_name
-
-    # Cleanup: destroy the agent
-    run_mng_subprocess("destroy", "--disable-plugin", "modal", agent_name, "-f", env=sync_test_env)
+        yield agent_name
 
 
 def _get_agent_work_dir(repo_path: Path, agent_name: str) -> Path:
