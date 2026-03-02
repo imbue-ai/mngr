@@ -152,7 +152,7 @@ def _isolate_tmux_server(
     """Give each test its own isolated tmux server.
 
     Delegates to the shared isolate_tmux_server() context manager in
-    imbue.mng.utils.testing, which handles TMUX_TMPDIR creation,
+    imbue.mng.testing.testing, which handles TMUX_TMPDIR creation,
     TMUX env var isolation, and teardown (kill-server + tmpdir cleanup).
     """
     with isolate_tmux_server(monkeypatch):
