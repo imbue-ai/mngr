@@ -4,7 +4,7 @@ set -euo pipefail
 # stop_hook_common.sh
 #
 # Shared function definitions for stop hook scripts. Source this file to get
-# logging helpers and retry_command. No side effects -- just definitions.
+# logging helpers and retry_command. Sources mng_log.sh for JSONL logging.
 
 # Colors for output (disabled if not a terminal)
 if [[ -t 2 ]]; then
@@ -55,6 +55,10 @@ log_warn() {
 log_info() {
     echo -e "${GREEN}$1${NC}"
     _log_to_file "INFO" "$1"
+}
+
+log_debug() {
+    _log_to_file "DEBUG" "$1"
 }
 
 # Retry a command with exponential backoff

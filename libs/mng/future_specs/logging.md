@@ -30,22 +30,40 @@ mng separates three distinct concerns:
 - Level controlled by config (default: DEBUG)
 - Each log line is a self-describing JSON object with envelope fields
 
-## Event Envelope Format
+## Event Envelope Fields
 
-Every log line uses the same event envelope as all other structured events:
+All log events (Python and bash) include the same set of envelope fields:
+
+- `timestamp`: ISO 8601 with nanosecond precision (e.g., `2026-03-01T12:00:00.123456789Z`)
+- `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
+- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
+- `source`: Matches the folder under `logs/` (e.g., `mng`, `event_watcher`)
+- `level`: Log level (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
+- `message`: The log message text
+- `pid`: Process ID
+- `command`: CLI subcommand (optional, present for `mng` and `changelings`)
+
+### Bash format (flat JSON)
+
+Bash scripts (via `mng_log.sh`) emit flat JSON with just the envelope fields:
 
 ```json
-{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"mng","event_id":"evt-a1b2c3d4e5f6...","source":"mng","level":"INFO","message":"Created agent","pid":12345,"command":"create"}
+{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"event_watcher","event_id":"evt-a1b2c3d4...","source":"event_watcher","level":"INFO","message":"Started watching","pid":12345}
 ```
 
-Envelope fields: `timestamp`, `type`, `event_id`, `source`
-Log-specific fields: `level`, `message`, `pid`, `command` (optional)
+### Python format (loguru serialized JSON)
 
-The `type` field identifies the program (e.g., `mng`, `changelings`, `event_watcher`).
-The `source` field matches the directory under `logs/` where events are stored.
-Level names match Python's loguru: `TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`.
+Python (via loguru's `serialize=True`) emits loguru's native JSON structure with the envelope fields injected into `record.extra`. This includes additional loguru metadata (function, line, module, exception, etc.) that bash logs don't have:
 
-Both Python (loguru) and bash scripts emit the same format using the shared `LogEvent` type (Python) and `mng_log.sh` library (bash).
+```json
+{"text":"...", "record":{"extra":{"timestamp":"...","type":"mng","event_id":"evt-...","source":"mng","pid":12345,"command":"list"}, "level":{"name":"INFO",...}, "message":"...", "function":"...", "line":42, ...}}
+```
+
+### Querying across both formats
+
+To extract envelope fields from either format:
+- For bash lines: fields are at the top level (e.g., `line["timestamp"]`)
+- For Python lines: fields are in `line["record"]["extra"]` (e.g., `line["record"]["extra"]["timestamp"]`); the message is in `line["record"]["message"]` and level in `line["record"]["level"]["name"]`
 
 ## Configuration
 
@@ -100,32 +118,6 @@ Logs are stored at:
 ### Rotation
 
 Logs are rotated by loguru when the file exceeds `max_log_size_mb`. Rotated files are renamed with a numeric suffix by loguru's built-in rotation mechanism.
-
-### Format
-
-Each line uses loguru's native JSON serialization (`serialize=True`). The event envelope fields are injected into `record.extra` via a patcher, so each line is:
-
-```json
-{"text": "...", "record": {"elapsed": {...}, "exception": null, "extra": {"timestamp": "...", "type": "mng", "event_id": "evt-...", "source": "mng", "pid": 12345, "command": "list"}, "file": {...}, "function": "...", "level": {"name": "INFO", ...}, "line": 42, "message": "...", "module": "...", "name": "...", "process": {...}, "thread": {...}, "time": {...}}}
-```
-
-The envelope fields live in `record.extra`:
-- `timestamp`: ISO 8601 with nanosecond precision (e.g., `2026-03-01T12:00:00.123456789Z`)
-- `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
-- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
-- `source`: Matches the folder under `logs/` (e.g., `mng`, `event_watcher`)
-- `pid`: Process ID
-- `command`: CLI subcommand (optional, present for `mng` and `changelings`)
-
-Standard loguru fields are also present in the record:
-- `level`: Log level object with `name` (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
-- `message`: The formatted log message text
-- `function`, `line`, `module`, `name`: Source code location
-- `file`: Source file path
-- `process`, `thread`: Process and thread info
-- `time`: Timestamp object with `repr` and `timestamp`
-- `elapsed`: Time since logger was first used
-- `exception`: Exception info (when present)
 
 ## Sensitive Data
 
