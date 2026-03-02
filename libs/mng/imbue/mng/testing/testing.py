@@ -20,7 +20,9 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.cli.create import create as create_command
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
@@ -836,3 +838,11 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+class ModalSubprocessTestEnv(FrozenModel):
+    """Environment configuration for Modal subprocess tests."""
+
+    env: dict[str, str] = Field(description="Environment variables for the subprocess")
+    prefix: str = Field(description="The mng prefix for test isolation")
+    host_dir: Path = Field(description="Path to the temporary host directory")

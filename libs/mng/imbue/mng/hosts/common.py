@@ -11,13 +11,11 @@ from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngConfig
-from imbue.mng.interfaces.data_types import ACTIVITY_SOURCES_BY_IDLE_MODE
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
-from imbue.mng.primitives import IdleMode
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
 
@@ -52,14 +50,6 @@ HOST_LEVEL_ACTIVITY_SOURCES: Final[frozenset[ActivitySource]] = frozenset(
         ActivitySource.SSH,
     }
 )
-
-
-def get_activity_sources_for_idle_mode(idle_mode: IdleMode) -> tuple[ActivitySource, ...]:
-    """Get the activity sources that should be monitored for a given idle mode.
-
-    Delegates to the canonical mapping in interfaces/data_types.py.
-    """
-    return ACTIVITY_SOURCES_BY_IDLE_MODE[idle_mode]
 
 
 # =========================================================================
