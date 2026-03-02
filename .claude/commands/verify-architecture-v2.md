@@ -10,7 +10,7 @@ Assess whether the approach taken on this branch is the right way to solve its p
 
 If you do not already know what the changes on this branch are supposed to accomplish, STOP and ask the user before continuing.
 
-Write a CONCISE description of the problem the branch is trying to solve, based on your knowledge of the work done so far. Focus on the goal, not the implementation: what should work differently afterward, what is currently broken, or what structural problem exists in the code. Do not describe the approach the branch takes.
+Write a CONCISE description of the problem the branch is trying to solve, based on your knowledge of the work done so far. This description must contain ONLY the problem -- not any part of the solution. Describe what should work differently afterward, what is currently broken, or what structural problem exists in the code. Do not mention any mechanism, technique, data structure, or approach used to fix it. The analysis subagent needs to evaluate the approach independently, so any hint about the implementation will bias its judgment.
 
 ## Phase 2: Validate the Diff
 
