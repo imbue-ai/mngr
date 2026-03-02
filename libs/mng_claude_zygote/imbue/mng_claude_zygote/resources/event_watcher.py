@@ -20,17 +20,18 @@ Environment:
 from __future__ import annotations
 
 import dataclasses
-import os
 import subprocess
 import sys
 import threading
-import time
 import tomllib
 from pathlib import Path
 
-from watchdog.events import FileSystemEvent
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+# watcher_common.py is provisioned alongside this script to the same directory
+sys.path.insert(0, str(Path(__file__).parent))
+from watcher_common import Logger
+from watcher_common import mtime_poll_directories
+from watcher_common import require_env
+from watcher_common import setup_watchdog_for_directories
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,37 +40,6 @@ class _WatcherSettings:
 
     poll_interval: int = 3
     sources: list[str] = dataclasses.field(default_factory=lambda: ["messages", "scheduled", "mng_agents", "stop"])
-
-
-class _Logger:
-    """Simple dual-output logger: writes to both stdout and a log file."""
-
-    def __init__(self, log_file: Path) -> None:
-        self.log_file_path = log_file
-        self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _timestamp(self) -> str:
-        now = time.time()
-        fractional_ns = int((now % 1) * 1_000_000_000)
-        utc_struct = time.gmtime(now)
-        return time.strftime("%Y-%m-%dT%H:%M:%S", utc_struct) + f".{fractional_ns:09d}Z"
-
-    def info(self, msg: str) -> None:
-        line = f"[{self._timestamp()}] {msg}"
-        print(line, flush=True)
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(line + "\n")
-        except OSError:
-            pass
-
-    def debug(self, msg: str) -> None:
-        line = f"[{self._timestamp()}] [debug] {msg}"
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(line + "\n")
-        except OSError:
-            pass
 
 
 def _load_watcher_settings(agent_state_dir: Path) -> _WatcherSettings:
@@ -109,7 +79,7 @@ def _check_and_send_new_events(
     source: str,
     offsets_dir: Path,
     agent_name: str,
-    log: _Logger,
+    log: Logger,
 ) -> None:
     """Check for new lines in an events.jsonl file and send them via mng message."""
     if not events_file.is_file():
@@ -172,7 +142,7 @@ def _check_all_sources(
     watched_sources: list[str],
     offsets_dir: Path,
     agent_name: str,
-    log: _Logger,
+    log: Logger,
 ) -> None:
     """Check all watched sources for new events."""
     for source in watched_sources:
@@ -180,141 +150,19 @@ def _check_all_sources(
         _check_and_send_new_events(events_file, source, offsets_dir, agent_name, log)
 
 
-def _mtime_poll(
-    logs_dir: Path,
-    watched_sources: list[str],
-    mtime_cache: dict[str, tuple[float, int]],
-    log: _Logger,
-) -> bool:
-    """Scan all watched event files for mtime/size changes.
-
-    Returns True if any file was created, removed, or modified since the
-    last scan. This catches changes that watchdog may have missed.
-    """
-    is_changed = False
-    current_keys: set[str] = set()
-
-    for source in watched_sources:
-        source_dir = logs_dir / source
-        if not source_dir.exists():
-            continue
-        try:
-            for entry in source_dir.iterdir():
-                key = str(entry)
-                current_keys.add(key)
-                try:
-                    stat = entry.stat()
-                    current = (stat.st_mtime, stat.st_size)
-                except OSError:
-                    # File may have been deleted between iterdir() and stat()
-                    continue
-
-                previous = mtime_cache.get(key)
-                if previous != current:
-                    mtime_cache[key] = current
-                    is_changed = True
-                    if previous is None:
-                        log.debug(f"New file detected: {entry}")
-                    else:
-                        log.debug(f"File changed: {entry}")
-        except OSError as exc:
-            log.debug(f"Failed to list directory {source_dir}: {exc}")
-            continue
-
-    # Detect removed files
-    removed_keys = set(mtime_cache.keys()) - current_keys
-    for key in removed_keys:
-        del mtime_cache[key]
-        is_changed = True
-        log.debug(f"File removed: {key}")
-
-    return is_changed
-
-
-def _require_env(name: str) -> str:
-    """Read a required environment variable, exiting if unset."""
-    value = os.environ.get(name, "")
-    if not value:
-        print(f"ERROR: {name} must be set", file=sys.stderr)
-        sys.exit(1)
-    return value
-
-
 # --- WATCHDOG-DEPENDENT CODE BELOW (not importable without watchdog) ---
 
 
-class _ChangeHandler(FileSystemEventHandler):
-    """Watchdog handler that signals the main loop on any filesystem change."""
-
-    def __init__(self, wake_event: threading.Event) -> None:
-        super().__init__()
-        self._wake_event = wake_event
-
-    def on_any_event(self, event: FileSystemEvent) -> None:
-        self._wake_event.set()
-
-
-def _setup_watchdog(
-    watch_dirs: list[Path],
-    wake_event: threading.Event,
-    log: _Logger,
-) -> tuple[Observer, bool]:
-    """Create and start a watchdog Observer for the given directories.
-
-    Returns (observer, is_active). If the observer fails to start,
-    is_active is False and the caller should fall back to polling only.
-    """
-    handler = _ChangeHandler(wake_event)
-    observer = Observer()
-    try:
-        for source_dir in watch_dirs:
-            observer.schedule(handler, str(source_dir), recursive=False)
-        observer.start()
-        return observer, True
-    except Exception as exc:
-        log.info(f"WARNING: watchdog observer failed to start, falling back to polling only: {exc}")
-        return observer, False
-
-
-def _run_event_loop(
-    logs_dir: Path,
-    watched_sources: list[str],
-    offsets_dir: Path,
-    agent_name: str,
-    poll_interval: int,
-    wake_event: threading.Event,
-    log: _Logger,
-) -> None:
-    """Run the main event loop: wait for watchdog or poll timeout, then check sources."""
-    mtime_cache: dict[str, tuple[float, int]] = {}
-    _mtime_poll(logs_dir, watched_sources, mtime_cache, log)
-
-    while True:
-        is_triggered_by_watchdog = wake_event.wait(timeout=poll_interval)
-        wake_event.clear()
-
-        if is_triggered_by_watchdog:
-            log.debug("Woken by watchdog filesystem event")
-
-        # Always update the mtime cache so it stays in sync. On timeout,
-        # this also serves as the safety-net poll for missed watchdog events.
-        is_mtime_changed = _mtime_poll(logs_dir, watched_sources, mtime_cache, log)
-        if not is_triggered_by_watchdog and is_mtime_changed:
-            log.info("Periodic mtime poll detected changes")
-
-        _check_all_sources(logs_dir, watched_sources, offsets_dir, agent_name, log)
-
-
 def main() -> None:
-    agent_state_dir = Path(_require_env("MNG_AGENT_STATE_DIR"))
-    agent_name = _require_env("MNG_AGENT_NAME")
-    host_dir = Path(_require_env("MNG_HOST_DIR"))
+    agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
+    agent_name = require_env("MNG_AGENT_NAME")
+    host_dir = Path(require_env("MNG_HOST_DIR"))
 
     logs_dir = agent_state_dir / "logs"
     offsets_dir = logs_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True, exist_ok=True)
 
-    log = _Logger(host_dir / "logs" / "event_watcher.log")
+    log = Logger(host_dir / "logs" / "event_watcher.log")
 
     settings = _load_watcher_settings(agent_state_dir)
 
@@ -335,10 +183,26 @@ def main() -> None:
         watch_dirs.append(source_dir)
 
     wake_event = threading.Event()
-    observer, is_watchdog_active = _setup_watchdog(watch_dirs, wake_event, log)
+    observer, is_watchdog_active = setup_watchdog_for_directories(watch_dirs, wake_event, log)
+
+    # Initialize mtime cache
+    mtime_cache: dict[str, tuple[float, int]] = {}
+    mtime_poll_directories(watch_dirs, mtime_cache, log)
 
     try:
-        _run_event_loop(logs_dir, settings.sources, offsets_dir, agent_name, settings.poll_interval, wake_event, log)
+        while True:
+            is_triggered_by_watchdog = wake_event.wait(timeout=settings.poll_interval)
+            wake_event.clear()
+
+            if is_triggered_by_watchdog:
+                log.debug("Woken by watchdog filesystem event")
+
+            # Always update mtime cache; on timeout this catches missed watchdog events
+            is_mtime_changed = mtime_poll_directories(watch_dirs, mtime_cache, log)
+            if not is_triggered_by_watchdog and is_mtime_changed:
+                log.info("Periodic mtime poll detected changes")
+
+            _check_all_sources(logs_dir, settings.sources, offsets_dir, agent_name, log)
     except KeyboardInterrupt:
         log.info("Event watcher stopping (KeyboardInterrupt)")
     finally:

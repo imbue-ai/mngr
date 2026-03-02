@@ -232,17 +232,6 @@ def test_chat_ttyd_command_runs_chat_script() -> None:
     assert "chat.sh" in CHAT_TTYD_COMMAND
 
 
-# -- Watcher command content tests --
-
-
-def test_conv_watcher_command_references_script() -> None:
-    assert "conversation_watcher.sh" in CONV_WATCHER_COMMAND
-
-
-def test_event_watcher_command_references_script() -> None:
-    assert "event_watcher.py" in EVENT_WATCHER_COMMAND
-
-
 # -- ClaudeZygoteAgent._get_zygote_config tests --
 
 

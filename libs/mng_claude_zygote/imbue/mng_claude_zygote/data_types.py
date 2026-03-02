@@ -82,7 +82,7 @@ class ChangelingEvent(EventEnvelope):
 # assistant output, tool calls/results) and drops noise like progress events,
 # file-history snapshots, and system bookkeeping.
 #
-# NOTE: These types document the schema produced by transcript_watcher.sh.
+# NOTE: These types document the schema produced by transcript_watcher.py.
 # The watcher runs as a standalone script on the host and produces matching
 # JSON directly (it cannot import these classes).
 

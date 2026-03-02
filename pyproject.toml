@@ -122,7 +122,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "contrib/", "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/event_watcher.py"]
+exclude = ["scripts/style_guide.py", "contrib/", "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/event_watcher.py", "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/conversation_watcher.py", "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/watcher_common.py"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
@@ -159,6 +159,11 @@ omit = [
     "libs/mng_kanpan/imbue/mng_kanpan/cli.py",
     # don't bother with anything in scripts
     "scripts/*",
+    # Standalone resource scripts with PEP 723 dependencies (watchdog) that
+    # cannot be imported in the test process
+    "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/event_watcher.py",
+    "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/conversation_watcher.py",
+    "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/watcher_common.py",
 ]
 
 [tool.importlinter]

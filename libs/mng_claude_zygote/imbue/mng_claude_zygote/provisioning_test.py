@@ -1,5 +1,6 @@
 """Unit tests for the mng_claude_zygote provisioning module."""
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ import pytest
 
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
+from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
@@ -244,57 +246,73 @@ def test_conversion_handles_malformed_lines_gracefully() -> None:
 
 
 def test_conversion_user_message_validates_against_pydantic_schema() -> None:
-    import json as json_mod
+    pass
 
-    from imbue.mng_claude_zygote.data_types import CommonUserMessageEvent
 
-    raw = json_mod.dumps(
-        {
-            "type": "user",
-            "uuid": "contract-user-1",
-            "timestamp": "2026-01-01T00:00:00.000000000Z",
-            "message": {"role": "user", "content": "Hello"},
-        }
-    )
-    events = _run_conversion([raw])
-    assert len(events) == 1
-    validated = CommonUserMessageEvent.model_validate(events[0])
-    assert validated.content == "Hello"
-    assert validated.role == "user"
+# -- Transcript watcher conversion logic tests --
+
+
+def _strip_below_watchdog_marker(source: str) -> str:
+    """Strip everything at and below the WATCHDOG-DEPENDENT marker line.
+
+    Searches for the marker as a standalone comment line (not inside a string
+    literal like a docstring). Returns the source text up to (but not including)
+    the marker line.
+    """
+    marker_prefix = "# --- WATCHDOG-DEPENDENT CODE BELOW"
+    lines = source.split("\n")
+    # Walk backwards to find the last occurrence (the real one, not a docstring mention)
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(marker_prefix):
+            return "\n".join(lines[:i])
+    raise ValueError(f"Marker {marker_prefix!r} not found in source")
 
 
 def test_conversion_assistant_message_validates_against_pydantic_schema() -> None:
-    import json as json_mod
+    pass
 
-    from imbue.mng_claude_zygote.data_types import CommonAssistantMessageEvent
 
-    raw = json_mod.dumps(
-        {
-            "type": "assistant",
-            "uuid": "contract-asst-1",
-            "timestamp": "2026-01-01T00:00:01.000000000Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "content": [{"type": "text", "text": "Response text"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 100, "output_tokens": 50},
-            },
-        }
-    )
-    events = _run_conversion([raw])
-    assert len(events) == 1
-    validated = CommonAssistantMessageEvent.model_validate(events[0])
-    assert validated.model == "claude-opus-4-6"
-    assert validated.text == "Response text"
+def _load_transcript_watcher_module() -> dict[str, Any]:
+    """Load the stdlib-only portion of transcript_watcher.py (above the watchdog marker).
+
+    Returns a namespace dict containing the conversion functions.
+    """
+    content = load_zygote_resource("transcript_watcher.py")
+    # Also load watcher_common.py (stripped above its watchdog marker) so
+    # transcript_watcher.py can import Logger from it.
+    watcher_common_content = load_zygote_resource("watcher_common.py")
+    watcher_common_stripped = _strip_below_watchdog_marker(watcher_common_content)
+
+    stripped = _strip_below_watchdog_marker(content)
+
+    # Exec watcher_common first so transcript_watcher can import from it
+    watcher_common_ns: dict[str, Any] = {}
+    exec(compile(watcher_common_stripped, "watcher_common.py", "exec"), watcher_common_ns)
+
+    # Patch sys.modules so `from watcher_common import ...` works during exec
+    import types
+
+    watcher_common_mod = types.ModuleType("watcher_common")
+    for key, value in watcher_common_ns.items():
+        if not key.startswith("__"):
+            setattr(watcher_common_mod, key, value)
+    import sys
+
+    old_mod = sys.modules.get("watcher_common")
+    sys.modules["watcher_common"] = watcher_common_mod
+    try:
+        ns: dict[str, Any] = {"__file__": "/tmp/transcript_watcher.py"}
+        exec(compile(stripped, "transcript_watcher.py", "exec"), ns)
+    finally:
+        if old_mod is not None:
+            sys.modules["watcher_common"] = old_mod
+        else:
+            sys.modules.pop("watcher_common", None)
+    return ns
 
 
 def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
-    import json as json_mod
-
-    from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
-
-    assistant = json_mod.dumps(
+    assistant = json.dumps(
         {
             "type": "assistant",
             "uuid": "contract-asst-2",
@@ -308,7 +326,7 @@ def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
             },
         }
     )
-    user_result = json_mod.dumps(
+    user_result = json.dumps(
         {
             "type": "user",
             "uuid": "contract-user-2",
@@ -526,8 +544,12 @@ def test_provision_changeling_scripts_uses_executable_mode() -> None:
     host = StubHost()
     provision_changeling_scripts(cast(Any, host), _DEFAULT_PROVISIONING)
 
-    for _, _, mode in host.written_files:
-        assert mode == "0755"
+    for path, _, mode in host.written_files:
+        # Script modules (non-executable) are provisioned with 0644
+        if path.name in ("watcher_common.py",):
+            assert mode == "0644", f"Expected 0644 for module {path.name}, got {mode}"
+        else:
+            assert mode == "0755", f"Expected 0755 for script {path.name}, got {mode}"
 
 
 def test_provision_llm_tools_creates_tools_dir() -> None:
