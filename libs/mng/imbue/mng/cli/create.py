@@ -807,7 +807,7 @@ def _handle_create(
         )
 
         # Update tab completion cache so the new agent name is immediately available
-        add_agent_name_to_cache(str(create_result.agent.name))
+        add_agent_name_to_cache(create_result.agent.name)
 
         # If --edit-message was used, wait for editor and send the message
         if editor_session is not None:
@@ -927,7 +927,7 @@ def _create_agent_in_background(
         # If creation fails in the child, the stale entry will be cleaned up
         # on the next background refresh.
         if agent_options.name is not None:
-            add_agent_name_to_cache(str(agent_options.name))
+            add_agent_name_to_cache(agent_options.name)
         return
 
     # Child process: detach from parent and continue
