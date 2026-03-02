@@ -9,7 +9,9 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
+from imbue.mng.register_guards import register_mng_guards
 from imbue.mng.utils.logging import suppress_warnings
 
 suppress_warnings()
+register_mng_guards()
 register_conftest_hooks(globals())
