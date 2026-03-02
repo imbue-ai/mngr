@@ -16,7 +16,7 @@ Write a CONCISE description of the problem the branch is trying to solve, based 
 
 Determine the base branch: use `$GIT_BASE_BRANCH` if set, otherwise default to `main`.
 
-Read the diff validation prompt from [validate-diff.md](validate-diff.md). Spawn a Task subagent (`subagent_type: "general-purpose"`, `model: "haiku"`) with that prompt, providing the base branch name and the problem description from Phase 1.
+Read the diff validation prompt from [prompts/validate-diff.md](prompts/validate-diff.md). Spawn a Task subagent (`subagent_type: "general-purpose"`, `model: "haiku"`) with that prompt, providing the base branch name and the problem description from Phase 1.
 
 Based on the subagent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
@@ -41,7 +41,7 @@ git worktree add --detach $worktree_path $base_hash
 
 ## Phase 4: Spawn Analysis Subagent
 
-Read the subagent prompt from [analyze-architecture.md](analyze-architecture.md). Spawn a single Task subagent (`subagent_type: "general-purpose"`, leaving model as default) with that prompt, prepending:
+Read the subagent prompt from [prompts/analyze-architecture.md](prompts/analyze-architecture.md). Spawn a single Task subagent (`subagent_type: "general-purpose"`, leaving model as default) with that prompt, prepending:
 - The problem description from Phase 1
 - The base commit hash ($base_hash) and feature branch tip hash ($tip_hash)
 - The worktree path ($worktree_path)
