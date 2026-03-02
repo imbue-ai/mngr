@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
 from imbue.mng_claude_zygote.resources.event_watcher import _WatcherSettings
@@ -14,7 +15,12 @@ from imbue.mng_claude_zygote.resources.event_watcher import _check_and_send_new_
 from imbue.mng_claude_zygote.resources.event_watcher import _get_offset
 from imbue.mng_claude_zygote.resources.event_watcher import _load_watcher_settings
 from imbue.mng_claude_zygote.resources.event_watcher import _set_offset
-from imbue.mng_claude_zygote.resources.watcher_common import Logger
+
+
+@pytest.fixture(autouse=True)
+def _reset_loguru() -> None:
+    """Reset loguru handlers before each test to avoid test pollution."""
+    logger.remove()
 
 
 class SubprocessCapture:
@@ -73,7 +79,9 @@ def test_load_settings_defaults_when_no_file(tmp_path: Path) -> None:
 
 
 def test_load_settings_reads_from_file(tmp_path: Path) -> None:
-    (tmp_path / "settings.toml").write_text(
+    changelings_dir = tmp_path / ".changelings"
+    changelings_dir.mkdir()
+    (changelings_dir / "settings.toml").write_text(
         '[watchers]\nevent_poll_interval_seconds = 10\nwatched_event_sources = ["messages", "stop"]\n'
     )
     settings = _load_watcher_settings(tmp_path)
@@ -82,13 +90,17 @@ def test_load_settings_reads_from_file(tmp_path: Path) -> None:
 
 
 def test_load_settings_handles_corrupt_file(tmp_path: Path) -> None:
-    (tmp_path / "settings.toml").write_text("this is not valid toml {{{")
+    changelings_dir = tmp_path / ".changelings"
+    changelings_dir.mkdir()
+    (changelings_dir / "settings.toml").write_text("this is not valid toml {{{")
     settings = _load_watcher_settings(tmp_path)
     assert settings.poll_interval == 3
 
 
 def test_load_settings_handles_partial_config(tmp_path: Path) -> None:
-    (tmp_path / "settings.toml").write_text("[watchers]\nevent_poll_interval_seconds = 7\n")
+    changelings_dir = tmp_path / ".changelings"
+    changelings_dir.mkdir()
+    (changelings_dir / "settings.toml").write_text("[watchers]\nevent_poll_interval_seconds = 7\n")
     settings = _load_watcher_settings(tmp_path)
     assert settings.poll_interval == 7
     assert settings.sources == ["messages", "scheduled", "mng_agents", "stop"]
@@ -135,9 +147,8 @@ def test_check_and_send_does_nothing_when_no_events_file(
     """No crash when events file does not exist."""
     offsets_dir = tmp_path / "offsets"
     offsets_dir.mkdir()
-    log = Logger(tmp_path / "test.log")
 
-    _check_and_send_new_events(tmp_path / "events.jsonl", "test_source", offsets_dir, "agent", log)
+    _check_and_send_new_events(tmp_path / "events.jsonl", "test_source", offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 0
 
 
@@ -150,9 +161,8 @@ def test_check_and_send_does_nothing_when_at_current_offset(
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n')
     _set_offset(offsets_dir, "test_source", 1)
-    log = Logger(tmp_path / "test.log")
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 0
 
 
@@ -165,9 +175,8 @@ def test_check_and_send_sends_new_events_and_updates_offset(
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n{"event": 2}\n{"event": 3}\n')
     (offsets_dir / "test_source.offset").write_text("1")
-    log = Logger(tmp_path / "test.log")
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent")
 
     assert len(mock_subprocess_success.calls) == 1
     cmd = mock_subprocess_success.calls[0][0]
@@ -186,9 +195,8 @@ def test_check_and_send_does_not_update_offset_on_failure(
     offsets_dir.mkdir()
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n{"event": 2}\n')
-    log = Logger(tmp_path / "test.log")
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "my-agent")
     assert _get_offset(offsets_dir, "test_source") == 0
 
 
@@ -200,7 +208,6 @@ def test_check_and_send_handles_timeout(
     offsets_dir.mkdir()
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n')
-    log = Logger(tmp_path / "test.log")
 
     def timeout_run(cmd: list[str], **kwargs: Any) -> types.SimpleNamespace:
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
@@ -208,7 +215,7 @@ def test_check_and_send_handles_timeout(
     mock_sp = types.SimpleNamespace(run=timeout_run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent")
     assert _get_offset(offsets_dir, "test_source") == 0
 
 
@@ -220,7 +227,6 @@ def test_check_and_send_handles_os_error(
     offsets_dir.mkdir()
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n')
-    log = Logger(tmp_path / "test.log")
 
     def os_error_run(cmd: list[str], **kwargs: Any) -> types.SimpleNamespace:
         raise OSError("subprocess launch failed")
@@ -228,7 +234,7 @@ def test_check_and_send_handles_os_error(
     mock_sp = types.SimpleNamespace(run=os_error_run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent")
     assert _get_offset(offsets_dir, "test_source") == 0
 
 
@@ -242,9 +248,8 @@ def test_check_and_send_skips_empty_new_lines(
     events_file = tmp_path / "events.jsonl"
     events_file.write_text('{"event": 1}\n\n\n')
     _set_offset(offsets_dir, "test_source", 1)
-    log = Logger(tmp_path / "test.log")
 
-    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent", log)
+    _check_and_send_new_events(events_file, "test_source", offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 0
 
 
@@ -258,14 +263,13 @@ def test_check_all_sources_iterates_all_sources(
     logs_dir = tmp_path / "logs"
     offsets_dir = logs_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True)
-    log = Logger(tmp_path / "test.log")
 
     for source in ("messages", "stop"):
         source_dir = logs_dir / source
         source_dir.mkdir(parents=True)
         (source_dir / "events.jsonl").write_text(f'{{"source": "{source}"}}\n')
 
-    _check_all_sources(logs_dir, ["messages", "stop"], offsets_dir, "agent", log)
+    _check_all_sources(logs_dir, ["messages", "stop"], offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 2
 
 
@@ -276,7 +280,6 @@ def test_check_all_sources_skips_missing_event_files(
     logs_dir = tmp_path / "logs"
     offsets_dir = logs_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True)
-    log = Logger(tmp_path / "test.log")
 
-    _check_all_sources(logs_dir, ["nonexistent"], offsets_dir, "agent", log)
+    _check_all_sources(logs_dir, ["nonexistent"], offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 0

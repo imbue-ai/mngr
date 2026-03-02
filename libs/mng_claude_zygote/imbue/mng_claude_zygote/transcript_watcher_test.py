@@ -6,48 +6,41 @@ from typing import Any
 from typing import cast
 
 import pytest
+from loguru import logger
 
-from imbue.mng_claude_zygote.resources.transcript_watcher import _WatcherSettings
 from imbue.mng_claude_zygote.resources.transcript_watcher import _convert_new_events
 from imbue.mng_claude_zygote.resources.transcript_watcher import _extract_text_content
 from imbue.mng_claude_zygote.resources.transcript_watcher import _get_existing_event_ids
 from imbue.mng_claude_zygote.resources.transcript_watcher import _has_tool_results_only
-from imbue.mng_claude_zygote.resources.transcript_watcher import _load_watcher_settings
+from imbue.mng_claude_zygote.resources.transcript_watcher import _load_poll_interval
 from imbue.mng_claude_zygote.resources.transcript_watcher import _make_event_id
-from imbue.mng_claude_zygote.resources.watcher_common import Logger
-
-# -- _WatcherSettings tests --
 
 
-def test_watcher_settings_defaults() -> None:
-    settings = _WatcherSettings()
-    assert settings.poll_interval == 5
+@pytest.fixture(autouse=True)
+def _reset_loguru() -> None:
+    """Reset loguru handlers before each test to avoid test pollution."""
+    logger.remove()
 
 
-def test_watcher_settings_is_frozen() -> None:
-    settings = _WatcherSettings()
-    with pytest.raises(AttributeError):
-        settings.poll_interval = 10  # type: ignore[misc]
+# -- _load_poll_interval tests --
 
 
-# -- _load_watcher_settings tests --
+def test_load_poll_interval_defaults_when_no_file(tmp_path: Path) -> None:
+    assert _load_poll_interval(tmp_path) == 5
 
 
-def test_load_settings_defaults_when_no_file(tmp_path: Path) -> None:
-    settings = _load_watcher_settings(tmp_path)
-    assert settings.poll_interval == 5
+def test_load_poll_interval_reads_from_file(tmp_path: Path) -> None:
+    changelings_dir = tmp_path / ".changelings"
+    changelings_dir.mkdir()
+    (changelings_dir / "settings.toml").write_text("[watchers]\ntranscript_poll_interval_seconds = 20\n")
+    assert _load_poll_interval(tmp_path) == 20
 
 
-def test_load_settings_reads_from_file(tmp_path: Path) -> None:
-    (tmp_path / "settings.toml").write_text("[watchers]\ntranscript_poll_interval_seconds = 20\n")
-    settings = _load_watcher_settings(tmp_path)
-    assert settings.poll_interval == 20
-
-
-def test_load_settings_handles_corrupt_file(tmp_path: Path) -> None:
-    (tmp_path / "settings.toml").write_text("this is not valid toml {{{")
-    settings = _load_watcher_settings(tmp_path)
-    assert settings.poll_interval == 5
+def test_load_poll_interval_handles_corrupt_file(tmp_path: Path) -> None:
+    changelings_dir = tmp_path / ".changelings"
+    changelings_dir.mkdir()
+    (changelings_dir / "settings.toml").write_text("this is not valid toml {{{")
+    assert _load_poll_interval(tmp_path) == 5
 
 
 # -- _extract_text_content tests --
@@ -146,24 +139,21 @@ def test_make_event_id_with_different_suffixes() -> None:
 
 
 def test_get_existing_event_ids_empty(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     output_file = tmp_path / "output.jsonl"
-    assert _get_existing_event_ids(output_file, log) == set()
+    assert _get_existing_event_ids(output_file) == set()
 
 
 def test_get_existing_event_ids_reads_ids(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     output_file = tmp_path / "output.jsonl"
     output_file.write_text(json.dumps({"event_id": "evt-1"}) + "\n" + json.dumps({"event_id": "evt-2"}) + "\n")
-    ids = _get_existing_event_ids(output_file, log)
+    ids = _get_existing_event_ids(output_file)
     assert ids == {"evt-1", "evt-2"}
 
 
 def test_get_existing_event_ids_handles_malformed_lines(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     output_file = tmp_path / "output.jsonl"
     output_file.write_text("bad json\n" + json.dumps({"event_id": "evt-ok"}) + "\n")
-    ids = _get_existing_event_ids(output_file, log)
+    ids = _get_existing_event_ids(output_file)
     assert ids == {"evt-ok"}
 
 
@@ -235,12 +225,11 @@ def _make_user_event(
 
 
 def test_convert_new_events_converts_user_text_message(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
     input_file.write_text(_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello") + "\n")
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
 
     assert count == 1
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -251,12 +240,11 @@ def test_convert_new_events_converts_user_text_message(tmp_path: Path) -> None:
 
 
 def test_convert_new_events_converts_assistant_message(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
     input_file.write_text(_make_assistant_event("uuid-2", "2026-01-01T00:00:01Z", text="Hi there!") + "\n")
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
 
     assert count == 1
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -269,7 +257,6 @@ def test_convert_new_events_converts_assistant_message(tmp_path: Path) -> None:
 
 
 def test_convert_new_events_converts_tool_calls(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -282,7 +269,7 @@ def test_convert_new_events_converts_tool_calls(tmp_path: Path) -> None:
         )
         + "\n"
     )
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
 
     assert count == 1
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -292,7 +279,6 @@ def test_convert_new_events_converts_tool_calls(tmp_path: Path) -> None:
 
 
 def test_convert_new_events_converts_tool_results(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -310,7 +296,7 @@ def test_convert_new_events_converts_tool_results(tmp_path: Path) -> None:
     )
     input_file.write_text(assistant + "\n" + user + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 2  # assistant + tool_result
 
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -323,7 +309,6 @@ def test_convert_new_events_converts_tool_results(tmp_path: Path) -> None:
 
 
 def test_convert_new_events_deduplicates_by_event_id(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -333,12 +318,11 @@ def test_convert_new_events_deduplicates_by_event_id(tmp_path: Path) -> None:
     # Pre-populate output with the same event_id
     output_file.write_text(json.dumps({"event_id": "uuid-1-user", "type": "user_message", "content": "Hello"}) + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 0
 
 
 def test_convert_new_events_skips_progress_events(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -352,46 +336,42 @@ def test_convert_new_events_skips_progress_events(tmp_path: Path) -> None:
     )
     input_file.write_text(progress + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 0
 
 
 def test_convert_new_events_handles_missing_input_file(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "nonexistent.jsonl"
     output_file = tmp_path / "output.jsonl"
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 0
 
 
 def test_convert_new_events_handles_malformed_json(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
     valid = _make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="valid")
     input_file.write_text("not json\n" + valid + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 1
 
 
 def test_convert_new_events_skips_events_without_uuid(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
     no_uuid = json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "hi"}})
     input_file.write_text(no_uuid + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 0
 
 
 def test_convert_new_events_user_with_text_and_tool_results(tmp_path: Path) -> None:
     """A user message with both text and tool results should emit both."""
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -419,7 +399,7 @@ def test_convert_new_events_user_with_text_and_tool_results(tmp_path: Path) -> N
     )
     input_file.write_text(assistant + "\n" + user + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
 
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
     types_found = [e["type"] for e in events]
@@ -429,7 +409,6 @@ def test_convert_new_events_user_with_text_and_tool_results(tmp_path: Path) -> N
 
 
 def test_convert_new_events_truncates_tool_input_preview(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -442,7 +421,7 @@ def test_convert_new_events_truncates_tool_input_preview(tmp_path: Path) -> None
         )
         + "\n"
     )
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 1
 
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -451,7 +430,6 @@ def test_convert_new_events_truncates_tool_input_preview(tmp_path: Path) -> None
 
 
 def test_convert_new_events_truncates_long_tool_output(tmp_path: Path) -> None:
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -469,7 +447,7 @@ def test_convert_new_events_truncates_long_tool_output(tmp_path: Path) -> None:
     )
     input_file.write_text(assistant + "\n" + user + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
     tool_results = [e for e in events if e["type"] == "tool_result"]
     assert len(tool_results[0]["output"]) <= 2003  # 2000 + "..."
@@ -477,7 +455,6 @@ def test_convert_new_events_truncates_long_tool_output(tmp_path: Path) -> None:
 
 def test_convert_new_events_tool_result_with_list_content(tmp_path: Path) -> None:
     """Tool result content can be a list of text blocks."""
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -507,7 +484,7 @@ def test_convert_new_events_tool_result_with_list_content(tmp_path: Path) -> Non
     )
     input_file.write_text(assistant + "\n" + user + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
     tool_results = [e for e in events if e["type"] == "tool_result"]
     assert tool_results[0]["output"] == "part 1\npart 2"
@@ -515,7 +492,6 @@ def test_convert_new_events_tool_result_with_list_content(tmp_path: Path) -> Non
 
 def test_convert_new_events_sorts_by_timestamp(tmp_path: Path) -> None:
     """Events should be output sorted by timestamp."""
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -524,7 +500,7 @@ def test_convert_new_events_sorts_by_timestamp(tmp_path: Path) -> None:
     earlier = _make_user_event("uuid-earlier", "2026-01-01T00:00:01Z", text="Earlier")
     input_file.write_text(later + "\n" + earlier + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 2
 
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -534,7 +510,6 @@ def test_convert_new_events_sorts_by_timestamp(tmp_path: Path) -> None:
 
 def test_convert_new_events_cache_read_and_write_tokens(tmp_path: Path) -> None:
     """Verify cache_read and cache_write tokens are captured from usage."""
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -553,7 +528,7 @@ def test_convert_new_events_cache_read_and_write_tokens(tmp_path: Path) -> None:
         + "\n"
     )
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     assert count == 1
 
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
@@ -564,7 +539,6 @@ def test_convert_new_events_cache_read_and_write_tokens(tmp_path: Path) -> None:
 
 def test_convert_new_events_unknown_tool_name_defaults(tmp_path: Path) -> None:
     """Tool results for unknown tool_call_ids should get tool_name='unknown'."""
-    log = Logger(tmp_path / "test.log")
     input_file = tmp_path / "input.jsonl"
     output_file = tmp_path / "output.jsonl"
 
@@ -576,7 +550,7 @@ def test_convert_new_events_unknown_tool_name_defaults(tmp_path: Path) -> None:
     )
     input_file.write_text(user + "\n")
 
-    count = _convert_new_events(input_file, output_file, log)
+    count = _convert_new_events(input_file, output_file)
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
     tool_results = [e for e in events if e["type"] == "tool_result"]
     assert tool_results[0]["tool_name"] == "unknown"

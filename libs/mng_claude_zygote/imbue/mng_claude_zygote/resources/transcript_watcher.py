@@ -26,52 +26,34 @@ Environment:
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import sys
-import threading
-import tomllib
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 try:
-    from imbue.mng_claude_zygote.resources.watcher_common import Logger
-    from imbue.mng_claude_zygote.resources.watcher_common import mtime_poll_files
+    from imbue.mng_claude_zygote.resources.watcher_common import load_watchers_section
     from imbue.mng_claude_zygote.resources.watcher_common import require_env
-    from imbue.mng_claude_zygote.resources.watcher_common import setup_watchdog_for_files
+    from imbue.mng_claude_zygote.resources.watcher_common import run_watcher_loop
+    from imbue.mng_claude_zygote.resources.watcher_common import setup_watcher_logging
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from watcher_common import Logger  # type: ignore[no-redef]
-    from watcher_common import mtime_poll_files  # type: ignore[no-redef]
+    from watcher_common import load_watchers_section  # type: ignore[no-redef]
     from watcher_common import require_env  # type: ignore[no-redef]
-    from watcher_common import setup_watchdog_for_files  # type: ignore[no-redef]
+    from watcher_common import run_watcher_loop  # type: ignore[no-redef]
+    from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
 
 # Maximum length for tool input preview and tool output
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
 
-@dataclasses.dataclass(frozen=True)
-class _WatcherSettings:
-    """Parsed transcript watcher settings from settings.toml."""
-
-    poll_interval: int = 5
-
-
-def _load_watcher_settings(agent_work_dir: Path) -> _WatcherSettings:
-    """Load transcript watcher settings from settings.toml."""
-    settings_path = agent_work_dir / ".changelings" / "settings.toml"
-    try:
-        if not settings_path.exists():
-            return _WatcherSettings()
-        raw = tomllib.loads(settings_path.read_text())
-        watchers = raw.get("watchers", {})
-        return _WatcherSettings(
-            poll_interval=watchers.get("transcript_poll_interval_seconds", 5),
-        )
-    except Exception as exc:
-        print(f"WARNING: failed to load settings: {exc}", file=sys.stderr)
-        return _WatcherSettings()
+def _load_poll_interval(agent_work_dir: Path) -> int:
+    """Load transcript watcher poll interval from settings.toml."""
+    watchers = load_watchers_section(agent_work_dir)
+    return watchers.get("transcript_poll_interval_seconds", 5)
 
 
 def _extract_text_content(content: str | list[dict[str, Any]]) -> str:
@@ -112,7 +94,7 @@ def _make_event_id(uuid: str, suffix: str) -> str:
     return f"{uuid}-{suffix}"
 
 
-def _get_existing_event_ids(output_file: Path, log: Logger) -> set[str]:
+def _get_existing_event_ids(output_file: Path) -> set[str]:
     """Read event IDs already present in the output file."""
     existing_ids: set[str] = set()
     if not output_file.is_file():
@@ -128,14 +110,13 @@ def _get_existing_event_ids(output_file: Path, log: Logger) -> set[str]:
                 except (json.JSONDecodeError, KeyError):
                     continue
     except OSError as exc:
-        log.info(f"WARNING: failed to read output file: {exc}")
+        logger.info("Failed to read output file: {}", exc)
     return existing_ids
 
 
 def _convert_new_events(
     input_file: Path,
     output_file: Path,
-    log: Logger,
 ) -> int:
     """Convert new Claude transcript events to the common format.
 
@@ -147,10 +128,10 @@ def _convert_new_events(
     Returns the number of new events converted.
     """
     if not input_file.is_file():
-        log.debug(f"Input file not found: {input_file}")
+        logger.debug("Input file not found: {}", input_file)
         return 0
 
-    existing_ids = _get_existing_event_ids(output_file, log)
+    existing_ids = _get_existing_event_ids(output_file)
 
     # Track tool_use_id -> tool_name from assistant messages so we can
     # label tool results with the correct tool name
@@ -314,7 +295,7 @@ def _convert_new_events(
 
                 # Skip: progress, file-history-snapshot, system, result, etc.
     except OSError as exc:
-        log.info(f"WARNING: failed to read input file: {exc}")
+        logger.info("Failed to read input file: {}", exc)
         return 0
 
     if not new_events:
@@ -340,49 +321,32 @@ def main() -> None:
     output_file = agent_state_dir / "logs" / "common_transcript" / "events.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    log = Logger(host_dir / "logs" / "transcript_watcher.log")
+    setup_watcher_logging("transcript_watcher", host_dir / "logs")
 
-    settings = _load_watcher_settings(agent_work_dir)
+    poll_interval = _load_poll_interval(agent_work_dir)
 
-    log.info("Transcript watcher started")
-    log.info(f"  Agent data dir: {agent_state_dir}")
-    log.info(f"  Input: {input_file}")
-    log.info(f"  Output: {output_file}")
-    log.info(f"  Log file: {log.log_file_path}")
-    log.info(f"  Poll interval: {settings.poll_interval}s")
-    log.info("  Using watchdog for file watching with periodic mtime polling")
+    logger.info("Transcript watcher started")
+    logger.info("  Agent data dir: {}", agent_state_dir)
+    logger.info("  Input: {}", input_file)
+    logger.info("  Output: {}", output_file)
+    logger.info("  Poll interval: {}s", poll_interval)
 
     watch_paths = [input_file]
 
-    wake_event = threading.Event()
-    observer, is_watchdog_active = setup_watchdog_for_files(watch_paths, wake_event, log)
+    def on_tick() -> None:
+        converted_count = _convert_new_events(input_file, output_file)
+        if converted_count > 0:
+            logger.info("Converted {} new event(s) -> logs/common_transcript/events.jsonl", converted_count)
+        else:
+            logger.debug("No new events to convert")
 
-    mtime_cache: dict[str, tuple[float, int]] = {}
-    mtime_poll_files(watch_paths, mtime_cache, log)
-
-    try:
-        while True:
-            is_triggered_by_watchdog = wake_event.wait(timeout=settings.poll_interval)
-            wake_event.clear()
-
-            if is_triggered_by_watchdog:
-                log.debug("Woken by watchdog filesystem event")
-
-            is_mtime_changed = mtime_poll_files(watch_paths, mtime_cache, log)
-            if not is_triggered_by_watchdog and is_mtime_changed:
-                log.info("Periodic mtime poll detected changes")
-
-            converted_count = _convert_new_events(input_file, output_file, log)
-            if converted_count > 0:
-                log.info(f"Converted {converted_count} new event(s) -> logs/common_transcript/events.jsonl")
-            else:
-                log.debug("No new events to convert")
-    except KeyboardInterrupt:
-        log.info("Transcript watcher stopping (KeyboardInterrupt)")
-    finally:
-        if is_watchdog_active:
-            observer.stop()
-            observer.join()
+    run_watcher_loop(
+        "Transcript watcher",
+        poll_interval,
+        watch_paths,
+        is_directory_mode=False,
+        on_tick=on_tick,
+    )
 
 
 if __name__ == "__main__":

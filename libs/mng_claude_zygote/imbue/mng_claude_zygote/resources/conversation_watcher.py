@@ -14,49 +14,31 @@ Environment:
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import sqlite3
 import sys
-import threading
-import tomllib
 from pathlib import Path
 
+from loguru import logger
+
 try:
-    from imbue.mng_claude_zygote.resources.watcher_common import Logger
-    from imbue.mng_claude_zygote.resources.watcher_common import mtime_poll_files
+    from imbue.mng_claude_zygote.resources.watcher_common import load_watchers_section
     from imbue.mng_claude_zygote.resources.watcher_common import require_env
-    from imbue.mng_claude_zygote.resources.watcher_common import setup_watchdog_for_files
+    from imbue.mng_claude_zygote.resources.watcher_common import run_watcher_loop
+    from imbue.mng_claude_zygote.resources.watcher_common import setup_watcher_logging
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from watcher_common import Logger  # type: ignore[no-redef]
-    from watcher_common import mtime_poll_files  # type: ignore[no-redef]
+    from watcher_common import load_watchers_section  # type: ignore[no-redef]
     from watcher_common import require_env  # type: ignore[no-redef]
-    from watcher_common import setup_watchdog_for_files  # type: ignore[no-redef]
+    from watcher_common import run_watcher_loop  # type: ignore[no-redef]
+    from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
 
 
-@dataclasses.dataclass(frozen=True)
-class _WatcherSettings:
-    """Parsed conversation watcher settings from settings.toml."""
-
-    poll_interval: int = 5
-
-
-def _load_watcher_settings(agent_work_dir: Path) -> _WatcherSettings:
-    """Load conversation watcher settings from settings.toml."""
-    settings_path = agent_work_dir / ".changelings" / "settings.toml"
-    try:
-        if not settings_path.exists():
-            return _WatcherSettings()
-        raw = tomllib.loads(settings_path.read_text())
-        watchers = raw.get("watchers", {})
-        return _WatcherSettings(
-            poll_interval=watchers.get("conversation_poll_interval_seconds", 5),
-        )
-    except Exception as exc:
-        print(f"WARNING: failed to load settings: {exc}", file=sys.stderr)
-        return _WatcherSettings()
+def _load_poll_interval(agent_work_dir: Path) -> int:
+    """Load conversation watcher poll interval from settings.toml."""
+    watchers = load_watchers_section(agent_work_dir)
+    return watchers.get("conversation_poll_interval_seconds", 5)
 
 
 def _get_llm_db_path() -> Path:
@@ -67,7 +49,7 @@ def _get_llm_db_path() -> Path:
     return Path(llm_user_path) / "logs.db"
 
 
-def _get_tracked_conversation_ids(conversations_file: Path, log: Logger) -> set[str]:
+def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
     """Read tracked conversation IDs from logs/conversations/events.jsonl."""
     tracked_cids: set[str] = set()
     if not conversations_file.is_file():
@@ -81,14 +63,14 @@ def _get_tracked_conversation_ids(conversations_file: Path, log: Logger) -> set[
                 try:
                     tracked_cids.add(json.loads(line)["conversation_id"])
                 except (json.JSONDecodeError, KeyError) as exc:
-                    log.info(f"WARNING: malformed conversation event line: {exc}")
+                    logger.info("Malformed conversation event line: {}", exc)
                     continue
     except OSError as exc:
-        log.info(f"WARNING: failed to read conversations file: {exc}")
+        logger.info("Failed to read conversations file: {}", exc)
     return tracked_cids
 
 
-def _get_existing_event_ids(messages_file: Path, log: Logger) -> set[str]:
+def _get_existing_event_ids(messages_file: Path) -> set[str]:
     """Read event IDs already present in logs/messages/events.jsonl."""
     file_event_ids: set[str] = set()
     if not messages_file.is_file():
@@ -102,10 +84,10 @@ def _get_existing_event_ids(messages_file: Path, log: Logger) -> set[str]:
                 try:
                     file_event_ids.add(json.loads(line)["event_id"])
                 except (json.JSONDecodeError, KeyError) as exc:
-                    log.info(f"WARNING: malformed message event line: {exc}")
+                    logger.info("Malformed message event line: {}", exc)
                     continue
     except OSError as exc:
-        log.info(f"WARNING: failed to read messages file: {exc}")
+        logger.info("Failed to read messages file: {}", exc)
     return file_event_ids
 
 
@@ -113,7 +95,6 @@ def _sync_messages(
     db_path: Path,
     conversations_file: Path,
     messages_file: Path,
-    log: Logger,
 ) -> int:
     """Sync missing messages from the llm DB to logs/messages/events.jsonl.
 
@@ -126,19 +107,19 @@ def _sync_messages(
     Returns the number of new events synced.
     """
     if not db_path.is_file():
-        log.debug(f"LLM database not found at {db_path}")
+        logger.debug("LLM database not found at {}", db_path)
         return 0
 
-    tracked_cids = _get_tracked_conversation_ids(conversations_file, log)
+    tracked_cids = _get_tracked_conversation_ids(conversations_file)
     if not tracked_cids:
         return 0
 
-    file_event_ids = _get_existing_event_ids(messages_file, log)
+    file_event_ids = _get_existing_event_ids(messages_file)
 
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except sqlite3.Error as exc:
-        log.info(f"WARNING: cannot open database: {exc}")
+        logger.info("Cannot open database: {}", exc)
         return 0
 
     placeholders = ",".join("?" for _ in tracked_cids)
@@ -158,7 +139,7 @@ def _sync_messages(
                 [*cid_list, window],
             ).fetchall()
         except sqlite3.Error as exc:
-            log.info(f"WARNING: sqlite3 query error: {exc}")
+            logger.info("sqlite3 query error: {}", exc)
             break
 
         if not rows:
@@ -245,51 +226,34 @@ def main() -> None:
     messages_file = agent_state_dir / "logs" / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True, exist_ok=True)
 
-    log = Logger(host_dir / "logs" / "conversation_watcher.log")
+    setup_watcher_logging("conversation_watcher", host_dir / "logs")
 
-    settings = _load_watcher_settings(agent_work_dir)
+    poll_interval = _load_poll_interval(agent_work_dir)
     db_path = _get_llm_db_path()
 
-    log.info("Conversation watcher started")
-    log.info(f"  Agent data dir: {agent_state_dir}")
-    log.info(f"  LLM database: {db_path}")
-    log.info(f"  Conversations events: {conversations_file}")
-    log.info(f"  Messages events: {messages_file}")
-    log.info(f"  Log file: {log.log_file_path}")
-    log.info(f"  Poll interval: {settings.poll_interval}s")
-    log.info("  Using watchdog for file watching with periodic mtime polling")
+    logger.info("Conversation watcher started")
+    logger.info("  Agent data dir: {}", agent_state_dir)
+    logger.info("  LLM database: {}", db_path)
+    logger.info("  Conversations events: {}", conversations_file)
+    logger.info("  Messages events: {}", messages_file)
+    logger.info("  Poll interval: {}s", poll_interval)
 
     watch_paths = [db_path, conversations_file]
 
-    wake_event = threading.Event()
-    observer, is_watchdog_active = setup_watchdog_for_files(watch_paths, wake_event, log)
+    def on_tick() -> None:
+        synced_count = _sync_messages(db_path, conversations_file, messages_file)
+        if synced_count > 0:
+            logger.info("Synced {} new message event(s) -> logs/messages/events.jsonl", synced_count)
+        else:
+            logger.debug("No new messages to sync")
 
-    mtime_cache: dict[str, tuple[float, int]] = {}
-    mtime_poll_files(watch_paths, mtime_cache, log)
-
-    try:
-        while True:
-            is_triggered_by_watchdog = wake_event.wait(timeout=settings.poll_interval)
-            wake_event.clear()
-
-            if is_triggered_by_watchdog:
-                log.debug("Woken by watchdog filesystem event")
-
-            is_mtime_changed = mtime_poll_files(watch_paths, mtime_cache, log)
-            if not is_triggered_by_watchdog and is_mtime_changed:
-                log.info("Periodic mtime poll detected changes")
-
-            synced_count = _sync_messages(db_path, conversations_file, messages_file, log)
-            if synced_count > 0:
-                log.info(f"Synced {synced_count} new message event(s) -> logs/messages/events.jsonl")
-            else:
-                log.debug("No new messages to sync")
-    except KeyboardInterrupt:
-        log.info("Conversation watcher stopping (KeyboardInterrupt)")
-    finally:
-        if is_watchdog_active:
-            observer.stop()
-            observer.join()
+    run_watcher_loop(
+        "Conversation watcher",
+        poll_interval,
+        watch_paths,
+        is_directory_mode=False,
+        on_tick=on_tick,
+    )
 
 
 if __name__ == "__main__":

@@ -50,7 +50,6 @@ from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
 from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_messages
-from imbue.mng_claude_zygote.resources.watcher_common import Logger
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
@@ -117,8 +116,7 @@ def _find_agent_state_dir(host_dir: Path) -> Path | None:
 
 def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path, tmp_path: Path) -> int:
     """Run the conversation watcher's sync logic and return the count of synced events."""
-    log = Logger(tmp_path / "test-conv-watcher.log")
-    return _sync_messages(db_path, conversations_file, messages_file, log)
+    return _sync_messages(db_path, conversations_file, messages_file)
 
 
 # -- Provisioning filesystem structure tests --

@@ -8,43 +8,117 @@ logging, and polling infrastructure that all watchers share.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
-import time
+import tomllib
+from collections.abc import Callable
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from loguru import logger
+from watchdog.events import FileSystemEvent
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 
-class Logger:
-    """Simple dual-output logger: writes to both stdout and a log file."""
+def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
+    """Configure loguru for a watcher process.
 
-    def __init__(self, log_file: Path) -> None:
-        self.log_file_path = log_file
-        self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    Sets up:
+    - stdout logging for INFO+ messages (timestamped)
+    - JSONL file logging for DEBUG+ to <log_dir>/<watcher_name>/events.jsonl
+    """
+    logger.remove()
 
-    def _timestamp(self) -> str:
-        now = time.time()
-        fractional_ns = int((now % 1) * 1_000_000_000)
-        utc_struct = time.gmtime(now)
-        return time.strftime("%Y-%m-%dT%H:%M:%S", utc_struct) + f".{fractional_ns:09d}Z"
+    logger.add(
+        sys.stdout,
+        level="INFO",
+        format="[{time:YYYY-MM-DDTHH:mm:ss.SSSSSS!UTC}Z] {message}",
+        colorize=False,
+    )
 
-    def info(self, msg: str) -> None:
-        line = f"[{self._timestamp()}] {msg}"
-        print(line, flush=True)
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(line + "\n")
-        except OSError:
-            pass
+    log_file = log_dir / watcher_name / "events.jsonl"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def debug(self, msg: str) -> None:
-        line = f"[{self._timestamp()}] [debug] {msg}"
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(line + "\n")
-        except OSError:
-            pass
+    sink = _make_jsonl_file_sink(
+        file_path=str(log_file),
+        event_type="watcher",
+        event_source=watcher_name,
+    )
+    logger.add(
+        sink,
+        level="DEBUG",
+        format="{message}",
+        colorize=False,
+    )
+
+
+def _format_nanosecond_timestamp(dt: Any) -> str:
+    """Format a datetime as ISO 8601 with nanosecond precision in UTC."""
+    utc_dt = dt.astimezone(timezone.utc)
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc_dt.microsecond * 1000:09d}Z"
+
+
+def _make_jsonl_file_sink(
+    file_path: str,
+    event_type: str,
+    event_source: str,
+    max_size_bytes: int = 10 * 1024 * 1024,
+) -> Callable[..., None]:
+    """Create a loguru sink function that writes flat JSONL to a rotating file."""
+    state: dict[str, Any] = {"file": None, "size": 0}
+
+    def _ensure_file() -> Any:
+        if state["file"] is None:
+            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+            state["file"] = open(file_path, "a")
+            try:
+                state["size"] = Path(file_path).stat().st_size
+            except OSError:
+                state["size"] = 0
+        return state["file"]
+
+    def _rotate_if_needed() -> None:
+        if state["size"] >= max_size_bytes:
+            if state["file"] is not None:
+                state["file"].close()
+            path = Path(file_path)
+            rotation_idx = 1
+            while True:
+                rotated = path.with_name(f"{path.name}.{rotation_idx}")
+                if not rotated.exists():
+                    break
+                rotation_idx += 1
+            path.rename(rotated)
+            state["file"] = open(file_path, "a")
+            state["size"] = 0
+
+    def sink(message: Any) -> None:
+        record = message.record
+        event: dict[str, Any] = {
+            "timestamp": _format_nanosecond_timestamp(record["time"]),
+            "type": event_type,
+            "event_id": f"evt-{uuid4().hex}",
+            "source": event_source,
+            "level": record["level"].name,
+            "message": record["message"],
+            "pid": os.getpid(),
+        }
+
+        json_line = json.dumps(event, separators=(",", ":"), default=str) + "\n"
+        line_bytes = len(json_line.encode("utf-8"))
+
+        _rotate_if_needed()
+        fh = _ensure_file()
+        fh.write(json_line)
+        fh.flush()
+        state["size"] += line_bytes
+
+    return sink
 
 
 def require_env(name: str) -> str:
@@ -56,10 +130,25 @@ def require_env(name: str) -> str:
     return value
 
 
+def load_watchers_section(agent_work_dir: Path) -> dict[str, Any]:
+    """Load the [watchers] section from .changelings/settings.toml.
+
+    Returns an empty dict on any error (missing file, corrupt TOML, etc.).
+    """
+    settings_path = agent_work_dir / ".changelings" / "settings.toml"
+    try:
+        if not settings_path.exists():
+            return {}
+        raw = tomllib.loads(settings_path.read_text())
+        return raw.get("watchers", {})
+    except Exception as exc:
+        logger.warning("Failed to load watcher settings: {}", exc)
+        return {}
+
+
 def mtime_poll_files(
     watch_paths: list[Path],
     mtime_cache: dict[str, tuple[float, int]],
-    log: Logger,
 ) -> bool:
     """Check specific files for mtime/size changes. Returns True if any changed."""
     is_changed = False
@@ -82,15 +171,15 @@ def mtime_poll_files(
             mtime_cache[key] = current
             is_changed = True
             if previous is None:
-                log.debug(f"New file detected: {file_path}")
+                logger.debug("New file detected: {}", file_path)
             else:
-                log.debug(f"File changed: {file_path}")
+                logger.debug("File changed: {}", file_path)
 
     removed_keys = set(mtime_cache.keys()) - current_keys
     for key in removed_keys:
         del mtime_cache[key]
         is_changed = True
-        log.debug(f"File removed: {key}")
+        logger.debug("File removed: {}", key)
 
     return is_changed
 
@@ -98,7 +187,6 @@ def mtime_poll_files(
 def mtime_poll_directories(
     directories: list[Path],
     mtime_cache: dict[str, tuple[float, int]],
-    log: Logger,
 ) -> bool:
     """Scan directories for mtime/size changes in their contents.
 
@@ -119,7 +207,6 @@ def mtime_poll_directories(
                     stat = entry.stat()
                     current = (stat.st_mtime, stat.st_size)
                 except OSError:
-                    # File may have been deleted between iterdir() and stat()
                     continue
 
                 previous = mtime_cache.get(key)
@@ -127,25 +214,20 @@ def mtime_poll_directories(
                     mtime_cache[key] = current
                     is_changed = True
                     if previous is None:
-                        log.debug(f"New file detected: {entry}")
+                        logger.debug("New file detected: {}", entry)
                     else:
-                        log.debug(f"File changed: {entry}")
+                        logger.debug("File changed: {}", entry)
         except OSError as exc:
-            log.debug(f"Failed to list directory {directory}: {exc}")
+            logger.debug("Failed to list directory {}: {}", directory, exc)
             continue
 
     removed_keys = set(mtime_cache.keys()) - current_keys
     for key in removed_keys:
         del mtime_cache[key]
         is_changed = True
-        log.debug(f"File removed: {key}")
+        logger.debug("File removed: {}", key)
 
     return is_changed
-
-
-from watchdog.events import FileSystemEvent
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 
 class ChangeHandler(FileSystemEventHandler):
@@ -162,7 +244,6 @@ class ChangeHandler(FileSystemEventHandler):
 def setup_watchdog_for_directories(
     watch_dirs: list[Path],
     wake_event: threading.Event,
-    log: Logger,
 ) -> tuple[Any, bool]:
     """Create and start a watchdog Observer for the given directories.
 
@@ -177,14 +258,13 @@ def setup_watchdog_for_directories(
         observer.start()
         return observer, True
     except Exception as exc:
-        log.info(f"WARNING: watchdog observer failed to start, falling back to polling only: {exc}")
+        logger.warning("Watchdog observer failed to start, falling back to polling only: {}", exc)
         return observer, False
 
 
 def setup_watchdog_for_files(
     watch_paths: list[Path],
     wake_event: threading.Event,
-    log: Logger,
 ) -> tuple[Any, bool]:
     """Create and start a watchdog Observer for the parent directories of watched files.
 
@@ -203,11 +283,63 @@ def setup_watchdog_for_files(
                 observer.schedule(handler, parent, recursive=False)
                 watched_dirs.add(parent)
             except Exception as exc:
-                log.info(f"WARNING: failed to watch {parent}: {exc}")
+                logger.warning("Failed to watch {}: {}", parent, exc)
 
     try:
         observer.start()
         return observer, True
     except Exception as exc:
-        log.info(f"WARNING: watchdog observer failed to start, falling back to polling only: {exc}")
+        logger.warning("Watchdog observer failed to start, falling back to polling only: {}", exc)
         return observer, False
+
+
+def run_watcher_loop(
+    watcher_name: str,
+    poll_interval: int,
+    watch_targets: list[Path],
+    *,
+    is_directory_mode: bool,
+    on_tick: Callable[[], None],
+) -> None:
+    """Run the common watcher main loop with watchdog + mtime polling.
+
+    Sets up watchdog for filesystem event detection, initializes mtime polling
+    as a safety net, then loops: wait for events or timeout, poll for changes,
+    and invoke the on_tick callback.
+    """
+    wake_event = threading.Event()
+
+    if is_directory_mode:
+        observer, is_watchdog_active = setup_watchdog_for_directories(watch_targets, wake_event)
+    else:
+        observer, is_watchdog_active = setup_watchdog_for_files(watch_targets, wake_event)
+
+    mtime_cache: dict[str, tuple[float, int]] = {}
+    if is_directory_mode:
+        mtime_poll_directories(watch_targets, mtime_cache)
+    else:
+        mtime_poll_files(watch_targets, mtime_cache)
+
+    try:
+        while True:
+            is_triggered_by_watchdog = wake_event.wait(timeout=poll_interval)
+            wake_event.clear()
+
+            if is_triggered_by_watchdog:
+                logger.debug("Woken by watchdog filesystem event")
+
+            if is_directory_mode:
+                is_mtime_changed = mtime_poll_directories(watch_targets, mtime_cache)
+            else:
+                is_mtime_changed = mtime_poll_files(watch_targets, mtime_cache)
+
+            if not is_triggered_by_watchdog and is_mtime_changed:
+                logger.info("Periodic mtime poll detected changes")
+
+            on_tick()
+    except KeyboardInterrupt:
+        logger.info("{} stopping (KeyboardInterrupt)", watcher_name)
+    finally:
+        if is_watchdog_active:
+            observer.stop()
+            observer.join()
