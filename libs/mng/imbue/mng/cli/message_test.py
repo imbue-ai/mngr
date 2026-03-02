@@ -204,7 +204,7 @@ def test_message_all_json_format_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test message --all --format json with no agents."""
+    """Test message --all --format json with no agents outputs JSON with empty lists."""
     result = cli_runner.invoke(
         message,
         ["--all", "-m", "hello", "--format", "json"],
@@ -212,6 +212,11 @@ def test_message_all_json_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["successful_agents"] == []
+    assert data["failed_agents"] == []
+    assert data["total_sent"] == 0
+    assert data["total_failed"] == 0
 
 
 # =============================================================================
@@ -332,7 +337,11 @@ def test_message_all_jsonl_format_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test message --all --format jsonl with no agents exits 0."""
+    """Test message --all --format jsonl with no agents exits 0 with empty output.
+
+    In JSONL mode, events are emitted via streaming callbacks. With no agents matched,
+    no callbacks fire, so the output is empty.
+    """
     result = cli_runner.invoke(
         message,
         ["--all", "-m", "hello", "--format", "jsonl"],
@@ -340,3 +349,4 @@ def test_message_all_jsonl_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    assert result.output.strip() == ""

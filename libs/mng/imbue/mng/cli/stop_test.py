@@ -182,7 +182,11 @@ def test_stop_format_json_all_no_running_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--format json --all with no running agents outputs nothing (early return)."""
+    """--format json --all with no running agents outputs nothing (early return).
+
+    In JSON mode, the "No running agents" message is not emitted because _output()
+    only writes for HUMAN format. The command returns early before _output_result().
+    """
     result = cli_runner.invoke(
         stop,
         ["--all", "--format", "json"],
@@ -190,9 +194,8 @@ def test_stop_format_json_all_no_running_agents(
         catch_exceptions=False,
     )
 
-    # Should succeed; in JSON mode, the "No running agents" message is not emitted
-    # because _output() only writes for HUMAN format
     assert result.exit_code == 0
+    assert result.output.strip() == ""
 
 
 # =============================================================================

@@ -54,6 +54,9 @@ def test_write_agent_names_cache_handles_oserror(tmp_path: Path) -> None:
         write_agent_names_cache(read_only_dir, ["agent1"])
     finally:
         read_only_dir.chmod(0o755)
+    # Verify the cache file was NOT created (write failed silently).
+    # Check after restoring permissions so Path.exists() doesn't raise PermissionError.
+    assert not (read_only_dir / AGENT_COMPLETIONS_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -72,6 +75,9 @@ def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyP
         write_cli_completions_cache(group)
     finally:
         read_only_dir.chmod(0o755)
+    # Verify the cache file was NOT created (write failed silently).
+    # Check after restoring permissions so Path.exists() doesn't raise PermissionError.
+    assert not (read_only_dir / COMMAND_COMPLETIONS_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_writes_valid_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

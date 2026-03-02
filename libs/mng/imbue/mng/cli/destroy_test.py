@@ -183,7 +183,11 @@ def test_destroy_all_json_format_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--all --force --format json with no agents returns 0."""
+    """--all --force --format json with no agents returns 0 and empty output.
+
+    In JSON mode, the "No agents found" message is not emitted because _output()
+    only writes for HUMAN format. The command returns early before _output_result().
+    """
     result = cli_runner.invoke(
         destroy,
         ["--all", "--force", "--format", "json"],
@@ -191,6 +195,7 @@ def test_destroy_all_json_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+    assert result.output.strip() == ""
 
 
 def test_destroy_session_fails_with_invalid_prefix(
