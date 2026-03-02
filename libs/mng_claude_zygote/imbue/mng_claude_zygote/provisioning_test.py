@@ -12,6 +12,9 @@ import pytest
 
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
+from imbue.mng_claude_zygote.data_types import CommonAssistantMessageEvent
+from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
+from imbue.mng_claude_zygote.data_types import CommonUserMessageEvent
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
@@ -322,8 +325,6 @@ def test_conversion_handles_malformed_lines_gracefully() -> None:
 
 
 def test_conversion_user_message_validates_against_pydantic_schema() -> None:
-    from imbue.mng_claude_zygote.data_types import CommonUserMessageEvent
-
     raw = json.dumps(
         {
             "type": "user",
@@ -340,8 +341,6 @@ def test_conversion_user_message_validates_against_pydantic_schema() -> None:
 
 
 def test_conversion_assistant_message_validates_against_pydantic_schema() -> None:
-    from imbue.mng_claude_zygote.data_types import CommonAssistantMessageEvent
-
     raw = json.dumps(
         {
             "type": "assistant",
@@ -364,8 +363,6 @@ def test_conversion_assistant_message_validates_against_pydantic_schema() -> Non
 
 
 def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
-    from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
-
     assistant = json.dumps(
         {
             "type": "assistant",
