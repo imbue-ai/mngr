@@ -517,6 +517,7 @@ def test_event_watcher_script_is_valid_bash(chat_env: ChatScriptEnv) -> None:
 # -- Agent creation integration tests --
 
 
+@pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_create_agent_with_additional_commands(
     cli_runner: CliRunner,
@@ -543,6 +544,7 @@ def test_create_agent_with_additional_commands(
         assert "watcher" in window_names, f"Expected 'watcher' window, got: {window_names}"
 
 
+@pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_create_agent_creates_state_directory(
     cli_runner: CliRunner,
@@ -683,6 +685,7 @@ print(json.dumps({{
 # -- Tmux window injection integration tests --
 
 
+@pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_agent_with_ttyd_window_creates_session_with_expected_windows(
     cli_runner: CliRunner,
@@ -725,6 +728,7 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
             assert expected in window_names, f"Expected window '{expected}' in {window_names}"
 
 
+@pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_agent_creation_and_listing(
     cli_runner: CliRunner,
