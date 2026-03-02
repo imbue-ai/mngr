@@ -1,5 +1,6 @@
 import functools
 import inspect
+import json
 import os
 import sys
 import time
@@ -133,7 +134,14 @@ def trace_span(message: str, *args: Any, _is_trace_span_enabled: bool = True, **
                 logger.trace(done_message, *args, elapsed)
 
 
-# -- Event envelope patcher for loguru's built-in JSON serialization --
+# -- Flat JSONL formatting for loguru file sinks --
+#
+# Produces a single flat JSON object per log line that merges the event
+# envelope fields with all standard loguru fields.  The field names are
+# chosen so that the envelope fields (timestamp, type, event_id, source,
+# level, message, pid) have the same names and positions as in the bash
+# logs emitted by mng_log.sh.  Python logs simply have additional fields
+# (function, line, module, extra, exception, etc.).
 
 
 @pure
@@ -152,30 +160,71 @@ def generate_log_event_id() -> str:
     return f"evt-{uuid4().hex}"
 
 
-def make_envelope_patcher(
+def make_jsonl_log_formatter(
     event_type: str,
     event_source: str,
     command: str | None,
-) -> Callable[..., None]:
-    """Create a loguru patcher that injects event envelope fields into record['extra'].
+) -> Callable[..., str]:
+    """Create a loguru format function that produces flat JSONL with event envelope fields.
 
-    The patcher adds timestamp, type, event_id, source, pid (and optionally
-    command) to every log record's extra dict. When loguru serializes the
-    record with serialize=True, these fields appear inside record.extra
-    alongside all standard loguru fields (level, message, function, line, etc).
+    The returned callable builds a single flat JSON object from the loguru
+    record, combining the event envelope fields (timestamp, type, event_id,
+    source, level, message, pid, command) with flattened loguru metadata
+    (function, line, module, file, elapsed, exception, process, thread, extra).
+
+    Braces in the returned string are doubled so loguru's format_map does not
+    interpret them as placeholders.
     """
     bound_type = event_type
     bound_source = event_source
     bound_command = command
 
-    def patcher(record: Any) -> None:
-        dt = record["time"]
-        record["extra"]["timestamp"] = format_nanosecond_iso_timestamp(dt)
-        record["extra"]["type"] = bound_type
-        record["extra"]["event_id"] = generate_log_event_id()
-        record["extra"]["source"] = bound_source
-        record["extra"]["pid"] = os.getpid()
+    def formatter(record: Any) -> str:
+        # Build the flat dict with envelope fields first, then loguru fields
+        event: dict[str, Any] = {
+            "timestamp": format_nanosecond_iso_timestamp(record["time"]),
+            "type": bound_type,
+            "event_id": generate_log_event_id(),
+            "source": bound_source,
+            "level": record["level"].name,
+            "message": record["message"],
+            "pid": os.getpid(),
+        }
         if bound_command is not None:
-            record["extra"]["command"] = bound_command
+            event["command"] = bound_command
 
-    return patcher
+        # Flattened loguru metadata
+        event["function"] = record["function"]
+        event["line"] = record["line"]
+        event["module"] = record["module"]
+        event["logger_name"] = record["name"]
+        event["file_name"] = record["file"].name
+        event["file_path"] = record["file"].path
+        event["elapsed_seconds"] = record["elapsed"].total_seconds()
+
+        # Exception info (None when no exception)
+        exc = record["exception"]
+        if exc is not None:
+            event["exception"] = {
+                "type": exc.type.__name__ if exc.type else None,
+                "value": str(exc.value) if exc.value else None,
+                "traceback": bool(exc.traceback),
+            }
+        else:
+            event["exception"] = None
+
+        # Process and thread
+        event["process_name"] = record["process"].name
+        event["thread_name"] = record["thread"].name
+        event["thread_id"] = record["thread"].id
+
+        # Extra context (from logger.contextualize or logger.bind)
+        extra = dict(record["extra"])
+        if extra:
+            event["extra"] = extra
+
+        json_line = json.dumps(event, separators=(",", ":"), default=str)
+        # Escape braces so loguru's format_map does not interpret them
+        return json_line.replace("{", "{{").replace("}", "}}") + "\n"
+
+    return formatter

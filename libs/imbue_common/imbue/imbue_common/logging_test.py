@@ -1,6 +1,5 @@
 """Tests for logging module."""
 
-import io
 import json
 from datetime import datetime
 from datetime import timezone
@@ -11,7 +10,7 @@ from loguru import logger
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import log_span
-from imbue.imbue_common.logging import make_envelope_patcher
+from imbue.imbue_common.logging import make_jsonl_log_formatter
 from imbue.imbue_common.logging import setup_logging
 from imbue.mng.errors import BaseMngError
 
@@ -194,74 +193,106 @@ def test_generate_log_event_id_returns_unique_ids() -> None:
     assert len(id_a) == 4 + 32
 
 
-def test_make_envelope_patcher_injects_fields_into_record_extra() -> None:
-    """The patcher should inject envelope fields into the loguru record's extra dict."""
-    captured_extras: list[dict[str, Any]] = []
+def test_make_jsonl_log_formatter_produces_flat_json_with_envelope_fields() -> None:
+    """The formatter should produce flat JSON with envelope and loguru fields at the top level."""
+    captured_lines: list[str] = []
+
+    formatter = make_jsonl_log_formatter(event_type="mng", event_source="mng", command="create")
 
     def sink(message: Any) -> None:
-        captured_extras.append(dict(message.record["extra"]))
+        fmt = formatter(message.record)
+        # Simulate loguru's unescape
+        captured_lines.append(fmt.replace("{{", "{").replace("}}", "}"))
 
-    patcher = make_envelope_patcher(event_type="mng", event_source="mng", command="create")
-    logger.configure(patcher=patcher)
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
         logger.info("Created agent {}", "test-agent")
     finally:
         logger.remove(handler_id)
-        logger.configure(patcher=lambda r: None)
 
-    assert len(captured_extras) == 1
-    extra = captured_extras[0]
-    assert extra["type"] == "mng"
-    assert extra["source"] == "mng"
-    assert extra["command"] == "create"
-    assert extra["event_id"].startswith("evt-")
-    assert "timestamp" in extra
-    assert "pid" in extra
+    parsed = json.loads(captured_lines[0])
+
+    # Envelope fields at top level
+    assert parsed["type"] == "mng"
+    assert parsed["source"] == "mng"
+    assert parsed["command"] == "create"
+    assert parsed["event_id"].startswith("evt-")
+    assert "timestamp" in parsed
+    assert "pid" in parsed
+    assert parsed["level"] == "INFO"
+    assert parsed["message"] == "Created agent test-agent"
+
+    # Loguru metadata at top level
+    assert "function" in parsed
+    assert "line" in parsed
+    assert "module" in parsed
+    assert "logger_name" in parsed
+    assert "file_name" in parsed
+    assert "file_path" in parsed
+    assert "elapsed_seconds" in parsed
+    assert "process_name" in parsed
+    assert "thread_name" in parsed
+    assert "thread_id" in parsed
 
 
-def test_make_envelope_patcher_omits_command_when_none() -> None:
-    """When command is None, the patcher should not add a command key to extra."""
-    captured_extras: list[dict[str, Any]] = []
+def test_make_jsonl_log_formatter_omits_command_when_none() -> None:
+    """When command is None, the command key should not appear in the JSON."""
+    captured_lines: list[str] = []
+
+    formatter = make_jsonl_log_formatter(event_type="event_watcher", event_source="event_watcher", command=None)
 
     def sink(message: Any) -> None:
-        captured_extras.append(dict(message.record["extra"]))
+        fmt = formatter(message.record)
+        captured_lines.append(fmt.replace("{{", "{").replace("}}", "}"))
 
-    patcher = make_envelope_patcher(event_type="event_watcher", event_source="event_watcher", command=None)
-    logger.configure(patcher=patcher)
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
         logger.debug("Watching events")
     finally:
         logger.remove(handler_id)
-        logger.configure(patcher=lambda r: None)
 
-    extra = captured_extras[0]
-    assert extra["type"] == "event_watcher"
-    assert "command" not in extra
+    parsed = json.loads(captured_lines[0])
+    assert parsed["type"] == "event_watcher"
+    assert "command" not in parsed
 
 
-def test_make_envelope_patcher_works_with_serialize_true() -> None:
-    """The patcher should produce valid serialized JSON via loguru's serialize=True."""
-    buf = io.StringIO()
-    patcher = make_envelope_patcher(event_type="mng", event_source="mng", command="list")
-    logger.configure(patcher=patcher)
-    handler_id = logger.add(buf, level="TRACE", format="{message}", serialize=True)
+def test_make_jsonl_log_formatter_includes_extra_context() -> None:
+    """Extra context from logger.contextualize should appear in the extra field."""
+    captured_lines: list[str] = []
+
+    formatter = make_jsonl_log_formatter(event_type="mng", event_source="mng", command="list")
+
+    def sink(message: Any) -> None:
+        fmt = formatter(message.record)
+        captured_lines.append(fmt.replace("{{", "{").replace("}}", "}"))
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
-        logger.info('Path with "quotes" and {{braces}}')
+        with logger.contextualize(host="my-host"):
+            logger.info("test")
     finally:
         logger.remove(handler_id)
-        logger.configure(patcher=lambda r: None)
 
-    parsed = json.loads(buf.getvalue())
-    record = parsed["record"]
-    extra = record["extra"]
+    parsed = json.loads(captured_lines[0])
+    assert parsed["extra"]["host"] == "my-host"
 
-    assert extra["type"] == "mng"
-    assert extra["source"] == "mng"
-    assert extra["command"] == "list"
-    assert extra["event_id"].startswith("evt-")
-    # Standard loguru fields should still be present
-    assert "function" in record
-    assert "level" in record
-    assert "message" in record
+
+def test_make_jsonl_log_formatter_handles_special_chars() -> None:
+    """Messages with quotes, newlines, and braces should be properly JSON-escaped."""
+    captured_lines: list[str] = []
+
+    formatter = make_jsonl_log_formatter(event_type="mng", event_source="mng", command=None)
+
+    def sink(message: Any) -> None:
+        fmt = formatter(message.record)
+        captured_lines.append(fmt.replace("{{", "{").replace("}}", "}"))
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
+    try:
+        logger.info('Path "C:\\test"\nLine 2')
+    finally:
+        logger.remove(handler_id)
+
+    parsed = json.loads(captured_lines[0])
+    assert '"C:\\test"' in parsed["message"]
+    assert "\n" in parsed["message"]

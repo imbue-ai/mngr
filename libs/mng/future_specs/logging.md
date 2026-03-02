@@ -30,40 +30,43 @@ mng separates three distinct concerns:
 - Level controlled by config (default: DEBUG)
 - Each log line is a self-describing JSON object with envelope fields
 
-## Event Envelope Fields
+## Log Format
 
-All log events (Python and bash) include the same set of envelope fields:
+Both Python and bash emit flat JSON with the same top-level field names. The envelope fields (`timestamp`, `type`, `event_id`, `source`, `level`, `message`, `pid`) are at the top level in both, so a single parser works for all log lines. Python logs include additional fields (function, line, module, etc.) that bash logs don't have.
 
-- `timestamp`: ISO 8601 with nanosecond precision (e.g., `2026-03-01T12:00:00.123456789Z`)
-- `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
-- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
-- `source`: Matches the folder under `logs/` (e.g., `mng`, `event_watcher`)
-- `level`: Log level (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
-- `message`: The log message text
-- `pid`: Process ID
-- `command`: CLI subcommand (optional, present for `mng` and `changelings`)
-
-### Bash format (flat JSON)
-
-Bash scripts (via `mng_log.sh`) emit flat JSON with just the envelope fields:
+### Bash example (envelope fields only)
 
 ```json
 {"timestamp":"2026-03-01T12:00:00.123456789Z","type":"event_watcher","event_id":"evt-a1b2c3d4...","source":"event_watcher","level":"INFO","message":"Started watching","pid":12345}
 ```
 
-### Python format (loguru serialized JSON)
-
-Python (via loguru's `serialize=True`) emits loguru's native JSON structure with the envelope fields injected into `record.extra`. This includes additional loguru metadata (function, line, module, exception, etc.) that bash logs don't have:
+### Python example (envelope fields + loguru metadata)
 
 ```json
-{"text":"...", "record":{"extra":{"timestamp":"...","type":"mng","event_id":"evt-...","source":"mng","pid":12345,"command":"list"}, "level":{"name":"INFO",...}, "message":"...", "function":"...", "line":42, ...}}
+{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"mng","event_id":"evt-a1b2c3d4...","source":"mng","level":"INFO","message":"Created agent","pid":12345,"command":"create","function":"create_agent","line":42,"module":"api.create","logger_name":"imbue.mng.api.create","file_name":"create.py","file_path":"/path/to/create.py","elapsed_seconds":0.012,"exception":null,"process_name":"MainProcess","thread_name":"MainThread","thread_id":140106487883584,"extra":{"host":"my-host"}}
 ```
 
-### Querying across both formats
+### All fields
 
-To extract envelope fields from either format:
-- For bash lines: fields are at the top level (e.g., `line["timestamp"]`)
-- For Python lines: fields are in `line["record"]["extra"]` (e.g., `line["record"]["extra"]["timestamp"]`); the message is in `line["record"]["message"]` and level in `line["record"]["level"]["name"]`
+Shared (present in both Python and bash):
+- `timestamp`: ISO 8601 with nanosecond precision in UTC
+- `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
+- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
+- `source`: Matches the folder under `logs/`
+- `level`: Log level string (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
+- `message`: The log message text
+- `pid`: Process ID
+
+Optional shared:
+- `command`: CLI subcommand (present for `mng` and `changelings`)
+
+Python-only (from loguru):
+- `function`, `line`, `module`, `logger_name`: Source code location
+- `file_name`, `file_path`: Source file
+- `elapsed_seconds`: Time since logger was first used
+- `exception`: Exception info object (null when no exception)
+- `process_name`, `thread_name`, `thread_id`: Process and thread info
+- `extra`: Dict of context from `logger.contextualize()` or `logger.bind()`
 
 ## Configuration
 

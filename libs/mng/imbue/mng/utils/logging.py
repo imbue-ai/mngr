@@ -12,7 +12,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.logging import make_envelope_patcher
+from imbue.imbue_common.logging import make_jsonl_log_formatter
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mng.primitives import LogLevel
 
@@ -245,17 +245,7 @@ def setup_logging(
             diagnose=False,
         )
 
-    # Configure the patcher to inject event envelope fields into every record.
-    # These appear in record.extra and are included in loguru's serialize=True output.
-    logger.configure(
-        patcher=make_envelope_patcher(
-            event_type=config.event_type,
-            event_source=config.event_source,
-            command=command,
-        ),
-    )
-
-    # Set up file logging using loguru's built-in JSON serialization
+    # Set up file logging with flat JSONL format
     if config.log_file_path is not None:
         log_file = config.log_file_path.expanduser()
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -270,8 +260,12 @@ def setup_logging(
     logger.add(
         log_file,
         level=loguru_file_level,
-        format="{message}",
-        serialize=True,
+        format=make_jsonl_log_formatter(
+            event_type=config.event_type,
+            event_source=config.event_source,
+            command=command,
+        ),
+        colorize=False,
         diagnose=False,
         rotation=f"{config.max_log_size_mb} MB",
     )
