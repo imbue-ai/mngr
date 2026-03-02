@@ -1,6 +1,6 @@
 ---
 name: delegate-task
-description: Create a sub-agent to perform a task. Use when you need to delegate work to a working or verifying agent.
+description: Create a sub-agent to perform a task. Use when you need to delegate work to another agent, for example, a working or verifying agent.
 ---
 
 # Delegating tasks to sub-agents
@@ -15,7 +15,9 @@ To delegate a task, create a sub-agent using `mng`:
 mng create <task-name> --message "Your task instructions here"
 ```
 
-The `<task-name>` should be a short, descriptive name for the task (e.g. `fix-login-bug`, `add-search-feature`).
+The `<task-name>` should be a descriptive name for the task (e.g. `fix-login-bug`, `add-search-feature`).
+Note that the names must be unique because git branches are created for each task.
+If the command fails because the name is taken, simply choose a more specific, longer name.
 
 The `--message` flag sends an initial prompt to the agent describing what work to do. Be specific and include:
 - What the task is and why it needs to be done
