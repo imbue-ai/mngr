@@ -839,21 +839,27 @@ def test_gather_context_incremental_returns_new_messages_from_other_conversation
     assert "new reply" in second
 
 
-def _load_format_events_module(module_name: str) -> Any:
-    """Load the _format_events function from either context_tool or extra_context_tool."""
+def _get_format_events_fn(module_name: str) -> Any:
+    """Get the format_events function from either context_tool or extra_context_tool.
+
+    The function is named _format_events in context_tool and _format_extra_events
+    in extra_context_tool (to avoid duplicate tool registration by llm --functions).
+    """
     if module_name == "context_tool":
-        return _load_fresh_context_tool("fmt_shared")
+        module = _load_fresh_context_tool("fmt_shared")
+        return module._format_events
     else:
-        return _load_fresh_extra_context_tool()
+        module = _load_fresh_extra_context_tool()
+        return module._format_extra_events
 
 
 @pytest.mark.parametrize("module_name", ["context_tool", "extra_context_tool"])
 def test_format_events_handles_data_events(module_name: str) -> None:
     """Verify _format_events formats data-bearing events correctly."""
-    module = _load_format_events_module(module_name)
+    format_events = _get_format_events_fn(module_name)
 
     lines = [_make_data_event("d1", "monitor")]
-    result = module._format_events(lines)
+    result = format_events(lines)
     assert "[trigger]" in result
     assert "key" in result
 
@@ -861,28 +867,28 @@ def test_format_events_handles_data_events(module_name: str) -> None:
 @pytest.mark.parametrize("module_name", ["context_tool", "extra_context_tool"])
 def test_format_events_handles_plain_events(module_name: str) -> None:
     """Verify _format_events formats events without role/content or data."""
-    module = _load_format_events_module(module_name)
+    format_events = _get_format_events_fn(module_name)
 
     line = '{"timestamp":"2026-01-01T00:00:00Z","type":"heartbeat","event_id":"h1","source":"monitor"}'
-    result = module._format_events([line])
+    result = format_events([line])
     assert "[heartbeat]" in result
 
 
 @pytest.mark.parametrize("module_name", ["context_tool", "extra_context_tool"])
 def test_format_events_handles_malformed_json(module_name: str) -> None:
     """Verify _format_events gracefully handles unparseable JSON lines."""
-    module = _load_format_events_module(module_name)
+    format_events = _get_format_events_fn(module_name)
 
-    result = module._format_events(["not valid json at all"])
+    result = format_events(["not valid json at all"])
     assert "not valid json" in result
 
 
 @pytest.mark.parametrize("module_name", ["context_tool", "extra_context_tool"])
 def test_format_events_skips_empty_lines(module_name: str) -> None:
     """Verify _format_events skips empty/whitespace-only lines."""
-    module = _load_format_events_module(module_name)
+    format_events = _get_format_events_fn(module_name)
 
-    result = module._format_events(["", "   ", _make_event_line("e1")])
+    result = format_events(["", "   ", _make_event_line("e1")])
     assert "e1" in result
     lines = [line for line in result.split("\n") if line.strip()]
     assert len(lines) == 1
@@ -891,10 +897,10 @@ def test_format_events_skips_empty_lines(module_name: str) -> None:
 @pytest.mark.parametrize("module_name", ["context_tool", "extra_context_tool"])
 def test_format_events_handles_message_event(module_name: str) -> None:
     """Verify _format_events formats message events correctly."""
-    module = _load_format_events_module(module_name)
+    format_events = _get_format_events_fn(module_name)
 
     line = _make_message_line("m1", "conv-1", "user", "hello world")
-    result = module._format_events([line])
+    result = format_events([line])
     assert "user" in result
     assert "conv-1" in result
     assert "hello world" in result

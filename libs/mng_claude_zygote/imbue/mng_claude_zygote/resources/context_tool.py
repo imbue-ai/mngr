@@ -20,30 +20,41 @@ where they cannot import from each other or from the mng_claude_zygote package.
 
 import json
 import os
+import pathlib
 import sys
-from pathlib import Path
 
 _TAIL_CHUNK_SIZE = 8192
 
 
 def _load_settings() -> dict:
-    """Load settings from $MNG_AGENT_STATE_DIR/settings.toml.
+    """Load settings from .changelings/settings.toml in the work dir or agent state dir.
 
-    NOTE: This function is intentionally duplicated in extra_context_tool.py.
-    These files are deployed as standalone scripts and cannot share imports.
+    NOTE: This function is intentionally duplicated (as _load_extra_settings)
+    in extra_context_tool.py. These files are deployed as standalone scripts
+    and cannot share imports.
     """
     try:
         import tomllib
     except ImportError:
         print("WARNING: tomllib not available, using default settings", file=sys.stderr)
         return {}
-    settings_path = Path(os.environ.get("MNG_AGENT_STATE_DIR", "")) / "settings.toml"
-    try:
-        with settings_path.open("rb") as f:
-            return tomllib.load(f)
-    except (OSError, ValueError) as e:
-        print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
-        return {}
+    # Try work dir first (source of truth), then agent state dir (provisioned copy)
+    candidates = []
+    work_dir = os.environ.get("MNG_AGENT_WORK_DIR", "")
+    if work_dir:
+        candidates.append(pathlib.Path(work_dir) / ".changelings" / "settings.toml")
+    state_dir = os.environ.get("MNG_AGENT_STATE_DIR", "")
+    if state_dir:
+        candidates.append(pathlib.Path(state_dir) / "settings.toml")
+    for settings_path in candidates:
+        if not settings_path.exists():
+            continue
+        try:
+            with settings_path.open("rb") as f:
+                return tomllib.load(f)
+        except (OSError, ValueError) as e:
+            print(f"WARNING: failed to load settings from {settings_path}: {e}", file=sys.stderr)
+    return {}
 
 
 _SETTINGS = _load_settings()
@@ -63,7 +74,7 @@ _MAX_TRIGGER_LINES = _CONTEXT.get("max_trigger_line_count", 5)
 _last_file_sizes: dict[str, int] = {}
 
 
-def _read_tail_lines(file_path: Path, n: int) -> list[str]:
+def _read_tail_lines(file_path: pathlib.Path, n: int) -> list[str]:
     """Read the last n complete lines from a file by reading backwards from EOF.
 
     If the file doesn't end with a newline, the final partial line is dropped
@@ -109,7 +120,7 @@ def _read_tail_lines(file_path: Path, n: int) -> list[str]:
     return lines[-n:]
 
 
-def _get_new_lines(file_path: Path) -> list[str]:
+def _get_new_lines(file_path: pathlib.Path) -> list[str]:
     """Read new complete lines appended since the last call.
 
     Only returns lines terminated by a newline (complete writes).
@@ -166,7 +177,7 @@ def gather_context() -> str:
     if not agent_data_dir_str:
         return "No agent data directory configured."
 
-    agent_data_dir = Path(agent_data_dir_str)
+    agent_data_dir = pathlib.Path(agent_data_dir_str)
     if not agent_data_dir.exists():
         return "Agent data directory does not exist."
 
