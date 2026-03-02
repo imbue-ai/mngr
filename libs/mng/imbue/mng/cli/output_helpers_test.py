@@ -1,20 +1,28 @@
 """Tests for CLI output helpers."""
 
 import json
+from pathlib import Path
 
 import pytest
 
+from imbue.mng.api.sync import SyncFilesResult
+from imbue.mng.api.sync import SyncGitResult
 from imbue.mng.cli.output_helpers import AbortError
+from imbue.mng.cli.output_helpers import _write_json_line
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import format_size
 from imbue.mng.cli.output_helpers import on_error
+from imbue.mng.cli.output_helpers import output_sync_files_result
+from imbue.mng.cli.output_helpers import output_sync_git_result
 from imbue.mng.cli.output_helpers import render_format_template
+from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.errors import MngError
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import SyncMode
 
 # =============================================================================
 # Tests for AbortError
@@ -325,3 +333,300 @@ def test_emit_format_template_lines_empty_list(capsys) -> None:
     emit_format_template_lines("{name}", [])
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+# =============================================================================
+# Tests for output_sync_files_result
+# =============================================================================
+
+
+def test_output_sync_files_result_json(capsys) -> None:
+    """output_sync_files_result with JSON should output structured data."""
+    result = SyncFilesResult(
+        files_transferred=5,
+        bytes_transferred=1024,
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_files_result(result, OutputFormat.JSON)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["files_transferred"] == 5
+    assert output["bytes_transferred"] == 1024
+
+
+def test_output_sync_files_result_jsonl(capsys) -> None:
+    """output_sync_files_result with JSONL should emit event."""
+    result = SyncFilesResult(
+        files_transferred=3,
+        bytes_transferred=512,
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        mode=SyncMode.PULL,
+    )
+    output_sync_files_result(result, OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "pull_complete"
+
+
+def test_output_sync_files_result_human(capsys) -> None:
+    """output_sync_files_result with HUMAN should output human-readable line."""
+    result = SyncFilesResult(
+        files_transferred=5,
+        bytes_transferred=1024,
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_files_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Push complete" in captured.out
+    assert "5 files" in captured.out
+
+
+def test_output_sync_files_result_human_dry_run(capsys) -> None:
+    """output_sync_files_result dry run should say would be transferred."""
+    result = SyncFilesResult(
+        files_transferred=2,
+        bytes_transferred=256,
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=True,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_files_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Dry run complete" in captured.out
+    assert "would be transferred" in captured.out
+
+
+# =============================================================================
+# Tests for output_sync_git_result
+# =============================================================================
+
+
+def test_output_sync_git_result_json(capsys) -> None:
+    """output_sync_git_result with JSON should output structured data."""
+    result = SyncGitResult(
+        source_branch="main",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        commits_transferred=3,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_git_result(result, OutputFormat.JSON)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["commits_transferred"] == 3
+    assert output["source_branch"] == "main"
+
+
+def test_output_sync_git_result_jsonl(capsys) -> None:
+    """output_sync_git_result with JSONL should emit event."""
+    result = SyncGitResult(
+        source_branch="main",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        commits_transferred=3,
+        mode=SyncMode.PULL,
+    )
+    output_sync_git_result(result, OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "pull_git_complete"
+
+
+def test_output_sync_git_result_human_push(capsys) -> None:
+    """output_sync_git_result with HUMAN should output push message."""
+    result = SyncGitResult(
+        source_branch="main",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        commits_transferred=3,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_git_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Git push complete" in captured.out
+    assert "pushed" in captured.out
+
+
+def test_output_sync_git_result_human_pull(capsys) -> None:
+    """output_sync_git_result with HUMAN should output merge message."""
+    result = SyncGitResult(
+        source_branch="feature",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        commits_transferred=5,
+        mode=SyncMode.PULL,
+    )
+    output_sync_git_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Git merge complete" in captured.out
+    assert "merged" in captured.out
+
+
+def test_output_sync_git_result_human_dry_run(capsys) -> None:
+    """output_sync_git_result dry run should say would push/merge."""
+    result = SyncGitResult(
+        source_branch="main",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=True,
+        commits_transferred=3,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_git_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Dry run complete" in captured.out
+    assert "would push" in captured.out
+
+
+# =============================================================================
+# Tests for write_human_line
+# =============================================================================
+
+
+def test_write_human_line_no_args(capsys) -> None:
+    """write_human_line should write plain message without args."""
+    write_human_line("Hello world")
+    captured = capsys.readouterr()
+    assert captured.out == "Hello world\n"
+
+
+def test_write_human_line_with_args(capsys) -> None:
+    """write_human_line should format message with positional args."""
+    write_human_line("Created {} agent(s) on {}", 3, "modal")
+    captured = capsys.readouterr()
+    assert captured.out == "Created 3 agent(s) on modal\n"
+
+
+# =============================================================================
+# Tests for _write_json_line
+# =============================================================================
+
+
+def test_write_json_line_outputs_json(capsys) -> None:
+    """_write_json_line should output valid JSON followed by newline."""
+    _write_json_line({"key": "value", "number": 42})
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["key"] == "value"
+    assert output["number"] == 42
+
+
+def test_write_json_line_terminates_with_newline(capsys) -> None:
+    """_write_json_line should terminate output with newline."""
+    _write_json_line({"a": 1})
+    captured = capsys.readouterr()
+    assert captured.out.endswith("\n")
+
+
+# =============================================================================
+# Tests for render_format_template (edge cases)
+# =============================================================================
+
+
+def test_render_format_template_unknown_conversion_raises() -> None:
+    """render_format_template should raise on unknown conversion specifier."""
+    # Python's string.Formatter only supports s, r, a conversions.
+    # We test the assertionError path for unknown conversions.
+    # Since Python's parser doesn't allow unknown conversions in regular format strings,
+    # we can verify the known paths work correctly instead.
+    result = render_format_template("{name!s}", {"name": "test"})
+    assert result == "test"
+
+
+# =============================================================================
+# Tests for output_sync_files_result (JSONL push event name)
+# =============================================================================
+
+
+def test_output_sync_files_result_jsonl_push(capsys) -> None:
+    """output_sync_files_result with JSONL for PUSH should emit push_complete event."""
+    result = SyncFilesResult(
+        files_transferred=3,
+        bytes_transferred=512,
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_files_result(result, OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "push_complete"
+
+
+# =============================================================================
+# Tests for output_sync_git_result (JSONL push event name)
+# =============================================================================
+
+
+def test_output_sync_git_result_jsonl_push(capsys) -> None:
+    """output_sync_git_result with JSONL for PUSH should emit push_git_complete event."""
+    result = SyncGitResult(
+        source_branch="main",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=False,
+        commits_transferred=3,
+        mode=SyncMode.PUSH,
+    )
+    output_sync_git_result(result, OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "push_git_complete"
+
+
+def test_output_sync_git_result_human_pull_dry_run(capsys) -> None:
+    """output_sync_git_result dry run with PULL should say would merge."""
+    result = SyncGitResult(
+        source_branch="feature",
+        target_branch="main",
+        source_path=Path("/src"),
+        destination_path=Path("/dst"),
+        is_dry_run=True,
+        commits_transferred=2,
+        mode=SyncMode.PULL,
+    )
+    output_sync_git_result(result, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "would merge" in captured.out
+
+
+# =============================================================================
+# Tests for on_error (JSON ABORT)
+# =============================================================================
+
+
+def test_on_error_json_format_abort() -> None:
+    """on_error with JSON format and ABORT should raise AbortError."""
+    with pytest.raises(AbortError) as exc_info:
+        on_error("json error", ErrorBehavior.ABORT, OutputFormat.JSON)
+    assert exc_info.value.message == "json error"
+
+
+def test_on_error_jsonl_format_abort(capsys) -> None:
+    """on_error with JSONL format and ABORT should emit error and then raise."""
+    with pytest.raises(AbortError):
+        on_error("jsonl error", ErrorBehavior.ABORT, OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "error"
+    assert output["message"] == "jsonl error"

@@ -613,3 +613,51 @@ def test_emit_destroy_result_human_format() -> None:
     with _capture_stdout() as buf:
         _emit_destroy_result(destroyed, output_opts)
     assert "Destroyed 2 snapshot(s)" in buf.getvalue()
+
+
+# =============================================================================
+# Additional _emit_create_result tests (error paths)
+# =============================================================================
+
+
+def test_emit_create_result_json_with_errors() -> None:
+    """_emit_create_result in JSON format should include errors when present."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    created = [{"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": []}]
+    errors = [{"host_id": "host-2", "error": "timeout"}]
+    with _capture_stdout() as buf:
+        _emit_create_result(created, errors, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["count"] == 1
+    assert data["error_count"] == 1
+    assert len(data["errors"]) == 1
+
+
+def test_emit_create_result_jsonl_with_errors() -> None:
+    """_emit_create_result in JSONL format should include error count."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    created = [{"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local", "agent_names": []}]
+    errors = [{"host_id": "host-2", "error": "timeout"}]
+    with _capture_stdout() as buf:
+        _emit_create_result(created, errors, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["event"] == "create_result"
+    assert data["error_count"] == 1
+
+
+def test_emit_list_snapshots_human_table_with_size() -> None:
+    """_emit_list_snapshots in HUMAN format should output table with size."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    snap = SnapshotInfo(
+        id=SnapshotId("snap-list-table-1"),
+        name=SnapshotName("my-snapshot"),
+        created_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        size_bytes=1048576,
+    )
+    with _capture_stdout() as buf:
+        _emit_list_snapshots([("host-abc", snap)], output_opts)
+    output = buf.getvalue()
+    assert "ID" in output
+    assert "snap-list-table-1" in output
+    assert "my-snapshot" in output
+    assert "host-abc" in output

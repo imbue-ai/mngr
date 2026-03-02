@@ -85,3 +85,75 @@ def test_push_requires_target(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+
+
+def test_push_source_branch_requires_git_mode(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --source-branch requires --sync-mode=git."""
+    result = cli_runner.invoke(
+        push,
+        ["nonexistent-push-agent-123", "--source-branch", "main"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "--source-branch can only be used with --sync-mode=git" in result.output
+
+
+def test_push_mirror_requires_git_mode(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --mirror requires --sync-mode=git."""
+    result = cli_runner.invoke(
+        push,
+        ["nonexistent-push-agent-124", "--mirror"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "--mirror can only be used with --sync-mode=git" in result.output
+
+
+def test_push_rsync_only_with_source_branch_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --rsync-only with --source-branch (in git mode) is rejected."""
+    result = cli_runner.invoke(
+        push,
+        ["nonexistent-push-agent-125", "--rsync-only", "--source-branch", "main", "--sync-mode", "git"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+
+
+def test_push_rsync_only_with_mirror_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --rsync-only with --mirror (in git mode) is rejected."""
+    result = cli_runner.invoke(
+        push,
+        ["nonexistent-push-agent-126", "--rsync-only", "--mirror", "--sync-mode", "git"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+
+
+def test_push_full_sync_mode_not_implemented(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --sync-mode=full raises NotImplementedError."""
+    result = cli_runner.invoke(
+        push,
+        ["nonexistent-push-agent-127", "--sync-mode", "full"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0

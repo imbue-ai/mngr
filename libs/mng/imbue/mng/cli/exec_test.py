@@ -1,6 +1,10 @@
 """Unit tests for the exec CLI command."""
 
 import json
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from io import StringIO
 
 import pluggy
 import pytest
@@ -11,8 +15,24 @@ from imbue.mng.api.exec import MultiExecResult
 from imbue.mng.cli.exec import ExecCliOptions
 from imbue.mng.cli.exec import _emit_human_output
 from imbue.mng.cli.exec import _emit_json_output
+from imbue.mng.cli.exec import _emit_jsonl_error
 from imbue.mng.cli.exec import _emit_jsonl_exec_result
+from imbue.mng.cli.exec import _emit_output
 from imbue.mng.cli.exec import exec_command
+from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.primitives import OutputFormat
+
+
+@contextmanager
+def _capture_stdout() -> Iterator[StringIO]:
+    """Temporarily redirect sys.stdout to a StringIO buffer."""
+    buf = StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        yield buf
+    finally:
+        sys.stdout = old_stdout
 
 
 def test_exec_cli_options_fields() -> None:
@@ -193,3 +213,119 @@ def test_exec_cannot_combine_agents_and_all(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+
+
+# =============================================================================
+# Tests for _emit_jsonl_error
+# =============================================================================
+
+
+def test_emit_jsonl_error(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_jsonl_error outputs proper JSONL error event."""
+    _emit_jsonl_error("test-agent", "connection refused")
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "exec_error"
+    assert output["agent"] == "test-agent"
+    assert output["error"] == "connection refused"
+
+
+# =============================================================================
+# Tests for _emit_output (dispatch function)
+# =============================================================================
+
+
+def test_emit_output_with_format_template() -> None:
+    """Test _emit_output with a format template produces templated output."""
+    result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
+    multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{agent}\t{stdout}")
+    with _capture_stdout() as buf:
+        _emit_output(multi_result, output_opts)
+    assert "agent-1\thello" in buf.getvalue()
+
+
+def test_emit_output_format_template_strips_trailing_newline_from_stdout() -> None:
+    """Test that format template output strips trailing newlines from stdout/stderr."""
+    result1 = ExecResult(agent_name="agent-1", stdout="output\n", stderr="err\n", success=True)
+    multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{stdout}|{stderr}")
+    with _capture_stdout() as buf:
+        _emit_output(multi_result, output_opts)
+    # Should strip trailing \n from stdout and stderr in format template mode
+    assert "output|err" in buf.getvalue()
+
+
+def test_emit_output_format_template_includes_failed_agents() -> None:
+    """Test that format template output includes failed agents."""
+    multi_result = MultiExecResult(
+        successful_results=[],
+        failed_agents=[("agent-x", "host offline")],
+    )
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{agent}: {stderr}")
+    with _capture_stdout() as buf:
+        _emit_output(multi_result, output_opts)
+    assert "agent-x: host offline" in buf.getvalue()
+
+
+def test_emit_output_dispatches_to_human() -> None:
+    """Test _emit_output dispatches to human output."""
+    result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
+    multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_output(multi_result, output_opts)
+    assert "hello" in buf.getvalue()
+
+
+def test_emit_output_dispatches_to_json() -> None:
+    """Test _emit_output dispatches to JSON output."""
+    result1 = ExecResult(agent_name="agent-1", stdout="hello\n", stderr="", success=True)
+    multi_result = MultiExecResult(successful_results=[result1], failed_agents=[])
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    with _capture_stdout() as buf:
+        _emit_output(multi_result, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["total_executed"] == 1
+
+
+def test_emit_output_jsonl_raises() -> None:
+    """Test _emit_output raises AssertionError for JSONL (should use streaming)."""
+    multi_result = MultiExecResult(successful_results=[], failed_agents=[])
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    with pytest.raises(AssertionError, match="JSONL should be handled with streaming"):
+        _emit_output(multi_result, output_opts)
+
+
+# =============================================================================
+# Tests for _emit_human_output (additional coverage)
+# =============================================================================
+
+
+def test_emit_human_output_stdout_without_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test human output adds trailing newline if stdout doesn't have one."""
+    result = ExecResult(agent_name="test-agent", stdout="no trailing newline", stderr="", success=True)
+    multi_result = MultiExecResult(successful_results=[result], failed_agents=[])
+    _emit_human_output(multi_result)
+    captured = capsys.readouterr()
+    # The output should still be readable with a newline added
+    assert "no trailing newline" in captured.out
+
+
+def test_emit_human_output_stderr_without_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test human output adds trailing newline if stderr doesn't have one."""
+    result = ExecResult(agent_name="test-agent", stdout="", stderr="error output", success=False)
+    multi_result = MultiExecResult(successful_results=[result], failed_agents=[])
+    _emit_human_output(multi_result)
+    captured = capsys.readouterr()
+    assert "error output" in captured.err
+
+
+def test_emit_human_output_failed_agents_in_multi(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test human output shows failed agents."""
+    multi_result = MultiExecResult(
+        successful_results=[],
+        failed_agents=[("agent-x", "host offline"), ("agent-y", "timeout")],
+    )
+    _emit_human_output(multi_result)
+    # Error messages go to logger (stderr) not stdout

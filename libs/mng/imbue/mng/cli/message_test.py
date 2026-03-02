@@ -1,3 +1,9 @@
+import json
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from io import StringIO
+
 import click
 import pluggy
 import pytest
@@ -7,8 +13,26 @@ from imbue.mng.api.message import MessageResult
 from imbue.mng.cli.message import MessageCliOptions
 from imbue.mng.cli.message import _emit_human_output
 from imbue.mng.cli.message import _emit_json_output
+from imbue.mng.cli.message import _emit_jsonl_error
+from imbue.mng.cli.message import _emit_jsonl_success
+from imbue.mng.cli.message import _emit_output
 from imbue.mng.cli.message import _get_message_content
 from imbue.mng.cli.message import message
+from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.primitives import OutputFormat
+
+
+@contextmanager
+def _capture_stdout() -> Iterator[StringIO]:
+    """Temporarily redirect sys.stdout to a StringIO buffer."""
+    buf = StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        yield buf
+    finally:
+        sys.stdout = old_stdout
+
 
 _DEFAULT_OPTS = MessageCliOptions(
     agents=(),
@@ -225,3 +249,96 @@ def test_message_all_json_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+# =============================================================================
+# Tests for _emit_jsonl_success
+# =============================================================================
+
+
+def test_emit_jsonl_success(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_jsonl_success outputs proper JSONL event."""
+    _emit_jsonl_success("my-agent")
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "message_sent"
+    assert output["agent"] == "my-agent"
+    assert output["message"] == "Message sent successfully"
+
+
+# =============================================================================
+# Tests for _emit_jsonl_error
+# =============================================================================
+
+
+def test_emit_jsonl_error_message(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_jsonl_error outputs proper JSONL error event."""
+    _emit_jsonl_error("failing-agent", "connection refused")
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["event"] == "message_error"
+    assert output["agent"] == "failing-agent"
+    assert output["error"] == "connection refused"
+
+
+# =============================================================================
+# Tests for _emit_output (dispatch function)
+# =============================================================================
+
+
+def test_emit_output_human_dispatches() -> None:
+    """Test _emit_output dispatches to human output handler."""
+    result = MessageResult()
+    result.successful_agents = ["agent-1"]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_output(result, output_opts)
+    assert "Message sent to: agent-1" in buf.getvalue()
+
+
+def test_emit_output_json_dispatches() -> None:
+    """Test _emit_output dispatches to JSON output handler."""
+    result = MessageResult()
+    result.successful_agents = ["agent-1"]
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    with _capture_stdout() as buf:
+        _emit_output(result, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["total_sent"] == 1
+    assert data["successful_agents"] == ["agent-1"]
+
+
+def test_emit_output_jsonl_raises() -> None:
+    """Test _emit_output raises AssertionError for JSONL (should use streaming)."""
+    result = MessageResult()
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    with pytest.raises(AssertionError, match="JSONL should be handled with streaming"):
+        _emit_output(result, output_opts)
+
+
+# =============================================================================
+# Tests for _emit_human_output (additional coverage)
+# =============================================================================
+
+
+def test_emit_human_output_successful_agents_with_count() -> None:
+    """Test _emit_human_output shows success count."""
+    result = MessageResult()
+    result.successful_agents = ["agent-1", "agent-2", "agent-3"]
+    with _capture_stdout() as buf:
+        _emit_human_output(result)
+    output = buf.getvalue()
+    assert "Message sent to: agent-1" in output
+    assert "Message sent to: agent-2" in output
+    assert "Message sent to: agent-3" in output
+    assert "Successfully sent message to 3 agent(s)" in output
+
+
+def test_emit_human_output_only_failed_agents() -> None:
+    """Test _emit_human_output handles case with only failures."""
+    result = MessageResult()
+    result.failed_agents = [("agent-1", "error1"), ("agent-2", "error2")]
+    with _capture_stdout() as buf:
+        _emit_human_output(result)
+    output = buf.getvalue()
+    assert "Failed to send message to 2 agent(s)" in output

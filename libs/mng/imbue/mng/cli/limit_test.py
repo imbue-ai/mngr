@@ -1,14 +1,83 @@
+import json
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from io import StringIO
+
 import pluggy
 from click.testing import CliRunner
 
 from imbue.mng.cli.limit import LimitCliOptions
 from imbue.mng.cli.limit import _build_updated_activity_config
 from imbue.mng.cli.limit import _build_updated_permissions
+from imbue.mng.cli.limit import _has_agent_level_settings
+from imbue.mng.cli.limit import _has_any_setting
+from imbue.mng.cli.limit import _has_host_level_settings
+from imbue.mng.cli.limit import _output
+from imbue.mng.cli.limit import _output_result
 from imbue.mng.cli.limit import limit
+from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import IdleMode
+from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import Permission
+
+
+@contextmanager
+def _capture_stdout() -> Iterator[StringIO]:
+    """Temporarily redirect sys.stdout to a StringIO buffer."""
+    buf = StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        yield buf
+    finally:
+        sys.stdout = old_stdout
+
+
+def _make_limit_opts(
+    idle_timeout: str | None = None,
+    idle_mode: str | None = None,
+    activity_sources: str | None = None,
+    add_activity_source: tuple[str, ...] = (),
+    remove_activity_source: tuple[str, ...] = (),
+    start_on_boot: bool | None = None,
+    grant: tuple[str, ...] = (),
+    revoke: tuple[str, ...] = (),
+) -> LimitCliOptions:
+    """Create a LimitCliOptions with sensible defaults, allowing overrides."""
+    return LimitCliOptions(
+        agents=(),
+        agent_list=(),
+        hosts=(),
+        limit_all=False,
+        dry_run=False,
+        include=(),
+        exclude=(),
+        stdin=False,
+        start_on_boot=start_on_boot,
+        idle_timeout=idle_timeout,
+        idle_mode=idle_mode,
+        activity_sources=activity_sources,
+        add_activity_source=add_activity_source,
+        remove_activity_source=remove_activity_source,
+        grant=grant,
+        revoke=revoke,
+        refresh_ssh_keys=False,
+        add_ssh_key=(),
+        remove_ssh_key=(),
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        project_context_path=None,
+        plugin=(),
+        disable_plugin=(),
+    )
 
 
 def test_limit_cli_options_fields() -> None:
@@ -388,3 +457,146 @@ def test_limit_all_json_format_no_agents(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+# =============================================================================
+# _has_* helper function tests
+# =============================================================================
+
+
+def test_has_host_level_settings_idle_timeout() -> None:
+    """_has_host_level_settings should return True when idle_timeout is set."""
+    opts = _make_limit_opts(idle_timeout="300")
+    assert _has_host_level_settings(opts) is True
+
+
+def test_has_host_level_settings_idle_mode() -> None:
+    """_has_host_level_settings should return True when idle_mode is set."""
+    opts = _make_limit_opts(idle_mode="ssh")
+    assert _has_host_level_settings(opts) is True
+
+
+def test_has_host_level_settings_activity_sources() -> None:
+    """_has_host_level_settings should return True when activity_sources is set."""
+    opts = _make_limit_opts(activity_sources="ssh,agent")
+    assert _has_host_level_settings(opts) is True
+
+
+def test_has_host_level_settings_add_activity_source() -> None:
+    """_has_host_level_settings should return True when add_activity_source is set."""
+    opts = _make_limit_opts(add_activity_source=("ssh",))
+    assert _has_host_level_settings(opts) is True
+
+
+def test_has_host_level_settings_remove_activity_source() -> None:
+    """_has_host_level_settings should return True when remove_activity_source is set."""
+    opts = _make_limit_opts(remove_activity_source=("boot",))
+    assert _has_host_level_settings(opts) is True
+
+
+def test_has_host_level_settings_none() -> None:
+    """_has_host_level_settings should return False when no host settings are changed."""
+    opts = _make_limit_opts()
+    assert _has_host_level_settings(opts) is False
+
+
+def test_has_agent_level_settings_start_on_boot() -> None:
+    """_has_agent_level_settings should return True when start_on_boot is set."""
+    opts = _make_limit_opts(start_on_boot=True)
+    assert _has_agent_level_settings(opts) is True
+
+
+def test_has_agent_level_settings_grant() -> None:
+    """_has_agent_level_settings should return True when grant is set."""
+    opts = _make_limit_opts(grant=("read",))
+    assert _has_agent_level_settings(opts) is True
+
+
+def test_has_agent_level_settings_revoke() -> None:
+    """_has_agent_level_settings should return True when revoke is set."""
+    opts = _make_limit_opts(revoke=("write",))
+    assert _has_agent_level_settings(opts) is True
+
+
+def test_has_agent_level_settings_none() -> None:
+    """_has_agent_level_settings should return False when no agent settings are changed."""
+    opts = _make_limit_opts()
+    assert _has_agent_level_settings(opts) is False
+
+
+def test_has_any_setting_with_host_settings() -> None:
+    """_has_any_setting should return True when host settings are set."""
+    opts = _make_limit_opts(idle_timeout="300")
+    assert _has_any_setting(opts) is True
+
+
+def test_has_any_setting_with_agent_settings() -> None:
+    """_has_any_setting should return True when agent settings are set."""
+    opts = _make_limit_opts(start_on_boot=False)
+    assert _has_any_setting(opts) is True
+
+
+def test_has_any_setting_with_no_settings() -> None:
+    """_has_any_setting should return False when no settings are changed."""
+    opts = _make_limit_opts()
+    assert _has_any_setting(opts) is False
+
+
+# =============================================================================
+# _output and _output_result tests
+# =============================================================================
+
+
+def test_limit_output_human() -> None:
+    """_output should write in HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _output("Test limit message", output_opts)
+    assert "Test limit message" in buf.getvalue()
+
+
+def test_limit_output_json_silent() -> None:
+    """_output should be silent in JSON format."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    with _capture_stdout() as buf:
+        _output("Should not appear", output_opts)
+    assert buf.getvalue() == ""
+
+
+def test_limit_output_result_human_with_changes() -> None:
+    """_output_result should show change count in HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    with _capture_stdout() as buf:
+        _output_result(changes, output_opts)
+    assert "Applied 1 change(s)" in buf.getvalue()
+
+
+def test_limit_output_result_human_empty() -> None:
+    """_output_result should not write in HUMAN format with no changes."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _output_result([], output_opts)
+    assert "Applied" not in buf.getvalue()
+
+
+def test_limit_output_result_json() -> None:
+    """_output_result should output JSON data."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    with _capture_stdout() as buf:
+        _output_result(changes, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["count"] == 1
+    assert len(data["changes"]) == 1
+
+
+def test_limit_output_result_jsonl() -> None:
+    """_output_result should output JSONL event."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    with _capture_stdout() as buf:
+        _output_result(changes, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["event"] == "limit_result"
+    assert data["count"] == 1

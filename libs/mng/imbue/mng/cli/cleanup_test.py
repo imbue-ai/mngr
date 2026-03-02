@@ -17,6 +17,7 @@ from imbue.mng.cli.cleanup import _build_cel_filters_from_options
 from imbue.mng.cli.cleanup import _build_cleanup_status_text
 from imbue.mng.cli.cleanup import _create_cleanup_list_item
 from imbue.mng.cli.cleanup import _emit_dry_run_output
+from imbue.mng.cli.cleanup import _emit_no_agents_found
 from imbue.mng.cli.cleanup import _emit_result
 from imbue.mng.cli.cleanup import _selected_marker
 from imbue.mng.cli.cleanup import cleanup
@@ -637,3 +638,128 @@ def test_emit_dry_run_output_jsonl_format() -> None:
     output = json.loads(buf.getvalue().strip())
     assert output["event"] == "dry_run"
     assert output["action"] == "stop"
+
+
+# =============================================================================
+# Tests for _emit_no_agents_found
+# =============================================================================
+
+
+def test_emit_no_agents_found_human_format() -> None:
+    """_emit_no_agents_found should output message in HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_no_agents_found(output_opts)
+    assert "No agents found matching the specified filters" in buf.getvalue()
+
+
+def test_emit_no_agents_found_json_format() -> None:
+    """_emit_no_agents_found should output JSON data."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    with _capture_stdout() as buf:
+        _emit_no_agents_found(output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["agents"] == []
+    assert "No agents found" in data["message"]
+
+
+def test_emit_no_agents_found_jsonl_format() -> None:
+    """_emit_no_agents_found should output JSONL event."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    with _capture_stdout() as buf:
+        _emit_no_agents_found(output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["event"] == "info"
+    assert "No agents found" in data["message"]
+
+
+# =============================================================================
+# Tests for _emit_result
+# =============================================================================
+
+
+def test_emit_result_human_with_destroyed() -> None:
+    """_emit_result should show destroyed agents in HUMAN format."""
+    result = CleanupResult()
+    result.destroyed_agents = [AgentName("agent-1"), AgentName("agent-2")]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_result(result, output_opts)
+    output = buf.getvalue()
+    assert "Successfully destroyed 2 agent(s)" in output
+    assert "agent-1" in output
+    assert "agent-2" in output
+
+
+def test_emit_result_human_with_stopped() -> None:
+    """_emit_result should show stopped agents in HUMAN format."""
+    result = CleanupResult()
+    result.stopped_agents = [AgentName("stopped-1")]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_result(result, output_opts)
+    output = buf.getvalue()
+    assert "Successfully stopped 1 agent(s)" in output
+    assert "stopped-1" in output
+
+
+def test_emit_result_human_with_no_agents_affected() -> None:
+    """_emit_result should show no agents affected in HUMAN format."""
+    result = CleanupResult()
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_result(result, output_opts)
+    assert "No agents were affected" in buf.getvalue()
+
+
+def test_emit_result_json_with_errors() -> None:
+    """_emit_result should include errors in JSON data."""
+    result = CleanupResult()
+    result.destroyed_agents = [AgentName("agent-x")]
+    result.stopped_agents = [AgentName("agent-y")]
+    result.errors = ["error-1"]
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    with _capture_stdout() as buf:
+        _emit_result(result, output_opts)
+    data = json.loads(buf.getvalue().strip())
+    assert data["destroyed_count"] == 1
+    assert data["stopped_count"] == 1
+    assert data["error_count"] == 1
+    assert data["errors"] == ["error-1"]
+
+
+def test_emit_result_human_with_errors() -> None:
+    """_emit_result should display errors in HUMAN format."""
+    result = CleanupResult()
+    result.errors = ["Failed to destroy agent-x", "Timeout on agent-y"]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_result(result, output_opts)
+    # Errors go to logger (stderr), not stdout, but "No agents were affected" still shows
+    assert "No agents were affected" in buf.getvalue()
+
+
+def test_emit_dry_run_output_human_stop_action() -> None:
+    """_emit_dry_run_output should show 'Would stop' for STOP action."""
+    agents = [
+        make_test_agent_info(name="stop-dry", state=AgentLifecycleState.RUNNING),
+        make_test_agent_info(name="stop-dry-2", state=AgentLifecycleState.RUNNING),
+    ]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_dry_run_output(agents, CleanupAction.STOP, output_opts)
+    output = buf.getvalue()
+    assert "Would stop 2 agent(s)" in output
+    assert "stop-dry" in output
+
+
+def test_emit_dry_run_output_human_destroy_action() -> None:
+    """_emit_dry_run_output should show 'Would destroy' for DESTROY action."""
+    agents = [
+        make_test_agent_info(name="destroy-dry", state=AgentLifecycleState.STOPPED),
+    ]
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with _capture_stdout() as buf:
+        _emit_dry_run_output(agents, CleanupAction.DESTROY, output_opts)
+    output = buf.getvalue()
+    assert "Would destroy 1 agent(s)" in output

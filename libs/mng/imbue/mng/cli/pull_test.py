@@ -362,3 +362,47 @@ def test_pull_nonexistent_agent(
     )
 
     assert result.exit_code != 0
+
+
+def test_pull_target_branch_requires_git_mode(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --target-branch requires --sync-mode=git."""
+    result = cli_runner.invoke(
+        pull,
+        ["nonexistent-pull-agent-222", "--target-branch", "main"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "--target-branch can only be used with --sync-mode=git" in result.output
+
+
+def test_pull_full_sync_mode_not_implemented(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --sync-mode=full raises NotImplementedError."""
+    result = cli_runner.invoke(
+        pull,
+        ["nonexistent-pull-agent-223", "--sync-mode", "full"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+
+
+def test_pull_help_exits_zero(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that pull --help works and exits 0."""
+    result = cli_runner.invoke(
+        pull,
+        ["--help"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "pull" in result.output.lower()
