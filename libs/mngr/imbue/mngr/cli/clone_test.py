@@ -97,7 +97,7 @@ def test_build_create_args_without_double_dash() -> None:
         remaining=["--in", "docker"],
         original_argv=["mngr", "clone", "my-agent", "--in", "docker"],
     )
-    assert result == ["--from-agent", "my-agent", "--name", "my-agent", "--in", "docker"]
+    assert result == ["--from-agent", "my-agent", "--in", "docker"]
 
 
 def test_build_create_args_with_double_dash() -> None:
@@ -107,7 +107,7 @@ def test_build_create_args_with_double_dash() -> None:
         remaining=["--model", "opus"],
         original_argv=["mngr", "clone", "my-agent", "--", "--model", "opus"],
     )
-    assert result == ["--from-agent", "my-agent", "--name", "my-agent", "--", "--model", "opus"]
+    assert result == ["--from-agent", "my-agent", "--", "--model", "opus"]
 
 
 def test_build_create_args_with_create_options_and_double_dash() -> None:
@@ -146,26 +146,49 @@ def test_build_create_args_with_double_dash_and_empty_remaining() -> None:
         remaining=[],
         original_argv=["mngr", "clone", "my-agent", "--"],
     )
-    assert result == ["--from-agent", "my-agent", "--name", "my-agent", "--"]
+    assert result == ["--from-agent", "my-agent", "--"]
 
 
-def test_build_create_args_preserves_explicit_positional_name() -> None:
-    """When a positional name is provided, --name is not injected."""
+def test_build_create_args_does_not_inject_name_by_default() -> None:
+    """Without preserve_name, --name is not injected even when no name is given."""
+    result = _build_create_args(
+        source_agent="my-agent",
+        remaining=["--in", "docker"],
+        original_argv=["mngr", "clone", "my-agent", "--in", "docker"],
+    )
+    assert "--name" not in result
+
+
+def test_build_create_args_preserves_name_when_requested() -> None:
+    """With preserve_name=True, --name is injected when no name is given."""
+    result = _build_create_args(
+        source_agent="my-agent",
+        remaining=["--in", "docker"],
+        original_argv=["mngr", "migrate", "my-agent", "--in", "docker"],
+        preserve_name=True,
+    )
+    assert result == ["--from-agent", "my-agent", "--name", "my-agent", "--in", "docker"]
+
+
+def test_build_create_args_preserve_name_skips_when_positional_given() -> None:
+    """With preserve_name=True, --name is not injected when a positional name is provided."""
     result = _build_create_args(
         source_agent="my-agent",
         remaining=["new-name", "--in", "modal"],
         original_argv=["mngr", "migrate", "my-agent", "new-name", "--in", "modal"],
+        preserve_name=True,
     )
     assert result == ["--from-agent", "my-agent", "new-name", "--in", "modal"]
     assert "--name" not in result
 
 
-def test_build_create_args_preserves_explicit_name_flag() -> None:
-    """When --name is provided, another --name is not injected."""
+def test_build_create_args_preserve_name_skips_when_name_flag_given() -> None:
+    """With preserve_name=True, --name is not injected when --name is already provided."""
     result = _build_create_args(
         source_agent="my-agent",
         remaining=["--name", "custom-name", "--in", "modal"],
         original_argv=["mngr", "migrate", "my-agent", "--name", "custom-name", "--in", "modal"],
+        preserve_name=True,
     )
     assert result == ["--from-agent", "my-agent", "--name", "custom-name", "--in", "modal"]
 
