@@ -77,6 +77,8 @@ _SHARED_FILTER_WARNINGS: Final[list[str]] = [
     # Suppress coverage warning about modules being imported before coverage starts measuring.
     # This happens because pytest collects tests (importing modules) before coverage.py starts.
     r"ignore:Module imbue\..* was previously imported, but not measured:coverage.exceptions.CoverageWarning",
+    # record_xml_attribute is marked experimental but we rely on it for JUnit test ID customization.
+    "ignore::pytest.PytestExperimentalApiWarning",
 ]
 
 # Lines matching any of these patterns are excluded from coverage measurement.

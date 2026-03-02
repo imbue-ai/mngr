@@ -20,4 +20,4 @@ if ! git rev-parse "$CHECKPOINT_HASH" >/dev/null 2>&1; then
 fi
 
 # Use HEAD as the current state of the repository
-git diff "$CHECKPOINT_HASH" HEAD
+git diff "$CHECKPOINT_HASH"
