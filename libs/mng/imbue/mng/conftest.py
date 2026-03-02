@@ -1,11 +1,10 @@
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Generator
+from typing import cast
 from uuid import uuid4
 
 import pluggy
@@ -24,7 +23,9 @@ from imbue.mng.agents.agent_registry import reset_agent_registry
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.hosts.host import Host
 from imbue.mng.plugins import hookspecs
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -40,6 +41,7 @@ from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
+from imbue.mng.utils.testing import isolate_tmux_server
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -152,56 +154,12 @@ def _isolate_tmux_server(
 ) -> Generator[None, None, None]:
     """Give each test its own isolated tmux server.
 
-    This fixture:
-    - Creates a per-test TMUX_TMPDIR under /tmp so each test gets its own
-      tmux server socket, preventing xdist workers from racing on the shared
-      default tmux server.
-    - Unsets TMUX so tmux commands connect to the isolated server (via
-      TMUX_TMPDIR) rather than the real server.
-    - On teardown, kills the isolated tmux server and cleans up the tmpdir.
-
-    IMPORTANT: We use /tmp directly instead of pytest's tmp_path because
-    tmux sockets are Unix domain sockets, which have a ~104-byte path
-    length limit on macOS. Pytest's tmp_path lives under
-    /private/var/folders/.../pytest-of-.../... which is already ~80+ bytes,
-    leaving no room for tmux's tmux-$UID/default suffix. When the path
-    exceeds the limit, tmux silently falls back to the default socket,
-    defeating isolation entirely (and potentially killing production
-    tmux servers during test cleanup).
+    Delegates to the shared isolate_tmux_server() context manager in
+    imbue.mng.utils.testing, which handles TMUX_TMPDIR creation,
+    TMUX env var isolation, and teardown (kill-server + tmpdir cleanup).
     """
-    tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mng-tmux-", dir="/tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
-    # Unset TMUX so tmux commands during the test connect to the isolated
-    # server (via TMUX_TMPDIR) rather than the real server. When TMUX is
-    # set (because we're running inside a tmux session), tmux uses it to
-    # find the current server, overriding TMUX_TMPDIR.
-    monkeypatch.delenv("TMUX", raising=False)
-
-    yield
-
-    # Kill the test's isolated tmux server to clean up any leaked sessions
-    # or processes. We must use -S with the explicit socket path because:
-    # 1. The TMUX env var (set when running inside tmux) tells tmux to
-    #    connect to the CURRENT server, overriding TMUX_TMPDIR entirely.
-    #    Without -S, kill-server would kill the real tmux server.
-    # 2. We also unset TMUX in the env as a belt-and-suspenders measure.
-    tmux_tmpdir_str = str(tmux_tmpdir)
-    assert tmux_tmpdir_str.startswith("/tmp/mng-tmux-"), (
-        f"TMUX_TMPDIR safety check failed! Expected /tmp/mng-tmux-* path but got: {tmux_tmpdir_str}. "
-        "Refusing to run 'tmux kill-server' to avoid killing the real tmux server."
-    )
-    socket_path = Path(tmux_tmpdir_str) / f"tmux-{os.getuid()}" / "default"
-    kill_env = os.environ.copy()
-    kill_env.pop("TMUX", None)
-    kill_env["TMUX_TMPDIR"] = tmux_tmpdir_str
-    subprocess.run(
-        ["tmux", "-S", str(socket_path), "kill-server"],
-        capture_output=True,
-        env=kill_env,
-    )
-
-    # Clean up the tmpdir we created outside of pytest's tmp_path.
-    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
+    with isolate_tmux_server(monkeypatch):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -426,6 +384,21 @@ def local_provider(temp_host_dir: Path, temp_mng_ctx: MngContext) -> LocalProvid
 
 
 @pytest.fixture
+def local_host(local_provider: LocalProviderInstance) -> Host:
+    """Create a local Host via the local provider.
+
+    This fixture eliminates the repeated pattern of:
+        host = local_provider.create_host(HostName("localhost"))
+
+    Use this when tests need a Host instance for creating agents,
+    executing commands, etc. The local provider always returns a Host
+    (the concrete OnlineHostInterface implementation).
+    """
+    host = local_provider.create_host(HostName("localhost"))
+    return cast(Host, host)
+
+
+@pytest.fixture
 def per_host_dir(temp_host_dir: Path) -> Path:
     """Get the host directory for the local provider.
 
@@ -458,18 +431,42 @@ def isolated_mng_venv(tmp_path: Path) -> Path:
 
     This fixture is useful for tests that install/uninstall packages and
     need full isolation from the main workspace venv.
+
+    To avoid network access (and the flakiness that comes with it), we
+    export mng's pinned deps from the lockfile via ``uv export``, then
+    install them with ``--no-deps`` (uses uv cache, no resolution or
+    network needed).
     """
     venv_dir = tmp_path / "isolated-venv"
 
-    install_args: list[str] = []
+    workspace_install_args: list[str] = []
     for pkg in _WORKSPACE_PACKAGES:
-        install_args.extend(["-e", str(pkg)])
+        workspace_install_args.extend(["-e", str(pkg)])
+
+    python_path = str(venv_dir / "bin" / "python")
 
     cg = ConcurrencyGroup(name="isolated-venv-setup")
     with cg:
+        # Export mng's pinned transitive deps from the lockfile (no editable/comment lines)
+        export_result = cg.run_process_to_completion(
+            ("uv", "export", "--package", "mng", "--no-hashes", "--frozen"),
+            cwd=_REPO_ROOT,
+        )
+        reqs_file = tmp_path / "pinned-deps.txt"
+        reqs_file.write_text(
+            "\n".join(
+                line for line in export_result.stdout.splitlines() if line and not line.startswith(("#", " ", "-e"))
+            )
+        )
+
         cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
+        # Install pinned deps from cache (no resolution or network needed)
         cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", str(venv_dir / "bin" / "python"), *install_args)
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file))
+        )
+        # Install workspace packages as editable (no-deps since deps are already installed)
+        cg.run_process_to_completion(
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
         )
 
     return venv_dir

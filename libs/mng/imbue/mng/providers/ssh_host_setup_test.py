@@ -4,8 +4,11 @@ import importlib.resources
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+import pytest
 
 import imbue.mng.resources as mng_resources
 from imbue.mng.providers.ssh_host_setup import RequiredHostPackage
@@ -357,6 +360,8 @@ def test_has_running_agent_sessions_returns_true_during_grace_period(
     assert result.returncode == 0
 
 
+@pytest.mark.tmux
+@pytest.mark.skipif(sys.platform == "darwin", reason="Script reads /proc/uptime; tmux never reached on macOS")
 def test_has_running_agent_sessions_returns_false_when_agents_exist_but_no_sessions(
     tmp_path: Path,
 ) -> None:

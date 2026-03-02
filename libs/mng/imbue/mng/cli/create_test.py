@@ -239,6 +239,7 @@ def test_try_reuse_existing_agent_filters_by_host(temp_mng_ctx: MngContext) -> N
 # -- Tests using real local provider infrastructure --
 
 
+@pytest.mark.tmux
 def test_try_reuse_existing_agent_found_and_started(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
@@ -593,3 +594,49 @@ def test_parse_agent_opts_empty_labels_by_default(
     )
 
     assert result.label_options.labels == {}
+
+
+def test_parse_agent_opts_with_agent_id(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+) -> None:
+    """--agent-id should be parsed into agent_id field."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    explicit_id = AgentId()
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().agent_id, str(explicit_id)),
+    )
+
+    result = _parse_agent_opts(
+        opts=opts,
+        initial_message=None,
+        resume_message=None,
+        source_location=source_location,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    assert result.agent_id == explicit_id
+
+
+def test_parse_agent_opts_agent_id_none_by_default(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+) -> None:
+    """Without --agent-id, agent_id should be None (auto-generated later)."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+
+    result = _parse_agent_opts(
+        opts=default_create_cli_opts,
+        initial_message=None,
+        resume_message=None,
+        source_location=source_location,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    assert result.agent_id is None

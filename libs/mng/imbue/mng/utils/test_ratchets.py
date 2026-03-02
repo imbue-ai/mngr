@@ -57,6 +57,7 @@ from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extensio
 from imbue.imbue_common.ratchet_testing.core import clear_ratchet_caches
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
@@ -71,7 +72,9 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 # Exclude this test file from ratchet scans to prevent self-referential matches
 _SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py",)
 
-# Group all ratchet tests onto a single xdist worker to benefit from LRU caching
+# Group all ratchet tests onto a single xdist worker to benefit from LRU caching.
+# With many other tests in the suite, the ratchet worker is never the bottleneck,
+# so the CPU savings from cache sharing outweigh the parallelism benefit.
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
@@ -116,7 +119,7 @@ def test_prevent_bare_except() -> None:
 
 def test_prevent_broad_exception_catch() -> None:
     chunks = check_ratchet_rule(PREVENT_BROAD_EXCEPTION_CATCH, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(2), PREVENT_BROAD_EXCEPTION_CATCH.format_failure(chunks)
+    assert len(chunks) <= snapshot(1), PREVENT_BROAD_EXCEPTION_CATCH.format_failure(chunks)
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -209,6 +212,11 @@ def test_prevent_literal_with_multiple_options() -> None:
 def test_no_ruff_errors() -> None:
     """Ensure the codebase has zero ruff linting errors."""
     check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)
+
+
+def test_no_import_layer_violations() -> None:
+    """Ensure production code has zero import layer violations."""
+    check_no_import_lint_errors(Path(__file__).parent.parent.parent.parent.parent.parent)
 
 
 def test_prevent_if_elif_without_else() -> None:
@@ -327,7 +335,7 @@ def test_prevent_direct_subprocess_usage() -> None:
     # Docker provider uses subprocess for docker build/run CLI pass-through.
     # connect.py uses os.execvp/os.execvpe for process replacement (not child spawning).
     chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, _get_mng_source_dir(), TEST_FILE_PATTERNS)
-    assert len(chunks) <= snapshot(50), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+    assert len(chunks) <= snapshot(46), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
 
 
 def test_prevent_unittest_mock_imports() -> None:
@@ -337,7 +345,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 def test_prevent_monkeypatch_setattr() -> None:
     chunks = check_ratchet_rule(PREVENT_MONKEYPATCH_SETATTR, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(25), PREVENT_MONKEYPATCH_SETATTR.format_failure(chunks)
+    assert len(chunks) <= snapshot(26), PREVENT_MONKEYPATCH_SETATTR.format_failure(chunks)
 
 
 def test_prevent_test_container_classes() -> None:

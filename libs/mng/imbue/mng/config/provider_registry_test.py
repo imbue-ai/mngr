@@ -21,12 +21,6 @@ def test_get_config_class_returns_local_config() -> None:
     assert config_class is LocalProviderConfig
 
 
-def test_get_config_class_returns_docker_config() -> None:
-    """get_config_class should return DockerProviderConfig for 'docker'."""
-    config_class = get_config_class("docker")
-    assert config_class is DockerProviderConfig
-
-
 def test_get_config_class_raises_for_unknown_backend() -> None:
     """get_config_class should raise UnknownBackendError for unknown backend."""
     with pytest.raises(UnknownBackendError, match="Unknown provider backend"):

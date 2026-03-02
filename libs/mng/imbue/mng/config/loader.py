@@ -12,32 +12,34 @@ from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
-from imbue.mng.agents.agent_registry import get_agent_config_class
+from imbue.mng.config.agent_config_registry import get_agent_config_class
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
-from imbue.mng.config.data_types import LoggingConfig
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import ProviderInstanceConfig
 from imbue.mng.config.data_types import split_cli_args_string
+from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.config.plugin_registry import get_plugin_config_class
 from imbue.mng.config.pre_readers import find_profile_dir_lightweight
 from imbue.mng.config.pre_readers import get_user_config_path
 from imbue.mng.config.pre_readers import load_local_config
 from imbue.mng.config.pre_readers import load_project_config
+from imbue.mng.config.pre_readers import read_disabled_plugins
 from imbue.mng.config.pre_readers import try_load_toml
+from imbue.mng.config.provider_config_registry import get_provider_config_class
 from imbue.mng.errors import ConfigParseError
 from imbue.mng.errors import UnknownBackendError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.providers.registry import get_config_class as get_provider_config_class
 from imbue.mng.utils.file_utils import atomic_write
+from imbue.mng.utils.logging import LoggingConfig
 
 # Environment variable prefix for command config overrides.
 # Format: MNG_COMMANDS_<COMMANDNAME>_<VARNAME>=<value>
@@ -84,12 +86,14 @@ def load_config(
     root_name = os.environ.get("MNG_ROOT_NAME", "mng")
 
     # Determine base directory (may be overridden by env var)
-    env_host_dir = os.environ.get("MNG_HOST_DIR")
-    base_dir = Path(env_host_dir) if env_host_dir else Path(f"~/.{root_name}")
-    base_dir = base_dir.expanduser()
+    base_dir = read_default_host_dir()
 
     # Get/create profile directory first (needed for user config
     profile_dir = get_or_create_profile_dir(base_dir)
+
+    # Pre-compute disabled plugins so _parse_providers can skip them.
+    # This uses the same lightweight pre-reader that create_plugin_manager() uses.
+    config_disabled_plugins = read_disabled_plugins()
 
     # Start with base config that has defaults based on root_name
     # Use model_construct with None to allow merging to work properly
@@ -110,7 +114,7 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(parse_config(raw))
+            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins))
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNG_PREFIX")
@@ -260,19 +264,31 @@ def _check_unknown_fields(
 
 def _parse_providers(
     raw_providers: dict[str, dict[str, Any]],
+    disabled_plugins: frozenset[str],
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Provider blocks whose plugin is disabled are silently skipped.
     """
     providers: dict[ProviderInstanceName, ProviderInstanceConfig] = {}
 
     for name, raw_config in raw_providers.items():
         backend = raw_config.get("backend") or name
+        plugin = raw_config.get("plugin") or backend
+        if plugin in disabled_plugins:
+            continue
         try:
             config_class = get_provider_config_class(backend)
         except UnknownBackendError as e:
-            raise ConfigParseError(f"Provider '{name}' missing required 'backend' field") from e
+            msg = f"Provider '{name}' references unknown backend '{backend}'."
+            if disabled_plugins:
+                msg += (
+                    f" If this backend is provided by a disabled plugin, either enable"
+                    f' the plugin or add `plugin = "<plugin-name>"` to this provider'
+                    f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
+                )
+            raise ConfigParseError(msg) from e
         _check_unknown_fields(raw_config, config_class, f"providers.{name}")
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
@@ -443,7 +459,10 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     return templates
 
 
-def parse_config(raw: dict[str, Any]) -> MngConfig:
+def parse_config(
+    raw: dict[str, Any],
+    disabled_plugins: frozenset[str],
+) -> MngConfig:
     """Parse a raw config dict into MngConfig.
 
     Uses model_construct to bypass defaults and explicitly set None for unset fields.
@@ -453,7 +472,9 @@ def parse_config(raw: dict[str, Any]) -> MngConfig:
     kwargs["prefix"] = raw.pop("prefix", None)
     kwargs["default_host_dir"] = raw.pop("default_host_dir", None)
     kwargs["agent_types"] = _parse_agent_types(raw.pop("agent_types", {})) if "agent_types" in raw else {}
-    kwargs["providers"] = _parse_providers(raw.pop("providers", {})) if "providers" in raw else {}
+    kwargs["providers"] = (
+        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins) if "providers" in raw else {}
+    )
     kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {})) if "plugins" in raw else {}
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (

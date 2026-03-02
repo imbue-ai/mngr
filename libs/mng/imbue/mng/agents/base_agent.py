@@ -8,6 +8,7 @@ from typing import Any
 from typing import Callable
 from typing import Final
 from typing import Mapping
+from typing import NoReturn
 from typing import Sequence
 from uuid import uuid4
 
@@ -36,15 +37,19 @@ _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 10.0
 _TUI_READY_TIMEOUT_SECONDS: Final[float] = 10.0
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# Constants for signal-based synchronization
-# Note that this does need to be fairly long, since it can takea little while for the machine to respond if you're unlucky
-_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
+# Default timeout for signal-based synchronization
+# Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
+_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 class BaseAgent(AgentInterface):
     """Concrete agent implementation that stores data on the host filesystem."""
 
     host: OnlineHostInterface = Field(description="The host this agent runs on (must be online)")
+    enter_submission_timeout_seconds: float = Field(
+        default=_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS,
+        description="Timeout in seconds for waiting on the enter submission signal",
+    )
 
     def get_host(self) -> OnlineHostInterface:
         return self.host
@@ -239,8 +244,13 @@ class BaseAgent(AgentInterface):
         could be interpreted as a literal newline instead of a submit action.
 
         Subclasses can enable this by overriding uses_marker_based_send_message().
+
+        Before sending, runs preflight checks (e.g., dialog detection) that
+        subclasses can customize by overriding _preflight_send_message().
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
+            self._preflight_send_message(self.session_name)
+
             if self.uses_marker_based_send_message():
                 self._send_message_with_marker(self.session_name, message)
             else:
@@ -267,6 +277,18 @@ class BaseAgent(AgentInterface):
         Returns None by default (no TUI readiness check). Subclasses can override.
         """
         return None
+
+    def _preflight_send_message(self, session_name: str) -> None:
+        """Run preflight checks before sending a message.
+
+        Called at the start of send_message. Default is a no-op.
+        Subclasses can override to perform checks (e.g., dialog detection)
+        and raise an appropriate error to abort the send.
+        """
+
+    def _raise_send_timeout(self, session_name: str, timeout_reason: str) -> NoReturn:
+        """Raise a SendMessageError for a send timeout."""
+        raise SendMessageError(str(self.name), timeout_reason)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -418,8 +440,8 @@ class BaseAgent(AgentInterface):
                 lambda: self._check_pane_contains(session_name, marker),
                 timeout=_SEND_MESSAGE_TIMEOUT_SECONDS,
             ):
-                raise SendMessageError(
-                    str(self.name),
+                self._raise_send_timeout(
+                    session_name,
                     f"Timeout waiting for message marker to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
                 )
 
@@ -439,8 +461,8 @@ class BaseAgent(AgentInterface):
             lambda: self._check_marker_removed_and_contains(session_name, marker, expected_ending),
             timeout=_SEND_MESSAGE_TIMEOUT_SECONDS,
         ):
-            raise SendMessageError(
-                str(self.name),
+            self._raise_send_timeout(
+                session_name,
                 f"Timeout waiting for message to be ready for submission (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
             )
         logger.trace("Verified marker removed and expected content visible in pane")
@@ -462,7 +484,7 @@ class BaseAgent(AgentInterface):
         """
         wait_channel = f"mng-submit-{session_name}"
         if self._send_enter_and_wait_for_signal(session_name, wait_channel):
-            logger.trace("Submitted message successfully")
+            logger.debug("Message submitted successfully")
             return
 
         pane_content = self._capture_pane_content(session_name)
@@ -474,9 +496,9 @@ class BaseAgent(AgentInterface):
         else:
             logger.error("TUI send enter and wait timeout -- failed to capture remote pane content")
 
-        raise SendMessageError(
-            str(self.name),
-            f"Timeout waiting for message submission signal (waited {_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS}s)",
+        self._raise_send_timeout(
+            session_name,
+            f"Timeout waiting for message submission signal (waited {self.enter_submission_timeout_seconds}s)",
         )
 
     def _send_enter_and_wait_for_signal(self, session_name: str, wait_channel: str) -> bool:
@@ -492,7 +514,7 @@ class BaseAgent(AgentInterface):
 
         Returns True if signal received, False if timeout.
         """
-        timeout_secs = _ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
+        timeout_secs = self.enter_submission_timeout_seconds
         cmd = (
             f"bash -c '"
             f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '

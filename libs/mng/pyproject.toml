@@ -31,6 +31,7 @@ dependencies = [
     "packaging>=21.0",
     "pydantic>=2.0",
     "psutil>=5.9",
+    "setproctitle>=1.3",
     "python-dotenv>=1.0",
     "pyinfra>=3.0",
     "pluggy>=1.5.0",
@@ -71,6 +72,7 @@ junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov-report=term-missing",
   "--cov-report=html",

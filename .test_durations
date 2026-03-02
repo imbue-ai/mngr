@@ -801,5 +801,14 @@
   "libs/mng/imbue/mng/utils/testing_test.py::test_wait_for_raises_timeout_error_when_condition_never_true": 0.10868776706047356,
   "libs/mng/imbue/mng/utils/testing_test.py::test_wait_for_returns_immediately_when_condition_true": 0.004941483028233051,
   "libs/mng_opencode/imbue/mng_opencode/plugin_test.py::test_opencode_agent_config_has_correct_defaults": 0.000607880880124867,
-  "libs/mng_opencode/imbue/mng_opencode/plugin_test.py::test_opencode_agent_config_merge_with_override": 1.4059662289218977
+  "libs/mng_opencode/imbue/mng_opencode/plugin_test.py::test_opencode_agent_config_merge_with_override": 1.4059662289218977,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_adds_ttyd_command_to_create": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_preserves_existing_add_commands": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_does_not_modify_non_create_commands": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_handles_missing_add_command_param": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_ttyd_command_is_parseable_as_named_command": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_ttyd_command_uses_random_port": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_ttyd_command_writes_server_log": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_ttyd_command_watches_stderr_for_port": 0.0004,
+  "libs/mng_ttyd/imbue/mng_ttyd/plugin_test.py::test_ttyd_command_skips_log_when_no_state_dir": 0.0004
 }

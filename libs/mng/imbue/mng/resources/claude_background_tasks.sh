@@ -7,7 +7,7 @@
 #      whenever the agent is actively processing (indicated by the
 #      $MNG_AGENT_STATE_DIR/active file)
 #   2. Transcript export: periodically exports the conversation transcript
-#      to $MNG_AGENT_STATE_DIR/logs/transcript.jsonl
+#      to $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
@@ -40,7 +40,16 @@ trap 'rm -f "$_MNG_ACT_LOCK"' EXIT
 mkdir -p "$MNG_AGENT_STATE_DIR/activity"
 mkdir -p "$MNG_AGENT_STATE_DIR/logs"
 
+# Configure and source the shared logging library
+_MNG_LOG_TYPE="claude_background_tasks"
+_MNG_LOG_SOURCE="claude_background_tasks"
+_MNG_LOG_FILE="$MNG_HOST_DIR/logs/claude_background_tasks/events.jsonl"
+# shellcheck source=mng_log.sh
+source "$MNG_HOST_DIR/commands/mng_log.sh"
+
 EXPORT_SCRIPT="$MNG_HOST_DIR/commands/export_transcript.sh"
+
+log_info "Background tasks started for session $SESSION_NAME"
 
 while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
     # Task 1: Update activity timestamp if agent is actively processing
@@ -52,15 +61,19 @@ while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
     # Task 2: Export transcript if the export script is available
     # Uses temp file + mv for atomic replacement so readers never see a truncated file
     if [ -x "$EXPORT_SCRIPT" ]; then
-        _TRANSCRIPT_TMP="$MNG_AGENT_STATE_DIR/logs/transcript.jsonl.tmp"
+        mkdir -p "$MNG_AGENT_STATE_DIR/logs/claude_transcript"
+        _TRANSCRIPT_TMP="$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl.tmp"
         if "$EXPORT_SCRIPT" > "$_TRANSCRIPT_TMP" 2>/dev/null; then
-            mv "$_TRANSCRIPT_TMP" "$MNG_AGENT_STATE_DIR/logs/transcript.jsonl"
+            mv "$_TRANSCRIPT_TMP" "$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
+            log_debug "Transcript export complete"
         else
             rm -f "$_TRANSCRIPT_TMP"
+            log_warn "Transcript export failed"
         fi
     fi
 
     sleep 15
 done
 
+log_info "Background tasks finished for session $SESSION_NAME (session ended)"
 rm -f "$_MNG_ACT_LOCK"

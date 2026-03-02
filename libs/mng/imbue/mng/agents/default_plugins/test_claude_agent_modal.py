@@ -5,7 +5,7 @@ to run. They are marked with @pytest.mark.release and only run when pushing
 to main. To run them locally:
 
     PYTEST_MAX_DURATION=600 uv run pytest --no-cov --cov-fail-under=0 -n 0 -m release \\
-        libs/mng/imbue/mng/agents/default_plugins/test_claude_agent.py::test_claude_agent_provisioning_on_modal
+        libs/mng/imbue/mng/agents/default_plugins/test_claude_agent_modal.py::test_claude_agent_provisioning_on_modal
 """
 
 import subprocess

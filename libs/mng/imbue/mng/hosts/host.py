@@ -16,7 +16,6 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
-from typing import cast
 
 from loguru import logger
 from paramiko import SSHException
@@ -37,8 +36,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.agents.agent_registry import resolve_agent_type
-from imbue.mng.agents.base_agent import BaseAgent
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
@@ -51,6 +49,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import LOCAL_CONNECTOR_NAME
+from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.offline_host import BaseHost
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import CertifiedHostData
@@ -908,7 +907,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_type = AgentTypeName(data["type"])
         resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
-        return cast(type[BaseAgent], resolved.agent_class)(
+        return resolved.agent_class(
             id=AgentId(data["id"]),
             name=AgentName(data["name"]),
             agent_type=agent_type,
@@ -962,9 +961,16 @@ class Host(BaseHost, OnlineHostInterface):
 
         self._mkdir(target_path)
 
-        # Track generated work directories at the host level
+        # Track generated work directories at the host level.
+        # When running in-place, actively remove from generated_work_dirs in case
+        # a previous agent had registered this path (e.g., a worktree agent created
+        # this directory, then the user ran --in-place from it). Without this removal,
+        # GC would treat the directory as orphaned and delete it after the in-place
+        # agent is destroyed.
         if is_generated_work_dir:
             self._add_generated_work_dir(target_path)
+        else:
+            self._remove_generated_work_dir(target_path)
 
         created_branch_name: str | None = None
 
@@ -1073,6 +1079,7 @@ class Host(BaseHost, OnlineHostInterface):
                     result = self.execute_command(f"git init --bare {shlex.quote(str(target_path / '.git'))}")
                     if not result.success:
                         raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
+                    add_safe_directory_on_remote(self, target_path)
 
             self._git_push_to_target(source_host, source_path, target_path)
 
@@ -1094,7 +1101,29 @@ class Host(BaseHost, OnlineHostInterface):
                 if not result.success:
                     raise MngError(f"Failed to configure git repo on target: {result.stderr}")
 
+            # Copy .git/info/exclude from source to target. This file is not
+            # transferred by git push --mirror since it lives outside the git
+            # object store.
+            self._transfer_git_info_exclude(source_host, source_path, target_path)
+
         return new_branch_name
+
+    def _transfer_git_info_exclude(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        """Copy .git/info/exclude from source to target if it exists."""
+        exclude_path = Path(".git") / "info" / "exclude"
+        try:
+            content = source_host.read_file(source_path / exclude_path)
+        except FileNotFoundError:
+            logger.trace("No .git/info/exclude in source, skipping")
+            return
+
+        with log_span("Copying .git/info/exclude to target"):
+            self.write_file(target_path / exclude_path, content)
 
     def _git_push_to_target(
         self,
@@ -1423,7 +1452,7 @@ class Host(BaseHost, OnlineHostInterface):
         created_branch_name: str | None = None,
     ) -> AgentInterface:
         """Create the agent state directory and return the agent."""
-        agent_id = AgentId.generate()
+        agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
         agent_type = options.agent_type or AgentTypeName("claude")
         with log_span(
@@ -1439,7 +1468,7 @@ class Host(BaseHost, OnlineHostInterface):
 
             create_time = datetime.now(timezone.utc)
 
-            agent = cast(type[BaseAgent], resolved.agent_class)(
+            agent = resolved.agent_class(
                 id=agent_id,
                 name=agent_name,
                 agent_type=agent_type,
@@ -2259,11 +2288,10 @@ def _build_start_agent_shell_command(
         )
         steps.append(f"tmux set-hook -t {quoted_session} client-attached[99] {shlex.quote(hook_value)}")
 
-    # Send the agent command as literal keys, then Enter to execute
-    steps.append(f"tmux send-keys -t {shlex.quote(session_name)} -l {shlex.quote(command)}")
-    steps.append(f"tmux send-keys -t {shlex.quote(session_name)} Enter")
-
-    # Create additional windows for each additional command
+    # Create additional windows BEFORE sending the agent command. This
+    # ensures all windows exist before the agent starts, preventing a race
+    # where a fast-exiting agent command destroys the session before
+    # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
         window_target = f"{session_name}:{window_name}"
@@ -2278,8 +2306,16 @@ def _build_start_agent_shell_command(
         steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
 
     # If we created additional windows, select the first window (the main agent)
+    # before sending the agent command
     if additional_commands:
         steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
+
+    # Send the agent command as literal keys, then Enter to execute.
+    # Target window :0 explicitly so this works even after additional windows
+    # have been created (which changes the active window).
+    agent_window = shlex.quote(session_name + ":0")
+    steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
+    steps.append(f"tmux send-keys -t {agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content

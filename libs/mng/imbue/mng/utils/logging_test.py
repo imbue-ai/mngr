@@ -1,97 +1,43 @@
 """Tests for logging utilities."""
 
 import io
+import json
 import sys
 from pathlib import Path
 
 from loguru import logger
 
+import imbue.mng.utils.logging as mng_logging_module
 from imbue.imbue_common.logging import _format_arg_value
 from imbue.imbue_common.logging import log_call
-from imbue.mng.config.data_types import LoggingConfig
-from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import LogLevel
-from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.logging import BUILD_COLOR
 from imbue.mng.utils.logging import BufferedMessage
 from imbue.mng.utils.logging import DEBUG_COLOR
 from imbue.mng.utils.logging import ERROR_COLOR
+from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.logging import RESET_COLOR
 from imbue.mng.utils.logging import WARNING_COLOR
-from imbue.mng.utils.logging import _console_handler_ids
 from imbue.mng.utils.logging import _format_user_message
 from imbue.mng.utils.logging import _resolve_log_dir
-from imbue.mng.utils.logging import _rotate_old_logs
 from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.logging import setup_logging
 
 
 def test_resolve_log_dir_uses_absolute_path(mng_test_prefix: str) -> None:
     """Absolute log_dir should be used as-is."""
-    config = MngConfig(
-        prefix=mng_test_prefix,
-        default_host_dir=Path("/custom/mng"),
-        logging=LoggingConfig(log_dir=Path("/absolute/path/logs")),
-    )
-
-    resolved = _resolve_log_dir(config)
+    resolved = _resolve_log_dir(Path("/absolute/path/logs"), Path("/custom/mng"))
 
     assert resolved == Path("/absolute/path/logs")
 
 
 def test_resolve_log_dir_uses_default_host_dir_for_relative(mng_test_prefix: str) -> None:
     """Relative log_dir should be resolved relative to default_host_dir."""
-    config = MngConfig(
-        prefix=mng_test_prefix,
-        default_host_dir=Path("/custom/mng"),
-        logging=LoggingConfig(log_dir=Path("my_logs")),
-    )
-
-    resolved = _resolve_log_dir(config)
+    resolved = _resolve_log_dir(Path("my_logs"), Path("/custom/mng"))
 
     assert resolved == Path("/custom/mng/my_logs")
-
-
-def test_rotate_old_logs_removes_oldest_files(tmp_path: Path) -> None:
-    """Should remove oldest files when exceeding max_files."""
-    log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-
-    # Create 5 log files
-    for i in range(5):
-        log_file = log_dir / f"log{i}.json"
-        log_file.write_text(f"log {i}")
-
-    # Keep only 3 most recent
-    _rotate_old_logs(log_dir, max_files=3)
-
-    remaining = sorted(log_dir.glob("*.json"))
-    assert len(remaining) == 3
-
-
-def test_rotate_old_logs_keeps_all_if_under_limit(tmp_path: Path) -> None:
-    """Should not remove files if under max_files."""
-    log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-
-    # Create 3 log files
-    for i in range(3):
-        log_file = log_dir / f"log{i}.json"
-        log_file.write_text(f"log {i}")
-
-    # Max is 10, so should keep all
-    _rotate_old_logs(log_dir, max_files=10)
-
-    remaining = list(log_dir.glob("*.json"))
-    assert len(remaining) == 3
-
-
-def test_rotate_old_logs_handles_nonexistent_dir() -> None:
-    """Should not error when log_dir doesn't exist."""
-    _rotate_old_logs(Path("/nonexistent/path"), max_files=10)
 
 
 def test_setup_logging_creates_log_dir(temp_mng_ctx: MngContext) -> None:
@@ -99,70 +45,100 @@ def test_setup_logging_creates_log_dir(temp_mng_ctx: MngContext) -> None:
     log_dir = temp_mng_ctx.config.default_host_dir / temp_mng_ctx.config.logging.log_dir
     assert not log_dir.exists()
 
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-        is_log_commands=True,
-        is_log_command_output=False,
-    )
+    logging_config = LoggingConfig(console_level=LogLevel.INFO)
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
-    assert log_dir.exists()
-    assert log_dir.is_dir()
+    # The source subdirectory should be created
+    source_dir = log_dir / "mng"
+    assert source_dir.exists()
+    assert source_dir.is_dir()
 
 
-def test_setup_logging_creates_log_file(temp_mng_ctx: MngContext) -> None:
-    """setup_logging should create a log file."""
+def test_setup_logging_creates_events_jsonl_file(temp_mng_ctx: MngContext) -> None:
+    """setup_logging should create an events.jsonl file in the source directory."""
     log_dir = temp_mng_ctx.config.default_host_dir / temp_mng_ctx.config.logging.log_dir
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-        is_log_commands=True,
-        is_log_command_output=False,
-    )
+    logging_config = LoggingConfig(console_level=LogLevel.INFO)
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
-    log_files = list(log_dir.glob("*.json"))
-    assert len(log_files) >= 1
+    # Log a message to trigger file creation
+    logger.info("test log message")
+
+    events_file = log_dir / "mng" / "events.jsonl"
+    assert events_file.exists()
+
+
+def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mng_ctx: MngContext) -> None:
+    """setup_logging should write flat JSON log lines with envelope fields and loguru metadata."""
+    log_dir = temp_mng_ctx.config.default_host_dir / temp_mng_ctx.config.logging.log_dir
+    logging_config = LoggingConfig(console_level=LogLevel.INFO)
+
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="list")
+
+    logger.info("Listed 3 agents")
+
+    events_file = log_dir / "mng" / "events.jsonl"
+    content = events_file.read_text().strip()
+    assert content, "events.jsonl should not be empty"
+
+    # Parse the last line as flat JSON
+    last_line = content.split("\n")[-1]
+    parsed = json.loads(last_line)
+
+    # Verify envelope fields at top level (same as bash logs)
+    assert "timestamp" in parsed
+    assert parsed["type"] == "mng"
+    assert parsed["event_id"].startswith("evt-")
+    assert parsed["source"] == "mng"
+    assert parsed["level"] == "INFO"
+    assert parsed["message"] == "Listed 3 agents"
+    assert "pid" in parsed
+    assert parsed["command"] == "list"
+
+    # Verify flattened loguru metadata
+    assert "function" in parsed
+    assert "line" in parsed
+    assert "module" in parsed
+    assert "logger_name" in parsed
+    assert "file_name" in parsed
+    assert "file_path" in parsed
+    assert "elapsed_seconds" in parsed
+    assert "process_name" in parsed
+    assert "thread_name" in parsed
+    assert "thread_id" in parsed
 
 
 def test_setup_logging_uses_custom_log_file_path(tmp_path: Path, temp_mng_ctx: MngContext) -> None:
     """setup_logging should create log file at custom path when log_file_path is provided."""
-    custom_log_path = tmp_path / "custom_log.json"
+    custom_log_path = tmp_path / "custom_log.jsonl"
 
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
+    logging_config = LoggingConfig(
         console_level=LogLevel.INFO,
         log_file_path=custom_log_path,
-        is_log_commands=True,
-        is_log_command_output=False,
     )
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
+    # Log a message to create the file
+    logger.info("custom path test")
     assert custom_log_path.exists()
 
 
 def test_setup_logging_creates_parent_dirs_for_custom_log_path(tmp_path: Path, temp_mng_ctx: MngContext) -> None:
     """setup_logging should create parent directories for custom log file path."""
-    custom_log_path = tmp_path / "nested" / "dirs" / "custom_log.json"
+    custom_log_path = tmp_path / "nested" / "dirs" / "custom_log.jsonl"
 
     assert not custom_log_path.parent.exists()
 
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
+    logging_config = LoggingConfig(
         console_level=LogLevel.INFO,
         log_file_path=custom_log_path,
-        is_log_commands=True,
-        is_log_command_output=False,
     )
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
     assert custom_log_path.parent.exists()
-    assert custom_log_path.exists()
 
 
 def test_setup_logging_expands_user_in_custom_log_path(tmp_path: Path, temp_mng_ctx: MngContext) -> None:
@@ -179,19 +155,18 @@ def test_setup_logging_expands_user_in_custom_log_path(tmp_path: Path, temp_mng_
 
     # Get the relative path from home
     relative_path = log_subdir.relative_to(home_dir)
-    tilde_path = Path("~") / relative_path / "expanded_log.json"
+    tilde_path = Path("~") / relative_path / "expanded_log.jsonl"
 
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
+    logging_config = LoggingConfig(
         console_level=LogLevel.INFO,
         log_file_path=tilde_path,
-        is_log_commands=True,
-        is_log_command_output=False,
     )
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
-    expanded_path = home_dir / relative_path / "expanded_log.json"
+    expanded_path = home_dir / relative_path / "expanded_log.jsonl"
+    # Log something so loguru creates the file
+    logger.info("expanded test")
     assert expanded_path.exists()
 
 
@@ -337,13 +312,8 @@ def test_logging_suppressor_initial_state() -> None:
 
 def test_logging_suppressor_enable_sets_suppressed() -> None:
     """Enable should set suppressed state to True."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
     try:
-        LoggingSuppressor.enable(output_opts)
+        LoggingSuppressor.enable(LogLevel.INFO)
         assert LoggingSuppressor.is_suppressed()
     finally:
         LoggingSuppressor.disable_and_replay(clear_screen=False)
@@ -351,12 +321,7 @@ def test_logging_suppressor_enable_sets_suppressed() -> None:
 
 def test_logging_suppressor_disable_clears_suppressed() -> None:
     """Disable should set suppressed state to False."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
-    LoggingSuppressor.enable(output_opts)
+    LoggingSuppressor.enable(LogLevel.INFO)
     assert LoggingSuppressor.is_suppressed()
 
     LoggingSuppressor.disable_and_replay(clear_screen=False)
@@ -365,13 +330,8 @@ def test_logging_suppressor_disable_clears_suppressed() -> None:
 
 def test_logging_suppressor_buffers_messages() -> None:
     """Suppressor should buffer messages while suppression is enabled."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
     try:
-        LoggingSuppressor.enable(output_opts)
+        LoggingSuppressor.enable(LogLevel.INFO)
 
         # Log some messages
         logger.info("Test message 1")
@@ -388,14 +348,9 @@ def test_logging_suppressor_buffers_messages() -> None:
 
 def test_logging_suppressor_respects_buffer_size() -> None:
     """Suppressor should limit buffer to specified size."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
     try:
         # Enable with small buffer
-        LoggingSuppressor.enable(output_opts, buffer_size=3)
+        LoggingSuppressor.enable(LogLevel.INFO, buffer_size=3)
 
         # Log more messages than buffer size
         for i in range(10):
@@ -410,12 +365,7 @@ def test_logging_suppressor_respects_buffer_size() -> None:
 
 def test_logging_suppressor_clears_buffer_on_disable() -> None:
     """Suppressor should clear buffer after disable_and_replay."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
-    LoggingSuppressor.enable(output_opts)
+    LoggingSuppressor.enable(LogLevel.INFO)
     logger.info("Test message")
     assert len(LoggingSuppressor.get_buffered_messages()) >= 1
 
@@ -425,18 +375,13 @@ def test_logging_suppressor_clears_buffer_on_disable() -> None:
 
 def test_logging_suppressor_enable_is_idempotent() -> None:
     """Calling enable twice should not reset buffer."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
     try:
-        LoggingSuppressor.enable(output_opts)
+        LoggingSuppressor.enable(LogLevel.INFO)
         logger.info("First message")
         initial_count = len(LoggingSuppressor.get_buffered_messages())
 
         # Enable again (should be no-op)
-        LoggingSuppressor.enable(output_opts)
+        LoggingSuppressor.enable(LogLevel.INFO)
         assert len(LoggingSuppressor.get_buffered_messages()) == initial_count
     finally:
         LoggingSuppressor.disable_and_replay(clear_screen=False)
@@ -444,12 +389,7 @@ def test_logging_suppressor_enable_is_idempotent() -> None:
 
 def test_logging_suppressor_disable_is_idempotent() -> None:
     """Calling disable_and_replay twice should be safe."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
-
-    LoggingSuppressor.enable(output_opts)
+    LoggingSuppressor.enable(LogLevel.INFO)
     LoggingSuppressor.disable_and_replay(clear_screen=False)
 
     # Second disable should not error
@@ -471,47 +411,39 @@ def test_buffered_message_tracks_stderr_destination() -> None:
 # =============================================================================
 
 
-def test_remove_console_handlers_clears_handler_ids(temp_mng_ctx: MngContext) -> None:
-    """remove_console_handlers should clear _console_handler_ids dict."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
+def test_remove_console_handlers_clears_handler_id(temp_mng_ctx: MngContext) -> None:
+    """remove_console_handlers should clear _console_handler_id."""
+    logging_config = LoggingConfig(console_level=LogLevel.INFO)
 
-    # Setup logging to populate console handler IDs
-    setup_logging(output_opts, temp_mng_ctx)
-    assert len(_console_handler_ids) > 0
+    # Setup logging to populate console handler ID
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
+    assert mng_logging_module._console_handler_id is not None
 
     # Remove handlers
     remove_console_handlers()
 
-    # Handler IDs dict should be empty
-    assert len(_console_handler_ids) == 0
+    # Handler ID should be None
+    assert mng_logging_module._console_handler_id is None
 
 
 def test_remove_console_handlers_is_idempotent(temp_mng_ctx: MngContext) -> None:
     """Calling remove_console_handlers twice should not error."""
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
-        console_level=LogLevel.INFO,
-    )
+    logging_config = LoggingConfig(console_level=LogLevel.INFO)
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
     remove_console_handlers()
 
     # Second call should not raise an error
     remove_console_handlers()
-    assert len(_console_handler_ids) == 0
 
 
 def test_remove_console_handlers_when_no_handlers_exist() -> None:
     """remove_console_handlers should not error when no handlers exist."""
-    # Clear any existing handlers
-    _console_handler_ids.clear()
+    mng_logging_module._console_handler_id = None
 
     # Should not raise an error
     remove_console_handlers()
-    assert len(_console_handler_ids) == 0
+    assert mng_logging_module._console_handler_id is None
 
 
 # =============================================================================
@@ -522,22 +454,18 @@ def test_remove_console_handlers_when_no_handlers_exist() -> None:
 def test_setup_logging_writes_to_current_stderr_after_stream_replacement(
     temp_mng_ctx: MngContext,
 ) -> None:
-    """All loguru handlers should write to the current sys.stderr, not a stale reference.
+    """The console handler should write to the current sys.stderr, not a stale reference.
 
     This is a regression test for a bug where logger.add(sys.stderr) captured the
     stream object at add time. If sys.stderr was later replaced (e.g., by pytest's
     capture mechanism), the handler would write to the old (possibly closed) stream,
     causing ValueError("I/O operation on closed file").
-
-    Both the user-facing handler and the diagnostic handler write to stderr.
     """
-    output_opts = OutputOptions(
-        output_format=OutputFormat.HUMAN,
+    logging_config = LoggingConfig(
         console_level=LogLevel.INFO,
-        log_level=LogLevel.DEBUG,
     )
 
-    setup_logging(output_opts, temp_mng_ctx)
+    setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
     # Replace sys.stderr with a StringIO to simulate pytest's capture mechanism
     original_stderr = sys.stderr

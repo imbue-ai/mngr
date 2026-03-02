@@ -3,9 +3,11 @@ from typing import Any
 
 import click
 import pluggy
+import setproctitle
 from click_option_group import OptionGroup
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.agents.agent_registry import load_agents_from_plugins
 from imbue.mng.cli.ask import ask
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.clone import clone
@@ -147,6 +149,8 @@ def cli(ctx: click.Context) -> None:
     """
     Initial entry point for mng CLI commands.
     """
+    setproctitle.setproctitle("mng")
+
     # expose the plugin manager in the command context so that all commands have access to it
     # This uses the singleton that was already created during command registration
     pm = get_or_create_plugin_manager()
@@ -257,6 +261,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     # load all classes defined by plugins so they are available later
     load_all_registries(pm)
+    load_agents_from_plugins(pm)
+
+    # Wire up the agent type resolver so hosts can resolve agent types
+    # without directly importing from the agents layer
 
     return pm
 

@@ -1,4 +1,5 @@
 import platform
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -77,6 +78,7 @@ class UnisonSyncer(MutableModel):
         description="Glob patterns to include in sync",
     )
     _running_process: RunningProcess | None = PrivateAttr(default=None)
+    _started_event: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -126,14 +128,24 @@ class UnisonSyncer(MutableModel):
 
         return cmd
 
+    def _on_output(self, line: str, is_stdout: bool) -> None:
+        """Handle a line of output from the unison process.
+
+        Sets the _started_event on first output, which signals that unison has
+        actually initialized (not just that the OS process was spawned).
+        """
+        logger.debug("unison: {}", line.rstrip())
+        self._started_event.set()
+
     def start(self) -> None:
         """Start the unison sync process."""
+        self._started_event.clear()
         cmd = self._build_unison_command()
         logger.debug("Starting unison with command: {}", " ".join(cmd))
 
         self._running_process = self.cg.run_process_in_background(
             cmd,
-            on_output=lambda line, is_stdout: logger.debug("unison: {}", line.rstrip()),
+            on_output=self._on_output,
         )
 
         logger.info("Started continuous sync between {} and {}", self.source_path, self.target_path)
@@ -155,10 +167,17 @@ class UnisonSyncer(MutableModel):
 
     @property
     def is_running(self) -> bool:
-        """Check if the unison process is currently running."""
+        """Check if the unison process is currently running.
+
+        Returns True only when the OS process is alive AND unison has produced
+        at least one line of output (meaning it has actually initialized, not
+        just that the process was spawned).
+        """
         if self._running_process is None:
             return False
-        return not self._running_process.is_finished()
+        if self._running_process.is_finished():
+            return False
+        return self._started_event.is_set()
 
 
 _UNISON = SystemDependency(

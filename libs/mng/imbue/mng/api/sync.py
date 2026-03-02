@@ -19,6 +19,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.errors import MngError
+from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -1123,6 +1124,8 @@ def sync_git(
     remote_git_ctx = RemoteGitContext(host=host)
 
     logger.debug("Syncing git from {} to {} (mode={})", local_path, remote_path, mode)
+
+    add_safe_directory_on_remote(host, remote_path)
 
     # Verify both are git repositories
     if not local_git_ctx.is_git_repository(local_path):

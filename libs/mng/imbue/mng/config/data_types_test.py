@@ -11,14 +11,16 @@ from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import HookDefinition
-from imbue.mng.config.data_types import LoggingConfig
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import ProviderInstanceConfig
+from imbue.mng.config.data_types import get_or_create_user_id
 from imbue.mng.config.data_types import merge_cli_args
 from imbue.mng.config.data_types import merge_dict_fields
 from imbue.mng.config.data_types import merge_list_fields
 from imbue.mng.config.data_types import split_cli_args_string
+from imbue.mng.errors import ParseSpecError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import LifecycleHook
@@ -27,6 +29,7 @@ from imbue.mng.primitives import Permission
 from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.logging import LoggingConfig
 
 
 def test_logging_config_merge_overrides_all_fields() -> None:
@@ -35,7 +38,6 @@ def test_logging_config_merge_overrides_all_fields() -> None:
     override = LoggingConfig(
         file_level=LogLevel.TRACE,
         log_dir=Path("/custom/logs"),
-        max_log_files=500,
         max_log_size_mb=20,
         console_level=LogLevel.DEBUG,
         is_logging_commands=False,
@@ -46,7 +48,6 @@ def test_logging_config_merge_overrides_all_fields() -> None:
 
     assert merged.file_level == LogLevel.TRACE
     assert merged.log_dir == Path("/custom/logs")
-    assert merged.max_log_files == 500
     assert merged.max_log_size_mb == 20
     assert merged.console_level == LogLevel.DEBUG
     assert merged.is_logging_commands is False
@@ -909,3 +910,72 @@ def test_mng_config_merge_keeps_base_connect_command_when_override_none(mng_test
 def test_mng_config_connect_command_defaults_to_none(mng_test_prefix: str) -> None:
     config = MngConfig(prefix=mng_test_prefix)
     assert config.connect_command is None
+
+
+# =============================================================================
+# Tests for CreateTemplateName validation
+# =============================================================================
+
+
+def test_create_template_name_raises_on_empty_string() -> None:
+    """CreateTemplateName should raise ParseSpecError for empty string."""
+    with pytest.raises(ParseSpecError, match="Template name cannot be empty"):
+        CreateTemplateName("")
+
+
+# =============================================================================
+# Tests for get_or_create_user_id with MNG_USER_ID
+# =============================================================================
+
+
+def test_get_or_create_user_id_uses_env_var_when_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_or_create_user_id should use MNG_USER_ID env var when file doesn't exist."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    env_user_id = "a" * 32
+    monkeypatch.setenv("MNG_USER_ID", env_user_id)
+
+    result = get_or_create_user_id(profile_dir)
+    assert result == env_user_id
+
+    # Should have persisted the value
+    user_id_file = profile_dir / "user_id"
+    assert user_id_file.read_text() == env_user_id
+
+
+def test_get_or_create_user_id_validates_env_var_matches_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_or_create_user_id should assert when MNG_USER_ID doesn't match existing file."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    existing_id = "b" * 32
+    user_id_file = profile_dir / "user_id"
+    user_id_file.write_text(existing_id)
+
+    monkeypatch.setenv("MNG_USER_ID", "c" * 32)
+
+    with pytest.raises(AssertionError, match="MNG_USER_ID environment variable does not match"):
+        get_or_create_user_id(profile_dir)
+
+
+def test_get_or_create_user_id_accepts_env_var_matching_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_or_create_user_id should succeed when MNG_USER_ID matches the existing file."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    existing_id = "d" * 32
+    user_id_file = profile_dir / "user_id"
+    user_id_file.write_text(existing_id)
+
+    monkeypatch.setenv("MNG_USER_ID", existing_id)
+
+    result = get_or_create_user_id(profile_dir)
+    assert result == existing_id
+
+
+def test_mng_context_get_profile_user_id(temp_mng_ctx: MngContext) -> None:
+    """MngContext.get_profile_user_id should return a non-empty user ID."""
+    user_id = temp_mng_ctx.get_profile_user_id()
+    assert len(user_id) == 32

@@ -213,7 +213,7 @@ def run_local_command_modern_version(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=env,
+                env=env if env is not None else os.environ.copy(),
             )
         except (OSError, ValueError) as e:
             raise ProcessSetupError(

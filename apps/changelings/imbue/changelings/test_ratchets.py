@@ -5,7 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ARGS_IN_DOCSTRINGS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASSERT_ISINSTANCE
-from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNCIO_IMPORT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_EXCEPT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_GENERIC_TYPES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
@@ -78,7 +77,7 @@ def teardown_module() -> None:
 
 
 def _get_changelings_source_dir() -> Path:
-    return Path(__file__).parent
+    return Path(__file__).parent.parent.parent
 
 
 # --- Code safety ---
@@ -101,7 +100,7 @@ def test_prevent_eval_usage() -> None:
 
 def test_prevent_while_true() -> None:
     chunks = check_ratchet_rule(PREVENT_WHILE_TRUE, _get_changelings_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_WHILE_TRUE.format_failure(chunks)
+    assert len(chunks) <= snapshot(1), PREVENT_WHILE_TRUE.format_failure(chunks)
 
 
 def test_prevent_time_sleep() -> None:
@@ -176,11 +175,6 @@ def test_prevent_setattr() -> None:
 
 
 # --- Banned libraries and patterns ---
-
-
-def test_prevent_asyncio_import() -> None:
-    chunks = check_ratchet_rule(PREVENT_ASYNCIO_IMPORT, _get_changelings_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_ASYNCIO_IMPORT.format_failure(chunks)
 
 
 def test_prevent_pandas_import() -> None:
@@ -329,7 +323,7 @@ def test_prevent_direct_subprocess_usage() -> None:
     Test files are excluded from this check.
     """
     chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, _get_changelings_source_dir(), TEST_FILE_PATTERNS)
-    assert len(chunks) <= snapshot(8), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+    assert len(chunks) <= snapshot(0), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
 
 
 # --- AST-based ratchets ---

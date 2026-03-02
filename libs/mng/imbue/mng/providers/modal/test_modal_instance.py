@@ -615,7 +615,7 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
     try:
         host = real_modal_provider.create_host(
             HostName("test-cidr"),
-            build_args=[f"--dockerfile={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
+            build_args=[f"--file={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
         )
 
         # curl to a public IP should fail because it's outside the allowlist
@@ -671,7 +671,7 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
     try:
         host = real_modal_provider.create_host(
             HostName("test-offline"),
-            build_args=[f"--dockerfile={dockerfile}", "--offline"],
+            build_args=[f"--file={dockerfile}", "--offline"],
         )
 
         # curl to a public IP should fail because all outbound traffic is blocked

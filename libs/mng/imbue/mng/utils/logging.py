@@ -1,9 +1,7 @@
 import io
 import logging
-import os
 import sys
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -14,10 +12,85 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mng.config.data_types import MngConfig
-from imbue.mng.config.data_types import MngContext
-from imbue.mng.config.data_types import OutputOptions
+from imbue.imbue_common.logging import make_jsonl_file_sink
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mng.primitives import LogLevel
+
+# Default event type and source for mng CLI logs
+_DEFAULT_EVENT_TYPE: Final[str] = "mng"
+_DEFAULT_EVENT_SOURCE: Final[str] = "mng"
+
+
+class LoggingConfig(FrozenModel):
+    """Logging configuration for mng."""
+
+    file_level: LogLevel = Field(
+        default=LogLevel.DEBUG,
+        description="Log level for file logging",
+    )
+    log_dir: Path = Field(
+        default=Path("logs"),
+        description="Directory for log files (relative to data root if relative)",
+    )
+    max_log_size_mb: int = Field(
+        default=10,
+        description="Maximum size of each log file in MB",
+    )
+    console_level: LogLevel = Field(
+        default=LogLevel.BUILD,
+        description="Log level for console output",
+    )
+    log_file_path: Path | None = Field(
+        default=None,
+        description="Custom log file path (None for default)",
+    )
+    is_logging_commands: bool = Field(
+        default=True,
+        description="Log what commands were executed",
+    )
+    is_logging_command_output: bool = Field(
+        default=False,
+        description="Log stdout/stderr from executed commands",
+    )
+    is_logging_env_vars: bool = Field(
+        default=False,
+        description="Log environment variables (security risk)",
+    )
+    event_type: NonEmptyStr = Field(
+        default=NonEmptyStr(_DEFAULT_EVENT_TYPE),
+        description="Event type for JSONL log events (e.g. 'mng', 'changelings')",
+    )
+    event_source: NonEmptyStr = Field(
+        default=NonEmptyStr(_DEFAULT_EVENT_SOURCE),
+        description="Event source for JSONL log events, matching logs/<source>/",
+    )
+
+    def merge_with(self, override: "LoggingConfig") -> "LoggingConfig":
+        """Merge this config with an override config.
+
+        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
+
+        Scalar fields: override wins if not None
+        """
+        return LoggingConfig(
+            file_level=override.file_level if override.file_level is not None else self.file_level,
+            log_dir=override.log_dir if override.log_dir is not None else self.log_dir,
+            max_log_size_mb=override.max_log_size_mb if override.max_log_size_mb is not None else self.max_log_size_mb,
+            console_level=override.console_level if override.console_level is not None else self.console_level,
+            log_file_path=override.log_file_path if override.log_file_path is not None else self.log_file_path,
+            is_logging_commands=override.is_logging_commands
+            if override.is_logging_commands is not None
+            else self.is_logging_commands,
+            is_logging_command_output=override.is_logging_command_output
+            if override.is_logging_command_output is not None
+            else self.is_logging_command_output,
+            is_logging_env_vars=override.is_logging_env_vars
+            if override.is_logging_env_vars is not None
+            else self.is_logging_env_vars,
+            event_type=override.event_type if override.event_type is not None else self.event_type,
+            event_source=override.event_source if override.event_source is not None else self.event_source,
+        )
+
 
 # ANSI color codes that work well on both light and dark backgrounds.
 # Using 256-color palette codes with bold for better visibility.
@@ -64,8 +137,20 @@ DEFAULT_BUFFER_SIZE: Final[int] = 500
 # ANSI escape codes for screen control
 CLEAR_SCREEN: Final[str] = "\x1b[2J\x1b[H"
 
-# Module-level storage for console handler IDs (used by LoggingSuppressor)
-_console_handler_ids: dict[str, int] = {}
+# Module-level storage for the console handler ID (used by LoggingSuppressor)
+_console_handler_id: int | None = None
+
+
+# Map from our LogLevel enum to loguru level strings
+LEVEL_MAP: Final[dict[LogLevel, str]] = {
+    LogLevel.TRACE: "TRACE",
+    LogLevel.DEBUG: "DEBUG",
+    LogLevel.BUILD: "BUILD",
+    LogLevel.INFO: "INFO",
+    LogLevel.WARN: "WARNING",
+    LogLevel.ERROR: "ERROR",
+    LogLevel.NONE: "CRITICAL",
+}
 
 
 def _dynamic_stderr_sink(message: Any) -> None:
@@ -122,143 +207,84 @@ def suppress_warnings() -> None:
     pyinfra_logger.propagate = False
 
 
-def setup_logging(output_opts: OutputOptions, mng_ctx: MngContext) -> None:
-    """Configure logging based on output options and mng context.
+def setup_logging(
+    config: LoggingConfig,
+    default_host_dir: Path,
+    command: str | None,
+) -> None:
+    """Configure logging based on the provided settings.
 
     Sets up:
-    - stderr logging for user-facing messages (clean format)
-    - stderr logging for structured diagnostic messages (detailed format)
-    - File logging to custom path (if log_file_path provided) or
-      ~/.mng/logs/<timestamp>-<pid>.json (default)
-    - Log rotation based on config (only for default log directory)
+    - stderr logging for user-facing messages (clean format, colored)
+    - File logging in JSONL event envelope format to a single rotating events.jsonl
     """
+    global _console_handler_id
+
     # Remove default handler
     logger.remove()
 
-    # remove warnings
+    # Suppress pyinfra warnings
     suppress_warnings()
 
     # BUILD level is registered at module import time via register_build_level()
 
-    # Map our LogLevel enum to loguru levels
-    level_map = {
-        LogLevel.TRACE: "TRACE",
-        LogLevel.DEBUG: "DEBUG",
-        LogLevel.BUILD: "BUILD",
-        LogLevel.INFO: "INFO",
-        LogLevel.WARN: "WARNING",
-        LogLevel.ERROR: "ERROR",
-        LogLevel.NONE: "CRITICAL",
-    }
-
-    # Clear stored handler IDs from previous setup (if any)
-    _console_handler_ids.clear()
+    # Reset stored handler ID from previous setup (if any)
+    _console_handler_id = None
 
     # Set up stderr logging for user-facing messages (clean format, with colored WARNING prefix).
     # All logger.* messages go to stderr; only explicit output (JSON, tables, etc.) goes to stdout.
     # We set colorize=False because we handle colors manually in _format_user_message.
     # Use callable sinks so the handler always writes to the current sys.stderr,
     # even if it gets replaced (e.g., by pytest's capture mechanism).
-    if output_opts.console_level != LogLevel.NONE:
-        handler_id = logger.add(
+    if config.console_level != LogLevel.NONE:
+        _console_handler_id = logger.add(
             _dynamic_stderr_sink,
-            level=output_opts.console_level,
+            level=config.console_level,
             format=_format_user_message,
             colorize=False,
             diagnose=False,
         )
-        _console_handler_ids["console"] = handler_id
 
-    # FIXME: entirely remove output_opts.log_level and this whole notion of multiple console handler ids
-    #  we only actually use the console_level and file_level variables in practice.
-    #  don't worry about backwards compatibility--just completely remove the log_level option and simplify this stuff
-
-    # Set up stderr logging for diagnostics (structured format)
-    # Shows all messages at console_level with detailed formatting
-    if output_opts.log_level != LogLevel.NONE:
-        console_level = level_map[output_opts.log_level]
-        handler_id = logger.add(
-            _dynamic_stderr_sink,
-            level=console_level,
-            format="<level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
-            colorize=True,
-            diagnose=False,
-        )
-        _console_handler_ids["stderr"] = handler_id
-
-    # Set up file logging
-    # Use provided log file path if specified, otherwise use default directory
-    if output_opts.log_file_path is not None:
-        log_file = output_opts.log_file_path.expanduser()
-        # Ensure parent directory exists
+    # Set up file logging with flat JSONL format
+    if config.log_file_path is not None:
+        log_file = config.log_file_path.expanduser()
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        is_using_custom_log_path = True
     else:
-        is_using_custom_log_path = False
-        log_dir = _resolve_log_dir(mng_ctx.config)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        # Create log file path with timestamp and PID
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        pid = os.getpid()
-        log_file = log_dir / f"{timestamp}-{pid}.json"
+        resolved_log_dir = _resolve_log_dir(config.log_dir, default_host_dir)
+        # Write to logs/<source>/events.jsonl
+        log_source_dir = resolved_log_dir / config.event_source
+        log_source_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_source_dir / "events.jsonl"
 
-    file_level = level_map[mng_ctx.config.logging.file_level]
+    # Use a callable sink (not a format function) to bypass loguru's colorizer,
+    # which would otherwise choke on angle brackets in serialized extra data.
+    loguru_file_level = LEVEL_MAP[config.file_level]
+    jsonl_sink = make_jsonl_file_sink(
+        file_path=str(log_file),
+        event_type=config.event_type,
+        event_source=config.event_source,
+        command=command,
+        max_size_bytes=config.max_log_size_mb * 1024 * 1024,
+    )
     logger.add(
-        log_file,
-        level=file_level,
+        jsonl_sink,
+        level=loguru_file_level,
         format="{message}",
-        serialize=True,
+        colorize=False,
         diagnose=False,
-        rotation=f"{mng_ctx.config.logging.max_log_size_mb} MB",
     )
 
-    # Rotate old logs if needed (only for default log directory to avoid
-    # accidentally deleting unrelated .json files when custom path is used)
-    if not is_using_custom_log_path:
-        _rotate_old_logs(log_dir, mng_ctx.config.logging.max_log_files)
 
-
-def _resolve_log_dir(config: MngConfig) -> Path:
+def _resolve_log_dir(log_dir: Path, default_host_dir: Path) -> Path:
     """Resolve the log directory path.
 
     If log_dir is relative, it's relative to default_host_dir.
     """
-    log_dir = config.logging.log_dir
-
     if not log_dir.is_absolute():
-        # Resolve relative to host dir
-        host_dir = config.default_host_dir.expanduser()
+        host_dir = default_host_dir.expanduser()
         log_dir = host_dir / log_dir
 
     return log_dir.expanduser()
-
-
-def _rotate_old_logs(log_dir: Path, max_files: int) -> None:
-    """Remove oldest log files if we exceed max_files.
-
-    Uses least-recently-modified strategy. Robust to concurrent access
-    from multiple mng instances - failures during deletion are silently
-    ignored.
-    """
-    if not log_dir.exists():
-        return
-
-    try:
-        # Get all .json log files
-        log_files = sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        # If we can't read the directory, just skip rotation
-        return
-
-    # Remove oldest files if we exceed max_files
-    if len(log_files) > max_files:
-        for old_log in log_files[max_files:]:
-            try:
-                old_log.unlink()
-            except (OSError, FileNotFoundError):
-                # File might have been deleted by another mng instance, or
-                # we might not have permission - either way, ignore and continue
-                pass
 
 
 class BufferedMessage(FrozenModel):
@@ -280,7 +306,6 @@ class BufferingStreamWrapper(io.TextIOBase):
     """
 
     def __init__(self, original_stream: TextIO, buffer: deque[BufferedMessage], is_stderr: bool) -> None:
-        """Create a buffering wrapper around a stream."""
         super().__init__()
         self._original_stream = original_stream
         self._buffer = buffer
@@ -342,11 +367,8 @@ class LoggingSuppressor:
     # Class-level state for the singleton suppressor
     _is_suppressed: bool = False
     _buffer: deque[BufferedMessage] = deque(maxlen=DEFAULT_BUFFER_SIZE)
-    _console_handler_id: int | None = None
-    _stderr_handler_id: int | None = None
     _suppressed_console_handler_id: int | None = None
-    _suppressed_stderr_handler_id: int | None = None
-    _output_opts: OutputOptions | None = None
+    _console_level: LogLevel | None = None
     # Original streams for restoration
     _original_stdout: TextIO | None = None
     _original_stderr: TextIO | None = None
@@ -357,34 +379,31 @@ class LoggingSuppressor:
         return cls._is_suppressed
 
     @classmethod
-    def enable(cls, output_opts: OutputOptions, buffer_size: int = DEFAULT_BUFFER_SIZE) -> None:
+    def enable(cls, console_level: LogLevel, buffer_size: int = DEFAULT_BUFFER_SIZE) -> None:
         """Enable logging suppression and start buffering console output.
 
         The buffer will keep the most recent buffer_size messages. File logging
-        is not affected - only stdout and stderr console handlers are suppressed.
+        is not affected - only the console handler is suppressed.
 
         This also redirects sys.stdout and sys.stderr to capture ALL writes,
         including those from Python's warnings module and third-party libraries.
         """
+        global _console_handler_id
+
         if cls._is_suppressed:
             return
 
-        cls._output_opts = output_opts
+        cls._console_level = console_level
         cls._buffer = deque(maxlen=buffer_size)
         cls._is_suppressed = True
 
-        # Remove only the console handlers (preserving file logging)
-        # The handler IDs are stored in _console_handler_ids by setup_logging()
-        if "console" in _console_handler_ids:
+        # Remove the console handler (preserving file logging)
+        if _console_handler_id is not None:
             try:
-                logger.remove(_console_handler_ids["console"])
+                logger.remove(_console_handler_id)
             except ValueError:
                 pass
-        if "stderr" in _console_handler_ids:
-            try:
-                logger.remove(_console_handler_ids["stderr"])
-            except ValueError:
-                pass
+            _console_handler_id = None
 
         # Redirect sys.stdout and sys.stderr to capture ALL writes
         # This captures Python warnings, third-party library output, etc.
@@ -395,35 +414,13 @@ class LoggingSuppressor:
         sys.stdout = cast(TextIO, stdout_wrapper)
         sys.stderr = cast(TextIO, stderr_wrapper)
 
-        # Add buffering handlers that capture messages instead of writing to console.
-        # Note: These handlers now write to our BufferingStreamWrapper, but since we're
-        # using custom sink functions that write to the buffer directly, this is fine.
-        # The loguru messages will be buffered via the sink functions, while direct
-        # writes to sys.stdout/stderr will be buffered via the stream wrappers.
-        if output_opts.console_level != LogLevel.NONE:
+        # Add a buffering handler that captures messages instead of writing to console
+        if console_level != LogLevel.NONE:
             cls._suppressed_console_handler_id = logger.add(
                 cls._buffered_console_sink,
-                level=output_opts.console_level,
+                level=console_level,
                 format=_format_user_message,
                 colorize=False,
-                diagnose=False,
-            )
-
-        if output_opts.log_level != LogLevel.NONE:
-            level_map = {
-                LogLevel.TRACE: "TRACE",
-                LogLevel.DEBUG: "DEBUG",
-                LogLevel.BUILD: "BUILD",
-                LogLevel.INFO: "INFO",
-                LogLevel.WARN: "WARNING",
-                LogLevel.ERROR: "ERROR",
-                LogLevel.NONE: "CRITICAL",
-            }
-            cls._suppressed_stderr_handler_id = logger.add(
-                cls._buffered_stderr_sink,
-                level=level_map[output_opts.log_level],
-                format="<level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
-                colorize=True,
                 diagnose=False,
             )
 
@@ -433,30 +430,24 @@ class LoggingSuppressor:
         cls._buffer.append(BufferedMessage(formatted_message=str(message), is_stderr=True))
 
     @classmethod
-    def _buffered_stderr_sink(cls, message: Any) -> None:
-        """Sink function that buffers messages intended for stderr."""
-        cls._buffer.append(BufferedMessage(formatted_message=str(message), is_stderr=True))
-
-    @classmethod
     def disable_and_replay(cls, clear_screen: bool = True) -> None:
         """Disable suppression and replay buffered messages.
 
         If clear_screen is True, clears the terminal before replaying messages.
         Restores sys.stdout and sys.stderr to their original streams.
         """
+        global _console_handler_id
+
         if not cls._is_suppressed:
             return
 
         cls._is_suppressed = False
-        output_opts = cls._output_opts
+        console_level = cls._console_level
 
-        # Remove the buffering handlers
+        # Remove the buffering handler
         if cls._suppressed_console_handler_id is not None:
             logger.remove(cls._suppressed_console_handler_id)
             cls._suppressed_console_handler_id = None
-        if cls._suppressed_stderr_handler_id is not None:
-            logger.remove(cls._suppressed_stderr_handler_id)
-            cls._suppressed_stderr_handler_id = None
 
         # Restore the original stdout/stderr streams BEFORE writing anything
         # This ensures our replayed messages go to the real terminal
@@ -486,39 +477,17 @@ class LoggingSuppressor:
         # Clear the buffer
         cls._buffer.clear()
 
-        # Re-add the normal console handlers and store their IDs.
-        # Use callable sinks so the handler always writes to the current stream.
-        if output_opts is not None:
-            if output_opts.console_level != LogLevel.NONE:
-                handler_id = logger.add(
-                    _dynamic_stderr_sink,
-                    level=output_opts.console_level,
-                    format=_format_user_message,
-                    colorize=False,
-                    diagnose=False,
-                )
-                _console_handler_ids["console"] = handler_id
+        # Re-add the normal console handler and store its ID
+        if console_level is not None and console_level != LogLevel.NONE:
+            _console_handler_id = logger.add(
+                _dynamic_stderr_sink,
+                level=console_level,
+                format=_format_user_message,
+                colorize=False,
+                diagnose=False,
+            )
 
-            if output_opts.log_level != LogLevel.NONE:
-                level_map = {
-                    LogLevel.TRACE: "TRACE",
-                    LogLevel.DEBUG: "DEBUG",
-                    LogLevel.BUILD: "BUILD",
-                    LogLevel.INFO: "INFO",
-                    LogLevel.WARN: "WARNING",
-                    LogLevel.ERROR: "ERROR",
-                    LogLevel.NONE: "CRITICAL",
-                }
-                handler_id = logger.add(
-                    _dynamic_stderr_sink,
-                    level=level_map[output_opts.log_level],
-                    format="<level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
-                    colorize=True,
-                    diagnose=False,
-                )
-                _console_handler_ids["stderr"] = handler_id
-
-        cls._output_opts = None
+        cls._console_level = None
 
     @classmethod
     def get_buffered_messages(cls) -> list[BufferedMessage]:
@@ -527,16 +496,17 @@ class LoggingSuppressor:
 
 
 def remove_console_handlers() -> None:
-    """Remove all console log handlers (stdout and stderr).
+    """Remove the console log handler.
 
     This is useful for daemon/background processes that detach from the terminal,
     where the console file descriptors may become invalid after the parent exits.
     File logging continues to work after calling this function.
     """
-    for handler_id in list(_console_handler_ids.values()):
+    global _console_handler_id
+    if _console_handler_id is not None:
         try:
-            logger.remove(handler_id)
+            logger.remove(_console_handler_id)
         except ValueError:
             # Handler already removed
             pass
-    _console_handler_ids.clear()
+        _console_handler_id = None

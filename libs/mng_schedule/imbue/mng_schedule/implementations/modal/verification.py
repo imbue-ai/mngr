@@ -128,6 +128,8 @@ def _wait_for_agent_to_finish(
             )
             return
 
+        # FIXME: when polling the agent here, we should *also* print a little "and this is how you can connect" message at the bottom, in case the user wants to connect and debug, eg, if the agent gets stuck
+
         # Capture and log the agent's screen periodically.
         now = time.monotonic()
         if now - last_capture_time >= screen_capture_interval_seconds:

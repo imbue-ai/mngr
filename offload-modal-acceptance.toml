@@ -1,0 +1,33 @@
+# offload configuration for running mng acceptance tests on Modal
+[offload]
+max_parallel = 200
+test_timeout_secs = 60
+retry_count = 2
+stream_output = true
+sandbox_project_root = "/code/mng"
+
+[provider]
+type = "default"
+prepare_command = "uv run @modal_sandbox.py prepare libs/mng/imbue/mng/resources/Dockerfile"
+create_command = "uv run @modal_sandbox.py create {image_id}" #Image Id gets injected, also --copy-dirs
+exec_command = "uv run @modal_sandbox.py exec {sandbox_id} {command}"
+destroy_command = "uv run @modal_sandbox.py destroy {sandbox_id}"
+download_command = "uv run @modal_sandbox.py download {sandbox_id} {paths}"
+timeout_secs = 600
+
+[framework]
+type = "default"
+discover_command = "uv run pytest --collect-only -q 2>/dev/null {filters} | grep '::'"
+# Run tests in the sandbox (source is baked into /app)
+run_command = "cd /code/mng && git fetch origin ${LAST_COMMIT_SHA} && git checkout ${LAST_COMMIT_SHA} && git apply /offload-upload/patch --allow-empty && uv sync --all-packages && uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml={result_file} {tests}"
+test_id_format = "{name}"
+
+[groups.all]
+retry_count = 4
+# Exclude release tests from the acceptance suite. Exclude docker tests because Modal support for Docker is in ALPHA state.
+filters = "-m'not release and not docker'"
+
+[report]
+output_dir = "test-results"
+junit = true
+junit_file = "junit.xml"

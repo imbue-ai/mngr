@@ -2,7 +2,6 @@
 [offload]
 max_parallel = 50
 test_timeout_secs = 60
-retry_count = 4
 stream_output = true
 sandbox_project_root = "/code/mng"
 
@@ -15,12 +14,17 @@ destroy_command = "uv run @modal_sandbox.py destroy {sandbox_id}"
 download_command = "uv run @modal_sandbox.py download {sandbox_id} {paths}"
 timeout_secs = 600
 
-[groups.all]
+[framework]
 type = "default"
-# Discover tests locally using pytest --collect-only, exclude acceptance and release tests
-discover_command = "uv run pytest --collect-only -q -m 'not acceptance and not release' 2>/dev/null | grep '::'"
+discover_command = "uv sync --all-packages && uv run pytest --collect-only -q {filters} 2>/dev/null | grep '::'"
 # Run tests in the sandbox (source is baked into /app)
-run_command = "cd /code/mng && git fetch origin fix/junit-classname-nodeid && git checkout fix/junit-classname-nodeid && git apply /offload-upload/patch --allow-empty && uv sync --all-packages && uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml=/tmp/junit.xml {tests}"
+run_command = "cd /code/mng && git fetch origin ${LAST_COMMIT_SHA} && git checkout ${LAST_COMMIT_SHA} && git apply /offload-upload/patch --allow-empty && uv sync --all-packages && uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml={result_file} {tests}"
+test_id_format = "{name}"
+
+[groups.all]
+retry_count = 4
+# Exclude acceptance and release tests
+filters = "-m 'not acceptance and not release'"
 
 [report]
 output_dir = "test-results"
