@@ -1451,7 +1451,7 @@ def test_all_default_work_dir_files_are_loadable() -> None:
 
     for resource_name, _ in _DEFAULT_WORK_DIR_FILES:
         content = load_zygote_resource(f"defaults/{resource_name}")
-        assert content is not None, f"defaults/{resource_name} should be loadable"
+        assert content, f"defaults/{resource_name} is empty"
 
 
 def test_all_default_skill_files_are_loadable() -> None:

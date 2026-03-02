@@ -99,10 +99,10 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
     During provisioning:
     - Installs the llm toolchain (llm, llm-anthropic, llm-live-chat)
-    - Creates symlinks for changeling entrypoint files
+    - Creates symlinks for Claude Code discovery (CLAUDE.md, settings, skills)
     - Provisions watcher scripts and chat utilities
     - Sets up event log directories (logs/<source>/events.jsonl)
-    - Symlinks .changelings/memory/ into Claude project memory
+    - Symlinks memory/ into Claude project memory
 
     Via tmux windows (injected by override_command_options):
     - Conversation watcher (syncs llm DB to logs/messages/events.jsonl)

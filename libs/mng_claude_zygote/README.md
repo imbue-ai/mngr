@@ -48,12 +48,21 @@ Every event is self-describing: you never need to know the filename to understan
 - To list all conversations for this agent, we read `logs/conversations/events.jsonl` (append-only, last value per conversation_id wins)
 - When invoking "llm live-chat", we pass in two tools: one for gathering context (recent messages from other conversations, inner monologue, recent events) and another for extra context (mng agent list, deeper history)
 - A simple event watcher observes the event streams (`logs/messages/events.jsonl`, `logs/scheduled/events.jsonl`, `logs/mng_agents/events.jsonl`, `logs/stop/events.jsonl`) for changes, and when modified, sends the next unhandled event(s) to the primary agent (via "mng message")
-- Changeling agents are assumed to run from a specially structured git repo that contains various skills, configuration, CLAUDE.md files with prompts, and the code for any tools they have constructed for themselves.
-- The top level CLAUDE.md in the agent git repo (where it will be launched) serves as the core system prompt that is *shared* among all agents (the primary agent, any claude subagent it makes, and even any other agents created via mng with this repo as the target)
-- The primary agent CLAUDE.md should be checked in as ".changelings/entrypoint.md" and should be symlinked from the project root as "CLAUDE.local.md" when it is the agent that is running (same thing for ".changelings/entrypoint.json", which will be symlinked as ".claude/settings.local.json"). This is something that the ClaudeZygoteAgent should take care of.
-- Other agents can be defined by simply making *.md (and *.json) entries in the ".changelings/" folder (and creating an appropriate agent type for them in ".mng/settings.toml", and maybe someday we even auto-gen those entries if missing)
+- Changeling agents are assumed to run from a specially structured git repo that contains various skills, configuration, prompt files, and the code for any tools they have constructed for themselves. The layout is:
+    - `GLOBAL.md` - shared instructions for all agents (symlinked as `CLAUDE.md` so Claude Code discovers it)
+    - `settings.json` - shared Claude Code settings (symlinked as `.claude/settings.json`)
+    - `thinking/PROMPT.md` - primary/inner monologue agent prompt (symlinked as `CLAUDE.local.md`)
+    - `thinking/settings.json` - primary agent Claude Code settings (symlinked as `.claude/settings.local.json`)
+    - `thinking/skills/` - skills for the thinking agent (symlinked as `.claude/skills`)
+    - `talking/PROMPT.md` - talking agent prompt (future)
+    - `talking/settings.json` - talking agent settings (future)
+    - `talking/skills/` - skills for the talking agent (future)
+    - `memory/` - shared memory directory (symlinked into Claude project memory)
+- The `GLOBAL.md` serves as the core system prompt that is *shared* among all agents (the primary agent, any claude subagent it makes, and even any other agents created via mng with this repo as the target). It is symlinked to `CLAUDE.md` at the project root so Claude Code picks it up.
+- The primary agent prompt is stored as `thinking/PROMPT.md` and symlinked as `CLAUDE.local.md` at the project root. Similarly, `thinking/settings.json` is symlinked as `.claude/settings.local.json`, and `thinking/skills/` is symlinked as `.claude/skills`. All of this is handled by the ClaudeZygoteAgent during provisioning.
+- Other agent roles (e.g., `talking/`) can be defined by creating corresponding directories with their own `PROMPT.md`, `settings.json`, and `skills/` subdirectories (and creating an appropriate agent type for them in `.mng/settings.toml`)
 - The prompts for the primary agent (both before shutdown and upon message receipt) should encourage it to keep track of messages that it received (via its own task list)
-- *All* claude agents should share the same memory, which should be symlinked between ".changelings/memory/" (in the worktree) and the claude location for memory for a project (~/.claude/projects/<project>/memory/, which then causes the memories to show up as changes to git). This is done during provisioning: since we know the work_dir, we can compute the Claude project directory name (absolute path with / and . replaced by -) and proactively create the directory and symlink without needing to poll
+- *All* claude agents should share the same memory, which is stored at `memory/` in the work dir and symlinked to the Claude project memory location (`~/.claude/projects/<project>/memory/`, which then causes the memories to show up as changes to git). This is done during provisioning: since we know the work_dir, we can compute the Claude project directory name (absolute path with / and . replaced by -) and proactively create the directory and symlink without needing to poll
 - Any claude agents should use the "project" memory scope (again, to keep memories version controlled)
 - As part of getting itself set up, the ClaudeZygoteAgent will need to ensure that we've installed the "llm" tool, as well as our plugins for it (ie, "llm-anthropic" and "llm-live-chat"). In other words, we need to call these commands:
         uv tool install llm

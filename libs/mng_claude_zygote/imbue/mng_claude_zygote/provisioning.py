@@ -471,7 +471,7 @@ def link_memory_directory(
     This ensures all Claude agents share the same project memory, and that
     memories are version-controlled in the agent's git repo.
     """
-    changelings_memory = work_dir / "memory"
+    memory_dir = work_dir / "memory"
 
     # Get the absolute path of work_dir on the host
     abs_result = _execute_with_timing(
@@ -486,13 +486,13 @@ def link_memory_directory(
     abs_work_dir = abs_result.stdout.strip()
     project_dir_name = compute_claude_project_dir_name(abs_work_dir)
 
-    # Create the changelings memory directory
+    # Create the memory directory
     _execute_with_timing(
         host,
-        f"mkdir -p {shlex.quote(str(changelings_memory))}",
+        f"mkdir -p {shlex.quote(str(memory_dir))}",
         hard_timeout=settings.fs_hard_timeout_seconds,
         warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir changelings memory",
+        label="mkdir memory",
     )
 
     # Create the Claude project directory and symlink memory into it.
@@ -502,8 +502,8 @@ def link_memory_directory(
     project_dir_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}'
     memory_link_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
 
-    cmd = f"mkdir -p {project_dir_shell} && ln -sfn {shlex.quote(str(changelings_memory))} {memory_link_shell}"
-    with log_span("Linking memory: $HOME/.claude/projects/{}/memory -> {}", project_dir_name, changelings_memory):
+    cmd = f"mkdir -p {project_dir_shell} && ln -sfn {shlex.quote(str(memory_dir))} {memory_link_shell}"
+    with log_span("Linking memory: $HOME/.claude/projects/{}/memory -> {}", project_dir_name, memory_dir):
         result = _execute_with_timing(
             host,
             cmd,
