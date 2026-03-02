@@ -1,14 +1,67 @@
+import json
+
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.cli.limit import LimitCliOptions
 from imbue.mng.cli.limit import _build_updated_activity_config
 from imbue.mng.cli.limit import _build_updated_permissions
+from imbue.mng.cli.limit import _has_agent_level_settings
+from imbue.mng.cli.limit import _has_any_setting
+from imbue.mng.cli.limit import _has_host_level_settings
+from imbue.mng.cli.limit import _output_result
 from imbue.mng.cli.limit import limit
+from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import IdleMode
+from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import Permission
+
+
+def _make_limit_opts(
+    idle_timeout: str | None = None,
+    idle_mode: str | None = None,
+    activity_sources: str | None = None,
+    add_activity_source: tuple[str, ...] = (),
+    remove_activity_source: tuple[str, ...] = (),
+    start_on_boot: bool | None = None,
+    grant: tuple[str, ...] = (),
+    revoke: tuple[str, ...] = (),
+) -> LimitCliOptions:
+    """Create a LimitCliOptions with sensible defaults, allowing overrides."""
+    return LimitCliOptions(
+        agents=(),
+        agent_list=(),
+        hosts=(),
+        limit_all=False,
+        dry_run=False,
+        include=(),
+        exclude=(),
+        stdin=False,
+        start_on_boot=start_on_boot,
+        idle_timeout=idle_timeout,
+        idle_mode=idle_mode,
+        activity_sources=activity_sources,
+        add_activity_source=add_activity_source,
+        remove_activity_source=remove_activity_source,
+        grant=grant,
+        revoke=revoke,
+        refresh_ssh_keys=False,
+        add_ssh_key=(),
+        remove_ssh_key=(),
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        project_context_path=None,
+        plugin=(),
+        disable_plugin=(),
+    )
 
 
 def test_limit_cli_options_fields() -> None:
@@ -97,29 +150,6 @@ def test_limit_cannot_combine_agents_and_all(
 
     assert result.exit_code != 0
     assert "Cannot specify both agent names and --all" in result.output
-
-
-def test_limit_future_options_raise_not_implemented(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that [future] options raise NotImplementedError."""
-    future_option_sets = [
-        ["--all", "--idle-timeout", "300", "--include", "some-filter"],
-        ["--all", "--idle-timeout", "300", "--exclude", "some-filter"],
-        ["--all", "--idle-timeout", "300", "--stdin"],
-        ["--all", "--idle-timeout", "300", "--refresh-ssh-keys"],
-        ["--all", "--idle-timeout", "300", "--add-ssh-key", "key.pub"],
-        ["--all", "--idle-timeout", "300", "--remove-ssh-key", "key.pub"],
-    ]
-    for args in future_option_sets:
-        result = cli_runner.invoke(
-            limit,
-            args,
-            obj=plugin_manager,
-            catch_exceptions=True,
-        )
-        assert result.exit_code != 0, f"Expected failure for args {args}, got exit_code=0"
 
 
 def test_limit_all_with_no_agents(
@@ -330,3 +360,129 @@ def test_activity_sources_mutually_exclusive_with_add_remove(
 
     assert result.exit_code != 0
     assert "Cannot combine --activity-sources with --add-activity-source" in result.output
+
+
+def test_limit_all_dry_run_no_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--all --dry-run --idle-timeout with no agents reports none found."""
+    result = cli_runner.invoke(
+        limit,
+        ["--all", "--dry-run", "--idle-timeout", "300"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "No agents found to configure" in result.output
+
+
+def test_limit_all_json_format_no_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--all --format json --idle-timeout with no agents exits 0."""
+    result = cli_runner.invoke(
+        limit,
+        ["--all", "--format", "json", "--idle-timeout", "300"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+
+# =============================================================================
+# _has_* helper function tests
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("opts", "expected"),
+    [
+        pytest.param(_make_limit_opts(idle_timeout="300"), True, id="idle_timeout"),
+        pytest.param(_make_limit_opts(idle_mode="ssh"), True, id="idle_mode"),
+        pytest.param(_make_limit_opts(activity_sources="ssh,agent"), True, id="activity_sources"),
+        pytest.param(_make_limit_opts(add_activity_source=("ssh",)), True, id="add_activity_source"),
+        pytest.param(_make_limit_opts(remove_activity_source=("boot",)), True, id="remove_activity_source"),
+        pytest.param(_make_limit_opts(), False, id="none"),
+    ],
+)
+def test_has_host_level_settings(opts: LimitCliOptions, expected: bool) -> None:
+    """_has_host_level_settings should detect whether any host-level setting is set."""
+    assert _has_host_level_settings(opts) is expected
+
+
+@pytest.mark.parametrize(
+    ("opts", "expected"),
+    [
+        pytest.param(_make_limit_opts(start_on_boot=True), True, id="start_on_boot"),
+        pytest.param(_make_limit_opts(grant=("read",)), True, id="grant"),
+        pytest.param(_make_limit_opts(revoke=("write",)), True, id="revoke"),
+        pytest.param(_make_limit_opts(), False, id="none"),
+    ],
+)
+def test_has_agent_level_settings(opts: LimitCliOptions, expected: bool) -> None:
+    """_has_agent_level_settings should detect whether any agent-level setting is set."""
+    assert _has_agent_level_settings(opts) is expected
+
+
+def test_has_any_setting_with_host_settings() -> None:
+    """_has_any_setting should return True when host settings are set."""
+    opts = _make_limit_opts(idle_timeout="300")
+    assert _has_any_setting(opts) is True
+
+
+def test_has_any_setting_with_agent_settings() -> None:
+    """_has_any_setting should return True when agent settings are set."""
+    opts = _make_limit_opts(start_on_boot=False)
+    assert _has_any_setting(opts) is True
+
+
+def test_has_any_setting_with_no_settings() -> None:
+    """_has_any_setting should return False when no settings are changed."""
+    opts = _make_limit_opts()
+    assert _has_any_setting(opts) is False
+
+
+# =============================================================================
+# _output_result tests
+# =============================================================================
+
+
+def test_limit_output_result_human_with_changes(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result should show change count in HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    assert "Applied 1 change(s)" in captured.out
+
+
+def test_limit_output_result_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result should not write in HUMAN format with no changes."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    _output_result([], output_opts)
+    captured = capsys.readouterr()
+    assert "Applied" not in captured.out
+
+
+def test_limit_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result should output JSON data."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["count"] == 1
+    assert len(data["changes"]) == 1
+
+
+def test_limit_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result should output JSONL event."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    changes = [{"setting": "idle_timeout", "value": 300}]
+    _output_result(changes, output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["event"] == "limit_result"
+    assert data["count"] == 1

@@ -202,6 +202,7 @@ def deploy_changeling(
     paths: ChangelingPaths,
     forwarding_server_port: int,
     concurrency_group: ConcurrencyGroup,
+    pass_env: tuple[str, ...] = (),
 ) -> DeploymentResult:
     """Deploy a changeling by creating an mng agent.
 
@@ -241,6 +242,7 @@ def deploy_changeling(
             agent_id=agent_id,
             provider=provider,
             concurrency_group=concurrency_group,
+            pass_env=pass_env,
         )
 
         login_url = _generate_auth_code(
@@ -314,6 +316,7 @@ def _create_mng_agent(
     agent_id: AgentId,
     provider: DeploymentProvider,
     concurrency_group: ConcurrencyGroup,
+    pass_env: tuple[str, ...] = (),
 ) -> None:
     """Create an mng agent from the changeling's repo directory.
 
@@ -342,6 +345,9 @@ def _create_mng_agent(
             "--label",
             "changeling=true",
         ]
+
+        for env_var in pass_env:
+            mng_command.extend(["--pass-env", env_var])
 
         if provider == DeploymentProvider.LOCAL:
             # Local: run in-place so the agent runs directly in the

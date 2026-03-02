@@ -1,5 +1,7 @@
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Generator
@@ -9,11 +11,32 @@ from typing import Any
 import pytest
 from loguru import logger
 
+from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 
 register_plugin_test_fixtures(globals())
+
+
+@pytest.fixture(autouse=True)
+def _reset_loguru() -> Generator[None, None, None]:
+    """Reset loguru handlers before and after each test to prevent handler leakage."""
+    logger.remove()
+    yield
+    logger.remove()
+
+
+def write_changelings_settings_toml(base_dir: Path, content: str) -> Path:
+    """Write a settings.toml file under .changelings/ for watcher tests.
+
+    Returns the path to the written file.
+    """
+    changelings_dir = base_dir / ".changelings"
+    changelings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = changelings_dir / "settings.toml"
+    settings_path.write_text(content)
+    return settings_path
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +132,12 @@ class ChatScriptEnv:
     def __init__(self, temp_host_dir: Path) -> None:
         self.chat_script = temp_host_dir / "commands" / "chat.sh"
         self.chat_script.parent.mkdir(parents=True)
+
+        # Write the shared logging library (sourced by chat.sh and other scripts)
+        mng_log_path = temp_host_dir / "commands" / "mng_log.sh"
+        mng_log_path.write_text(load_resource_script("mng_log.sh"))
+        os.chmod(mng_log_path, 0o755)
+
         self.chat_script.write_text(load_zygote_resource("chat.sh"))
         os.chmod(self.chat_script, 0o755)
 
@@ -118,13 +147,19 @@ class ChatScriptEnv:
         self.messages_dir = self.agent_state_dir / "logs" / "messages"
         self.messages_dir.mkdir(parents=True)
 
+        self.work_dir = temp_host_dir / "work"
+        self.work_dir.mkdir(parents=True)
+        self.changelings_dir = self.work_dir / ".changelings"
+        self.changelings_dir.mkdir(parents=True)
+
         self.env = os.environ.copy()
         self.env["MNG_AGENT_STATE_DIR"] = str(self.agent_state_dir)
         self.env["MNG_HOST_DIR"] = str(temp_host_dir)
+        self.env["MNG_AGENT_WORK_DIR"] = str(self.work_dir)
 
     def set_default_model(self, model: str) -> None:
-        """Write the chat model to settings.toml."""
-        (self.agent_state_dir / "settings.toml").write_text(f'[chat]\nmodel = "{model}"\n')
+        """Write the chat model to .changelings/settings.toml in the work dir."""
+        (self.changelings_dir / "settings.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
     def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
         """Run chat.sh with the given arguments."""
@@ -218,3 +253,64 @@ def temp_git_repo(tmp_path: Path) -> Path:
     repo_dir.mkdir()
     init_git_repo_with_config(repo_dir)
     return repo_dir
+
+
+# -- Shared test helpers for watcher and integration tests --
+
+# SQL schema matching the llm tool's responses table.
+# Used by conversation watcher sync tests that create a real SQLite DB.
+LLM_RESPONSES_SCHEMA = """
+    CREATE TABLE responses (
+        id TEXT PRIMARY KEY,
+        system TEXT,
+        prompt TEXT,
+        response TEXT,
+        model TEXT,
+        datetime_utc TEXT,
+        conversation_id TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        token_details TEXT,
+        response_json TEXT,
+        reply_to_id TEXT,
+        chat_id INTEGER,
+        duration_ms INTEGER,
+        attachment_type TEXT,
+        attachment_path TEXT,
+        attachment_url TEXT,
+        attachment_content TEXT
+    )
+"""
+
+
+def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
+    """Create a minimal llm-compatible SQLite database with responses.
+
+    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
+    """
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(LLM_RESPONSES_SCHEMA)
+        for row_id, prompt, response, model, dt, cid in rows:
+            conn.execute(
+                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (row_id, prompt, response, model, dt, cid),
+            )
+        conn.commit()
+
+
+def write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
+    """Append a conversation_created event to a JSONL file."""
+    event = json.dumps(
+        {
+            "timestamp": "2025-01-15T10:00:00.000Z",
+            "type": "conversation_created",
+            "event_id": f"evt-{cid}",
+            "source": "conversations",
+            "conversation_id": cid,
+            "model": model,
+        }
+    )
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    with events_file.open("a") as f:
+        f.write(event + "\n")

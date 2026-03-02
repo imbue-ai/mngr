@@ -12,8 +12,8 @@ injection logic that the plugin provides.
 
 import json
 import os
-import sqlite3
 import subprocess
+import sys
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -33,6 +33,8 @@ from imbue.mng_claude_zygote.conftest import ChatScriptEnv
 from imbue.mng_claude_zygote.conftest import LocalShellHost
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
+from imbue.mng_claude_zygote.conftest import create_test_llm_db
+from imbue.mng_claude_zygote.conftest import write_conversation_event
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_SKILL_DIRS
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_THINKING_DIR_FILES
@@ -47,33 +49,9 @@ from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
+from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_messages
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
-
-# SQL schema matching the llm tool's responses table.
-# Used by conversation watcher sync tests that create a real SQLite DB.
-_LLM_RESPONSES_SCHEMA = """
-    CREATE TABLE responses (
-        id TEXT PRIMARY KEY,
-        system TEXT,
-        prompt TEXT,
-        response TEXT,
-        model TEXT,
-        datetime_utc TEXT,
-        conversation_id TEXT,
-        input_tokens INTEGER,
-        output_tokens INTEGER,
-        token_details TEXT,
-        response_json TEXT,
-        reply_to_id TEXT,
-        chat_id INTEGER,
-        duration_ms INTEGER,
-        attachment_type TEXT,
-        attachment_path TEXT,
-        attachment_url TEXT,
-        attachment_content TEXT
-    )
-"""
 
 
 def _unique_agent_name(label: str) -> str:
@@ -136,87 +114,9 @@ def _find_agent_state_dir(host_dir: Path) -> Path | None:
     return None
 
 
-def _create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
-    """Create a minimal llm-compatible SQLite database with responses.
-
-    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
-    """
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(_LLM_RESPONSES_SCHEMA)
-        for row_id, prompt, response, model, dt, cid in rows:
-            conn.execute(
-                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, prompt, response, model, dt, cid),
-            )
-        conn.commit()
-
-
-def _extract_sync_script_from_watcher() -> str:
-    """Extract the Python sync script from conversation_watcher.sh.
-
-    The watcher embeds a Python heredoc between 'SYNC_SCRIPT' markers.
-    This function extracts it so tests run the actual production algorithm
-    rather than a potentially-stale copy.
-    """
-    watcher_content = load_zygote_resource("conversation_watcher.sh")
-    start_marker = "python3 << 'SYNC_SCRIPT'"
-    end_marker = "SYNC_SCRIPT"
-
-    start_idx = watcher_content.index(start_marker)
-    # Find the content after the start marker line
-    script_start = watcher_content.index("\n", start_idx) + 1
-    # Find the closing SYNC_SCRIPT marker (it's on its own line after the heredoc)
-    remaining = watcher_content[script_start:]
-    # The end marker is on a line by itself (possibly with leading whitespace)
-    script_end = None
-    for i, line in enumerate(remaining.split("\n")):
-        if line.strip() == end_marker:
-            script_end = sum(len(l) + 1 for l in remaining.split("\n")[:i])
-            break
-    assert script_end is not None, "Could not find SYNC_SCRIPT end marker in conversation_watcher.sh"
-    return remaining[:script_end]
-
-
-def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path) -> int:
-    """Run the conversation watcher's sync logic and return the count of synced events.
-
-    Extracts the Python sync script embedded in conversation_watcher.sh and
-    runs it directly, testing the actual production algorithm without needing
-    the full bash watcher loop infrastructure.
-    """
-    sync_env = os.environ.copy()
-    sync_env["_CONVERSATIONS_FILE"] = str(conversations_file)
-    sync_env["_MESSAGES_FILE"] = str(messages_file)
-    sync_env["_DB_PATH"] = str(db_path)
-
-    sync_script = _extract_sync_script_from_watcher()
-
-    result = subprocess.run(
-        ["python3", "-c", sync_script],
-        capture_output=True,
-        text=True,
-        env=sync_env,
-        timeout=10,
-    )
-    assert result.returncode == 0, f"Sync failed: {result.stderr}"
-    return int(result.stdout.strip())
-
-
-def _write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
-    """Append a conversation_created event to a JSONL file."""
-    event = json.dumps(
-        {
-            "timestamp": "2025-01-15T10:00:00.000Z",
-            "type": "conversation_created",
-            "event_id": f"evt-{cid}",
-            "source": "conversations",
-            "conversation_id": cid,
-            "model": model,
-        }
-    )
-    with events_file.open("a") as f:
-        f.write(event + "\n")
+def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path, tmp_path: Path) -> int:
+    """Run the conversation watcher's sync logic and return the count of synced events."""
+    return _sync_messages(db_path, conversations_file, messages_file)
 
 
 # -- Provisioning filesystem structure tests --
@@ -251,7 +151,7 @@ def test_provisioning_creates_event_log_directories(
 def test_provisioning_writes_changeling_scripts_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that provisioning writes all bash scripts with correct permissions."""
+    """Verify that provisioning writes all scripts with correct permissions."""
     provision_changeling_scripts(cast(Any, local_shell_host), _DEFAULT_PROVISIONING)
 
     commands_dir = local_shell_host.host_dir / "commands"
@@ -260,7 +160,7 @@ def test_provisioning_writes_changeling_scripts_to_host(
         assert script_path.exists(), f"Expected {script_name} to be written"
         assert script_path.stat().st_mode & 0o111, f"Expected {script_name} to be executable"
         content = script_path.read_text()
-        assert content.startswith("#!/bin/bash"), f"Expected {script_name} to have bash shebang"
+        assert content.startswith("#!"), f"Expected {script_name} to have a shebang"
 
 
 @pytest.mark.timeout(30)
@@ -491,25 +391,35 @@ def test_chat_script_list_handles_malformed_events(chat_env: ChatScriptEnv) -> N
 
 
 @pytest.mark.timeout(30)
-def test_conversation_watcher_script_is_valid_bash(chat_env: ChatScriptEnv) -> None:
-    """Verify that conversation_watcher.sh passes bash syntax check."""
-    watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "conversation_watcher.sh"
+def test_conversation_watcher_script_is_valid_python(chat_env: ChatScriptEnv) -> None:
+    """Verify that conversation_watcher.py passes Python syntax check."""
+    watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "conversation_watcher.py"
     watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_zygote_resource("conversation_watcher.sh"))
+    watcher_script.write_text(load_zygote_resource("conversation_watcher.py"))
 
-    result = subprocess.run(["bash", "-n", str(watcher_script)], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(watcher_script)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
     assert result.returncode == 0, f"Syntax check failed: {result.stderr}"
 
 
 @pytest.mark.timeout(30)
-def test_event_watcher_script_is_valid_bash(chat_env: ChatScriptEnv) -> None:
-    """Verify that event_watcher.sh passes bash syntax check."""
-    watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "event_watcher.sh"
+def test_event_watcher_script_is_valid_python(chat_env: ChatScriptEnv) -> None:
+    """Verify that event_watcher.py passes Python syntax check."""
+    watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "event_watcher.py"
     watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_zygote_resource("event_watcher.sh"))
+    watcher_script.write_text(load_zygote_resource("event_watcher.py"))
 
-    result = subprocess.run(["bash", "-n", str(watcher_script)], capture_output=True, text=True, timeout=10)
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(watcher_script)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
     assert result.returncode == 0, f"Syntax check failed: {result.stderr}"
 
@@ -636,8 +546,8 @@ def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
 
     chat_env.run("--new", "--as-agent")
 
-    log_file = log_dir / "chat.log"
-    assert log_file.exists(), "chat.log should be created"
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists(), "chat/events.jsonl should be created"
     log_content = log_file.read_text()
     assert "Creating new conversation" in log_content
 
@@ -651,18 +561,19 @@ def test_event_watcher_reads_settings_for_watched_sources(
 ) -> None:
     """Verify that the event watcher script reads watched_event_sources from settings."""
 
-    agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
-    agent_state_dir.mkdir(parents=True)
+    work_dir = local_shell_host.host_dir / "work"
+    changelings_dir = work_dir / ".changelings"
+    changelings_dir.mkdir(parents=True)
 
     # Write a settings.toml with custom watched sources
     settings_content = '[watchers]\nwatched_event_sources = ["messages", "stop"]\nevent_poll_interval_seconds = 7\n'
-    (agent_state_dir / "settings.toml").write_text(settings_content)
+    (changelings_dir / "settings.toml").write_text(settings_content)
 
     # The event watcher reads settings via a Python snippet at startup.
     # Test that the Python settings-reading logic produces the expected output.
     settings_reader = f"""
 import tomllib, pathlib, json
-p = pathlib.Path('{agent_state_dir}/settings.toml')
+p = pathlib.Path('{changelings_dir}/settings.toml')
 s = tomllib.loads(p.read_text()) if p.exists() else {{}}
 w = s.get('watchers', {{}})
 print(json.dumps({{
@@ -759,10 +670,10 @@ def test_conversation_watcher_sync_with_llm_database(
     Creates a minimal llm-compatible database and verifies that the sync
     script extracts messages correctly.
     """
-    _write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-sync-test")
+    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-sync-test")
 
     db_path = tmp_path / "logs.db"
-    _create_test_llm_db(
+    create_test_llm_db(
         db_path,
         [
             (
@@ -788,6 +699,7 @@ def test_conversation_watcher_sync_with_llm_database(
         chat_env.conversations_dir / "events.jsonl",
         chat_env.messages_dir / "events.jsonl",
         db_path,
+        tmp_path,
     )
     assert synced_count == 4, f"Expected 4 synced events (2 user + 2 assistant), got {synced_count}"
 
@@ -813,10 +725,10 @@ def test_conversation_watcher_sync_is_idempotent(
     tmp_path: Path,
 ) -> None:
     """Verify that running the sync twice does not duplicate events."""
-    _write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-idem-test")
+    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-idem-test")
 
     db_path = tmp_path / "logs.db"
-    _create_test_llm_db(
+    create_test_llm_db(
         db_path,
         [
             (
@@ -833,10 +745,10 @@ def test_conversation_watcher_sync_is_idempotent(
     conversations_file = chat_env.conversations_dir / "events.jsonl"
     messages_file = chat_env.messages_dir / "events.jsonl"
 
-    first_count = _run_sync_script(conversations_file, messages_file, db_path)
+    first_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
     assert first_count == 2
 
-    second_count = _run_sync_script(conversations_file, messages_file, db_path)
+    second_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
     assert second_count == 0
 
     lines = messages_file.read_text().strip().split("\n")
@@ -856,7 +768,7 @@ def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScrip
 
     events_file = chat_env.conversations_dir / "events.jsonl"
     event = json.loads(events_file.read_text().strip().split("\n")[-1])
-    assert event["model"] == "claude-opus-4-6", f"Expected hardcoded default, got: {event['model']!r}"
+    assert event["model"] == "claude-opus-4.6", f"Expected hardcoded default, got: {event['model']!r}"
 
 
 @pytest.mark.timeout(30)

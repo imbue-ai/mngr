@@ -12,15 +12,23 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng_claude_zygote import resources as zygote_resources
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 
 # Scripts to provision to $MNG_HOST_DIR/commands/
 _SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
-    "conversation_watcher.sh",
-    "event_watcher.sh",
+    "chat_ttyd_handler.sh",
+    "agent_tmux_handler.sh",
+    "web_server.py",
+    "conversation_watcher.py",
+    "event_watcher.py",
+    "transcript_watcher.py",
 )
+
+# Python modules provisioned alongside scripts (not executable, mode 0644)
+_SCRIPT_MODULES: Final[tuple[str, ...]] = ("watcher_common.py",)
 
 # Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/
 _LLM_TOOL_FILES: Final[tuple[str, ...]] = (
@@ -260,7 +268,7 @@ def warn_if_mng_unavailable(
 ) -> None:
     """Warn if mng will not be available on the agent host.
 
-    Changeling scripts (event_watcher.sh, etc.) use 'uv run mng message' to
+    Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to
     communicate with the primary agent. If mng is not available on the host,
     these scripts will fail silently.
 
@@ -285,7 +293,7 @@ def warn_if_mng_unavailable(
     if not check_result.success:
         logger.warning(
             "mng is not available on the remote host and the mng_recursive plugin is not enabled. "
-            "Changeling scripts (event_watcher.sh, etc.) use 'uv run mng message' to communicate "
+            "Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to communicate "
             "with the primary agent and will fail without mng installed. "
             "Enable the mng_recursive plugin or install mng on the remote host manually."
         )
@@ -429,7 +437,7 @@ def _create_dir_symlink_if_target_exists(
 
 
 def provision_changeling_scripts(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
-    """Write changeling bash scripts to $MNG_HOST_DIR/commands/.
+    """Write changeling scripts to $MNG_HOST_DIR/commands/.
 
     Scripts are loaded from the resources package and written with execute permission.
     """
@@ -442,11 +450,24 @@ def provision_changeling_scripts(host: OnlineHostInterface, settings: Provisioni
         label="mkdir commands",
     )
 
+    # Provision the shared logging library (from mng core resources) first,
+    # since the changeling scripts source it.
+    mng_log_content = load_resource_script("mng_log.sh")
+    mng_log_path = commands_dir / "mng_log.sh"
+    with log_span("Writing mng_log.sh to host"):
+        host.write_file(mng_log_path, mng_log_content.encode(), mode="0755")
+
     for script_name in _SCRIPT_FILES:
         script_content = load_zygote_resource(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
+
+    for module_name in _SCRIPT_MODULES:
+        module_content = load_zygote_resource(module_name)
+        module_path = commands_dir / module_name
+        with log_span("Writing {} to host", module_name):
+            host.write_file(module_path, module_content.encode(), mode="0644")
 
 
 def provision_llm_tools(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
@@ -486,8 +507,18 @@ def create_event_log_directories(
     - logs/stop/              agent stop events
     - logs/monitor/           (future) monitor agent events
     - logs/claude_transcript/ inner monologue (written by Claude background tasks)
+    - logs/common_transcript/ agent-agnostic transcript (written by transcript watcher)
     """
-    for source in ("conversations", "messages", "scheduled", "mng_agents", "stop", "monitor", "claude_transcript"):
+    for source in (
+        "conversations",
+        "messages",
+        "scheduled",
+        "mng_agents",
+        "stop",
+        "monitor",
+        "claude_transcript",
+        "common_transcript",
+    ):
         source_dir = agent_state_dir / "logs" / source
         _execute_with_timing(
             host,

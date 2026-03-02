@@ -7,7 +7,11 @@ import pytest
 
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
+from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng.providers.deploy_utils import collect_deploy_files
+from imbue.mng.providers.deploy_utils import collect_provider_profile_files
+from imbue.mng.providers.deploy_utils import detect_mng_install_mode
+from imbue.mng.providers.deploy_utils import resolve_mng_install_mode
 
 
 class _MockHook:
@@ -104,3 +108,119 @@ def test_collect_deploy_files_empty_results() -> None:
 
     result = collect_deploy_files(ctx, repo_root=Path("/repo"))
     assert result == {}
+
+
+# --- MngInstallMode enum tests ---
+
+
+def test_mng_install_mode_has_correct_values() -> None:
+    """MngInstallMode enum members should have uppercase string values."""
+    assert MngInstallMode.AUTO.value == "AUTO"
+    assert MngInstallMode.PACKAGE.value == "PACKAGE"
+    assert MngInstallMode.EDITABLE.value == "EDITABLE"
+    assert MngInstallMode.SKIP.value == "SKIP"
+
+
+# --- detect_mng_install_mode tests ---
+
+
+def test_detect_mng_install_mode_returns_editable_or_package() -> None:
+    """detect_mng_install_mode should return EDITABLE or PACKAGE for the current install."""
+    result = detect_mng_install_mode()
+    assert result in (MngInstallMode.EDITABLE, MngInstallMode.PACKAGE)
+
+
+def test_detect_mng_install_mode_returns_package_for_missing_package() -> None:
+    """detect_mng_install_mode should return PACKAGE when the package is not installed."""
+    result = detect_mng_install_mode("nonexistent-package-xyz-12345")
+    assert result == MngInstallMode.PACKAGE
+
+
+def test_detect_mng_install_mode_returns_editable_for_mng() -> None:
+    """detect_mng_install_mode for 'mng' should return EDITABLE in a dev workspace."""
+    # In a development workspace with editable install, this should return EDITABLE.
+    # In a regular install, it would return PACKAGE. Either is valid.
+    result = detect_mng_install_mode("mng")
+    assert result in (MngInstallMode.EDITABLE, MngInstallMode.PACKAGE)
+
+
+# --- resolve_mng_install_mode tests ---
+
+
+def test_resolve_mng_install_mode_resolves_auto() -> None:
+    """resolve_mng_install_mode should resolve AUTO to a concrete mode."""
+    result = resolve_mng_install_mode(MngInstallMode.AUTO)
+    assert result in (MngInstallMode.EDITABLE, MngInstallMode.PACKAGE)
+
+
+def test_resolve_mng_install_mode_passes_through_package() -> None:
+    """resolve_mng_install_mode should pass through PACKAGE unchanged."""
+    result = resolve_mng_install_mode(MngInstallMode.PACKAGE)
+    assert result == MngInstallMode.PACKAGE
+
+
+def test_resolve_mng_install_mode_passes_through_editable() -> None:
+    """resolve_mng_install_mode should pass through EDITABLE unchanged."""
+    result = resolve_mng_install_mode(MngInstallMode.EDITABLE)
+    assert result == MngInstallMode.EDITABLE
+
+
+def test_resolve_mng_install_mode_passes_through_skip() -> None:
+    """resolve_mng_install_mode should pass through SKIP unchanged."""
+    result = resolve_mng_install_mode(MngInstallMode.SKIP)
+    assert result == MngInstallMode.SKIP
+
+
+# --- collect_provider_profile_files tests ---
+
+
+def test_collect_provider_profile_files_returns_empty_when_dir_missing(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """collect_provider_profile_files should return empty dict when provider dir doesn't exist."""
+    result = collect_provider_profile_files(
+        mng_ctx=temp_mng_ctx,
+        provider_name="nonexistent-provider",
+        excluded_file_names=frozenset(),
+    )
+    assert result == {}
+
+
+def test_collect_provider_profile_files_collects_files(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """collect_provider_profile_files should return files from the provider directory."""
+    provider_dir = temp_mng_ctx.profile_dir / "providers" / "test-provider"
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    (provider_dir / "config.toml").write_text("test config")
+    (provider_dir / "other.txt").write_text("other content")
+
+    result = collect_provider_profile_files(
+        mng_ctx=temp_mng_ctx,
+        provider_name="test-provider",
+        excluded_file_names=frozenset(),
+    )
+
+    assert len(result) == 2
+
+
+def test_collect_provider_profile_files_excludes_specified_files(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """collect_provider_profile_files should exclude files in the excluded set."""
+    provider_dir = temp_mng_ctx.profile_dir / "providers" / "test-provider"
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    (provider_dir / "config.toml").write_text("test config")
+    (provider_dir / "id_rsa").write_text("secret key")
+    (provider_dir / "known_hosts").write_text("host data")
+
+    result = collect_provider_profile_files(
+        mng_ctx=temp_mng_ctx,
+        provider_name="test-provider",
+        excluded_file_names=frozenset({"id_rsa", "known_hosts"}),
+    )
+
+    assert len(result) == 1
+    # The single remaining file should be config.toml
+    dest_paths = list(result.keys())
+    assert any("config.toml" in str(p) for p in dest_paths)
