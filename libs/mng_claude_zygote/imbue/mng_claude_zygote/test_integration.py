@@ -696,112 +696,36 @@ print(json.dumps({{
 # that exercise individual functions.
 
 
+_WATCHDOG_MARKER = "# --- WATCHDOG-DEPENDENT CODE BELOW"
+
+
+def _strip_watchdog_from_event_watcher() -> str:
+    """Load event_watcher.py and return only the stdlib-only portion.
+
+    The script contains a marker comment that separates stdlib-only
+    functions (above) from watchdog-dependent code (below). This function
+    loads the script, removes watchdog imports, and truncates at the marker.
+    Tests then exec the result to get the real production implementations
+    of _get_offset, _set_offset, _mtime_poll, _load_watcher_settings, etc.
+    """
+    source = load_zygote_resource("event_watcher.py")
+    marker_idx = source.find(_WATCHDOG_MARKER)
+    assert marker_idx != -1, "event_watcher.py is missing the WATCHDOG-DEPENDENT marker comment"
+    truncated = source[:marker_idx]
+    # Remove watchdog imports and the _ChangeHandler class
+    stripped_lines = [line for line in truncated.splitlines() if not line.startswith("from watchdog.")]
+    return "\n".join(stripped_lines)
+
+
 def _run_event_watcher_test(test_code: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Run a snippet of Python code that exercises event_watcher.py functions.
 
-    Extracts the testable parts of event_watcher.py (everything except the
-    watchdog imports and classes that depend on them) into a helper script
-    and runs the provided test_code in that context.
+    Loads the actual production code from event_watcher.py, strips out the
+    watchdog-dependent portions, and runs the provided test_code in that
+    context. This ensures tests always exercise the real implementation.
     """
-    script_content = load_zygote_resource("event_watcher.py")
-
-    # Extract the portions of the script that don't require watchdog.
-    # We re-define the functions we need by running a stripped version.
-    setup = f"""
-import dataclasses
-import os
-import subprocess
-import sys
-import time
-import tomllib
-from pathlib import Path
-
-# -- Extracted from event_watcher.py --
-
-@dataclasses.dataclass(frozen=True)
-class _WatcherSettings:
-    poll_interval: int = 3
-    sources: list[str] = dataclasses.field(
-        default_factory=lambda: ["messages", "scheduled", "mng_agents", "stop"]
-    )
-
-class _Logger:
-    def __init__(self, log_file):
-        self.log_file_path = Path(log_file)
-        self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    def _timestamp(self):
-        return "test"
-    def info(self, msg):
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(msg + "\\n")
-        except OSError:
-            pass
-    def debug(self, msg):
-        try:
-            with self.log_file_path.open("a") as f:
-                f.write(msg + "\\n")
-        except OSError:
-            pass
-
-def _load_watcher_settings(agent_state_dir):
-    settings_path = agent_state_dir / "settings.toml"
-    try:
-        if not settings_path.exists():
-            return _WatcherSettings()
-        raw = tomllib.loads(settings_path.read_text())
-        watchers = raw.get("watchers", {{}})
-        return _WatcherSettings(
-            poll_interval=watchers.get("event_poll_interval_seconds", 3),
-            sources=watchers.get("watched_event_sources", _WatcherSettings().sources),
-        )
-    except Exception:
-        return _WatcherSettings()
-
-def _get_offset(offsets_dir, source):
-    offset_file = offsets_dir / f"{{source}}.offset"
-    try:
-        return int(offset_file.read_text().strip())
-    except (OSError, ValueError):
-        return 0
-
-def _set_offset(offsets_dir, source, offset):
-    offset_file = offsets_dir / f"{{source}}.offset"
-    offset_file.write_text(str(offset))
-
-def _mtime_poll(logs_dir, watched_sources, mtime_cache, log):
-    is_changed = False
-    current_keys = set()
-    for source in watched_sources:
-        source_dir = logs_dir / source
-        if not source_dir.exists():
-            continue
-        try:
-            for entry in source_dir.iterdir():
-                key = str(entry)
-                current_keys.add(key)
-                try:
-                    stat = entry.stat()
-                    current = (stat.st_mtime, stat.st_size)
-                except OSError:
-                    continue
-                previous = mtime_cache.get(key)
-                if previous != current:
-                    mtime_cache[key] = current
-                    is_changed = True
-        except OSError:
-            continue
-    removed_keys = set(mtime_cache.keys()) - current_keys
-    for key in removed_keys:
-        del mtime_cache[key]
-        is_changed = True
-    return is_changed
-
-TMP = Path("{tmp_path}")
-
-# -- Test code --
-"""
-    full_script = setup + test_code
+    setup = _strip_watchdog_from_event_watcher()
+    full_script = setup + f"\nTMP = __import__('pathlib').Path('{tmp_path}')\n" + test_code
     return subprocess.run(
         [sys.executable, "-c", full_script],
         capture_output=True,

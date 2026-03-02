@@ -89,17 +89,6 @@ def _load_watcher_settings(agent_state_dir: Path) -> _WatcherSettings:
         return _WatcherSettings()
 
 
-class _ChangeHandler(FileSystemEventHandler):
-    """Watchdog handler that signals the main loop on any filesystem change."""
-
-    def __init__(self, wake_event: threading.Event) -> None:
-        super().__init__()
-        self._wake_event = wake_event
-
-    def on_any_event(self, event: FileSystemEvent) -> None:
-        self._wake_event.set()
-
-
 def _get_offset(offsets_dir: Path, source: str) -> int:
     """Read the current line offset for a source."""
     offset_file = offsets_dir / f"{source}.offset"
@@ -249,6 +238,20 @@ def _require_env(name: str) -> str:
         print(f"ERROR: {name} must be set", file=sys.stderr)
         sys.exit(1)
     return value
+
+
+# --- WATCHDOG-DEPENDENT CODE BELOW (not importable without watchdog) ---
+
+
+class _ChangeHandler(FileSystemEventHandler):
+    """Watchdog handler that signals the main loop on any filesystem change."""
+
+    def __init__(self, wake_event: threading.Event) -> None:
+        super().__init__()
+        self._wake_event = wake_event
+
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        self._wake_event.set()
 
 
 def _setup_watchdog(
