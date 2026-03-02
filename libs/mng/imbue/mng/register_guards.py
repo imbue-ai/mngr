@@ -6,7 +6,6 @@ from modal._grpc_client import UnaryUnaryWrapper
 
 from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.imbue_common.resource_guards import enforce_sdk_guard
-from imbue.imbue_common.resource_guards import register_resource_guard
 from imbue.imbue_common.resource_guards import register_sdk_guard
 
 # Each guard pair manages its own originals dict so install/cleanup are symmetric.
@@ -99,28 +98,18 @@ def _cleanup_docker_guards() -> None:
     _docker_originals.clear()
 
 
-_GUARDED_BINARY_RESOURCES = ("tmux", "rsync", "unison")
-
-_MNG_MARKERS = (
-    "docker: marks tests that require a running Docker daemon",
-    "tmux: marks tests that create real tmux sessions or mng agents",
-    "modal: marks tests that connect to the Modal cloud service",
-    "rsync: marks tests that invoke rsync for file transfer",
-    "unison: marks tests that start a real unison file-sync process",
-)
+# ---------------------------------------------------------------------------
+# Per-SDK registration (called from each project's conftest.py)
+# ---------------------------------------------------------------------------
 
 
-def register_mng_guards() -> None:
-    """Register all mng-specific resource guards and markers.
-
-    Registers SDK monkeypatches (Modal, Docker), binary wrapper guards
-    (tmux, rsync, unison), and pytest markers for each. Safe to call
-    multiple times; all registration functions deduplicate.
-    Call this before register_conftest_hooks() in each conftest.py.
-    """
-    for marker_line in _MNG_MARKERS:
-        register_marker(marker_line)
+def register_modal_guard() -> None:
+    """Register the Modal SDK guard and marker. Safe to call multiple times."""
+    register_marker("modal: marks tests that connect to the Modal cloud service")
     register_sdk_guard("modal", _install_modal_guards, _cleanup_modal_guards)
+
+
+def register_docker_guard() -> None:
+    """Register the Docker SDK guard and marker. Safe to call multiple times."""
+    register_marker("docker: marks tests that require a running Docker daemon")
     register_sdk_guard("docker", _install_docker_guards, _cleanup_docker_guards)
-    for resource in _GUARDED_BINARY_RESOURCES:
-        register_resource_guard(resource)

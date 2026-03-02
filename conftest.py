@@ -8,12 +8,23 @@ are discovered (e.g., when running from the monorepo root).
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-from imbue.mng.register_guards import register_mng_guards
+from imbue.imbue_common.conftest_hooks import register_marker
+from imbue.imbue_common.resource_guards import register_resource_guard
+from imbue.mng.register_guards import register_docker_guard
+from imbue.mng.register_guards import register_modal_guard
 from imbue.mng.utils.logging import suppress_warnings
 
 # Suppress some pointless warnings from other library's loggers
 suppress_warnings()
 
-# Register mng-specific resource guards and markers, then the common conftest hooks
-register_mng_guards()
+# Register mng-specific pytest markers and guarded resources.
+register_marker("tmux: marks tests that create real tmux sessions or mng agents")
+register_marker("rsync: marks tests that invoke rsync for file transfer")
+register_marker("unison: marks tests that start a real unison file-sync process")
+register_resource_guard("tmux")
+register_resource_guard("rsync")
+register_resource_guard("unison")
+register_modal_guard()
+register_docker_guard()
+
 register_conftest_hooks(globals())

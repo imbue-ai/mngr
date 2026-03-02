@@ -1,6 +1,6 @@
-"""Project-level conftest for mng-pankan.
+"""Project-level conftest for mng-kanpan.
 
-When running tests from libs/mng_pankan/, this conftest provides the common pytest hooks
+When running tests from libs/mng_kanpan/, this conftest provides the common pytest hooks
 that would otherwise come from the monorepo root conftest.py (which is not discovered
 when pytest runs from a subdirectory).
 
@@ -9,9 +9,7 @@ and this file's register_conftest_hooks() call is a no-op (guarded by a module-l
 """
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
-from imbue.mng.register_guards import register_mng_guards
 from imbue.mng.utils.logging import suppress_warnings
 
 suppress_warnings()
-register_mng_guards()
 register_conftest_hooks(globals())
