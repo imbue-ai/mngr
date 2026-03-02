@@ -135,6 +135,7 @@ new_conversation() {
 
     append_conversation_event "$cid" "$model" "conversation_created"
 
+    # Build system prompt args for llm live-chat only (llm inject does not support -s).
     local system_prompt
     system_prompt=$(build_system_prompt)
     local sys_args=()
@@ -145,7 +146,7 @@ new_conversation() {
     if [ "$as_agent" = true ]; then
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $cid"
-            llm inject --cid "$cid" -m "$model" "${sys_args[@]}" "$message"
+            llm inject --cid "$cid" -m "$model" "$message"
             log "Agent message injected successfully"
         fi
         echo "$cid"

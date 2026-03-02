@@ -1643,7 +1643,7 @@ def test_get_event_type_info_skill_has_frontmatter() -> None:
     content = load_zygote_resource("defaults/thinking/skills/get-event-type-info/SKILL.md")
     assert content.startswith("---")
     assert "name: get-event-type-info" in content
-    assert len(content) > 100  # no longer empty
+    assert len(content) > 100  # must have substantive content
 
 
 # -- GLOBAL.md content quality tests --
