@@ -234,12 +234,12 @@ Provider: local
 
 Provider: modal
   Supported build arguments for the modal provider:
-    --dockerfile PATH     Path to the Dockerfile to build the sandbox image. Default: Dockerfile in context dir
+    --file PATH           Path to the Dockerfile to build the sandbox image. Default: Dockerfile in context dir
     --context-dir PATH    Build context directory for Dockerfile COPY/ADD instructions. Default: Dockerfile's directory
     --cpu COUNT           Number of CPU cores (0.25-16). Default: 1.0
     --memory GB           Memory in GB (0.5-32). Default: 1.0
     --gpu TYPE            GPU type to use (e.g., t4, a10g, a100, any). Default: no GPU
-    --image NAME          Base Docker image to use. Not required if using a dockerfile. Default: debian:bookworm-slim
+    --image NAME          Base Docker image to use. Not required if using --file. Default: debian:bookworm-slim
     --timeout SEC         Maximum sandbox lifetime in seconds. Default: 900 (15 min)
     --region NAME         Region to run the sandbox in (e.g., us-east, us-west, eu-west). Default: auto
     --secret VAR          Pass an environment variable as a secret to the image build. The value of

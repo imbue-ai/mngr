@@ -19,7 +19,7 @@ add_command = ["reviewer_0='export IS_SANDBOX=1 && claude --dangerously-skip-per
 
 [create_templates.modal]
 new_host = "modal"
-build_args = "dockerfile=libs/mng/imbue/mng/resources/Dockerfile context-dir=.mng/dev/build/ volume=code-review-json:/code_reviews"
+build_args = "file=libs/mng/imbue/mng/resources/Dockerfile context-dir=.mng/dev/build/ volume=code-review-json:/code_reviews"
 add_command = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
 target_path = "/code/mng"
