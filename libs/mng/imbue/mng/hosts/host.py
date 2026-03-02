@@ -72,6 +72,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.utils.env_utils import parse_env_file
+from imbue.mng.utils.git_utils import format_branch_name
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng.utils.git_utils import get_git_author_info
 from imbue.mng.utils.git_utils import get_git_remote_url
@@ -1441,9 +1442,9 @@ class Host(BaseHost, OnlineHostInterface):
 
         agent_name = options.name or AgentName("agent")
         provider_name = self.provider_instance.name
-        branch_prefix = options.git.new_branch_prefix if options.git else "mng/"
+        branch_format = options.git.new_branch_format if options.git else "mng/{name}-{provider}"
 
-        return f"{branch_prefix}{agent_name}-{provider_name}"
+        return format_branch_name(branch_format, name=str(agent_name), provider=str(provider_name))
 
     def create_agent_state(
         self,

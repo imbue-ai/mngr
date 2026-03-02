@@ -1851,7 +1851,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(is_new_branch=True, new_branch_format="test/{name}-{provider}"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1899,7 +1899,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(is_new_branch=True, new_branch_format="test/{name}-{provider}"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1939,7 +1939,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(is_new_branch=True, new_branch_format="test/{name}-{provider}"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path

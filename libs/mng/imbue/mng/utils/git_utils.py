@@ -7,6 +7,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
 from imbue.mng.errors import MngError
+from imbue.mng.errors import UserInputError
 
 
 @pure
@@ -293,3 +294,22 @@ def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:
     except ProcessError as e:
         logger.trace("Failed to find main .git dir: {}", e)
         return None
+
+
+@pure
+def format_branch_name(format_string: str, *, name: str, provider: str) -> str:
+    """Format a branch name using a format string with named placeholders.
+
+    Available variables:
+        {name} - the agent name
+        {provider} - the provider name
+
+    Raises UserInputError if the format string contains unknown placeholders.
+    """
+    try:
+        return format_string.format_map({"name": name, "provider": provider})
+    except KeyError as e:
+        raise UserInputError(
+            f"Unknown variable {e} in branch format string {format_string!r}. "
+            f"Available variables: {{name}}, {{provider}}"
+        ) from None

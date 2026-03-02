@@ -53,7 +53,7 @@ host = "ssh://user@server"
 
 # Command defaults
 [commands.create]
-new_branch_prefix = "agent/"
+new_branch_format = "agent/{name}-{provider}"
 connect = false
 ```
 
@@ -63,7 +63,7 @@ Command defaults allow you to set default values for CLI command parameters. The
 
 ```toml
 [commands.create]
-new_branch_prefix = "agent/"
+new_branch_format = "agent/{name}-{provider}"
 connect = false
 
 [commands.list]

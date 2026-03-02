@@ -120,7 +120,7 @@ By default, `mng create` uses the "local" host. Use these options to change that
 | `--base-branch` | text | The starting point for the agent [default: current branch] | None |
 | `--new-branch` | text | Create a fresh branch (named TEXT if provided, otherwise auto-generated) [default: new branch] | `` |
 | `--no-new-branch` | boolean | Do not create a new branch; use the current branch directly. Incompatible with --worktree | None |
-| `--new-branch-prefix` | text | Prefix for auto-generated branch names | `mng/` |
+| `--new-branch-format` | text | Format string for auto-generated branch names. Available variables: {name} (agent name), {provider} (provider name) | `mng/{name}-{provider}` |
 | `--depth` | integer | Shallow clone depth [default: full] | None |
 | `--shallow-since` | text | Shallow clone since date | None |
 

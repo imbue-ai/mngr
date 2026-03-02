@@ -188,7 +188,7 @@ class CreateCliOptions(CommonCliOptions):
     include_gitignored: bool
     base_branch: str | None
     new_branch: str | None
-    new_branch_prefix: str
+    new_branch_format: str
     depth: int | None
     shallow_since: str | None
     agent_env: tuple[str, ...]
@@ -406,7 +406,7 @@ class CreateCliOptions(CommonCliOptions):
     help="Do not create a new branch; use the current branch directly. Incompatible with --worktree",
 )
 @optgroup.option(
-    "--new-branch-prefix", default="mng/", show_default=True, help="Prefix for auto-generated branch names"
+    "--new-branch-format", default="mng/{name}-{provider}", show_default=True, help="Format string for auto-generated branch names. Available variables: {name} (agent name), {provider} (provider name)"
 )
 @optgroup.option("--depth", type=int, help="Shallow clone depth [default: full]")
 @optgroup.option("--shallow-since", help="Shallow clone since date")
@@ -1295,7 +1295,7 @@ def _parse_agent_opts(
             base_branch=opts.base_branch or _get_current_git_branch(source_location, mng_ctx),
             is_new_branch=is_new_branch,
             new_branch_name=new_branch if new_branch else None,
-            new_branch_prefix=opts.new_branch_prefix,
+            new_branch_format=opts.new_branch_format,
             depth=opts.depth,
             shallow_since=opts.shallow_since,
             is_git_synced=opts.include_git,

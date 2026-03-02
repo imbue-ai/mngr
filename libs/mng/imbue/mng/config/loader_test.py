@@ -45,23 +45,23 @@ hookimpl = pluggy.HookimplMarker("mng")
 
 def test_parse_command_env_vars_single_param() -> None:
     """Test parsing a single command param from env var."""
-    environ = {"MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX": "agent/"}
+    environ = {"MNG_COMMANDS_CREATE_NEW_BRANCH_FORMAT": "agent/{name}-{provider}"}
     result = _parse_command_env_vars(environ)
 
     assert "create" in result
-    assert result["create"].defaults["new_branch_prefix"] == "agent/"
+    assert result["create"].defaults["new_branch_format"] == "agent/{name}-{provider}"
 
 
 def test_parse_command_env_vars_multiple_params_same_command() -> None:
     """Test parsing multiple params for the same command."""
     environ = {
-        "MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX": "agent/",
+        "MNG_COMMANDS_CREATE_NEW_BRANCH_FORMAT": "agent/{name}-{provider}",
         "MNG_COMMANDS_CREATE_CONNECT": "false",
     }
     result = _parse_command_env_vars(environ)
 
     assert "create" in result
-    assert result["create"].defaults["new_branch_prefix"] == "agent/"
+    assert result["create"].defaults["new_branch_format"] == "agent/{name}-{provider}"
     # Values are kept as strings - type conversion happens in click/pydantic
     assert result["create"].defaults["connect"] == "false"
 
@@ -104,11 +104,11 @@ def test_parse_command_env_vars_ignores_no_underscore_after_command() -> None:
 
 def test_parse_command_env_vars_lowercases_command_and_param() -> None:
     """Test that command and param names are lowercased."""
-    environ = {"MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX": "agent/"}
+    environ = {"MNG_COMMANDS_CREATE_NEW_BRANCH_FORMAT": "agent/{name}-{provider}"}
     result = _parse_command_env_vars(environ)
 
     assert "create" in result
-    assert "new_branch_prefix" in result["create"].defaults
+    assert "new_branch_format" in result["create"].defaults
 
 
 def test_parse_command_env_vars_empty_environ() -> None:

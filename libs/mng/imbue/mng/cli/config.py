@@ -637,7 +637,7 @@ def _get_config_template() -> str:
 
 # Command defaults
 # [commands.create]
-# new_branch_prefix = "agent/"
+# new_branch_format = "agent/{name}-{provider}"
 # connect = false
 
 # Logging configuration

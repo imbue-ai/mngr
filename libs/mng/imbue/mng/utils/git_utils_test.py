@@ -3,11 +3,15 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.errors import UserInputError
 from imbue.mng.utils.git_utils import _parse_project_name_from_url
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.git_utils import find_git_worktree_root
+from imbue.mng.utils.git_utils import format_branch_name
 from imbue.mng.utils.git_utils import get_git_author_info
 from imbue.mng.utils.git_utils import get_git_remote_url
 from imbue.mng.utils.git_utils import is_git_repository
@@ -272,3 +276,44 @@ def test_get_git_remote_url_returns_none_for_non_git_dir(tmp_path: Path, cg: Con
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
     assert get_git_remote_url(plain_dir, "origin", cg) is None
+
+
+# =============================================================================
+# Tests for format_branch_name
+# =============================================================================
+
+
+def test_format_branch_name_default_format() -> None:
+    """Test the default format string produces the expected branch name."""
+    result = format_branch_name("mng/{name}-{provider}", name="my-task", provider="local")
+    assert result == "mng/my-task-local"
+
+
+def test_format_branch_name_name_only() -> None:
+    """Test a format string that only uses the name variable."""
+    result = format_branch_name("feature/{name}", name="my-task", provider="modal")
+    assert result == "feature/my-task"
+
+
+def test_format_branch_name_provider_only() -> None:
+    """Test a format string that only uses the provider variable."""
+    result = format_branch_name("agents/{provider}", name="my-task", provider="modal")
+    assert result == "agents/modal"
+
+
+def test_format_branch_name_no_variables() -> None:
+    """Test a format string with no variables produces a literal string."""
+    result = format_branch_name("static-branch", name="my-task", provider="local")
+    assert result == "static-branch"
+
+
+def test_format_branch_name_provider_slash_name() -> None:
+    """Test the provider/name style that motivated this feature."""
+    result = format_branch_name("mng/{provider}/{name}", name="my-task", provider="modal")
+    assert result == "mng/modal/my-task"
+
+
+def test_format_branch_name_unknown_variable_raises() -> None:
+    """Test that unknown variables in the format string raise UserInputError."""
+    with pytest.raises(UserInputError, match="Unknown variable.*'unknown'"):
+        format_branch_name("{unknown}/{name}", name="my-task", provider="local")

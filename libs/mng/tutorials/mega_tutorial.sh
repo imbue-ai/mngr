@@ -93,8 +93,9 @@ mng create my-task --context /tmp/my_random_folder --agent-command python -- scr
 mng create my-task
 git branch | grep mng/my-task
 
-# --new-branch-prefix controls the prefix for auto-generated branch names (default: mng/)
-mng create my-task --new-branch-prefix "feature/"
+# --new-branch-format controls the format for auto-generated branch names (default: mng/{name}-{provider})
+# available variables: {name} (agent name), {provider} (provider name)
+mng create my-task --new-branch-format "feature/{name}"
 git branch | grep feature/my-task
 
 # you can also specify a different base branch (instead of the current branch):

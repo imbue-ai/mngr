@@ -494,9 +494,9 @@ class AgentGitOptions(FrozenModel):
         default=None,
         description="Name for the new branch (implies is_new_branch)",
     )
-    new_branch_prefix: str = Field(
-        default="mng/",
-        description="Prefix for auto-generated branch names",
+    new_branch_format: str = Field(
+        default="mng/{name}-{provider}",
+        description="Format string for auto-generated branch names. Available variables: {name} (agent name), {provider} (provider name)",
     )
     depth: int | None = Field(
         default=None,

@@ -108,7 +108,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         include_gitignored=False,
         base_branch=None,
         new_branch="",
-        new_branch_prefix="mng/",
+        new_branch_format="mng/{name}-{provider}",
         depth=None,
         shallow_since=None,
         agent_env=(),
