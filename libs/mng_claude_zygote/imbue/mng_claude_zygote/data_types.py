@@ -9,6 +9,7 @@ from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.primitives import PositiveInt
 
@@ -36,6 +37,7 @@ SOURCE_MNG_AGENTS: Final[EventSource] = EventSource("mng_agents")
 SOURCE_STOP: Final[EventSource] = EventSource("stop")
 SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_CLAUDE_TRANSCRIPT: Final[EventSource] = EventSource("claude_transcript")
+SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("common_transcript")
 
 
 class ConversationEvent(EventEnvelope):
@@ -69,6 +71,89 @@ class ChangelingEvent(EventEnvelope):
     """
 
     data: dict[str, Any] = {}
+
+
+# -- Common transcript types --
+# These define the agent-agnostic common message format written to
+# logs/common_transcript/events.jsonl. Inspired by oh-my-pi's session
+# entry format, but adapted to our EventEnvelope conventions.
+#
+# The common format focuses on semantically important messages (user input,
+# assistant output, tool calls/results) and drops noise like progress events,
+# file-history snapshots, and system bookkeeping.
+#
+# NOTE: These types document the schema produced by transcript_watcher.sh.
+# The watcher runs as a standalone script on the host and produces matching
+# JSON directly (it cannot import these classes).
+
+
+class CommonToolCallSummary(FrozenModel):
+    """Summary of a single tool invocation within an assistant message."""
+
+    tool_call_id: NonEmptyStr = Field(description="Unique ID for this tool call (from the API response).")
+    tool_name: NonEmptyStr = Field(description="Name of the tool invoked (e.g. 'Bash', 'Read', 'Edit').")
+    input_preview: str = Field(description="Truncated serialization of the tool input arguments.")
+
+
+class CommonTokenUsage(FrozenModel):
+    """Token usage counts for an assistant message."""
+
+    input_tokens: NonNegativeInt = Field(description="Number of input tokens consumed.")
+    output_tokens: NonNegativeInt = Field(description="Number of output tokens generated.")
+    cache_read_tokens: NonNegativeInt | None = Field(
+        default=None, description="Cache-read input tokens (None if not reported)."
+    )
+    cache_write_tokens: NonNegativeInt | None = Field(
+        default=None, description="Cache-write input tokens (None if not reported)."
+    )
+
+
+class CommonUserMessageEvent(EventEnvelope):
+    """A user message in the common transcript.
+
+    Emitted for each Claude ``type: "user"`` event that contains actual
+    user-authored text (not tool results).
+    """
+
+    role: str = Field(default="user", description="Always 'user'.")
+    content: str = Field(description="The user's message text.")
+    message_uuid: str | None = Field(
+        default=None, description="UUID from the raw Claude JSONL event (for traceability)."
+    )
+
+
+class CommonAssistantMessageEvent(EventEnvelope):
+    """An assistant response in the common transcript.
+
+    Emitted for each Claude ``type: "assistant"`` event. Contains the
+    concatenated text output, any tool calls, model info, and token usage.
+    """
+
+    role: str = Field(default="assistant", description="Always 'assistant'.")
+    model: str = Field(description="Model that generated this response (e.g. 'claude-opus-4-6').")
+    text: str = Field(description="Concatenated text content blocks from the response.")
+    tool_calls: tuple[CommonToolCallSummary, ...] = Field(default=(), description="Tool calls made in this response.")
+    stop_reason: str | None = Field(default=None, description="Why the response ended (e.g. 'end_turn', 'tool_use').")
+    usage: CommonTokenUsage | None = Field(default=None, description="Token usage for this response.")
+    message_uuid: str | None = Field(
+        default=None, description="UUID from the raw Claude JSONL event (for traceability)."
+    )
+
+
+class CommonToolResultEvent(EventEnvelope):
+    """A tool result in the common transcript.
+
+    Emitted for each tool result block found inside Claude ``type: "user"``
+    events. These are the return values from tool invocations.
+    """
+
+    tool_call_id: str = Field(description="ID of the tool call this result corresponds to.")
+    tool_name: str = Field(description="Name of the tool (resolved from the preceding assistant message).")
+    output: str = Field(description="Truncated output text from the tool.")
+    is_error: bool = Field(description="Whether the tool returned an error.")
+    message_uuid: str | None = Field(
+        default=None, description="UUID from the raw Claude JSONL event (for traceability)."
+    )
 
 
 # -- Settings types --

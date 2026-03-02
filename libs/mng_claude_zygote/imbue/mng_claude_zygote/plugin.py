@@ -53,6 +53,9 @@ CONV_WATCHER_COMMAND: Final[str] = "$MNG_HOST_DIR/commands/conversation_watcher.
 EVENT_WATCHER_WINDOW_NAME: Final[str] = "events"
 EVENT_WATCHER_COMMAND: Final[str] = "$MNG_HOST_DIR/commands/event_watcher.sh"
 
+TRANSCRIPT_WATCHER_WINDOW_NAME: Final[str] = "transcript"
+TRANSCRIPT_WATCHER_COMMAND: Final[str] = "$MNG_HOST_DIR/commands/transcript_watcher.sh"
+
 # Conversation ttyd: a web terminal that runs the chat script for interactive
 # conversation access via the browser.
 CHAT_TTYD_WINDOW_NAME: Final[str] = "chat"
@@ -187,6 +190,7 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
     - Agent ttyd (web terminal for the primary agent)
     - Conversation watcher (syncs llm DB to JSONL files)
     - Event watcher (sends new events to primary agent via mng message)
+    - Transcript watcher (converts claude_transcript to common_transcript)
     - Chat ttyd (web terminal for conversation access)
     """
     inject_agent_ttyd(params)
@@ -196,6 +200,7 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
         *existing,
         f'{CONV_WATCHER_WINDOW_NAME}="{CONV_WATCHER_COMMAND}"',
         f'{EVENT_WATCHER_WINDOW_NAME}="{EVENT_WATCHER_COMMAND}"',
+        f'{TRANSCRIPT_WATCHER_WINDOW_NAME}="{TRANSCRIPT_WATCHER_COMMAND}"',
         f'{CHAT_TTYD_WINDOW_NAME}="{CHAT_TTYD_COMMAND}"',
     )
 
