@@ -587,7 +587,7 @@ def create(ctx: click.Context, **kwargs) -> None:
 
 
 class _CreateSetup(FrozenModel):
-    """Per-invocation state shared across all agents in a create command."""
+    """Per-invocation state shared between _setup_create and _create_agent."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
