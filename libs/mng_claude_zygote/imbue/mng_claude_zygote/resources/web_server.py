@@ -58,10 +58,30 @@ AGENT_LIST_POLL_INTERVAL_SECONDS: Final[int] = 30
 MAX_TTYD_PROCESSES: Final[int] = 20
 TTYD_PORT_DETECT_TIMEOUT_SECONDS: Final[int] = 15
 
+# -- Typed ttyd entry --
+
+
+class _TtydEntry:
+    """Tracks a spawned ttyd process and the port it is listening on."""
+
+    __slots__ = ("process", "port")
+
+    def __init__(self, process: subprocess.Popen[bytes], port: int) -> None:
+        self.process = process
+        self.port = port
+
+    def is_alive(self) -> bool:
+        return self.process.poll() is None
+
+
+# Sentinel value stored in the dict while a ttyd is being spawned,
+# preventing a second thread from spawning a duplicate for the same key.
+_SPAWNING_SENTINEL = object()
+
 # -- Global state (protected by locks) --
 
 _ttyd_lock = threading.Lock()
-_ttyd_by_server_name: dict[str, dict[str, object]] = {}
+_ttyd_by_server_name: dict[str, _TtydEntry | object] = {}
 
 _agent_list_lock = threading.Lock()
 _cached_agents: list[dict[str, object]] = []
@@ -179,34 +199,40 @@ def _drain_ttyd_stderr(process: subprocess.Popen[bytes], server_name: str) -> No
             line = process.stderr.readline()
             if line:
                 _log(f"[ttyd:{server_name}] {line.decode('utf-8', errors='replace').rstrip()}")
-    except (ValueError, OSError):
-        pass
+    except (ValueError, OSError) as e:
+        _log(f"[ttyd:{server_name}] Stderr drain ended: {e}")
 
 
-def _start_ttyd_for_command(server_name: str, command: list[str]) -> dict[str, object] | None:
-    """Spawn a ttyd process for the given command and register it."""
+def _start_ttyd_for_command(server_name: str, command: list[str]) -> _TtydEntry | None:
+    """Spawn a ttyd process for the given command and register it.
+
+    Uses a sentinel pattern to prevent concurrent spawns for the same server_name:
+    a placeholder is stored in the dict under the lock, so any second request for
+    the same name will see the sentinel and wait rather than spawning a duplicate.
+    """
     with _ttyd_lock:
         # Reuse existing if alive
-        if server_name in _ttyd_by_server_name:
-            entry = _ttyd_by_server_name[server_name]
-            proc = entry["process"]
-            if hasattr(proc, "poll") and proc.poll() is None:  # type: ignore[union-attr]
-                return entry
+        existing = _ttyd_by_server_name.get(server_name)
+        if existing is _SPAWNING_SENTINEL:
+            # Another thread is already spawning this server
+            return None
+        if isinstance(existing, _TtydEntry):
+            if existing.is_alive():
+                return existing
             del _ttyd_by_server_name[server_name]
 
         # Enforce max limit (clean up dead processes first)
-        dead_keys = [
-            k
-            for k, v in _ttyd_by_server_name.items()
-            if hasattr(v["process"], "poll") and v["process"].poll() is not None  # type: ignore[union-attr]
-        ]
+        dead_keys = [k for k, v in _ttyd_by_server_name.items() if isinstance(v, _TtydEntry) and not v.is_alive()]
         for k in dead_keys:
             del _ttyd_by_server_name[k]
 
-        alive_count = len(_ttyd_by_server_name)
+        alive_count = sum(1 for v in _ttyd_by_server_name.values() if v is not _SPAWNING_SENTINEL)
         if alive_count >= MAX_TTYD_PROCESSES:
             _log(f"Max ttyd processes ({MAX_TTYD_PROCESSES}) reached, cannot spawn {server_name}")
             return None
+
+        # Reserve the slot so no other thread tries to spawn the same server
+        _ttyd_by_server_name[server_name] = _SPAWNING_SENTINEL
 
     # Spawn ttyd (outside the lock to avoid holding it during process start)
     ttyd_cmd = ["ttyd", "-p", "0", "-t", "disableLeaveAlert=true", "-W", *command]
@@ -220,6 +246,8 @@ def _start_ttyd_for_command(server_name: str, command: list[str]) -> dict[str, o
         )
     except FileNotFoundError:
         _log("ttyd not found in PATH")
+        with _ttyd_lock:
+            _ttyd_by_server_name.pop(server_name, None)
         return None
 
     # Detect port (blocking, but only during initial spawn)
@@ -228,6 +256,8 @@ def _start_ttyd_for_command(server_name: str, command: list[str]) -> dict[str, o
         _log(f"Failed to detect ttyd port for {server_name}")
         process.kill()
         process.wait()
+        with _ttyd_lock:
+            _ttyd_by_server_name.pop(server_name, None)
         return None
 
     _log(f"ttyd for {server_name} listening on port {port}")
@@ -236,15 +266,15 @@ def _start_ttyd_for_command(server_name: str, command: list[str]) -> dict[str, o
     drain_thread = threading.Thread(target=_drain_ttyd_stderr, args=(process, server_name), daemon=True)
     drain_thread.start()
 
-    entry: dict[str, object] = {"process": process, "port": port}
+    ttyd_entry = _TtydEntry(process=process, port=port)
 
     with _ttyd_lock:
-        _ttyd_by_server_name[server_name] = entry
+        _ttyd_by_server_name[server_name] = ttyd_entry
 
     # Register in servers.jsonl so the forwarding server discovers it
     _register_server(server_name, port)
 
-    return entry
+    return ttyd_entry
 
 
 def _ensure_conversation_ttyd(conversation_id: str) -> str | None:
@@ -298,13 +328,12 @@ def _cleanup_all_ttyd_processes() -> None:
     """Kill all managed ttyd processes."""
     with _ttyd_lock:
         for server_name, entry in _ttyd_by_server_name.items():
-            proc = entry["process"]
-            try:
-                if hasattr(proc, "terminate"):
-                    proc.terminate()  # type: ignore[union-attr]
-            except ProcessLookupError:
-                pass
-            _log(f"Terminated ttyd for {server_name}")
+            if isinstance(entry, _TtydEntry):
+                try:
+                    entry.process.terminate()
+                except ProcessLookupError:
+                    pass
+                _log(f"Terminated ttyd for {server_name}")
         _ttyd_by_server_name.clear()
 
 
@@ -546,7 +575,7 @@ _MAIN_PAGE_HTML: Final[str] = """<!DOCTYPE html>
       showStatus('Connecting to conversation...');
 
       try {{
-        var resp = await fetch('api/ensure-conversation-ttyd/' + encodeURIComponent(cid));
+        var resp = await fetch('api/ensure-conversation-ttyd/' + encodeURIComponent(cid), {{ method: 'POST' }});
         var data = await resp.json();
 
         if (data.server_name) {{
@@ -746,7 +775,7 @@ _AGENTS_PAGE_HTML: Final[str] = """<!DOCTYPE html>
       btn.disabled = true;
 
       try {{
-        var resp = await fetch('api/ensure-agent-ttyd/' + encodeURIComponent(agentName));
+        var resp = await fetch('api/ensure-agent-ttyd/' + encodeURIComponent(agentName), {{ method: 'POST' }});
         var data = await resp.json();
         if (data.server_name) {{
           // Navigate to the sibling server (the agent's tmux ttyd)
@@ -790,14 +819,6 @@ class _WebServerHandler(BaseHTTPRequestHandler):
         elif path == "/api/agents":
             with _agent_list_lock:
                 self._serve_json(list(_cached_agents))
-        elif path.startswith("/api/ensure-conversation-ttyd/"):
-            cid = unquote(path.split("/")[-1])
-            server_name = _ensure_conversation_ttyd(cid)
-            self._serve_json({"server_name": server_name})
-        elif path.startswith("/api/ensure-agent-ttyd/"):
-            agent_name = unquote(path.split("/")[-1])
-            server_name = _ensure_agent_tmux_ttyd(agent_name)
-            self._serve_json({"server_name": server_name})
         else:
             self.send_error(404)
 
@@ -807,6 +828,14 @@ class _WebServerHandler(BaseHTTPRequestHandler):
 
         if path == "/api/new-conversation":
             server_name = _ensure_new_conversation_ttyd()
+            self._serve_json({"server_name": server_name})
+        elif path.startswith("/api/ensure-conversation-ttyd/"):
+            cid = unquote(path.split("/")[-1])
+            server_name = _ensure_conversation_ttyd(cid)
+            self._serve_json({"server_name": server_name})
+        elif path.startswith("/api/ensure-agent-ttyd/"):
+            agent_name = unquote(path.split("/")[-1])
+            server_name = _ensure_agent_tmux_ttyd(agent_name)
             self._serve_json({"server_name": server_name})
         else:
             self.send_error(404)
