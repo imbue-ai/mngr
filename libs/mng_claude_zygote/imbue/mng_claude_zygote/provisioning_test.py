@@ -1646,10 +1646,16 @@ def test_get_event_type_info_skill_has_frontmatter() -> None:
     assert len(content) > 100  # must have substantive content
 
 
-# -- GLOBAL.md resource loading test --
+# -- GLOBAL.md content tests --
 
 
-def test_global_md_is_loadable() -> None:
-    """Verify that GLOBAL.md can be loaded as a resource."""
+def test_global_md_is_loadable_and_has_expected_content() -> None:
+    """Verify that GLOBAL.md can be loaded and contains key structural elements."""
     content = load_zygote_resource("defaults/GLOBAL.md")
     assert len(content) > 0
+    # Verify repo structure documentation
+    assert "talking/" in content
+    assert "thinking/" in content
+    assert "working/" in content
+    assert "verifying/" in content
+    assert "PROMPT.md" in content
