@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -691,7 +691,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1555,7 +1555,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1802,7 +1802,7 @@ wheels = [
 
 [[package]]
 name = "mng"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "libs/mng" }
 dependencies = [
     { name = "cel-python" },
@@ -1904,7 +1904,7 @@ requires-dist = [
 
 [[package]]
 name = "mng-opencode"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "libs/mng_opencode" }
 dependencies = [
     { name = "mng" },
@@ -1915,7 +1915,7 @@ requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-pair"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "libs/mng_pair" }
 dependencies = [
     { name = "click-option-group" },
