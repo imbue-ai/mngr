@@ -194,27 +194,27 @@ def test_conversation_watcher_uses_adaptive_window() -> None:
 
 def test_event_watcher_sends_mng_message() -> None:
     content = load_zygote_resource("event_watcher.py")
-    assert "mng" in content and "message" in content
+    assert '"mng", "message"' in content
 
 
 def test_event_watcher_watches_messages_events() -> None:
     content = load_zygote_resource("event_watcher.py")
-    assert "messages" in content
+    assert '"messages"' in content
 
 
 def test_event_watcher_watches_scheduled_events() -> None:
     content = load_zygote_resource("event_watcher.py")
-    assert "scheduled" in content
+    assert '"scheduled"' in content
 
 
 def test_event_watcher_watches_mng_agents_events() -> None:
     content = load_zygote_resource("event_watcher.py")
-    assert "mng_agents" in content
+    assert '"mng_agents"' in content
 
 
 def test_event_watcher_watches_stop_events() -> None:
     content = load_zygote_resource("event_watcher.py")
-    assert "stop" in content
+    assert '"stop"' in content
 
 
 def test_event_watcher_tracks_offsets() -> None:
