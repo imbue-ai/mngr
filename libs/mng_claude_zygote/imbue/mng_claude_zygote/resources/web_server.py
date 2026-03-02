@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Web server for the ClaudeZygoteAgent web interface.
 
-Serves a web interface with:
-- Main page: conversation selector dropdown + iframe for the active conversation
-- All Agents page: list of agents on this host with links to connect
+Serves a simple link-based web interface with:
+- Main page: links to existing conversations + link to start a new one
+- All Agents page: links to agents on this host
 
-The actual terminal sessions are handled by companion ttyd processes (started
-as separate tmux windows with --url-arg):
-- Chat ttyd: accessed via ?arg=<conversation_id> to resume a conversation
-- Agent-tmux ttyd: accessed via ?arg=<agent_name> to attach to an agent's tmux
+The actual terminal sessions are handled by companion ttyd processes
+(started as separate tmux windows with --url-arg):
+- Chat ttyd: ?arg=<conversation_id> to resume, ?arg=NEW to create
+- Agent-tmux ttyd: ?arg=<agent_name> to attach to an agent's tmux
 
 Environment:
     MNG_AGENT_STATE_DIR  - Agent state directory (contains logs/)
@@ -179,363 +179,140 @@ def _poll_agent_list_forever() -> None:
             time.sleep(1)
 
 
-# -- HTML Templates --
-#
-# The main page shows a conversation selector with an iframe that loads the
-# chat ttyd via ../chat/?arg=<cid>. The agents page lists all agents on
-# this host with links to ../agent-tmux/?arg=<name>.
+# -- Page rendering --
 
-_MAIN_PAGE_HTML: Final[str] = """<!DOCTYPE html>
+_CSS: Final[str] = """
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
+    .header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px; background: rgb(26, 26, 46); color: white; height: 48px;
+    }
+    .header h1 { font-size: 16px; font-weight: 600; }
+    .header-spacer { flex: 1; }
+    .header a {
+      color: rgba(255,255,255,0.8); text-decoration: none; font-size: 14px;
+      padding: 4px 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2);
+    }
+    .header a:hover { background: rgba(255,255,255,0.1); color: white; }
+    .content { padding: 24px; max-width: 800px; }
+    .item-list { list-style: none; margin-top: 16px; }
+    .item {
+      padding: 12px 16px; background: white; border: 1px solid #ddd;
+      border-radius: 6px; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .item-info { display: flex; align-items: center; gap: 8px; }
+    .item-name { font-weight: 600; font-size: 15px; }
+    .item-detail { font-size: 13px; color: #666; }
+    .badge {
+      font-size: 13px; padding: 2px 8px; border-radius: 4px; background: #e8e8e8;
+    }
+    .badge.running { background: #d4edda; color: #155724; }
+    .badge.stopped { background: #f8d7da; color: #721c24; }
+    .badge.waiting { background: #fff3cd; color: #856404; }
+    .link-btn {
+      display: inline-block; padding: 6px 14px; background: rgb(26, 26, 46);
+      color: white; text-decoration: none; border-radius: 4px; font-size: 14px;
+    }
+    .link-btn:hover { background: rgb(42, 42, 78); }
+    .link-btn.disabled { opacity: 0.5; pointer-events: none; }
+    .link-btn.new { background: rgb(34, 120, 60); }
+    .link-btn.new:hover { background: rgb(40, 150, 70); }
+    .empty-state { color: #666; font-size: 15px; margin-top: 16px; }
+"""
+
+
+def _render_main_page() -> str:
+    """Render the main page with conversation links (server-side)."""
+    agent_name = _html_escape(AGENT_NAME or "Agent")
+    conversations = _read_conversations()
+
+    conv_items = ""
+    for conv in conversations:
+        cid = _html_escape(conv["conversation_id"])
+        model = _html_escape(conv.get("model", ""))
+        updated = _html_escape(conv.get("updated_at", ""))
+        detail = model
+        if updated:
+            detail += f" -- {updated}"
+        conv_items += (
+            f'<li class="item">'
+            f'<div class="item-info">'
+            f'<span class="item-name">{cid}</span>'
+            f'<span class="item-detail">{detail}</span>'
+            f"</div>"
+            f'<a class="link-btn" href="../chat/?arg={cid}">Open</a>'
+            f"</li>\n"
+        )
+
+    empty_section = ""
+    if not conversations:
+        empty_section = '<p class="empty-state">No conversations yet.</p>'
+
+    return f"""<!DOCTYPE html>
 <html>
-<head>
-  <title>{agent_name}</title>
-  <style>
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    html, body {{ height: 100%; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }}
-
-    .header {{
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 8px 16px;
-      background: rgb(26, 26, 46);
-      color: white;
-      height: 48px;
-    }}
-
-    .header-title {{
-      font-weight: 600;
-      font-size: 15px;
-      margin-right: 8px;
-      white-space: nowrap;
-    }}
-
-    .header select {{
-      padding: 4px 8px;
-      border-radius: 4px;
-      border: 1px solid rgba(255,255,255,0.2);
-      background: rgba(255,255,255,0.1);
-      color: white;
-      font-size: 14px;
-      max-width: 400px;
-      cursor: pointer;
-    }}
-
-    .header select option {{
-      background: rgb(26, 26, 46);
-      color: white;
-    }}
-
-    .header button {{
-      padding: 4px 12px;
-      border-radius: 4px;
-      border: 1px solid rgba(255,255,255,0.3);
-      background: rgba(255,255,255,0.15);
-      color: white;
-      font-size: 14px;
-      cursor: pointer;
-    }}
-    .header button:hover {{ background: rgba(255,255,255,0.25); }}
-
-    .header-spacer {{ flex: 1; }}
-
-    .header a {{
-      color: rgba(255,255,255,0.8);
-      text-decoration: none;
-      font-size: 14px;
-      padding: 4px 12px;
-      border-radius: 4px;
-      border: 1px solid rgba(255,255,255,0.2);
-    }}
-    .header a:hover {{ background: rgba(255,255,255,0.1); color: white; }}
-
-    .status-area {{
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: calc(100% - 48px);
-      color: #666;
-      font-size: 16px;
-    }}
-
-    .empty-state {{
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: calc(100% - 48px);
-      color: #666;
-      font-size: 16px;
-      gap: 16px;
-    }}
-
-    .empty-state button {{
-      padding: 8px 20px;
-      border-radius: 6px;
-      border: none;
-      background: rgb(26, 26, 46);
-      color: white;
-      font-size: 15px;
-      cursor: pointer;
-    }}
-    .empty-state button:hover {{ background: rgb(42, 42, 78); }}
-
-    #conv-frame {{
-      width: 100%;
-      height: calc(100% - 48px);
-      border: none;
-    }}
-  </style>
-</head>
+<head><title>{agent_name}</title><style>{_CSS}</style></head>
 <body>
   <div class="header">
-    <span class="header-title">{agent_name}</span>
-    <select id="conv-select" onchange="onConversationSelected()">
-      <option value="">Loading...</option>
-    </select>
-    <button onclick="onNewConversation()">+ New</button>
+    <h1>{agent_name}</h1>
     <div class="header-spacer"></div>
     <a href="agents-page">All Agents</a>
   </div>
-
-  <div id="status" class="status-area">Loading conversations...</div>
-  <div id="empty" class="empty-state" style="display:none">
-    <p>No conversations yet.</p>
-    <button onclick="onNewConversation()">Start a conversation</button>
+  <div class="content">
+    <a class="link-btn new" href="../chat/?arg=NEW">+ New Conversation</a>
+    {empty_section}
+    <ul class="item-list">{conv_items}</ul>
   </div>
-  <iframe id="conv-frame" style="display:none"></iframe>
-
-  <script>
-    function showStatus(msg) {{
-      document.getElementById('status').textContent = msg;
-      document.getElementById('status').style.display = 'flex';
-      document.getElementById('empty').style.display = 'none';
-      document.getElementById('conv-frame').style.display = 'none';
-    }}
-
-    function showEmpty() {{
-      document.getElementById('status').style.display = 'none';
-      document.getElementById('empty').style.display = 'flex';
-      document.getElementById('conv-frame').style.display = 'none';
-    }}
-
-    function showFrame(src) {{
-      var frame = document.getElementById('conv-frame');
-      frame.src = src;
-      frame.style.display = 'block';
-      document.getElementById('status').style.display = 'none';
-      document.getElementById('empty').style.display = 'none';
-    }}
-
-    async function loadConversations() {{
-      try {{
-        var resp = await fetch('api/conversations');
-        var conversations = await resp.json();
-        var select = document.getElementById('conv-select');
-        var previousValue = select.value;
-        select.innerHTML = '';
-
-        if (conversations.length === 0) {{
-          showEmpty();
-          return;
-        }}
-
-        conversations.forEach(function(conv) {{
-          var opt = document.createElement('option');
-          opt.value = conv.conversation_id;
-          var updated = conv.updated_at || '';
-          var label = conv.conversation_id;
-          if (updated) {{
-            try {{ label += ' (' + new Date(updated).toLocaleString() + ')'; }}
-            catch(e) {{ label += ' (' + updated + ')'; }}
-          }}
-          opt.textContent = label;
-          select.appendChild(opt);
-        }});
-
-        // Restore previous selection if it still exists, otherwise select first
-        if (previousValue && Array.from(select.options).some(function(o) {{ return o.value === previousValue; }})) {{
-          select.value = previousValue;
-        }} else {{
-          select.selectedIndex = 0;
-          onConversationSelected();
-        }}
-      }} catch (e) {{
-        console.error('Failed to load conversations:', e);
-        showStatus('Failed to load conversations. Retrying...');
-        setTimeout(loadConversations, 3000);
-      }}
-    }}
-
-    function onConversationSelected() {{
-      var select = document.getElementById('conv-select');
-      var cid = select.value;
-      if (!cid) return;
-      // Load the chat ttyd with the conversation id as a URL arg
-      showFrame('../chat/?arg=' + encodeURIComponent(cid));
-    }}
-
-    function onNewConversation() {{
-      // Load the chat ttyd with arg=NEW (starts a new conversation)
-      showFrame('../chat/?arg=NEW');
-      // Refresh the conversation list after a delay to pick up the new one
-      setTimeout(loadConversations, 5000);
-    }}
-
-    // Periodically refresh the conversation list
-    setInterval(loadConversations, 15000);
-
-    // Initial load
-    loadConversations();
-  </script>
 </body>
 </html>"""
 
 
-_AGENTS_PAGE_HTML: Final[str] = """<!DOCTYPE html>
+def _render_agents_page() -> str:
+    """Render the agents page with agent links (server-side)."""
+    agent_name = _html_escape(AGENT_NAME or "Agent")
+
+    with _agent_list_lock:
+        agents = list(_cached_agents)
+
+    agent_items = ""
+    for agent in agents:
+        name = _html_escape(str(agent.get("name", "unnamed")))
+        state = str(agent.get("state", "unknown")).lower()
+        state_escaped = _html_escape(state.upper())
+        is_connectable = state in ("running", "waiting")
+
+        link_class = "link-btn" if is_connectable else "link-btn disabled"
+        link_href = f"../agent-tmux/?arg={_html_escape(str(agent.get('name', '')))}"
+        link_title = "" if is_connectable else ' title="Agent is not running"'
+
+        agent_items += (
+            f'<li class="item">'
+            f'<div class="item-info">'
+            f'<span class="item-name">{name}</span>'
+            f'<span class="badge {_html_escape(state)}">{state_escaped}</span>'
+            f"</div>"
+            f'<a class="{link_class}" href="{link_href}"{link_title}>Connect</a>'
+            f"</li>\n"
+        )
+
+    empty_section = ""
+    if not agents:
+        empty_section = '<p class="empty-state">No agents found on this host.</p>'
+
+    return f"""<!DOCTYPE html>
 <html>
-<head>
-  <title>All Agents - {agent_name}</title>
-  <style>
-    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    body {{ font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }}
-
-    .header {{
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 8px 16px;
-      background: rgb(26, 26, 46);
-      color: white;
-      height: 48px;
-    }}
-
-    .header h1 {{ font-size: 16px; font-weight: 600; }}
-    .header-spacer {{ flex: 1; }}
-    .header a {{
-      color: rgba(255,255,255,0.8);
-      text-decoration: none;
-      font-size: 14px;
-      padding: 4px 12px;
-      border-radius: 4px;
-      border: 1px solid rgba(255,255,255,0.2);
-    }}
-    .header a:hover {{ background: rgba(255,255,255,0.1); color: white; }}
-
-    .content {{ padding: 24px; max-width: 800px; }}
-
-    .agent-list {{ list-style: none; margin-top: 16px; }}
-    .agent-item {{
-      padding: 12px 16px;
-      background: white;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      margin-bottom: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }}
-    .agent-info {{ display: flex; align-items: center; gap: 8px; }}
-    .agent-name {{ font-weight: 600; font-size: 15px; }}
-    .agent-state {{
-      font-size: 13px;
-      padding: 2px 8px;
-      border-radius: 4px;
-      background: #e8e8e8;
-    }}
-    .agent-state.running {{ background: #d4edda; color: #155724; }}
-    .agent-state.stopped {{ background: #f8d7da; color: #721c24; }}
-    .agent-state.waiting {{ background: #fff3cd; color: #856404; }}
-    .agent-state.done {{ background: #cce5ff; color: #004085; }}
-    .agent-connect {{
-      display: inline-block;
-      padding: 6px 14px;
-      background: rgb(26, 26, 46);
-      color: white;
-      text-decoration: none;
-      border-radius: 4px;
-      font-size: 14px;
-    }}
-    .agent-connect:hover {{ background: rgb(42, 42, 78); }}
-    .agent-connect.disabled {{ opacity: 0.5; pointer-events: none; }}
-    .empty-state {{ color: #666; font-size: 15px; margin-top: 16px; }}
-    .loading {{ color: #666; font-size: 15px; margin-top: 16px; }}
-  </style>
-</head>
+<head><title>All Agents - {agent_name}</title><style>{_CSS}</style></head>
 <body>
   <div class="header">
     <h1>All Agents</h1>
     <div class="header-spacer"></div>
     <a href="./">Back to Conversations</a>
   </div>
-
   <div class="content">
-    <div id="loading" class="loading">Loading agents...</div>
-    <ul id="agent-list" class="agent-list" style="display:none"></ul>
-    <div id="empty" class="empty-state" style="display:none">No agents found on this host.</div>
+    {empty_section}
+    <ul class="item-list">{agent_items}</ul>
   </div>
-
-  <script>
-    async function loadAgents() {{
-      try {{
-        var resp = await fetch('api/agents');
-        var agents = await resp.json();
-
-        document.getElementById('loading').style.display = 'none';
-
-        if (agents.length === 0) {{
-          document.getElementById('empty').style.display = 'block';
-          document.getElementById('agent-list').style.display = 'none';
-          return;
-        }}
-
-        var list = document.getElementById('agent-list');
-        list.innerHTML = '';
-        list.style.display = 'block';
-
-        agents.forEach(function(agent) {{
-          var li = document.createElement('li');
-          li.className = 'agent-item';
-
-          var info = document.createElement('div');
-          info.className = 'agent-info';
-
-          var name = document.createElement('span');
-          name.className = 'agent-name';
-          name.textContent = agent.name || 'unnamed';
-          info.appendChild(name);
-
-          var state = (agent.state || 'unknown').toLowerCase();
-          var stateSpan = document.createElement('span');
-          stateSpan.className = 'agent-state ' + state;
-          stateSpan.textContent = state.toUpperCase();
-          info.appendChild(stateSpan);
-
-          li.appendChild(info);
-
-          var link = document.createElement('a');
-          link.className = 'agent-connect';
-          link.textContent = 'Connect';
-          if (state === 'running' || state === 'waiting') {{
-            // Link to the agent-tmux ttyd with the agent name as a URL arg
-            link.href = '../agent-tmux/?arg=' + encodeURIComponent(agent.name);
-          }} else {{
-            link.className += ' disabled';
-            link.title = 'Agent is not running';
-          }}
-          li.appendChild(link);
-
-          list.appendChild(li);
-        }});
-      }} catch (e) {{
-        document.getElementById('loading').textContent = 'Failed to load agents. Retrying...';
-        setTimeout(loadAgents, 5000);
-      }}
-    }}
-
-    loadAgents();
-    setInterval(loadAgents, 30000);
-  </script>
 </body>
 </html>"""
 
@@ -554,24 +331,11 @@ class _WebServerHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
 
         if path == "/" or path == "/index.html":
-            self._serve_main_page()
+            self._send_html(_render_main_page())
         elif path == "/agents-page":
-            self._serve_agents_page()
-        elif path == "/api/conversations":
-            self._serve_json(_read_conversations())
-        elif path == "/api/agents":
-            with _agent_list_lock:
-                self._serve_json(list(_cached_agents))
+            self._send_html(_render_agents_page())
         else:
             self.send_error(404)
-
-    def _serve_main_page(self) -> None:
-        page_html = _MAIN_PAGE_HTML.format(agent_name=_html_escape(AGENT_NAME or "Agent"))
-        self._send_html(page_html)
-
-    def _serve_agents_page(self) -> None:
-        page_html = _AGENTS_PAGE_HTML.format(agent_name=_html_escape(AGENT_NAME or "Agent"))
-        self._send_html(page_html)
 
     def _send_html(self, content: str) -> None:
         encoded = content.encode("utf-8")
@@ -580,15 +344,6 @@ class _WebServerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
-
-    def _serve_json(self, data: object) -> None:
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(body)
 
 
 # -- Main --

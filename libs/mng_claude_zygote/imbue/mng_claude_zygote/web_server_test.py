@@ -1,8 +1,6 @@
 """Unit tests for the web_server.py resource script.
 
 Tests the pure/near-pure functions by loading the resource module via exec().
-Uses monkeypatch.setenv (allowed) and SimpleNamespace (allowed sparingly)
-per the style guide.
 """
 
 import json
@@ -17,11 +15,7 @@ from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 
 @pytest.fixture()
 def web_server_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Load web_server.py as a module for testing.
-
-    Sets environment variables via monkeypatch.setenv so the module can be
-    loaded without requiring a real agent state directory.
-    """
+    """Load web_server.py as a module for testing."""
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
     host_dir = tmp_path / "host"
@@ -205,13 +199,56 @@ def test_register_server_appends_multiple(web_server_module: Any) -> None:
     assert len(lines) == 2
 
 
-def test_register_server_does_nothing_when_path_is_none(web_server_module: Any) -> None:
-    original = web_server_module.SERVERS_JSONL_PATH
-    web_server_module.SERVERS_JSONL_PATH = None
-    try:
-        web_server_module._register_server("web", 8080)
-    finally:
-        web_server_module.SERVERS_JSONL_PATH = original
+# -- Page rendering tests --
+
+
+def test_render_main_page_contains_new_conversation_link(web_server_module: Any) -> None:
+    page = web_server_module._render_main_page()
+    assert "../chat/?arg=NEW" in page
+    assert "New Conversation" in page
+
+
+def test_render_main_page_contains_agents_link(web_server_module: Any) -> None:
+    page = web_server_module._render_main_page()
+    assert "agents-page" in page
+    assert "All Agents" in page
+
+
+def test_render_main_page_shows_empty_state_with_no_conversations(web_server_module: Any) -> None:
+    page = web_server_module._render_main_page()
+    assert "No conversations yet" in page
+
+
+def test_render_main_page_lists_conversations(web_server_module: Any) -> None:
+    events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "type": "conversation_created",
+                "event_id": "evt-1",
+                "source": "conversations",
+                "conversation_id": "conv-render-82741",
+                "model": "claude-sonnet-4-6",
+            }
+        )
+        + "\n"
+    )
+
+    page = web_server_module._render_main_page()
+    assert "conv-render-82741" in page
+    assert "../chat/?arg=conv-render-82741" in page
+
+
+def test_render_agents_page_contains_back_link(web_server_module: Any) -> None:
+    page = web_server_module._render_agents_page()
+    assert "Back to Conversations" in page
+
+
+def test_render_agents_page_shows_empty_state(web_server_module: Any) -> None:
+    page = web_server_module._render_agents_page()
+    assert "No agents found" in page
 
 
 # -- HTTP handler tests --
@@ -220,39 +257,3 @@ def test_register_server_does_nothing_when_path_is_none(web_server_module: Any) 
 def test_handler_class_has_get_method(web_server_module: Any) -> None:
     handler = web_server_module._WebServerHandler
     assert hasattr(handler, "do_GET")
-
-
-# -- Template rendering tests --
-
-
-def test_main_page_html_contains_conversation_dropdown(web_server_module: Any) -> None:
-    rendered = web_server_module._MAIN_PAGE_HTML.format(agent_name="TestAgent")
-    assert "conv-select" in rendered
-    assert "TestAgent" in rendered
-    assert "All Agents" in rendered
-    assert "agents-page" in rendered
-
-
-def test_main_page_html_uses_chat_ttyd_url_arg(web_server_module: Any) -> None:
-    """Verify the main page links to the chat ttyd with ?arg= for conversation selection."""
-    rendered = web_server_module._MAIN_PAGE_HTML.format(agent_name="Test")
-    assert "../chat/?arg=" in rendered
-
-
-def test_main_page_html_links_to_chat_new_for_new_conversations(web_server_module: Any) -> None:
-    """Verify the new conversation button links to the chat ttyd with arg=NEW."""
-    rendered = web_server_module._MAIN_PAGE_HTML.format(agent_name="Test")
-    assert "../chat/?arg=NEW" in rendered
-
-
-def test_agents_page_html_contains_agent_list(web_server_module: Any) -> None:
-    rendered = web_server_module._AGENTS_PAGE_HTML.format(agent_name="TestAgent")
-    assert "agent-list" in rendered
-    assert "TestAgent" in rendered
-    assert "Back to Conversations" in rendered
-
-
-def test_agents_page_html_uses_agent_tmux_url_arg(web_server_module: Any) -> None:
-    """Verify the agents page links to the agent-tmux ttyd with ?arg= for agent selection."""
-    rendered = web_server_module._AGENTS_PAGE_HTML.format(agent_name="Test")
-    assert "../agent-tmux/?arg=" in rendered
