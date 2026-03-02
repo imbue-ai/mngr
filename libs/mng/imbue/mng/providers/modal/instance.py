@@ -1368,7 +1368,7 @@ log "=== Shutdown script completed ==="
         parser.add_argument("--cpu", type=float, default=self.config.default_cpu)
         parser.add_argument("--memory", type=float, default=self.config.default_memory)
         parser.add_argument("--image", type=str, default=self.config.default_image)
-        parser.add_argument("--dockerfile", type=str, default=None)
+        parser.add_argument("--file", type=str, default=None, dest="dockerfile")
         parser.add_argument("--timeout", type=int, default=self.config.default_sandbox_timeout)
         parser.add_argument("--region", type=str, default=self.config.default_region)
         parser.add_argument("--context-dir", type=str, default=None)
@@ -1700,7 +1700,7 @@ log "=== Shutdown script completed ==="
 
         logger.info("Creating host {} in {} ...", name, self.name)
 
-        # Parse build arguments (including --dockerfile if specified)
+        # Parse build arguments (including --file if specified)
         config = self._parse_build_args(build_args)
         base_image = str(image) if image else config.image
         dockerfile_path = Path(config.dockerfile) if config.dockerfile else None
@@ -1709,7 +1709,7 @@ log "=== Shutdown script completed ==="
         if not base_image and not dockerfile_path:
             logger.warning(
                 "No image or Dockerfile specified -- building from mng default Dockerfile. "
-                "Consider using your own Dockerfile (-b --dockerfile=<path>) to include "
+                "Consider using your own Dockerfile (-b --file=<path>) to include "
                 "your project's dependencies for faster startup.",
             )
 
