@@ -240,7 +240,7 @@ def test_conv_watcher_command_references_script() -> None:
 
 
 def test_event_watcher_command_references_script() -> None:
-    assert "event_watcher.sh" in EVENT_WATCHER_COMMAND
+    assert "event_watcher.py" in EVENT_WATCHER_COMMAND
 
 
 # -- ClaudeZygoteAgent._get_zygote_config tests --

@@ -122,7 +122,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "contrib/"]
+exclude = ["scripts/style_guide.py", "contrib/", "libs/mng_claude_zygote/imbue/mng_claude_zygote/resources/event_watcher.py"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
