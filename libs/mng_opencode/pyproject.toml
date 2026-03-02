@@ -1,10 +1,10 @@
 [project]
 name = "mng-opencode"
-version = "0.1.0"
+version = "0.1.1"
 description = "OpenCode agent type plugin for mng"
 requires-python = ">=3.11"
 dependencies = [
-    "mng==0.1.4",
+    "mng==0.1.5",
 ]
 
 [project.entry-points.mng]
