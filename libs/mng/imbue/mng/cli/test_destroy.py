@@ -535,7 +535,7 @@ def test_destroy_remove_created_branch_deletes_branch(
     """Test that --remove-created-branch deletes the git branch after destroying a worktree agent."""
     agent_name = f"test-rm-branch-{int(time.time())}"
     session_name = f"{mng_test_prefix}{agent_name}"
-    branch_name = f"mng/{agent_name}-local"
+    branch_name = f"mng/{agent_name}"
 
     with tmux_session_cleanup(session_name):
         create_result = cli_runner.invoke(
@@ -584,7 +584,7 @@ def test_destroy_without_remove_created_branch_leaves_branch(
     """Test that destroy without --remove-created-branch leaves the git branch intact."""
     agent_name = f"test-keep-branch-{int(time.time())}"
     session_name = f"{mng_test_prefix}{agent_name}"
-    branch_name = f"mng/{agent_name}-local"
+    branch_name = f"mng/{agent_name}"
 
     with tmux_session_cleanup(session_name):
         create_result = cli_runner.invoke(

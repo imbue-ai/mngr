@@ -230,6 +230,13 @@ class ProviderInstanceName(NonEmptyStr):
 
 LOCAL_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("local")
 
+DEFAULT_BRANCH_PREFIX: Final[str] = "mng/"
+
+
+def default_branch_name(agent_name: "AgentName", prefix: str = DEFAULT_BRANCH_PREFIX) -> str:
+    """Build the default branch name for an agent."""
+    return f"{prefix}{agent_name}"
+
 
 class ProviderBackendName(NonEmptyStr):
     """Name of a provider backend."""
