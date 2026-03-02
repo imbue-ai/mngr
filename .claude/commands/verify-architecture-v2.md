@@ -16,20 +16,7 @@ Write a CONCISE description of the problem the branch is trying to solve, based 
 
 Determine the base branch: use `$GIT_BASE_BRANCH` if set, otherwise default to `main`.
 
-Spawn a Task subagent (`subagent_type: "general-purpose"`, `model: "haiku"`) to do a quick sanity check on the diff. Give it the problem description from Phase 1 and instruct it to skim (not analyze in depth -- a later step does that):
-
-> The branch is supposed to: {problem description}
->
-> Skim this diff and answer three questions:
-> 1. Is the diff empty?
-> 2. Does it include significant unrelated changes (e.g. from merged-in feature branches)? Ignore minor cleanups or small incidental fixes -- only flag changes that look like a separate logical effort. If so, describe what seems unrelated.
-> 3. At a glance, does the scope of the changes look roughly complete for the stated goal, or does it look like only a partial solution or a work in progress?
->
-> ```
-> git diff ${base}...HEAD
-> ```
->
-> Keep your answer brief -- a detailed review happens later.
+Read the diff validation prompt from [validate-diff.md](validate-diff.md). Spawn a Task subagent (`subagent_type: "general-purpose"`, `model: "haiku"`) with that prompt, providing the base branch name and the problem description from Phase 1.
 
 Based on the subagent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
