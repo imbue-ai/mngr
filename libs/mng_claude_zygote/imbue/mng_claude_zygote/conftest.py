@@ -1,5 +1,7 @@
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Generator
@@ -218,3 +220,64 @@ def temp_git_repo(tmp_path: Path) -> Path:
     repo_dir.mkdir()
     init_git_repo_with_config(repo_dir)
     return repo_dir
+
+
+# -- Shared test helpers for watcher and integration tests --
+
+# SQL schema matching the llm tool's responses table.
+# Used by conversation watcher sync tests that create a real SQLite DB.
+LLM_RESPONSES_SCHEMA = """
+    CREATE TABLE responses (
+        id TEXT PRIMARY KEY,
+        system TEXT,
+        prompt TEXT,
+        response TEXT,
+        model TEXT,
+        datetime_utc TEXT,
+        conversation_id TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        token_details TEXT,
+        response_json TEXT,
+        reply_to_id TEXT,
+        chat_id INTEGER,
+        duration_ms INTEGER,
+        attachment_type TEXT,
+        attachment_path TEXT,
+        attachment_url TEXT,
+        attachment_content TEXT
+    )
+"""
+
+
+def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
+    """Create a minimal llm-compatible SQLite database with responses.
+
+    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
+    """
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(LLM_RESPONSES_SCHEMA)
+        for row_id, prompt, response, model, dt, cid in rows:
+            conn.execute(
+                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (row_id, prompt, response, model, dt, cid),
+            )
+        conn.commit()
+
+
+def write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
+    """Append a conversation_created event to a JSONL file."""
+    event = json.dumps(
+        {
+            "timestamp": "2025-01-15T10:00:00.000Z",
+            "type": "conversation_created",
+            "event_id": f"evt-{cid}",
+            "source": "conversations",
+            "conversation_id": cid,
+            "model": model,
+        }
+    )
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    with events_file.open("a") as f:
+        f.write(event + "\n")

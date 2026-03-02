@@ -1,11 +1,12 @@
 """Unit tests for conversation_watcher.py."""
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
 
+from imbue.mng_claude_zygote.conftest import create_test_llm_db
+from imbue.mng_claude_zygote.conftest import write_conversation_event
 from imbue.mng_claude_zygote.resources.conversation_watcher import _WatcherSettings
 from imbue.mng_claude_zygote.resources.conversation_watcher import _get_existing_event_ids
 from imbue.mng_claude_zygote.resources.conversation_watcher import _get_llm_db_path
@@ -13,64 +14,6 @@ from imbue.mng_claude_zygote.resources.conversation_watcher import _get_tracked_
 from imbue.mng_claude_zygote.resources.conversation_watcher import _load_watcher_settings
 from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_messages
 from imbue.mng_claude_zygote.resources.watcher_common import Logger
-
-# SQL schema matching the llm tool's responses table
-_LLM_RESPONSES_SCHEMA = """
-    CREATE TABLE responses (
-        id TEXT PRIMARY KEY,
-        system TEXT,
-        prompt TEXT,
-        response TEXT,
-        model TEXT,
-        datetime_utc TEXT,
-        conversation_id TEXT,
-        input_tokens INTEGER,
-        output_tokens INTEGER,
-        token_details TEXT,
-        response_json TEXT,
-        reply_to_id TEXT,
-        chat_id INTEGER,
-        duration_ms INTEGER,
-        attachment_type TEXT,
-        attachment_path TEXT,
-        attachment_url TEXT,
-        attachment_content TEXT
-    )
-"""
-
-
-def _create_test_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
-    """Create a minimal llm-compatible SQLite database with responses.
-
-    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
-    """
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(_LLM_RESPONSES_SCHEMA)
-        for row_id, prompt, response, model, dt, cid in rows:
-            conn.execute(
-                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, prompt, response, model, dt, cid),
-            )
-        conn.commit()
-
-
-def _write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
-    """Append a conversation_created event to a JSONL file."""
-    event = json.dumps(
-        {
-            "timestamp": "2025-01-15T10:00:00.000Z",
-            "type": "conversation_created",
-            "event_id": f"evt-{cid}",
-            "source": "conversations",
-            "conversation_id": cid,
-            "model": model,
-        }
-    )
-    events_file.parent.mkdir(parents=True, exist_ok=True)
-    with events_file.open("a") as f:
-        f.write(event + "\n")
-
 
 # -- _WatcherSettings tests --
 
@@ -140,8 +83,8 @@ def test_get_tracked_conversation_ids_empty_file(tmp_path: Path) -> None:
 def test_get_tracked_conversation_ids_reads_cids(tmp_path: Path) -> None:
     log = Logger(tmp_path / "test.log")
     conversations_file = tmp_path / "events.jsonl"
-    _write_conversation_event(conversations_file, "conv-1")
-    _write_conversation_event(conversations_file, "conv-2")
+    write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-2")
 
     cids = _get_tracked_conversation_ids(conversations_file, log)
     assert cids == {"conv-1", "conv-2"}
@@ -207,10 +150,10 @@ def test_sync_messages_syncs_from_database(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [
             ("resp-1", "Hello", "Hi!", "claude-sonnet-4-6", "2025-01-15T10:01:00", "conv-1"),
@@ -234,10 +177,10 @@ def test_sync_messages_is_idempotent(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [("resp-1", "Hello", "Hi!", "claude-sonnet-4-6", "2025-01-15T10:01:00", "conv-1")],
     )
@@ -257,7 +200,7 @@ def test_sync_messages_returns_zero_for_missing_db(tmp_path: Path) -> None:
     conversations_file = tmp_path / "conversations" / "events.jsonl"
     messages_file = tmp_path / "messages" / "events.jsonl"
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     result = _sync_messages(tmp_path / "nonexistent.db", conversations_file, messages_file, log)
     assert result == 0
@@ -269,7 +212,7 @@ def test_sync_messages_returns_zero_with_no_tracked_conversations(tmp_path: Path
     messages_file = tmp_path / "messages" / "events.jsonl"
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(db_path, [])
+    create_test_llm_db(db_path, [])
 
     result = _sync_messages(db_path, conversations_file, messages_file, log)
     assert result == 0
@@ -281,10 +224,10 @@ def test_sync_messages_only_syncs_tracked_conversations(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-tracked")
+    write_conversation_event(conversations_file, "conv-tracked")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [
             ("resp-1", "Hi", "Hello!", "model", "2025-01-15T10:01:00", "conv-tracked"),
@@ -308,10 +251,10 @@ def test_sync_messages_handles_prompt_only_response(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [("resp-1", "Only a prompt", "", "model", "2025-01-15T10:01:00", "conv-1")],
     )
@@ -331,10 +274,10 @@ def test_sync_messages_handles_response_only(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [("resp-1", "", "Only a response", "model", "2025-01-15T10:01:00", "conv-1")],
     )
@@ -354,10 +297,10 @@ def test_sync_messages_event_format(tmp_path: Path) -> None:
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
-    _write_conversation_event(conversations_file, "conv-1")
+    write_conversation_event(conversations_file, "conv-1")
 
     db_path = tmp_path / "logs.db"
-    _create_test_db(
+    create_test_llm_db(
         db_path,
         [("resp-1", "Hello", "Hi!", "claude-sonnet-4-6", "2025-01-15T10:01:00", "conv-1")],
     )

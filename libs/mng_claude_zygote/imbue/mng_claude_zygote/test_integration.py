@@ -12,7 +12,6 @@ injection logic that the plugin provides.
 
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
@@ -34,6 +33,8 @@ from imbue.mng_claude_zygote.conftest import ChatScriptEnv
 from imbue.mng_claude_zygote.conftest import LocalShellHost
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
+from imbue.mng_claude_zygote.conftest import create_test_llm_db
+from imbue.mng_claude_zygote.conftest import write_conversation_event
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_SKILL_DIRS
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_THINKING_DIR_FILES
@@ -52,31 +53,6 @@ from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_message
 from imbue.mng_claude_zygote.resources.watcher_common import Logger
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
-
-# SQL schema matching the llm tool's responses table.
-# Used by conversation watcher sync tests that create a real SQLite DB.
-_LLM_RESPONSES_SCHEMA = """
-    CREATE TABLE responses (
-        id TEXT PRIMARY KEY,
-        system TEXT,
-        prompt TEXT,
-        response TEXT,
-        model TEXT,
-        datetime_utc TEXT,
-        conversation_id TEXT,
-        input_tokens INTEGER,
-        output_tokens INTEGER,
-        token_details TEXT,
-        response_json TEXT,
-        reply_to_id TEXT,
-        chat_id INTEGER,
-        duration_ms INTEGER,
-        attachment_type TEXT,
-        attachment_path TEXT,
-        attachment_url TEXT,
-        attachment_content TEXT
-    )
-"""
 
 
 def _unique_agent_name(label: str) -> str:
@@ -139,42 +115,10 @@ def _find_agent_state_dir(host_dir: Path) -> Path | None:
     return None
 
 
-def _create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
-    """Create a minimal llm-compatible SQLite database with responses.
-
-    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
-    """
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(_LLM_RESPONSES_SCHEMA)
-        for row_id, prompt, response, model, dt, cid in rows:
-            conn.execute(
-                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, prompt, response, model, dt, cid),
-            )
-        conn.commit()
-
-
-def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path) -> int:
+def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path, tmp_path: Path) -> int:
     """Run the conversation watcher's sync logic and return the count of synced events."""
-    log = Logger(Path("/tmp/test-conv-watcher.log"))
+    log = Logger(tmp_path / "test-conv-watcher.log")
     return _sync_messages(db_path, conversations_file, messages_file, log)
-
-
-def _write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
-    """Append a conversation_created event to a JSONL file."""
-    event = json.dumps(
-        {
-            "timestamp": "2025-01-15T10:00:00.000Z",
-            "type": "conversation_created",
-            "event_id": f"evt-{cid}",
-            "source": "conversations",
-            "conversation_id": cid,
-            "model": model,
-        }
-    )
-    with events_file.open("a") as f:
-        f.write(event + "\n")
 
 
 # -- Provisioning filesystem structure tests --
@@ -727,10 +671,10 @@ def test_conversation_watcher_sync_with_llm_database(
     Creates a minimal llm-compatible database and verifies that the sync
     script extracts messages correctly.
     """
-    _write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-sync-test")
+    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-sync-test")
 
     db_path = tmp_path / "logs.db"
-    _create_test_llm_db(
+    create_test_llm_db(
         db_path,
         [
             (
@@ -756,6 +700,7 @@ def test_conversation_watcher_sync_with_llm_database(
         chat_env.conversations_dir / "events.jsonl",
         chat_env.messages_dir / "events.jsonl",
         db_path,
+        tmp_path,
     )
     assert synced_count == 4, f"Expected 4 synced events (2 user + 2 assistant), got {synced_count}"
 
@@ -781,10 +726,10 @@ def test_conversation_watcher_sync_is_idempotent(
     tmp_path: Path,
 ) -> None:
     """Verify that running the sync twice does not duplicate events."""
-    _write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-idem-test")
+    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-idem-test")
 
     db_path = tmp_path / "logs.db"
-    _create_test_llm_db(
+    create_test_llm_db(
         db_path,
         [
             (
@@ -801,10 +746,10 @@ def test_conversation_watcher_sync_is_idempotent(
     conversations_file = chat_env.conversations_dir / "events.jsonl"
     messages_file = chat_env.messages_dir / "events.jsonl"
 
-    first_count = _run_sync_script(conversations_file, messages_file, db_path)
+    first_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
     assert first_count == 2
 
-    second_count = _run_sync_script(conversations_file, messages_file, db_path)
+    second_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
     assert second_count == 0
 
     lines = messages_file.read_text().strip().split("\n")
