@@ -84,6 +84,7 @@ def _run_deployment(
     agent_id: AgentId,
     provider: DeploymentProvider,
     paths: ChangelingPaths,
+    pass_env: tuple[str, ...],
 ) -> DeploymentResult:
     """Deploy the changeling and return the result.
 
@@ -104,6 +105,7 @@ def _run_deployment(
                 paths=paths,
                 forwarding_server_port=forwarding_port,
                 concurrency_group=cg,
+                pass_env=pass_env,
             )
         except ChangelingError as e:
             deploy_error = e
@@ -319,6 +321,12 @@ def _move_to_permanent_location(temp_dir: Path, changeling_dir: Path) -> None:
     help="Whether to allow the agent to launch its own agents (skips the prompt if provided)",
 )
 @click.option(
+    "--pass-env",
+    "pass_env",
+    multiple=True,
+    help="Forward an environment variable from the current shell to the agent (repeatable).",
+)
+@click.option(
     "--data-dir",
     type=click.Path(resolve_path=True),
     default=None,
@@ -332,6 +340,7 @@ def deploy(
     name: str | None,
     provider: str | None,
     self_deploy: bool | None,
+    pass_env: tuple[str, ...],
     data_dir: str | None,
 ) -> None:
     """Deploy a new changeling from a git repository or agent type.
@@ -411,6 +420,7 @@ def deploy(
             agent_id=agent_id,
             provider=provider_choice,
             paths=paths,
+            pass_env=pass_env,
         )
     except ChangelingError:
         shutil.rmtree(changeling_dir, ignore_errors=True)

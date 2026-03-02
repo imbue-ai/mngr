@@ -14,7 +14,6 @@ from imbue.mng_claude_zygote.data_types import ExtraContextSettings
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.data_types import WatcherSettings
 from imbue.mng_claude_zygote.settings import load_settings_from_host
-from imbue.mng_claude_zygote.settings import provision_settings_file
 
 # -- ClaudeZygoteSettings default tests --
 
@@ -144,24 +143,3 @@ def test_load_settings_returns_defaults_on_read_failure() -> None:
     # File check passes (default success), but read_text_file raises FileNotFoundError
     # which is caught. Defaults returned.
     assert settings.chat.model is None
-
-
-# -- provision_settings_file tests --
-
-
-def test_provision_settings_file_copies_when_exists() -> None:
-    toml_content = '[chat]\nmodel = "claude-sonnet-4-6"\n'
-    host = StubHost(text_file_contents={"settings.toml": toml_content})
-    provision_settings_file(cast(Any, host), Path("/work"), ".changelings", Path("/state"))
-
-    assert len(host.written_text_files) == 1
-    path, content = host.written_text_files[0]
-    assert str(path) == "/state/settings.toml"
-    assert "claude-sonnet-4-6" in content
-
-
-def test_provision_settings_file_skips_when_missing() -> None:
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_settings_file(cast(Any, host), Path("/work"), ".changelings", Path("/state"))
-
-    assert len(host.written_text_files) == 0

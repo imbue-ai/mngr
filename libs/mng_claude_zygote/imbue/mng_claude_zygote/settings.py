@@ -47,34 +47,3 @@ def load_settings_from_host(
         except Exception as e:
             logger.warning("Failed to validate settings from {}: {}", settings_path, e)
             return ClaudeZygoteSettings()
-
-
-def provision_settings_file(
-    host: OnlineHostInterface,
-    work_dir: Path,
-    changelings_dir_name: str,
-    agent_state_dir: Path,
-) -> None:
-    """Copy settings.toml from the work dir to the agent state dir.
-
-    If the source file does not exist, does nothing. The agent state dir
-    location ($MNG_AGENT_STATE_DIR/settings.toml) is accessible to all
-    scripts via the MNG_AGENT_STATE_DIR environment variable.
-    """
-    source_path = work_dir / changelings_dir_name / "settings.toml"
-    dest_path = agent_state_dir / "settings.toml"
-    quoted_source = shlex.quote(str(source_path))
-
-    check = host.execute_command(f"test -f {quoted_source}", timeout_seconds=15.0)
-    if not check.success:
-        logger.debug("No settings file at {} to provision", source_path)
-        return
-
-    with log_span("Provisioning settings to {}", dest_path):
-        try:
-            content = host.read_text_file(source_path)
-        except Exception as e:
-            logger.warning("Failed to read settings file for provisioning: {}", e)
-            return
-
-        host.write_text_file(dest_path, content)

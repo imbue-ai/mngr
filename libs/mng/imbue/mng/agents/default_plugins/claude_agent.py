@@ -354,13 +354,14 @@ def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGr
 def _provision_background_scripts(host: OnlineHostInterface) -> None:
     """Write the background task scripts to $MNG_HOST_DIR/commands/.
 
-    Provisions export_transcript.sh and claude_background_tasks.sh so they
-    can be launched by the agent's assemble_command at runtime.
+    Provisions mng_log.sh (shared logging library), export_transcript.sh,
+    and claude_background_tasks.sh so they can be launched by the agent's
+    assemble_command at runtime.
     """
     commands_dir = host.host_dir / "commands"
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
-    for script_name in ("export_transcript.sh", "claude_background_tasks.sh"):
+    for script_name in ("mng_log.sh", "export_transcript.sh", "claude_background_tasks.sh"):
         script_content = load_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):

@@ -621,7 +621,7 @@ def _handle_create(
         editor_session = EditorSession.create(initial_content=initial_message_content)
         # Enable logging suppression before starting the editor so that
         # log messages don't interfere with the editor's terminal output
-        LoggingSuppressor.enable(logging_config.console_level, logging_config.log_level)
+        LoggingSuppressor.enable(logging_config.console_level)
         # Start editor with callback that restores logging when it exits
         editor_session.start(on_exit=_on_editor_exit)
         # When using editor, don't pass message to api_create (we'll send it after editor finishes)

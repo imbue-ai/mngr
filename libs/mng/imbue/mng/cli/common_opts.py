@@ -229,7 +229,7 @@ def setup_command_context(
     ctx.meta["logging_config"] = resolved_logging_config
 
     # Set up logging
-    setup_logging(resolved_logging_config, default_host_dir=mng_ctx.config.default_host_dir)
+    setup_logging(resolved_logging_config, default_host_dir=mng_ctx.config.default_host_dir, command=command_name)
 
     # Enter a log span for the command lifetime
     span = log_span("Started {} command", command_name)
@@ -336,10 +336,8 @@ def parse_output_options(
     resolved_logging_config = LoggingConfig(
         file_level=config.logging.file_level,
         log_dir=config.logging.log_dir,
-        max_log_files=config.logging.max_log_files,
         max_log_size_mb=config.logging.max_log_size_mb,
         console_level=console_level,
-        log_level=config.logging.log_level,
         log_file_path=log_file_path,
         is_logging_commands=is_log_commands,
         is_logging_command_output=is_log_command_output,

@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Generator
+from typing import cast
 from uuid import uuid4
 
 import pluggy
@@ -22,7 +23,9 @@ from imbue.mng.agents.agent_registry import reset_agent_registry
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.hosts.host import Host
 from imbue.mng.plugins import hookspecs
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -378,6 +381,21 @@ def local_provider(temp_host_dir: Path, temp_mng_ctx: MngContext) -> LocalProvid
         host_dir=temp_host_dir,
         mng_ctx=temp_mng_ctx,
     )
+
+
+@pytest.fixture
+def local_host(local_provider: LocalProviderInstance) -> Host:
+    """Create a local Host via the local provider.
+
+    This fixture eliminates the repeated pattern of:
+        host = local_provider.create_host(HostName("localhost"))
+
+    Use this when tests need a Host instance for creating agents,
+    executing commands, etc. The local provider always returns a Host
+    (the concrete OnlineHostInterface implementation).
+    """
+    host = local_provider.create_host(HostName("localhost"))
+    return cast(Host, host)
 
 
 @pytest.fixture

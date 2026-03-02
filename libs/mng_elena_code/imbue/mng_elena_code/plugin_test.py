@@ -4,7 +4,6 @@ import shlex
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import cast
 
 import pluggy
@@ -18,19 +17,12 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import HostId
-from imbue.mng_claude_zygote.plugin import AGENT_TTYD_COMMAND
-from imbue.mng_claude_zygote.plugin import AGENT_TTYD_WINDOW_NAME
 from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
 from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
 from imbue.mng_elena_code.plugin import ELENA_SYSTEM_PROMPT
 from imbue.mng_elena_code.plugin import ElenaCodeAgent
 from imbue.mng_elena_code.plugin import _merge_system_prompt_into_args
-from imbue.mng_elena_code.plugin import override_command_options
 from imbue.mng_elena_code.plugin import register_agent_type
-
-
-class _DummyCommandClass:
-    pass
 
 
 def _make_elena_agent(tmp_path: Path) -> tuple[ElenaCodeAgent, OnlineHostInterface]:
@@ -77,47 +69,6 @@ def test_elena_code_agent_inherits_from_claude_zygote_agent() -> None:
 def test_elena_code_agent_inherits_from_claude_agent() -> None:
     """Verify that ElenaCodeAgent is transitively a subclass of ClaudeAgent."""
     assert issubclass(ElenaCodeAgent, ClaudeAgent)
-
-
-def test_adds_agent_ttyd_for_elena_code_type() -> None:
-    """Verify that the plugin adds an agent ttyd command for elena-code agents."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "elena-code"}
-
-    override_command_options(
-        command_name="create",
-        command_class=_DummyCommandClass,
-        params=params,
-    )
-
-    assert len(params["add_command"]) == 1
-    assert AGENT_TTYD_WINDOW_NAME in params["add_command"][0]
-    assert AGENT_TTYD_COMMAND in params["add_command"][0]
-
-
-def test_does_not_modify_non_create_commands() -> None:
-    """Verify that the plugin does not modify params for non-create commands."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "elena-code"}
-
-    override_command_options(
-        command_name="connect",
-        command_class=_DummyCommandClass,
-        params=params,
-    )
-
-    assert params["add_command"] == ()
-
-
-def test_does_not_modify_for_other_agent_types() -> None:
-    """Verify that the plugin does not modify params for non-elena-code agents."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude"}
-
-    override_command_options(
-        command_name="create",
-        command_class=_DummyCommandClass,
-        params=params,
-    )
-
-    assert params["add_command"] == ()
 
 
 def test_elena_system_prompt_is_conversational() -> None:

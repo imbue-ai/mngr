@@ -25,38 +25,55 @@ set -euo pipefail
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
 CONVERSATIONS_EVENTS="$AGENT_DATA_DIR/logs/conversations/events.jsonl"
 LLM_TOOLS_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}/commands/llm_tools"
-LOG_FILE="${MNG_HOST_DIR}/logs/chat.log"
 TALKING_PROMPT="${MNG_AGENT_WORK_DIR:-}/talking/PROMPT.md"
+
+# Configure and source the shared logging library
+_MNG_LOG_TYPE="chat"
+_MNG_LOG_SOURCE="chat"
+_MNG_LOG_FILE="${MNG_HOST_DIR}/logs/chat/events.jsonl"
+# shellcheck source=../../../../mng/imbue/mng/resources/mng_log.sh
+source "$MNG_HOST_DIR/commands/mng_log.sh"
+
+LOG_FILE="$_MNG_LOG_FILE"
 
 # Nanosecond-precision UTC timestamp in ISO 8601 format.
 iso_timestamp_ns() {
     date -u +"%Y-%m-%dT%H:%M:%S.%NZ"
 }
 
-# Generate a unique event ID (timestamp-based + random hex for uniqueness)
+# Generate a unique event ID (random UUID4 hex with evt- prefix)
 generate_event_id() {
-    echo "evt-$(date +%s%N)-$(head -c 4 /dev/urandom | xxd -p)"
+    echo "evt-$(head -c 16 /dev/urandom | xxd -p)"
 }
 
 # Log a message to the log file (not to stdout, since chat is interactive)
 log() {
-    local ts
-    ts=$(iso_timestamp_ns)
-    mkdir -p "$(dirname "$LOG_FILE")"
-    echo "[$ts] $*" >> "$LOG_FILE"
+    log_info "$*"
 }
 
 get_default_model() {
-    python3 -c "
+    local _stderr_file
+    _stderr_file=$(mktemp)
+    local _model
+    _model=$(python3 -c "
 import tomllib, pathlib, sys
-p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')
-try:
-    s = tomllib.loads(p.read_text()) if p.exists() else {}
-    print(s.get('chat', {}).get('model', 'claude-opus-4-6'))
-except Exception as e:
-    print(f'WARNING: failed to load settings: {e}', file=sys.stderr)
-    print('claude-opus-4-6')
-" 2>>"$LOG_FILE" || echo "claude-opus-4-6"
+p = pathlib.Path('${MNG_AGENT_WORK_DIR:-}/.changelings/settings.toml')
+if p.exists():
+    try:
+        s = tomllib.loads(p.read_text())
+        model = s.get('chat', {}).get('model')
+        if model:
+            print(model)
+            sys.exit(0)
+    except Exception as e:
+        print(f'WARNING: failed to load settings from {p}: {e}', file=sys.stderr)
+print('claude-opus-4.6')
+" 2>"$_stderr_file") || true
+    if [ -s "$_stderr_file" ]; then
+        log_error "Failed to load settings: $(cat "$_stderr_file")"
+    fi
+    rm -f "$_stderr_file"
+    echo "${_model:-claude-opus-4-6}"
 }
 
 generate_cid() {
@@ -133,8 +150,6 @@ new_conversation() {
 
     log "Creating new conversation: cid=$cid model=$model as_agent=$as_agent message_len=${#message}"
 
-    append_conversation_event "$cid" "$model" "conversation_created"
-
     # Build system prompt args for llm live-chat only (llm inject does not support -s).
     local system_prompt
     system_prompt=$(build_system_prompt)
@@ -144,6 +159,7 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
+        append_conversation_event "$cid" "$model" "conversation_created"
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $cid"
             llm inject --cid "$cid" -m "$model" "$message"
@@ -153,13 +169,30 @@ new_conversation() {
     else
         local tool_args
         tool_args=$(build_tool_args)
-        log "Starting live-chat session: cid=$cid model=$model tool_args='$tool_args'"
+        log "Starting live-chat session: model=$model tool_args='$tool_args'"
+
+        # llm live-chat prints "PID: <pid> | Conversation: <id>" to stdout
+        # before the interactive session. We use a trap + background watcher
+        # to capture this from the llm logs database once it starts, so the
+        # conversation appears in our event logs for the web UI.
+        (
+            # Wait for llm to create its conversation in the database
+            sleep 2
+            _LLM_DB=$(llm logs path 2>/dev/null || echo "")
+            if [ -n "$_LLM_DB" ] && [ -f "$_LLM_DB" ]; then
+                _LATEST_CID=$(sqlite3 "$_LLM_DB" "SELECT id FROM conversations ORDER BY rowid DESC LIMIT 1" 2>/dev/null || true)
+                if [ -n "$_LATEST_CID" ]; then
+                    append_conversation_event "$_LATEST_CID" "$model" "conversation_created"
+                    log "Recorded conversation event for llm-generated cid=$_LATEST_CID"
+                fi
+            fi
+        ) &
+
+        # shellcheck disable=SC2086
         if [ -n "$message" ]; then
-            # shellcheck disable=SC2086
-            exec llm live-chat --cid "$cid" -m "$model" "${sys_args[@]}" $tool_args "$message"
+            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args "$message"
         else
-            # shellcheck disable=SC2086
-            exec llm live-chat --cid "$cid" -m "$model" "${sys_args[@]}" $tool_args
+            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args
         fi
     fi
 }
