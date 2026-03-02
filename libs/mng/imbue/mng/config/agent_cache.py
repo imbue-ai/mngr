@@ -27,7 +27,7 @@ class AgentSummaryUntyped(FrozenModel):
     host_id: str = Field(description="Unique host identifier")
 
 
-def write_agent_names_cache(
+def write_agent_cache(
     cache_dir: Path,
     agents_by_host: Mapping[HostReference, Sequence[AgentReference]],
 ) -> None:

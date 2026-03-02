@@ -3,7 +3,7 @@ from pathlib import Path
 
 from imbue.mng.config.agent_cache import AGENT_COMPLETIONS_CACHE_FILENAME
 from imbue.mng.config.agent_cache import resolve_identifiers_from_cache
-from imbue.mng.config.agent_cache import write_agent_names_cache
+from imbue.mng.config.agent_cache import write_agent_cache
 from imbue.mng.conftest import build_agents_by_host_from_tuples
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
@@ -14,11 +14,11 @@ from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import ProviderInstanceName
 
 # =============================================================================
-# write_agent_names_cache format tests
+# write_agent_cache format tests
 # =============================================================================
 
 
-def test_write_agent_names_cache_produces_agents_and_names_keys(
+def test_write_agent_cache_produces_agents_and_names_keys(
     tmp_path: Path,
 ) -> None:
     agents_by_host, _ = build_agents_by_host_from_tuples(
@@ -27,7 +27,7 @@ def test_write_agent_names_cache_produces_agents_and_names_keys(
             ("my-agent", "docker", "my-docker-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
     cache_data = json.loads(cache_path.read_text())
@@ -39,7 +39,7 @@ def test_write_agent_names_cache_produces_agents_and_names_keys(
     assert cache_data["names"] == ["bench-ep-cache4", "my-agent"]
 
 
-def test_write_agent_names_cache_agents_contain_provider_info(
+def test_write_agent_cache_agents_contain_provider_info(
     tmp_path: Path,
 ) -> None:
     agents_by_host, _ = build_agents_by_host_from_tuples(
@@ -47,7 +47,7 @@ def test_write_agent_names_cache_agents_contain_provider_info(
             ("test-agent", "modal", "test-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
     cache_data = json.loads(cache_path.read_text())
@@ -60,11 +60,11 @@ def test_write_agent_names_cache_agents_contain_provider_info(
     assert "host_id" in entry
 
 
-def test_write_agent_names_cache_writes_empty_list_for_no_agents(
+def test_write_agent_cache_writes_empty_list_for_no_agents(
     tmp_path: Path,
 ) -> None:
-    """write_agent_names_cache should write an empty names list when no agents."""
-    write_agent_names_cache(tmp_path, {})
+    """write_agent_cache should write an empty names list when no agents."""
+    write_agent_cache(tmp_path, {})
 
     cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
     assert cache_path.is_file()
@@ -73,10 +73,10 @@ def test_write_agent_names_cache_writes_empty_list_for_no_agents(
     assert cache_data["agents"] == []
 
 
-def test_write_agent_names_cache_deduplicates_names(
+def test_write_agent_cache_deduplicates_names(
     tmp_path: Path,
 ) -> None:
-    """write_agent_names_cache should deduplicate names in the names list."""
+    """write_agent_cache should deduplicate names in the names list."""
     # Two agents with the same name on different hosts
     host_ref_1 = HostReference(
         host_id=HostId.generate(),
@@ -106,7 +106,7 @@ def test_write_agent_names_cache_deduplicates_names(
             )
         ],
     }
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
     cache_data = json.loads(cache_path.read_text())
@@ -129,7 +129,7 @@ def test_resolve_identifiers_from_cache_round_trip_by_name(
             ("my-agent", "docker", "my-docker-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     result = resolve_identifiers_from_cache(tmp_path, ["bench-ep-cache4"])
 
@@ -149,7 +149,7 @@ def test_resolve_identifiers_from_cache_round_trip_by_id(
             ("my-agent", "docker", "my-docker-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     agent_id = str(ids_by_name["my-agent"])
     result = resolve_identifiers_from_cache(tmp_path, [agent_id])
@@ -169,7 +169,7 @@ def test_resolve_identifiers_from_cache_returns_entries_for_multiple_identifiers
             ("my-agent", "docker", "my-docker-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     result = resolve_identifiers_from_cache(tmp_path, ["bench-ep-cache4", "my-agent"])
 
@@ -187,7 +187,7 @@ def test_resolve_identifiers_from_cache_returns_none_for_missing_identifier(
             ("bench-ep-cache4", "modal", "bench-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     result = resolve_identifiers_from_cache(tmp_path, ["nonexistent-agent"])
 
@@ -238,7 +238,7 @@ def test_resolve_identifiers_from_cache_returns_none_when_any_identifier_missing
             ("found-agent", "modal", "bench-host"),
         ]
     )
-    write_agent_names_cache(tmp_path, agents_by_host)
+    write_agent_cache(tmp_path, agents_by_host)
 
     result = resolve_identifiers_from_cache(tmp_path, ["found-agent", "missing-agent"])
 

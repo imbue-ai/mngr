@@ -22,7 +22,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.providers import get_all_provider_instances
-from imbue.mng.config.agent_cache import write_agent_names_cache
+from imbue.mng.config.agent_cache import write_agent_cache
 from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
@@ -751,6 +751,6 @@ def load_all_agents_grouped_by_host(
         # partial cache is better than none -- the fallback in
         # find_agents_by_identifiers_or_state handles misses correctly.
         if provider_names is None:
-            write_agent_names_cache(get_completion_cache_dir(), agents_by_host)
+            write_agent_cache(get_completion_cache_dir(), agents_by_host)
 
         return (agents_by_host, providers)
