@@ -20,6 +20,7 @@ _SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
     "conversation_watcher.sh",
     "event_watcher.sh",
+    "transcript_watcher.sh",
 )
 
 # Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/
@@ -486,8 +487,18 @@ def create_event_log_directories(
     - logs/stop/              agent stop events
     - logs/monitor/           (future) monitor agent events
     - logs/claude_transcript/ inner monologue (written by Claude background tasks)
+    - logs/common_transcript/ agent-agnostic transcript (written by transcript watcher)
     """
-    for source in ("conversations", "messages", "scheduled", "mng_agents", "stop", "monitor", "claude_transcript"):
+    for source in (
+        "conversations",
+        "messages",
+        "scheduled",
+        "mng_agents",
+        "stop",
+        "monitor",
+        "claude_transcript",
+        "common_transcript",
+    ):
         source_dir = agent_state_dir / "logs" / source
         _execute_with_timing(
             host,

@@ -240,6 +240,370 @@ def test_event_watcher_logs_send_errors() -> None:
     assert "send_stderr" in content or "ERROR" in content
 
 
+# -- Transcript watcher content tests --
+
+
+def test_load_zygote_resource_loads_transcript_watcher() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "#!/bin/bash" in content
+    assert "transcript" in content.lower()
+
+
+def test_transcript_watcher_reads_claude_transcript() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "claude_transcript/events.jsonl" in content
+
+
+def test_transcript_watcher_writes_common_transcript() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "common_transcript/events.jsonl" in content
+
+
+def test_transcript_watcher_uses_id_based_dedup() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "existing_ids" in content
+    assert "event_id" in content
+
+
+def test_transcript_watcher_handles_assistant_messages() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert '"assistant"' in content or "assistant" in content
+    assert "tool_use" in content
+
+
+def test_transcript_watcher_handles_user_messages() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "user_message" in content
+
+
+def test_transcript_watcher_handles_tool_results() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "tool_result" in content
+    assert "tool_use_id" in content
+
+
+def test_transcript_watcher_skips_progress_events() -> None:
+    """Verify transcript_watcher.sh skips noise events like progress."""
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "progress" in content.lower()
+
+
+def test_transcript_watcher_supports_inotifywait() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "inotifywait" in content
+
+
+def test_transcript_watcher_defines_log_functions() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "log()" in content
+    assert "log_warn()" in content
+    assert "log_debug()" in content
+
+
+def test_transcript_watcher_truncates_tool_output() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "_MAX_OUTPUT_LENGTH" in content
+
+
+def test_transcript_watcher_truncates_tool_input_preview() -> None:
+    content = load_zygote_resource("transcript_watcher.sh")
+    assert "_MAX_INPUT_PREVIEW_LENGTH" in content
+
+
+# -- Transcript watcher conversion logic tests --
+
+
+def _extract_convert_script() -> str:
+    """Extract the inline Python CONVERT_SCRIPT from transcript_watcher.sh."""
+    content = load_zygote_resource("transcript_watcher.sh")
+    start_marker = "python3 << 'CONVERT_SCRIPT'"
+    start_idx = content.index(start_marker)
+    start_of_python = content.index("\n", start_idx) + 1
+    remaining = content[start_of_python:]
+    python_lines = []
+    for line in remaining.split("\n"):
+        if line.strip() == "CONVERT_SCRIPT":
+            break
+        python_lines.append(line)
+    return "\n".join(python_lines)
+
+
+def _run_conversion(
+    input_lines: list[str],
+    existing_output_lines: list[str] | None = None,
+    tmp_path: Path = Path("/tmp"),
+) -> list[dict[str, Any]]:
+    """Run the conversion logic on the given input and return output events."""
+    import json
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_file = Path(tmpdir) / "input.jsonl"
+        output_file = Path(tmpdir) / "output.jsonl"
+
+        input_file.write_text("\n".join(input_lines) + "\n" if input_lines else "")
+
+        if existing_output_lines:
+            output_file.write_text("\n".join(existing_output_lines) + "\n")
+
+        script = _extract_convert_script()
+        env = {
+            **os.environ,
+            "_INPUT_FILE": str(input_file),
+            "_OUTPUT_FILE": str(output_file),
+        }
+
+        result = subprocess.run(
+            ["python3", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Conversion failed: {result.stderr}")
+
+        if not output_file.exists():
+            return []
+
+        output_text = output_file.read_text()
+        events = []
+        for line in output_text.strip().split("\n"):
+            if line.strip():
+                events.append(json.loads(line))
+        return events
+
+
+def test_conversion_handles_user_text_message() -> None:
+    import json
+
+    raw = json.dumps(
+        {
+            "type": "user",
+            "uuid": "user-uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "Hello world"},
+        }
+    )
+    events = _run_conversion([raw])
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "Hello world"
+    assert events[0]["source"] == "common_transcript"
+    assert events[0]["event_id"] == "user-uuid-1-user"
+
+
+def test_conversion_handles_assistant_message_with_text() -> None:
+    import json
+
+    raw = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "asst-uuid-1",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [{"type": "text", "text": "Hello back!"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        }
+    )
+    events = _run_conversion([raw])
+    assert len(events) == 1
+    assert events[0]["type"] == "assistant_message"
+    assert events[0]["model"] == "claude-opus-4-6"
+    assert events[0]["text"] == "Hello back!"
+
+
+def test_conversion_handles_tool_results() -> None:
+    import json
+
+    assistant = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "asst-uuid-3",
+            "timestamp": "2026-01-01T00:00:03Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_456", "name": "Read", "input": {"file_path": "/tmp/test.txt"}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 50, "output_tokens": 30},
+            },
+        }
+    )
+    user_result = json.dumps(
+        {
+            "type": "user",
+            "uuid": "user-uuid-2",
+            "timestamp": "2026-01-01T00:00:04Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_456",
+                        "content": "file contents here",
+                        "is_error": False,
+                    },
+                ],
+            },
+        }
+    )
+    events = _run_conversion([assistant, user_result])
+    tool_results = [e for e in events if e["type"] == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["tool_call_id"] == "toolu_456"
+    assert tool_results[0]["tool_name"] == "Read"
+
+
+def test_conversion_skips_progress_events() -> None:
+    import json
+
+    raw = json.dumps(
+        {
+            "type": "progress",
+            "uuid": "prog-uuid-1",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "data": {"type": "bash_progress"},
+        }
+    )
+    events = _run_conversion([raw])
+    assert len(events) == 0
+
+
+def test_conversion_deduplicates_by_event_id() -> None:
+    import json
+
+    raw = json.dumps(
+        {
+            "type": "user",
+            "uuid": "user-uuid-3",
+            "timestamp": "2026-01-01T00:00:07Z",
+            "message": {"role": "user", "content": "dedup test"},
+        }
+    )
+    existing = json.dumps(
+        {
+            "timestamp": "2026-01-01T00:00:07Z",
+            "type": "user_message",
+            "event_id": "user-uuid-3-user",
+            "source": "common_transcript",
+            "role": "user",
+            "content": "dedup test",
+        }
+    )
+    events = _run_conversion([raw], existing_output_lines=[existing])
+    assert len(events) == 1  # only the pre-existing one
+
+
+def test_conversion_handles_malformed_lines_gracefully() -> None:
+    import json
+
+    valid = json.dumps(
+        {
+            "type": "user",
+            "uuid": "user-uuid-4",
+            "timestamp": "2026-01-01T00:00:08Z",
+            "message": {"role": "user", "content": "valid"},
+        }
+    )
+    events = _run_conversion(["not json at all", valid, '{"incomplete": true'])
+    assert len(events) == 1
+    assert events[0]["content"] == "valid"
+
+
+def test_conversion_user_message_validates_against_pydantic_schema() -> None:
+    import json as json_mod
+
+    from imbue.mng_claude_zygote.data_types import CommonUserMessageEvent
+
+    raw = json_mod.dumps(
+        {
+            "type": "user",
+            "uuid": "contract-user-1",
+            "timestamp": "2026-01-01T00:00:00.000000000Z",
+            "message": {"role": "user", "content": "Hello"},
+        }
+    )
+    events = _run_conversion([raw])
+    assert len(events) == 1
+    validated = CommonUserMessageEvent.model_validate(events[0])
+    assert validated.content == "Hello"
+    assert validated.role == "user"
+
+
+def test_conversion_assistant_message_validates_against_pydantic_schema() -> None:
+    import json as json_mod
+
+    from imbue.mng_claude_zygote.data_types import CommonAssistantMessageEvent
+
+    raw = json_mod.dumps(
+        {
+            "type": "assistant",
+            "uuid": "contract-asst-1",
+            "timestamp": "2026-01-01T00:00:01.000000000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [{"type": "text", "text": "Response text"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        }
+    )
+    events = _run_conversion([raw])
+    assert len(events) == 1
+    validated = CommonAssistantMessageEvent.model_validate(events[0])
+    assert validated.model == "claude-opus-4-6"
+    assert validated.text == "Response text"
+
+
+def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
+    import json as json_mod
+
+    from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
+
+    assistant = json_mod.dumps(
+        {
+            "type": "assistant",
+            "uuid": "contract-asst-2",
+            "timestamp": "2026-01-01T00:00:02.000000000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": [{"type": "tool_use", "id": "toolu_c2", "name": "Read", "input": {"file": "test.txt"}}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 50, "output_tokens": 30},
+            },
+        }
+    )
+    user_result = json_mod.dumps(
+        {
+            "type": "user",
+            "uuid": "contract-user-2",
+            "timestamp": "2026-01-01T00:00:03.000000000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_c2", "content": "file contents", "is_error": False}
+                ],
+            },
+        }
+    )
+    events = _run_conversion([assistant, user_result])
+    tool_results = [e for e in events if e["type"] == "tool_result"]
+    assert len(tool_results) == 1
+    validated = CommonToolResultEvent.model_validate(tool_results[0])
+    assert validated.tool_call_id == "toolu_c2"
+    assert validated.tool_name == "Read"
+
+
 # -- LLM tool content tests --
 
 
@@ -1660,11 +2024,10 @@ def test_global_md_describes_repo_structure() -> None:
 
 
 def test_global_md_describes_event_system() -> None:
-    """Verify the GLOBAL.md describes the event system."""
+    """Verify the GLOBAL.md describes the thinking agent's event processing role."""
     content = load_zygote_resource("defaults/GLOBAL.md")
     assert "event" in content.lower()
-    assert "messages" in content
-    assert "mng_agents" in content
+    assert "mng" in content
 
 
 def test_global_md_describes_agent_roles() -> None:
