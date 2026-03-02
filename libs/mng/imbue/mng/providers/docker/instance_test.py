@@ -1,10 +1,14 @@
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
+from imbue.mng.hosts.offline_host import OfflineHost
+from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
@@ -317,3 +321,28 @@ def test_volume_id_for_host_differs_for_different_hosts() -> None:
     id1 = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
     id2 = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_B))
     assert id1 != id2
+
+
+# =========================================================================
+# Host Resources
+# =========================================================================
+
+
+def test_get_host_resources_returns_defaults(temp_mng_ctx: MngContext) -> None:
+    """get_host_resources returns default values without needing a Docker daemon."""
+    provider = make_docker_provider(temp_mng_ctx, "test-resources")
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    host_data = CertifiedHostData(host_id=str(host_id), host_name="resources-test", created_at=now, updated_at=now)
+
+    offline_host = OfflineHost(
+        id=host_id,
+        certified_host_data=host_data,
+        provider_instance=provider,
+        mng_ctx=temp_mng_ctx,
+        on_updated_host_data=lambda hid, data: None,
+    )
+
+    resources = provider.get_host_resources(offline_host)
+    assert resources.cpu.count == 1
+    assert resources.memory_gb == 1.0
