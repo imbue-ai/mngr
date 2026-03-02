@@ -9,7 +9,6 @@ import pytest
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.interfaces.host import NamedCommand
-from imbue.mng_claude_zygote.data_types import ChatModel
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_COMMAND
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_SERVER_NAME
 from imbue.mng_claude_zygote.plugin import AGENT_TTYD_WINDOW_NAME
@@ -73,11 +72,6 @@ def test_claude_zygote_config_overrides_base_trust_default() -> None:
     zygote = ClaudeZygoteConfig()
     assert base.trust_working_directory is False
     assert zygote.trust_working_directory is True
-
-
-def test_claude_zygote_config_has_default_chat_model() -> None:
-    config = ClaudeZygoteConfig()
-    assert config.default_chat_model == ChatModel("claude-opus-4-6")
 
 
 def test_claude_zygote_config_has_install_llm_default() -> None:
@@ -308,11 +302,6 @@ def test_get_agent_type_from_params_returns_none_when_absent() -> None:
 
 
 # -- Config customization tests --
-
-
-def test_claude_zygote_config_allows_custom_chat_model() -> None:
-    config = ClaudeZygoteConfig(default_chat_model=ChatModel("claude-sonnet-4-6"))
-    assert config.default_chat_model == ChatModel("claude-sonnet-4-6")
 
 
 def test_claude_zygote_config_allows_disabling_llm_install() -> None:

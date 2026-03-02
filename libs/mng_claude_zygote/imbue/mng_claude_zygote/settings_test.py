@@ -20,7 +20,7 @@ from imbue.mng_claude_zygote.settings import provision_settings_file
 
 
 def test_settings_default_chat_model_is_none() -> None:
-    """Default chat model is None (falls back to ClaudeZygoteConfig.default_chat_model)."""
+    """Default chat model is None (chat.sh falls back to its hardcoded default)."""
     settings = ClaudeZygoteSettings()
     assert settings.chat.model is None
 

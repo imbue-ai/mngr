@@ -13,7 +13,6 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng_claude_zygote.data_types import ChatModel
 from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
 from imbue.mng_claude_zygote.provisioning import create_event_log_directories
 from imbue.mng_claude_zygote.provisioning import install_llm_toolchain
@@ -75,10 +74,6 @@ class ClaudeZygoteConfig(ClaudeAgentConfig):
         default=True,
         description="Automatically trust the agent's working directory in ~/.claude.json. "
         "Enabled by default for changelings since they run in-place in their own repo.",
-    )
-    default_chat_model: ChatModel = Field(
-        default=ChatModel("claude-opus-4-6"),
-        description="Default model for new conversation threads.",
     )
     install_llm: bool = Field(
         default=True,
