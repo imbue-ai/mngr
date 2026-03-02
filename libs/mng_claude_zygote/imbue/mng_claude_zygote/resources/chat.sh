@@ -133,8 +133,6 @@ new_conversation() {
 
     log "Creating new conversation: cid=$cid model=$model as_agent=$as_agent message_len=${#message}"
 
-    append_conversation_event "$cid" "$model" "conversation_created"
-
     # Build system prompt args for llm live-chat only (llm inject does not support -s).
     local system_prompt
     system_prompt=$(build_system_prompt)
@@ -144,6 +142,9 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
+        # Agent-initiated: record the event with our pre-generated CID and
+        # use --cid to inject into that specific conversation.
+        append_conversation_event "$cid" "$model" "conversation_created"
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $cid"
             llm inject --cid "$cid" -m "$model" "$message"
@@ -151,11 +152,11 @@ new_conversation() {
         fi
         echo "$cid"
     else
+        # Interactive: do NOT pass --cid or record an event here. The llm
+        # tool creates its own conversation ID, and the conversation_watcher
+        # will detect it from llm's database and write the event.
         local tool_args
         tool_args=$(build_tool_args)
-        # Start a new live-chat session. Do NOT pass --cid since that means
-        # "continue existing". The conversation_watcher will detect the new
-        # conversation from llm's database and write events for it.
         log "Starting live-chat session: model=$model tool_args='$tool_args'"
         if [ -n "$message" ]; then
             # shellcheck disable=SC2086

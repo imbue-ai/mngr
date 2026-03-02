@@ -251,6 +251,24 @@ def test_render_agents_page_shows_empty_state(web_server_module: Any) -> None:
     assert "No agents found" in page
 
 
+def test_render_agents_page_lists_running_agents(web_server_module: Any) -> None:
+    web_server_module._cached_agents = [
+        {"name": "my-agent-82741", "state": "RUNNING"},
+        {"name": "stopped-agent-82741", "state": "STOPPED"},
+    ]
+    try:
+        page = web_server_module._render_agents_page()
+        assert "my-agent-82741" in page
+        assert "stopped-agent-82741" in page
+        assert "../agent-tmux/?arg=my-agent-82741" in page
+        assert "RUNNING" in page
+        assert "STOPPED" in page
+        # Running agent should have a connect link, stopped should be disabled
+        assert "disabled" in page
+    finally:
+        web_server_module._cached_agents = []
+
+
 # -- HTTP handler tests --
 
 
