@@ -54,7 +54,7 @@ def test_all_declared_script_files_are_loadable() -> None:
     for script_name in _SCRIPT_FILES:
         content = load_zygote_resource(script_name)
         assert content, f"{script_name} is empty"
-        assert "#!/bin/bash" in content, f"{script_name} missing shebang"
+        assert content.startswith("#!"), f"{script_name} missing shebang"
 
 
 def test_all_declared_llm_tool_files_are_loadable() -> None:

@@ -53,14 +53,10 @@ CONV_WATCHER_COMMAND: Final[str] = "$MNG_HOST_DIR/commands/conversation_watcher.
 EVENT_WATCHER_WINDOW_NAME: Final[str] = "events"
 EVENT_WATCHER_COMMAND: Final[str] = "$MNG_HOST_DIR/commands/event_watcher.sh"
 
-# Conversation ttyd: a web terminal that runs the chat script for interactive
-# conversation access via the browser.
-CHAT_TTYD_WINDOW_NAME: Final[str] = "chat"
-CHAT_TTYD_SERVER_NAME: Final[str] = CHAT_TTYD_WINDOW_NAME
-_CHAT_TTYD_INVOCATION: Final[str] = (
-    "ttyd -p 0 -t disableLeaveAlert=true -W bash -c 'exec \"$MNG_HOST_DIR/commands/chat.sh\"'"
-)
-CHAT_TTYD_COMMAND: Final[str] = build_ttyd_server_command(_CHAT_TTYD_INVOCATION, CHAT_TTYD_SERVER_NAME)
+# Web server: serves the main web interface with conversation selector,
+# agent list, and on-demand ttyd spawning for conversations/agents.
+WEB_SERVER_WINDOW_NAME: Final[str] = "web_server"
+WEB_SERVER_COMMAND: Final[str] = 'python3 "$MNG_HOST_DIR/commands/web_server.py"'
 
 
 class ClaudeZygoteConfig(ClaudeAgentConfig):
@@ -102,7 +98,7 @@ class ClaudeZygoteAgent(ClaudeAgent):
     Via tmux windows (injected by override_command_options):
     - Conversation watcher (syncs llm DB to logs/messages/events.jsonl)
     - Event watcher (sends new events to primary agent via mng message)
-    - Chat ttyd (web terminal for conversation access)
+    - Web server (main web interface with conversation selector and agent list)
     """
 
     def _get_zygote_config(self) -> ClaudeZygoteConfig:
@@ -184,10 +180,10 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
     """Inject all changeling tmux windows into the create command parameters.
 
     Adds:
-    - Agent ttyd (web terminal for the primary agent)
+    - Agent ttyd (web terminal for the primary agent's tmux session)
     - Conversation watcher (syncs llm DB to JSONL files)
     - Event watcher (sends new events to primary agent via mng message)
-    - Chat ttyd (web terminal for conversation access)
+    - Web server (main web interface with conversation selector and agent list)
     """
     inject_agent_ttyd(params)
 
@@ -196,7 +192,7 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
         *existing,
         f'{CONV_WATCHER_WINDOW_NAME}="{CONV_WATCHER_COMMAND}"',
         f'{EVENT_WATCHER_WINDOW_NAME}="{EVENT_WATCHER_COMMAND}"',
-        f'{CHAT_TTYD_WINDOW_NAME}="{CHAT_TTYD_COMMAND}"',
+        f'{WEB_SERVER_WINDOW_NAME}="{WEB_SERVER_COMMAND}"',
     )
 
 

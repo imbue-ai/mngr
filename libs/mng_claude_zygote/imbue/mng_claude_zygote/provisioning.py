@@ -20,6 +20,7 @@ _SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
     "conversation_watcher.sh",
     "event_watcher.sh",
+    "web_server.py",
 )
 
 # Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/

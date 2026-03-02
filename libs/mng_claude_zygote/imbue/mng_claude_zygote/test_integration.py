@@ -260,7 +260,7 @@ def test_provisioning_writes_changeling_scripts_to_host(
         assert script_path.exists(), f"Expected {script_name} to be written"
         assert script_path.stat().st_mode & 0o111, f"Expected {script_name} to be executable"
         content = script_path.read_text()
-        assert content.startswith("#!/bin/bash"), f"Expected {script_name} to have bash shebang"
+        assert content.startswith("#!"), f"Expected {script_name} to have a shebang"
 
 
 @pytest.mark.timeout(30)

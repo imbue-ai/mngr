@@ -63,8 +63,10 @@ boot().catch(err => {{
 def generate_service_worker_js(agent_id: AgentId, server_name: ServerName) -> str:
     """Generate the Service Worker JavaScript for transparent path rewriting."""
     prefix = _get_server_prefix(agent_id, server_name)
+    agent_prefix = f"/agents/{agent_id}"
     return f"""
 const PREFIX = '{prefix}';
+const AGENT_PREFIX = '{agent_prefix}';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -75,6 +77,10 @@ self.addEventListener('fetch', (event) => {{
   if (url.origin !== location.origin) return;
 
   if (url.pathname.startsWith(PREFIX + '/') || url.pathname === PREFIX) return;
+
+  // Don't rewrite paths to sibling servers of the same agent (e.g. iframes
+  // pointing to /agents/<id>/<other-server>/).
+  if (url.pathname.startsWith(AGENT_PREFIX + '/')) return;
 
   if (url.pathname.endsWith('__sw.js')) return;
 
@@ -102,16 +108,19 @@ self.addEventListener('fetch', (event) => {{
 def generate_websocket_shim_js(agent_id: AgentId, server_name: ServerName) -> str:
     """Generate the WebSocket shim script that rewrites WS URLs to include the server prefix."""
     prefix = _get_server_prefix(agent_id, server_name)
+    agent_prefix = f"/agents/{agent_id}"
     return f"""<script>
 (function() {{
   var PREFIX = '{prefix}';
+  var AGENT_PREFIX = '{agent_prefix}';
   var OrigWebSocket = window.WebSocket;
 
   window.WebSocket = function(url, protocols) {{
     try {{
       var parsed = new URL(url, location.origin);
       if (parsed.host === location.host) {{
-        if (!parsed.pathname.startsWith(PREFIX + '/') && parsed.pathname !== PREFIX) {{
+        if (!parsed.pathname.startsWith(PREFIX + '/') && parsed.pathname !== PREFIX
+            && !parsed.pathname.startsWith(AGENT_PREFIX + '/')) {{
           parsed.pathname = PREFIX + parsed.pathname;
         }}
         url = parsed.toString();
@@ -168,6 +177,8 @@ def rewrite_absolute_paths_in_html(
     result_parts: list[str] = []
     last_end = 0
 
+    agent_prefix = f"/agents/{agent_id}"
+
     for match in _ABSOLUTE_PATH_ATTR_PATTERN.finditer(html_content):
         quote = match.group(2)
         path_start = match.group(3)
@@ -176,7 +187,7 @@ def rewrite_absolute_paths_in_html(
         remaining = html_content[match.start(3) :]
         end_quote_idx = remaining.find(quote, 1)
         full_path = remaining[:end_quote_idx] if end_quote_idx > 0 else remaining
-        if full_path.startswith(prefix + "/") or full_path == prefix:
+        if full_path.startswith(prefix + "/") or full_path == prefix or full_path.startswith(agent_prefix + "/"):
             result_parts.append(html_content[last_end : match.end()])
         else:
             result_parts.append(html_content[last_end : match.start(3)])
