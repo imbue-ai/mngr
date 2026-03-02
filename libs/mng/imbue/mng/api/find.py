@@ -12,6 +12,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.config.agent_cache import AgentSummaryUntyped
+from imbue.mng.config.agent_cache import resolve_identifiers_from_cache
 from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundError
@@ -31,8 +33,6 @@ from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
-from imbue.mng.utils.agent_cache import AgentSummaryUntyped
-from imbue.mng.utils.agent_cache import resolve_identifiers_from_cache
 
 
 class ParsedSourceLocation(FrozenModel):
