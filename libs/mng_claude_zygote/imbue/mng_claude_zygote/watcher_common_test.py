@@ -3,6 +3,8 @@
 import threading
 import time
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
 
@@ -269,7 +271,7 @@ def test_change_handler_sets_wake_event() -> None:
     wake_event = threading.Event()
     handler = ChangeHandler(wake_event)
     assert not wake_event.is_set()
-    handler.on_any_event(None)  # type: ignore[arg-type]
+    handler.on_any_event(cast(Any, None))
     assert wake_event.is_set()
 
 

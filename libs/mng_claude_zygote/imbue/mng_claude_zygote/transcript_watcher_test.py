@@ -2,6 +2,8 @@
 
 import json
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
 
@@ -84,12 +86,12 @@ def test_extract_text_content_with_mixed_blocks() -> None:
 
 
 def test_extract_text_content_with_non_dict_blocks() -> None:
-    content = ["raw string", {"type": "text", "text": "ok"}]
+    content: list[dict[str, Any]] = ["raw string", {"type": "text", "text": "ok"}]  # type: ignore[list-item]
     assert _extract_text_content(content) == "ok"
 
 
 def test_extract_text_content_with_non_list_non_string() -> None:
-    assert _extract_text_content(42) == ""  # type: ignore[arg-type]
+    assert _extract_text_content(cast(Any, 42)) == ""
 
 
 # -- _has_tool_results_only tests --
@@ -120,11 +122,12 @@ def test_has_tool_results_only_with_empty_list() -> None:
 
 
 def test_has_tool_results_only_with_string_items() -> None:
-    assert _has_tool_results_only(["raw string"]) is False
+    content: list[dict[str, Any]] = ["raw string"]  # type: ignore[list-item]
+    assert _has_tool_results_only(content) is False
 
 
 def test_has_tool_results_only_with_non_list_non_string() -> None:
-    assert _has_tool_results_only(42) is True  # type: ignore[arg-type]
+    assert _has_tool_results_only(cast(Any, 42)) is True
 
 
 # -- _make_event_id tests --
@@ -171,7 +174,7 @@ def _make_assistant_event(
     uuid: str,
     timestamp: str,
     text: str = "",
-    tool_calls: list[dict[str, str]] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
     model: str = "claude-opus-4-6",
     stop_reason: str = "end_turn",
     usage: dict[str, int] | None = None,
