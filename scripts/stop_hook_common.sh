@@ -49,7 +49,7 @@ log_error() {
 
 log_warn() {
     echo -e "${YELLOW}WARN: $1${NC}" >&2
-    _log_to_file "WARN" "$1"
+    _log_to_file "WARNING" "$1"
 }
 
 log_info() {

@@ -12,10 +12,12 @@ set -euo pipefail
 #   _log_jsonl <level> <message>  - write a JSONL log line to $_MNG_LOG_FILE
 #   log_info <message>            - log at INFO level
 #   log_debug <message>           - log at DEBUG level
-#   log_warn <message>            - log at WARN level
+#   log_warn <message>            - log at WARNING level
 #   log_error <message>           - log at ERROR level
 #
-# This file is pure definitions -- no side effects when sourced.
+# Level names match Python's loguru: DEBUG, INFO, WARNING, ERROR.
+# Note: this file sets strict mode (set -euo pipefail) -- all sourcing
+# scripts are expected to use strict mode as well.
 
 _json_escape() {
     local s="$1"
@@ -50,7 +52,7 @@ log_debug() {
 }
 
 log_warn() {
-    _log_jsonl "WARN" "$*"
+    _log_jsonl "WARNING" "$*"
 }
 
 log_error() {
