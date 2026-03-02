@@ -23,7 +23,6 @@ set -euo pipefail
 
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
 CONVERSATIONS_EVENTS="$AGENT_DATA_DIR/logs/conversations/events.jsonl"
-DEFAULT_MODEL_FILE="$AGENT_DATA_DIR/default_chat_model"
 LLM_TOOLS_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}/commands/llm_tools"
 LOG_FILE="${MNG_HOST_DIR}/logs/chat.log"
 
@@ -46,16 +45,6 @@ log() {
 }
 
 get_default_model() {
-    if [ -f "$DEFAULT_MODEL_FILE" ]; then
-        local file_model
-        file_model=$(tr -d '[:space:]' < "$DEFAULT_MODEL_FILE")
-        if [ -n "$file_model" ]; then
-            echo "$file_model"
-            return
-        fi
-        log "WARNING: default_chat_model file exists but is empty, falling back"
-    fi
-    # Fall back to settings.toml, then hardcoded default
     python3 -c "
 import tomllib, pathlib, sys
 p = pathlib.Path('${MNG_AGENT_STATE_DIR}/settings.toml')

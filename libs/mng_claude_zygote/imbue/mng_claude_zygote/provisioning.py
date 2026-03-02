@@ -13,7 +13,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng_claude_zygote import resources as zygote_resources
-from imbue.mng_claude_zygote.data_types import ChatModel
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 
 # Scripts to provision to $MNG_HOST_DIR/commands/
@@ -371,12 +370,6 @@ def create_event_log_directories(
             warn_threshold=settings.fs_warn_threshold_seconds,
             label=f"mkdir logs/{source}",
         )
-
-
-def write_default_chat_model(host: OnlineHostInterface, agent_state_dir: Path, model: ChatModel) -> None:
-    """Write the default chat model to the agent state directory."""
-    model_file = agent_state_dir / "default_chat_model"
-    host.write_text_file(model_file, str(model) + "\n")
 
 
 def compute_claude_project_dir_name(work_dir_abs: str) -> str:

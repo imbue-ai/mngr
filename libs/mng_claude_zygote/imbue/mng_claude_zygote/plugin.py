@@ -22,7 +22,6 @@ from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
 from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
-from imbue.mng_claude_zygote.provisioning import write_default_chat_model
 from imbue.mng_claude_zygote.settings import load_settings_from_host
 from imbue.mng_claude_zygote.settings import provision_settings_file
 from imbue.mng_ttyd.plugin import build_ttyd_server_command
@@ -163,11 +162,6 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
         agent_state_dir = self._get_agent_dir()
         create_event_log_directories(host, agent_state_dir, provisioning)
-
-        # Use default_chat_model from settings.toml if present,
-        # otherwise fall back to the agent type config value.
-        chat_model = settings.chat.model if settings.chat.model is not None else config.default_chat_model
-        write_default_chat_model(host, agent_state_dir, chat_model)
 
         link_memory_directory(host, self.work_dir, config.changelings_dir_name, provisioning)
 

@@ -123,8 +123,8 @@ class ChatScriptEnv:
         self.env["MNG_HOST_DIR"] = str(temp_host_dir)
 
     def set_default_model(self, model: str) -> None:
-        """Write the default_chat_model file."""
-        (self.agent_state_dir / "default_chat_model").write_text(model + "\n")
+        """Write the chat model to settings.toml."""
+        (self.agent_state_dir / "settings.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
     def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
         """Run chat.sh with the given arguments."""

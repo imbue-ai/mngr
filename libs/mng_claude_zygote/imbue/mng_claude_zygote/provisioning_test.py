@@ -9,7 +9,6 @@ import pytest
 
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
-from imbue.mng_claude_zygote.data_types import ChatModel
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
 from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
@@ -23,7 +22,6 @@ from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
 from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
-from imbue.mng_claude_zygote.provisioning import write_default_chat_model
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
@@ -444,16 +442,6 @@ def test_create_event_log_directories_creates_all_source_dirs() -> None:
 
     for source in ("conversations", "messages", "scheduled", "mng_agents", "stop", "monitor", "claude_transcript"):
         assert any(source in c and "mkdir" in c for c in host.executed_commands), f"Missing mkdir for {source}"
-
-
-def test_write_default_chat_model_writes_model_to_file() -> None:
-    host = StubHost()
-    write_default_chat_model(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), ChatModel("claude-sonnet-4-6"))
-
-    assert len(host.written_text_files) == 1
-    path, content = host.written_text_files[0]
-    assert "claude-sonnet-4-6" in content
-    assert str(path).endswith("default_chat_model")
 
 
 # -- mng availability check tests --
@@ -1106,16 +1094,6 @@ def test_provision_llm_tools_uses_correct_mode() -> None:
 
     for _, _, mode in host.written_files:
         assert mode == "0644"
-
-
-def test_write_default_chat_model_includes_newline() -> None:
-    """Verify written model content ends with newline."""
-    host = StubHost()
-    write_default_chat_model(cast(Any, host), Path("/tmp/agent"), ChatModel("claude-haiku-4-5"))
-
-    assert len(host.written_text_files) == 1
-    _, content = host.written_text_files[0]
-    assert content.endswith("\n")
 
 
 def test_compute_claude_project_dir_name_simple_path() -> None:

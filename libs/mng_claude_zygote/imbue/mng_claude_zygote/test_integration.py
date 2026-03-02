@@ -33,7 +33,6 @@ from imbue.mng_claude_zygote.conftest import ChatScriptEnv
 from imbue.mng_claude_zygote.conftest import LocalShellHost
 from imbue.mng_claude_zygote.conftest import StubCommandResult
 from imbue.mng_claude_zygote.conftest import StubHost
-from imbue.mng_claude_zygote.data_types import ChatModel
 from imbue.mng_claude_zygote.data_types import ProvisioningSettings
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_CHANGELINGS_DIR_FILES
 from imbue.mng_claude_zygote.provisioning import _DEFAULT_SKILL_DIRS
@@ -48,7 +47,6 @@ from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
-from imbue.mng_claude_zygote.provisioning import write_default_chat_model
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
@@ -372,21 +370,6 @@ def test_provisioning_links_memory_directory(
     assert project_memory.resolve() == changelings_memory.resolve()
 
 
-@pytest.mark.timeout(30)
-def test_provisioning_writes_default_chat_model(
-    local_shell_host: LocalShellHost,
-) -> None:
-    """Verify that provisioning writes the default chat model file."""
-    agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
-    agent_state_dir.mkdir(parents=True)
-
-    write_default_chat_model(cast(Any, local_shell_host), agent_state_dir, ChatModel("claude-sonnet-4-6"))
-
-    model_file = agent_state_dir / "default_chat_model"
-    assert model_file.exists(), "default_chat_model file should exist"
-    assert model_file.read_text().strip() == "claude-sonnet-4-6"
-
-
 # -- Chat script tests --
 
 
@@ -605,8 +588,8 @@ def test_multiple_conversations_create_separate_events(chat_env: ChatScriptEnv) 
 
 
 @pytest.mark.timeout(30)
-def test_chat_model_read_from_default_model_file(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh reads the model from the default_chat_model file."""
+def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh reads the model from settings.toml."""
     chat_env.set_default_model("claude-haiku-4-5")
 
     result = chat_env.run("--new", "--as-agent")
@@ -837,30 +820,16 @@ def test_conversation_watcher_sync_is_idempotent(
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_empty_model_file_falls_back_to_settings(chat_env: ChatScriptEnv) -> None:
-    """Verify that an empty default_chat_model file falls back to settings.toml.
-
-    Regression test: get_default_model() uses `tr -d '[:space:]'` to read
-    the model file. If the file is empty or contains only whitespace,
-    tr produces an empty string, which would cause the model field in
-    conversation events to be empty. The script should fall back to the
-    settings.toml or hardcoded default in this case.
-    """
-    # Write an empty model file
-    (chat_env.agent_state_dir / "default_chat_model").write_text("\n")
-
-    # Write settings.toml with a valid model as fallback
-    (chat_env.agent_state_dir / "settings.toml").write_text('[chat]\nmodel = "claude-sonnet-4-6"\n')
+def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh falls back to the hardcoded default model when settings.toml is absent."""
+    # Do NOT call set_default_model -- no settings.toml exists
 
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
     events_file = chat_env.conversations_dir / "events.jsonl"
     event = json.loads(events_file.read_text().strip().split("\n")[-1])
-
-    # When the model file is empty, get_default_model() should fall back to
-    # settings.toml rather than returning an empty string.
-    assert event["model"] == "claude-sonnet-4-6", f"Expected fallback to settings.toml model, got: {event['model']!r}"
+    assert event["model"] == "claude-opus-4-6", f"Expected hardcoded default, got: {event['model']!r}"
 
 
 @pytest.mark.timeout(30)
