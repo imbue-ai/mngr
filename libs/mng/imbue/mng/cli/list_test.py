@@ -13,6 +13,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mng.api.list import ListResult
 from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.cli.list import _StreamingHumanRenderer
@@ -28,6 +29,7 @@ from imbue.mng.cli.list import _get_sortable_value
 from imbue.mng.cli.list import _is_streaming_eligible
 from imbue.mng.cli.list import _parse_slice_spec
 from imbue.mng.cli.list import _render_format_template
+from imbue.mng.cli.list import _resolve_model_type
 from imbue.mng.cli.list import _should_use_streaming_mode
 from imbue.mng.cli.list import _sort_agents
 from imbue.mng.cli.list import _validate_sort_field
@@ -617,6 +619,12 @@ def test_validate_sort_field_rejects_unknown_deep_field() -> None:
         _validate_sort_field("host.resource.nonexistent")
     with pytest.raises(click.BadParameter, match="'bogus' is not a valid field"):
         _validate_sort_field("host.resource.cpu.bogus")
+
+
+def test_resolve_model_type_raises_on_non_optional_union() -> None:
+    """_resolve_model_type should raise SwitchError for unions that are not X | None."""
+    with pytest.raises(SwitchError, match="Expected Optional"):
+        _resolve_model_type(str | int)
 
 
 # =============================================================================

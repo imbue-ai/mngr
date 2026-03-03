@@ -938,15 +938,13 @@ def _resolve_model_type(annotation: Any) -> type[BaseModel] | None:
     """Extract a BaseModel subclass from a type annotation, unwrapping Optional/list/tuple."""
     origin = get_origin(annotation)
 
-    # Handle X | None (Union types)
+    # Handle X | None (Optional types)
     if origin is types.UnionType or origin is Union:
-        for arg in get_args(annotation):
-            if arg is type(None):
-                continue
-            resolved = _resolve_model_type(arg)
-            if resolved is not None:
-                return resolved
-        return None
+        args = get_args(annotation)
+        if len(args) != 2 or type(None) not in args:
+            raise SwitchError(f"Expected Optional (X | None), got union: {annotation}")
+        inner = args[0] if args[1] is type(None) else args[1]
+        return _resolve_model_type(inner)
 
     # Handle list[X] and tuple[X, ...]
     elif origin in (list, tuple):
