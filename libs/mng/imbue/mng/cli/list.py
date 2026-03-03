@@ -937,32 +937,28 @@ def _resolve_model_type(annotation: Any) -> type[BaseModel] | None:
     """Extract a BaseModel subclass from a type annotation, unwrapping Optional/list/tuple."""
     origin = get_origin(annotation)
 
-    # Handle X | None (Union types)
-    if origin is types.UnionType or origin is Union:
-        for arg in get_args(annotation):
-            if arg is type(None):
-                continue
-            resolved = _resolve_model_type(arg)
-            if resolved is not None:
-                return resolved
-        return None
+    match origin:
+        case _ if origin is types.UnionType or origin is Union:
+            for arg in get_args(annotation):
+                if arg is type(None):
+                    continue
+                resolved = _resolve_model_type(arg)
+                if resolved is not None:
+                    return resolved
+            return None
 
-    # Handle list[X] and tuple[X, ...]
-    if origin in (list, tuple):
-        args = get_args(annotation)
-        if args:
-            return _resolve_model_type(args[0])
-        return None
+        case _ if origin in (list, tuple):
+            args = get_args(annotation)
+            return _resolve_model_type(args[0]) if args else None
 
-    # Handle dict[K, V] -- dynamic keys, stop validation
-    if origin is dict:
-        return None
+        case _ if origin is dict:
+            return None
 
-    # Direct model class
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation
+        case None if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return annotation
 
-    return None
+        case _:
+            return None
 
 
 @pure
