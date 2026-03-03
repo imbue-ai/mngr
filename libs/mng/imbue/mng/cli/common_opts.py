@@ -497,8 +497,10 @@ def _split_known_and_plugin_params(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Split params into those known to the command class and extra plugin params."""
     known_fields = command_class.model_fields
-    known_params = {k: v for k, v in params.items() if k in known_fields}
-    plugin_params = {k: v for k, v in params.items() if k not in known_fields}
+    known_params: dict[str, Any] = {}
+    plugin_params: dict[str, Any] = {}
+    for k, v in params.items():
+        (known_params if k in known_fields else plugin_params)[k] = v
     return known_params, plugin_params
 
 
