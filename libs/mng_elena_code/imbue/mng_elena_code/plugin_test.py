@@ -9,7 +9,7 @@ from typing import cast
 import pluggy
 
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.api.test_fixtures import FakeHost
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.interfaces.host import OnlineHostInterface

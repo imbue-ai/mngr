@@ -1,6 +1,5 @@
 """Unit tests for the connect CLI command."""
 
-from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.cli.connect import ConnectCliOptions
 from imbue.mng.cli.connect import _build_connection_options
 from imbue.mng.cli.connect import build_status_text
@@ -8,6 +7,7 @@ from imbue.mng.cli.connect import filter_agents
 from imbue.mng.cli.connect import handle_search_key
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
+from imbue.mng.utils.testing import make_test_agent_info
 
 # =============================================================================
 # Helpers

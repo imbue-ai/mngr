@@ -98,13 +98,30 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
+  "*/testing/*",
   "*/utils/testing.py",
   "*/utils/plugin_testing.py",
   "*/utils/mock_provider.py",
-  "imbue/mng/providers/modal/*",
-  "imbue/mng/providers/docker/instance.py",
-  "imbue/mng/providers/docker/volume.py",
-  "imbue/mng/providers/docker/testing.py",
+  "*/providers/modal/*",
+  "*/providers/docker/instance.py",
+  "*/providers/docker/volume.py",
+  "*/providers/docker/testing.py",
+]
+
+[tool.coverage.report]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/testing/*",
+  "*/utils/testing.py",
+  "*/utils/plugin_testing.py",
+  "*/utils/mock_provider.py",
+  "*/providers/modal/*",
+  "*/providers/docker/instance.py",
+  "*/providers/docker/volume.py",
+  "*/providers/docker/testing.py",
 ]
 
 [tool.inline-snapshot]

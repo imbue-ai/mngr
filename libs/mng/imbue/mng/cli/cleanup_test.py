@@ -17,13 +17,13 @@ from imbue.mng.cli.cleanup import _emit_no_agents_found
 from imbue.mng.cli.cleanup import _emit_result
 from imbue.mng.cli.cleanup import _selected_marker
 from imbue.mng.cli.cleanup import cleanup
-from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CleanupAction
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.testing import make_test_agent_info
 
 # =============================================================================
 # Tests for _build_cel_filters_from_options

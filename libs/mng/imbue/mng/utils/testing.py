@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -22,12 +23,23 @@ from click.testing import CliRunner
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.cli.create import create as create_command
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
+from imbue.mng.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import SnapshotInfo
+from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentLifecycleState
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.polling import wait_for
@@ -38,6 +50,67 @@ TEST_ENV_PREFIX: Final[str] = "mng_test-"
 # Pattern to match test environment names: mng_test-YYYY-MM-DD-HH-MM-SS
 # The name may have additional suffixes (like user_id)
 TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mng_test-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})")
+
+# =============================================================================
+# Resource tracking lists for cleanup verification
+# =============================================================================
+
+# Track test IDs used by this worker/process for cleanup verification.
+# Each xdist worker is a separate process with isolated memory, so this
+# list only contains IDs from tests run by THIS worker.
+worker_test_ids: list[str] = []
+
+# Track Modal app names that were created during tests for cleanup verification.
+# This enables detection of leaked apps that weren't properly cleaned up.
+worker_modal_app_names: list[str] = []
+
+# Track Modal volume names that were created during tests for cleanup verification.
+# Unlike Modal Apps, volumes are global to the account (not app-specific), so they
+# must be tracked and cleaned up separately.
+worker_modal_volume_names: list[str] = []
+
+# Track Modal environment names that were created during tests for cleanup verification.
+# Modal environments are used to scope all resources (apps, volumes, sandboxes) to a
+# specific user.
+worker_modal_environment_names: list[str] = []
+
+
+def register_modal_test_app(app_name: str) -> None:
+    """Register a Modal app name for cleanup verification.
+
+    Call this when creating a Modal app during tests to enable leak detection.
+    The app_name should match the name used when creating the Modal app.
+    """
+    if app_name not in worker_modal_app_names:
+        worker_modal_app_names.append(app_name)
+
+
+def register_modal_test_volume(volume_name: str) -> None:
+    """Register a Modal volume name for cleanup verification.
+
+    Call this when creating a Modal volume during tests to enable leak detection.
+    The volume_name should match the name used when creating the Modal volume.
+    """
+    if volume_name not in worker_modal_volume_names:
+        worker_modal_volume_names.append(volume_name)
+
+
+def register_modal_test_environment(environment_name: str) -> None:
+    """Register a Modal environment name for cleanup verification.
+
+    Call this when creating a Modal environment during tests to enable leak detection.
+    The environment_name should match the name used when creating resources in that environment.
+    """
+    if environment_name not in worker_modal_environment_names:
+        worker_modal_environment_names.append(environment_name)
+
+
+class ModalSubprocessTestEnv(FrozenModel):
+    """Environment configuration for Modal subprocess tests."""
+
+    env: dict[str, str] = Field(description="Environment variables for the subprocess")
+    prefix: str = Field(description="The mng prefix for test isolation")
+    host_dir: Path = Field(description="Path to the temporary host directory")
 
 
 def generate_test_environment_name() -> str:
@@ -272,9 +345,14 @@ def mng_agent_cleanup(
 
 
 def capture_tmux_pane_contents(session_name: str) -> str:
-    """Capture the contents of a tmux session's pane and return as a string."""
+    """Capture the contents of a tmux session's pane via local subprocess.
+
+    This is the local-only variant for test code that doesn't have a host object.
+    For the host-based version (works over SSH), use
+    imbue.mng.hosts.tmux.capture_tmux_pane_content.
+    """
     result = subprocess.run(
-        ["tmux", "capture-pane", "-t", session_name, "-p"],
+        shlex.split(build_tmux_capture_pane_command(session_name)),
         capture_output=True,
         text=True,
     )
@@ -358,14 +436,65 @@ def make_local_provider(
     )
 
 
-def make_mng_ctx(default_host_dir: Path, prefix: str) -> MngContext:
-    """Create a MngContext with the given default_host_dir, prefix, and a basic plugin manager."""
-    config = MngConfig(default_host_dir=default_host_dir, prefix=prefix, is_error_reporting_enabled=False)
-    pm = pluggy.PluginManager("mng")
-    # Create a profile directory in the default_host_dir
-    profile_dir = default_host_dir / PROFILES_DIRNAME / uuid4().hex
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    return MngContext(config=config, pm=pm, profile_dir=profile_dir)
+def make_mng_ctx(
+    config: MngConfig,
+    pm: pluggy.PluginManager,
+    profile_dir: Path,
+    *,
+    is_interactive: bool = False,
+    is_auto_approve: bool = False,
+    concurrency_group: ConcurrencyGroup,
+) -> MngContext:
+    """Create a MngContext with the given parameters.
+
+    Use this directly in tests that need non-default settings (e.g., interactive mode).
+    Most tests should use the temp_mng_ctx fixture instead.
+    """
+    return MngContext(
+        config=config,
+        pm=pm,
+        profile_dir=profile_dir,
+        is_interactive=is_interactive,
+        is_auto_approve=is_auto_approve,
+        concurrency_group=concurrency_group,
+    )
+
+
+def make_test_agent_info(
+    name: str = "test-agent",
+    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    create_time: datetime | None = None,
+    snapshots: list[SnapshotInfo] | None = None,
+    host_plugin: dict | None = None,
+    host_tags: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+) -> AgentInfo:
+    """Create a real AgentInfo for testing.
+
+    Shared helper used across test files to avoid duplicating AgentInfo
+    construction logic. Accepts optional overrides for commonly varied fields.
+    """
+    host_info = HostInfo(
+        id=HostId.generate(),
+        name="test-host",
+        provider_name=ProviderInstanceName("local"),
+        snapshots=snapshots or [],
+        state=HostState.RUNNING,
+        plugin=host_plugin or {},
+        tags=host_tags or {},
+    )
+    return AgentInfo(
+        id=AgentId.generate(),
+        name=AgentName(name),
+        type="generic",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/tmp/test"),
+        create_time=create_time or datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=state,
+        labels=labels or {},
+        host=host_info,
+    )
 
 
 def init_git_repo(path: Path, initial_commit: bool = True) -> None:
@@ -838,11 +967,3 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-
-
-class ModalSubprocessTestEnv(FrozenModel):
-    """Environment configuration for Modal subprocess tests."""
-
-    env: dict[str, str] = Field(description="Environment variables for the subprocess")
-    prefix: str = Field(description="The mng prefix for test isolation")
-    host_dir: Path = Field(description="Path to the temporary host directory")

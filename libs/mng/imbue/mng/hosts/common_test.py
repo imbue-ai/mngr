@@ -5,7 +5,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import cast
 
-from imbue.mng.api.test_fixtures import FakeHost
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.hosts.common import add_safe_directory_on_remote
