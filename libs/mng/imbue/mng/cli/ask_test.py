@@ -5,10 +5,8 @@ from typing import Any
 import pluggy
 import pytest
 from click.testing import CliRunner
-from pydantic import Field
 
 import imbue.mng.cli.ask as ask_module
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.cli.ask import _accumulate_chunks
 from imbue.mng.cli.ask import _build_ask_context
 from imbue.mng.cli.ask import _execute_response
@@ -18,13 +16,19 @@ from imbue.mng.errors import MngError
 from imbue.mng.primitives import OutputFormat
 
 
-class _FakeQueryStreaming(MutableModel):
+class _FakeQueryStreaming:
     """Test double for query_claude_streaming that records calls."""
 
-    response: str = "default response"
-    error_message: str | None = None
-    queries: list[str] = Field(default_factory=list)
-    system_prompts: list[str] = Field(default_factory=list)
+    response: str
+    error_message: str | None
+    queries: list[str]
+    system_prompts: list[str]
+
+    def __init__(self, response: str = "default response", error_message: str | None = None) -> None:
+        self.response = response
+        self.error_message = error_message
+        self.queries = []
+        self.system_prompts = []
 
     def __call__(self, prompt: str, system_prompt: str, cg: Any) -> Iterator[str]:
         self.queries.append(prompt)
