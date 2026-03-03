@@ -25,6 +25,7 @@ _CLAUDE_NOT_INSTALLED_MESSAGE: Final[str] = (
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
+@pure
 def _build_base_args(system_prompt: str) -> list[str]:
     return [
         "claude",
