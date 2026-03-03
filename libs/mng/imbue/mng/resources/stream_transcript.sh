@@ -8,11 +8,13 @@
 #   - Late-appearing session files (re-checks each poll cycle, no timeouts)
 #   - Sessions added out of order or with gaps
 #
-# Per-session line offsets are stored in .offsets/<session_id> so the script
-# can resume efficiently. On startup, stored offsets are verified against the
-# output file using UUID-based lookups -- if the stored offset is wrong (e.g.
-# crash between emit and offset save), the script works backwards through
-# the session file to find the last line that actually made it into the output.
+# Per-session line offsets are stored in
+# <agent-state-dir>/plugin/claude/.transcript_offsets/<session_id> so the
+# script can resume efficiently. On startup, stored offsets are verified
+# against the output file using UUID-based lookups -- if the stored offset
+# is wrong (e.g. crash between emit and offset save), the script works
+# backwards through the session file to find the last line that actually
+# made it into the output.
 #
 # Usage: stream_transcript.sh
 #
@@ -24,7 +26,7 @@ set -euo pipefail
 
 SESSION_HISTORY="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}/claude_session_id_history"
 OUTPUT_FILE="$MNG_AGENT_STATE_DIR/events/claude_transcript/events.jsonl"
-OFFSET_DIR="$MNG_AGENT_STATE_DIR/events/claude_transcript/.offsets"
+OFFSET_DIR="$MNG_AGENT_STATE_DIR/plugin/claude/.transcript_offsets"
 POLL_INTERVAL=1
 
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$OFFSET_DIR"
@@ -38,12 +40,14 @@ _MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/stream_transcript/events.jsonl"
 source "$MNG_HOST_DIR/commands/mng_log.sh"
 
 # -- Per-session state (bash 4+ associative arrays) --
-declare -A _FILE_BY_SID       # session_id -> resolved file path ("" if not yet found)
-declare -A _OFFSET_BY_SID     # session_id -> lines already emitted from this session
+# Note: explicit =() is required for set -u compatibility (empty associative
+# arrays are "unbound" under set -u without it).
+declare -A _FILE_BY_SID=()    # session_id -> resolved file path ("" if not yet found)
+declare -A _OFFSET_BY_SID=()  # session_id -> lines already emitted from this session
 _KNOWN_HISTORY_LINES=0        # lines of the history file already processed
 
 # UUID lookup set, built once at startup for offset reconciliation
-declare -A _OUTPUT_UUIDS
+declare -A _OUTPUT_UUIDS=()
 
 # -- Helpers --
 
@@ -91,7 +95,7 @@ _try_resolve_file() {
 
 # Extract the uuid field from a single JSONL line (no jq, for speed).
 _extract_uuid() {
-    grep -o '"uuid":"[^"]*"' <<< "$1" 2>/dev/null | head -1 | cut -d'"' -f4
+    grep -o '"uuid": *"[^"]*"' <<< "$1" 2>/dev/null | head -1 | cut -d'"' -f4
 }
 
 # -- Reconciliation (restart recovery) --
@@ -105,7 +109,7 @@ _build_output_uuid_set() {
     fi
     while IFS= read -r uuid; do
         [ -n "$uuid" ] && _OUTPUT_UUIDS["$uuid"]=1
-    done < <(grep -o '"uuid":"[^"]*"' "$OUTPUT_FILE" | cut -d'"' -f4)
+    done < <(grep -o '"uuid": *"[^"]*"' "$OUTPUT_FILE" | cut -d'"' -f4)
     log_debug "Built UUID set with ${#_OUTPUT_UUIDS[@]} entries"
 }
 
@@ -238,9 +242,42 @@ _initialize() {
     _OUTPUT_UUIDS=()
 }
 
+# -- Poll cycle (shared by main loop and single-pass mode) --
+
+_run_one_cycle() {
+    _check_for_new_sessions
+
+    for sid in "${!_FILE_BY_SID[@]}"; do
+        # Try to resolve file if not yet found (re-checked every cycle)
+        if [ -z "${_FILE_BY_SID[$sid]}" ]; then
+            if ! _try_resolve_file "$sid"; then
+                continue
+            fi
+            # File just appeared -- reconcile against the output file to
+            # find the true offset (handles both fresh starts and restarts)
+            _build_output_uuid_set
+            stored="${_OFFSET_BY_SID[$sid]}"
+            reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
+            _OFFSET_BY_SID[$sid]=$reconciled
+            if [ "$reconciled" != "$stored" ]; then
+                log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
+                _save_offset "$sid" "$reconciled"
+            fi
+            _OUTPUT_UUIDS=()
+        fi
+
+        _emit_new_lines "$sid"
+    done
+}
+
 # -- Main --
 
 main() {
+    local is_single_pass=false
+    if [ "${1:-}" = "--single-pass" ]; then
+        is_single_pass=true
+    fi
+
     log_info "Stream transcript started"
     log_info "  Session history: $SESSION_HISTORY"
     log_info "  Output: $OUTPUT_FILE"
@@ -257,36 +294,17 @@ main() {
         done < "$SESSION_HISTORY"
     fi
 
+    if [ "$is_single_pass" = true ]; then
+        _run_one_cycle
+        return
+    fi
+
     log_info "Entering main loop"
 
     while true; do
-        _check_for_new_sessions
-
-        for sid in "${!_FILE_BY_SID[@]}"; do
-            # Try to resolve file if not yet found (re-checked every cycle)
-            if [ -z "${_FILE_BY_SID[$sid]}" ]; then
-                if ! _try_resolve_file "$sid"; then
-                    continue
-                fi
-                # File just appeared -- reconcile against the output file to
-                # find the true offset (handles both fresh starts and restarts)
-                _build_output_uuid_set
-                local stored="${_OFFSET_BY_SID[$sid]}"
-                local reconciled
-                reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
-                _OFFSET_BY_SID[$sid]=$reconciled
-                if [ "$reconciled" != "$stored" ]; then
-                    log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
-                    _save_offset "$sid" "$reconciled"
-                fi
-                _OUTPUT_UUIDS=()
-            fi
-
-            _emit_new_lines "$sid"
-        done
-
+        _run_one_cycle
         sleep "$POLL_INTERVAL"
     done
 }
 
-main
+main "${1:-}"
