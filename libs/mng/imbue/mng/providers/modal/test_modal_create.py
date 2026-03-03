@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mng import resources
-from imbue.mng.conftest import ModalSubprocessTestEnv
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import get_short_random_string
 
 

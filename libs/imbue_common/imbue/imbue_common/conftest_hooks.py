@@ -6,6 +6,7 @@ Provides common test infrastructure:
 - xdist parallelism override (configurable via PYTEST_NUMPROCESSES env var)
 - Output file redirection (slow tests report, coverage report)
 - Shared pytest defaults (markers, filterwarnings, CLI args, coverage report config)
+- Cached importlib.metadata.entry_points() for fast test startup on slow filesystems
 - Resource mark enforcement (ensures tests are correctly marked for external tool usage)
 
 Environment variables:
@@ -28,12 +29,14 @@ by pytest. Without the guard, pytest_addoption would fail with duplicate option 
 """
 
 import fcntl
+import importlib.metadata
 import json
 import os
 import sys
 import time
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from typing import Final
 from typing import TextIO
 from uuid import uuid4
@@ -48,6 +51,44 @@ from imbue.imbue_common.resource_guards import cleanup_resource_guard_wrappers
 from imbue.imbue_common.resource_guards import cleanup_sdk_resource_guards
 from imbue.imbue_common.resource_guards import create_resource_guard_wrappers
 from imbue.imbue_common.resource_guards import create_sdk_resource_guards
+
+# ---------------------------------------------------------------------------
+# Cache importlib.metadata.entry_points() to avoid repeated filesystem scans.
+#
+# On slow filesystems (e.g., 9p with dcache=0), each entry_points() call takes
+# ~50-90ms because it must stat/read dist-info directories for every installed
+# package. With ~3000 tests that each trigger entry_points() via plugin loading
+# and connector discovery, this adds up to minutes of pure I/O overhead.
+#
+# Since installed packages don't change during a test run, we cache results at
+# module import time. Each xdist worker is a separate process, so a simple
+# in-process dict is sufficient (no cross-process coordination needed).
+# ---------------------------------------------------------------------------
+
+_original_entry_points = importlib.metadata.entry_points
+_entry_points_cache: dict[
+    tuple[tuple[str, Any], ...],
+    importlib.metadata.EntryPoints | importlib.metadata.SelectableGroups,
+] = {}
+
+
+def _cached_entry_points(
+    **params: Any,
+) -> importlib.metadata.EntryPoints | importlib.metadata.SelectableGroups:
+    """Caching wrapper around importlib.metadata.entry_points().
+
+    Converts the keyword arguments to a hashable key (frozenset of items) and
+    returns a cached result if available. Entry points are static for the
+    lifetime of a test process, so the cache never needs invalidation.
+    """
+    key = tuple(sorted(params.items()))
+    if key not in _entry_points_cache:
+        _entry_points_cache[key] = _original_entry_points(**params)
+    return _entry_points_cache[key]
+
+
+importlib.metadata.entry_points = _cached_entry_points  # type: ignore[assignment]
+
 
 # Directory for test output files (slow tests, coverage summaries).
 # Relative to wherever pytest is invoked from.

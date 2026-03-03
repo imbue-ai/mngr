@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng.cli.snapshot import snapshot
-from imbue.mng.conftest import ModalSubprocessTestEnv
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import tmux_session_cleanup
