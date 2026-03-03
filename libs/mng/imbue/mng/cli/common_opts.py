@@ -161,9 +161,15 @@ def setup_command_context(
     The resolved LoggingConfig (with CLI overrides applied) is stored on the
     click context at ctx.meta["logging_config"] for callers that need logging
     levels (e.g., LoggingSuppressor).
+
+    Plugin-registered CLI option values are stored in ctx.meta["plugin_cli_params"]
+    as a dict, accessible by plugins via their hooks.
     """
+    # Separate plugin-registered params from known command class fields
+    known_params, plugin_params = _split_known_and_plugin_params(ctx.params, command_class)
+
     # First parse options from CLI args to extract common parameters
-    initial_opts = command_class(**ctx.params)
+    initial_opts = command_class(**known_params)
 
     # Create a top-level ConcurrencyGroup for process management
     cg = ConcurrencyGroup(name=f"mng-{command_name}")
@@ -200,8 +206,14 @@ def setup_command_context(
     # Allow plugins to override command options before creating the options object
     _apply_plugin_option_overrides(pm, command_name, command_class, updated_params)
 
+    # Re-separate after config defaults and plugin overrides may have changed things
+    known_updated_params, updated_plugin_params = _split_known_and_plugin_params(updated_params, command_class)
+
+    # Store plugin CLI params so plugins can access their values via hooks
+    ctx.meta["plugin_cli_params"] = updated_plugin_params
+
     # Re-create options with config defaults applied
-    opts = command_class(**updated_params)
+    opts = command_class(**known_updated_params)
 
     # Resolve --json / --jsonl flags into output_format before parsing output options.
     effective_format = _resolve_format_flags(ctx, opts)
@@ -476,6 +488,18 @@ def apply_create_template(
                 updated_params[param_name] = template_value
 
     return updated_params
+
+
+@pure
+def _split_known_and_plugin_params(
+    params: dict[str, Any],
+    command_class: type[CommonCliOptions],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split params into those known to the command class and extra plugin params."""
+    known_fields = command_class.model_fields
+    known_params = {k: v for k, v in params.items() if k in known_fields}
+    plugin_params = {k: v for k, v in params.items() if k not in known_fields}
+    return known_params, plugin_params
 
 
 def _apply_plugin_option_overrides(

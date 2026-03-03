@@ -16,8 +16,11 @@ from click_option_group import optgroup
 
 import imbue.mng.main
 from imbue.mng import hookimpl
+from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import TCommand
 from imbue.mng.cli.common_opts import _apply_plugin_option_overrides
+from imbue.mng.cli.common_opts import add_common_options
+from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.main import apply_plugin_cli_options
 from imbue.mng.main import reset_plugin_manager
 from imbue.mng.plugins import hookspecs
@@ -668,3 +671,96 @@ def test_apply_plugin_option_overrides_function() -> None:
 def with_plugin_cli_options(command_name: str) -> Callable[[TCommand], TCommand]:
     """Decorator to apply plugin-registered CLI options to a click command."""
     return lambda cmd: apply_plugin_cli_options(cmd, command_name=command_name)
+
+
+# =============================================================================
+# Tests for setup_command_context with plugin-registered CLI options
+# =============================================================================
+
+
+def test_setup_command_context_does_not_crash_with_plugin_params(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """setup_command_context should not crash when plugin-registered options are in ctx.params."""
+    with _plugin_manager_with_plugin(_PluginWithStringOption()) as pm:
+        captured_plugin_params: dict[str, Any] = {}
+
+        @click.command("test-create")
+        @add_common_options
+        @click.pass_context
+        def test_cmd(ctx: click.Context, **kwargs: Any) -> None:
+            nonlocal captured_plugin_params
+            _mng_ctx, _output_opts, _opts = setup_command_context(
+                ctx=ctx,
+                command_name="create",
+                command_class=CommonCliOptions,
+            )
+            captured_plugin_params = ctx.meta.get("plugin_cli_params", {})
+
+        apply_plugin_cli_options(test_cmd, "create")
+
+        runner = CliRunner()
+        result = runner.invoke(test_cmd, ["--test-plugin-option", "my-value"], obj=pm, catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "test_plugin_option" in captured_plugin_params
+        assert captured_plugin_params["test_plugin_option"] == "my-value"
+
+
+def test_setup_command_context_stores_plugin_params_in_ctx_meta(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """setup_command_context should store plugin params in ctx.meta['plugin_cli_params']."""
+    with _plugin_manager_with_plugin(_PluginWithMultipleOptions()) as pm:
+        captured_plugin_params: dict[str, Any] = {}
+
+        @click.command("test-create")
+        @add_common_options
+        @click.pass_context
+        def test_cmd(ctx: click.Context, **kwargs: Any) -> None:
+            nonlocal captured_plugin_params
+            _mng_ctx, _output_opts, _opts = setup_command_context(
+                ctx=ctx,
+                command_name="create",
+                command_class=CommonCliOptions,
+            )
+            captured_plugin_params = ctx.meta.get("plugin_cli_params", {})
+
+        apply_plugin_cli_options(test_cmd, "create")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            test_cmd,
+            ["--multi-opt-1", "hello", "--multi-opt-2", "99"],
+            obj=pm,
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert captured_plugin_params["multi_opt_1"] == "hello"
+        assert captured_plugin_params["multi_opt_2"] == 99
+
+
+def test_setup_command_context_without_plugin_params_has_empty_plugin_cli_params(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """setup_command_context should set plugin_cli_params to empty dict when no plugin options exist."""
+    captured_plugin_params: dict[str, Any] | None = None
+
+    @click.command("test-gc")
+    @add_common_options
+    @click.pass_context
+    def test_cmd(ctx: click.Context, **kwargs: Any) -> None:
+        nonlocal captured_plugin_params
+        _mng_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="gc",
+            command_class=CommonCliOptions,
+        )
+        captured_plugin_params = ctx.meta.get("plugin_cli_params", {})
+
+    runner = CliRunner()
+    result = runner.invoke(test_cmd, [], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert captured_plugin_params == {}

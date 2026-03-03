@@ -12,6 +12,7 @@ from imbue.mng.cli.common_opts import _process_template_escapes
 from imbue.mng.cli.common_opts import _resolve_format_flags
 from imbue.mng.cli.common_opts import _run_pre_command_scripts
 from imbue.mng.cli.common_opts import _run_single_script
+from imbue.mng.cli.common_opts import _split_known_and_plugin_params
 from imbue.mng.cli.common_opts import apply_config_defaults
 from imbue.mng.cli.common_opts import apply_create_template
 from imbue.mng.cli.common_opts import parse_output_options
@@ -589,3 +590,68 @@ def test_apply_create_template_skips_unknown_params(mng_test_prefix: str) -> Non
     )
     result = apply_create_template(ctx, ctx.params.copy(), config)
     assert "nonexistent_param" not in result
+
+
+# =============================================================================
+# Tests for _split_known_and_plugin_params
+# =============================================================================
+
+
+def test_split_known_and_plugin_params_separates_known_from_extra() -> None:
+    """_split_known_and_plugin_params should separate known fields from plugin params."""
+    params = {
+        "output_format": "human",
+        "quiet": False,
+        "verbose": 0,
+        "log_file": None,
+        "log_commands": None,
+        "log_command_output": None,
+        "log_env_vars": None,
+        "project_context_path": None,
+        "plugin": (),
+        "disable_plugin": (),
+        "test_plugin_option": "hello",
+        "another_plugin_flag": True,
+    }
+
+    known, plugin = _split_known_and_plugin_params(params, CommonCliOptions)
+
+    assert "output_format" in known
+    assert "quiet" in known
+    assert "test_plugin_option" not in known
+    assert "another_plugin_flag" not in known
+
+    assert "test_plugin_option" in plugin
+    assert plugin["test_plugin_option"] == "hello"
+    assert "another_plugin_flag" in plugin
+    assert plugin["another_plugin_flag"] is True
+    assert "output_format" not in plugin
+
+
+def test_split_known_and_plugin_params_all_known() -> None:
+    """_split_known_and_plugin_params should return empty plugin params when all are known."""
+    params = {
+        "output_format": "human",
+        "quiet": False,
+        "verbose": 0,
+        "log_file": None,
+        "log_commands": None,
+        "log_command_output": None,
+        "log_env_vars": None,
+        "project_context_path": None,
+        "plugin": (),
+        "disable_plugin": (),
+    }
+
+    known, plugin = _split_known_and_plugin_params(params, CommonCliOptions)
+
+    assert known == params
+    assert plugin == {}
+
+
+def test_split_known_and_plugin_params_empty_params() -> None:
+    """_split_known_and_plugin_params should handle empty params dict."""
+    known, plugin = _split_known_and_plugin_params({}, CommonCliOptions)
+
+    assert known == {}
+    assert plugin == {}
