@@ -98,26 +98,26 @@ def _execute_destroy(
             match host:
                 case OnlineHostInterface() as online_host:
                     with log_span("Destroying agents on online host {}", host_id):
-                        for agent_info in host_agents:
+                        for agent_details in host_agents:
                             try:
                                 # Find the agent interface on the host
                                 for agent in online_host.get_agents():
-                                    if agent.id == agent_info.id:
+                                    if agent.id == agent_details.id:
                                         mng_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=online_host)
                                         online_host.destroy_agent(agent)
                                         mng_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
-                                        result.destroyed_agents.append(agent_info.name)
-                                        logger.debug("Destroyed agent: {}", agent_info.name)
+                                        result.destroyed_agents.append(agent_details.name)
+                                        logger.debug("Destroyed agent: {}", agent_details.name)
                                         break
                                 else:
                                     # Agent not found on host (likely already cleaned up)
                                     logger.debug(
                                         "Agent {} not found on host, treating as already destroyed",
-                                        agent_info.name,
+                                        agent_details.name,
                                     )
-                                    result.destroyed_agents.append(agent_info.name)
+                                    result.destroyed_agents.append(agent_details.name)
                             except MngError as e:
-                                error_msg = f"Error destroying agent {agent_info.name}: {e}"
+                                error_msg = f"Error destroying agent {agent_details.name}: {e}"
                                 logger.warning(error_msg)
                                 result.errors.append(error_msg)
                                 if error_behavior == ErrorBehavior.ABORT:
@@ -128,9 +128,9 @@ def _execute_destroy(
                             mng_ctx.pm.hook.on_before_host_destroy(host=offline_host)
                             provider.destroy_host(offline_host)
                             mng_ctx.pm.hook.on_host_destroyed(host=offline_host)
-                            for agent_info in host_agents:
-                                result.destroyed_agents.append(agent_info.name)
-                                logger.debug("Destroyed agent: {} (via host destruction)", agent_info.name)
+                            for agent_details in host_agents:
+                                result.destroyed_agents.append(agent_details.name)
+                                logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
                         except MngError as e:
                             error_msg = f"Error destroying offline host {host_id}: {e}"
                             logger.warning(error_msg)
@@ -163,12 +163,12 @@ def _execute_stop(
             match host:
                 case OnlineHostInterface() as online_host:
                     with log_span("Stopping agents on host {}", host_id):
-                        agent_ids_to_stop = [agent_info.id for agent_info in host_agents]
+                        agent_ids_to_stop = [agent_details.id for agent_details in host_agents]
                         try:
                             online_host.stop_agents(agent_ids_to_stop)
-                            for agent_info in host_agents:
-                                result.stopped_agents.append(agent_info.name)
-                                logger.debug("Stopped agent: {}", agent_info.name)
+                            for agent_details in host_agents:
+                                result.stopped_agents.append(agent_details.name)
+                                logger.debug("Stopped agent: {}", agent_details.name)
                         except MngError as e:
                             error_msg = f"Error stopping agents on host {host_id}: {e}"
                             logger.warning(error_msg)

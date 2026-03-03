@@ -474,7 +474,7 @@ def make_test_agent_details(
     Shared helper used across test files to avoid duplicating AgentDetails
     construction logic. Accepts optional overrides for commonly varied fields.
     """
-    host_info = HostDetails(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
@@ -493,7 +493,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
-        host=host_info,
+        host=host_details,
     )
 
 

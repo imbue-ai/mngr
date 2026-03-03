@@ -49,7 +49,7 @@ def _make_host_details() -> HostDetails:
     )
 
 
-def _make_agent_details(name: str, host_info: HostDetails) -> AgentDetails:
+def _make_agent_details(name: str, host_details: HostDetails) -> AgentDetails:
     return AgentDetails(
         id=AgentId.generate(),
         name=AgentName(name),
@@ -59,7 +59,7 @@ def _make_agent_details(name: str, host_info: HostDetails) -> AgentDetails:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
 
@@ -255,8 +255,8 @@ def test_list_result_initializes_with_empty_lists() -> None:
 def test_list_result_allows_appending() -> None:
     """ListResult agents and errors lists should be mutable."""
     result = ListResult()
-    host_info = _make_host_details()
-    agent = _make_agent_details("test-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("test-agent", host_details)
     result.agents.append(agent)
     assert len(result.agents) == 1
     assert result.agents[0].name == AgentName("test-agent")
@@ -273,8 +273,8 @@ def test_list_result_allows_appending() -> None:
 
 def test_agent_details_to_cel_context_basic_fields() -> None:
     """_agent_details_to_cel_context should convert AgentDetails to a dict with basic fields."""
-    host_info = _make_host_details()
-    agent = _make_agent_details("my-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("my-agent", host_details)
     context = _agent_details_to_cel_context(agent)
 
     assert context["name"] == "my-agent"
@@ -285,7 +285,7 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
 
 def test_agent_details_to_cel_context_computes_age() -> None:
     """_agent_details_to_cel_context should compute 'age' from create_time."""
-    host_info = _make_host_details()
+    host_details = _make_host_details()
     create_time = datetime.now(timezone.utc) - timedelta(hours=2)
     agent = AgentDetails(
         id=AgentId.generate(),
@@ -296,7 +296,7 @@ def test_agent_details_to_cel_context_computes_age() -> None:
         create_time=create_time,
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
     context = _agent_details_to_cel_context(agent)
 
@@ -308,7 +308,7 @@ def test_agent_details_to_cel_context_computes_age() -> None:
 
 def test_agent_details_to_cel_context_computes_runtime() -> None:
     """_agent_details_to_cel_context should set 'runtime' from runtime_seconds."""
-    host_info = _make_host_details()
+    host_details = _make_host_details()
     agent = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("running-agent"),
@@ -319,7 +319,7 @@ def test_agent_details_to_cel_context_computes_runtime() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         runtime_seconds=3600.0,
-        host=host_info,
+        host=host_details,
     )
     context = _agent_details_to_cel_context(agent)
 
@@ -328,7 +328,7 @@ def test_agent_details_to_cel_context_computes_runtime() -> None:
 
 def test_agent_details_to_cel_context_computes_idle() -> None:
     """_agent_details_to_cel_context should compute 'idle' from activity times."""
-    host_info = _make_host_details()
+    host_details = _make_host_details()
     activity_time = datetime.now(timezone.utc) - timedelta(minutes=5)
     agent = AgentDetails(
         id=AgentId.generate(),
@@ -340,7 +340,7 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         user_activity_time=activity_time,
-        host=host_info,
+        host=host_details,
     )
     context = _agent_details_to_cel_context(agent)
 
@@ -352,12 +352,12 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
 
 def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
     """_agent_details_to_cel_context should rename host.provider_name to host.provider."""
-    host_info = HostDetails(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
     )
-    agent = _make_agent_details("test-agent", host_info)
+    agent = _make_agent_details("test-agent", host_details)
     context = _agent_details_to_cel_context(agent)
 
     assert "host" in context
@@ -374,8 +374,8 @@ def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
 
 def test_apply_cel_filters_includes_matching_agent() -> None:
     """_apply_cel_filters should return True when agent matches include filter."""
-    host_info = _make_host_details()
-    agent = _make_agent_details("target-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("target-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=('name == "target-agent"',),
         exclude_filters=(),
@@ -385,8 +385,8 @@ def test_apply_cel_filters_includes_matching_agent() -> None:
 
 def test_apply_cel_filters_excludes_non_matching_agent() -> None:
     """_apply_cel_filters should return False when agent does not match include filter."""
-    host_info = _make_host_details()
-    agent = _make_agent_details("other-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("other-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=('name == "target-agent"',),
         exclude_filters=(),
@@ -396,8 +396,8 @@ def test_apply_cel_filters_excludes_non_matching_agent() -> None:
 
 def test_apply_cel_filters_exclude_filter_removes_agent() -> None:
     """_apply_cel_filters should return False when agent matches exclude filter."""
-    host_info = _make_host_details()
-    agent = _make_agent_details("unwanted-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("unwanted-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
         exclude_filters=('name == "unwanted-agent"',),
@@ -407,8 +407,8 @@ def test_apply_cel_filters_exclude_filter_removes_agent() -> None:
 
 def test_apply_cel_filters_no_filters_includes_all() -> None:
     """_apply_cel_filters should return True when no filters are provided."""
-    host_info = _make_host_details()
-    agent = _make_agent_details("any-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("any-agent", host_details)
     assert _apply_cel_filters(agent, [], []) is True
 
 

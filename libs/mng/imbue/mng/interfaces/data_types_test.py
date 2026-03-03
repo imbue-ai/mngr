@@ -114,22 +114,22 @@ def test_ssh_info_serialization() -> None:
 
 def test_host_info_minimal_creation() -> None:
     """Test that HostDetails can be created with minimal required fields."""
-    host_info = HostDetails(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    assert host_info.name == "test-host"
-    assert host_info.provider_name == ProviderInstanceName("local")
+    assert host_details.name == "test-host"
+    assert host_details.provider_name == ProviderInstanceName("local")
     # Extended fields should be None/empty by default
-    assert host_info.state is None
-    assert host_info.image is None
-    assert host_info.tags == {}
-    assert host_info.boot_time is None
-    assert host_info.uptime_seconds is None
-    assert host_info.resource is None
-    assert host_info.ssh is None
-    assert host_info.snapshots == []
+    assert host_details.state is None
+    assert host_details.image is None
+    assert host_details.tags == {}
+    assert host_details.boot_time is None
+    assert host_details.uptime_seconds is None
+    assert host_details.resource is None
+    assert host_details.ssh is None
+    assert host_details.snapshots == []
 
 
 def test_host_info_with_extended_fields() -> None:
@@ -144,7 +144,7 @@ def test_host_info_with_extended_fields() -> None:
     )
     resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
 
-    host_info = HostDetails(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("docker"),
@@ -158,17 +158,17 @@ def test_host_info_with_extended_fields() -> None:
         # Note: not testing snapshots here as SnapshotInfo has complex ID requirements
     )
 
-    assert host_info.state == HostState.RUNNING
-    assert host_info.image == "ubuntu:22.04"
-    assert host_info.tags == {"env": "production", "team": "infra"}
-    assert host_info.boot_time == boot_time
-    assert host_info.uptime_seconds == 3600.5
-    assert host_info.resource is not None
-    assert host_info.resource.memory_gb == 16.0
-    assert host_info.ssh is not None
-    assert host_info.ssh.user == "root"
+    assert host_details.state == HostState.RUNNING
+    assert host_details.image == "ubuntu:22.04"
+    assert host_details.tags == {"env": "production", "team": "infra"}
+    assert host_details.boot_time == boot_time
+    assert host_details.uptime_seconds == 3600.5
+    assert host_details.resource is not None
+    assert host_details.resource.memory_gb == 16.0
+    assert host_details.ssh is not None
+    assert host_details.ssh.user == "root"
     # Snapshots should be empty by default
-    assert host_info.snapshots == []
+    assert host_details.snapshots == []
 
 
 def test_host_info_serialization_with_extended_fields() -> None:
@@ -182,7 +182,7 @@ def test_host_info_serialization_with_extended_fields() -> None:
         command="ssh -i /keys/id_rsa -p 22 root@example.com",
     )
 
-    host_info = HostDetails(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
@@ -194,7 +194,7 @@ def test_host_info_serialization_with_extended_fields() -> None:
         ssh=ssh_info,
     )
 
-    data = host_info.model_dump(mode="json")
+    data = host_details.model_dump(mode="json")
 
     assert data["state"] == HostState.RUNNING.value
     assert data["image"] == "custom-image:v1"

@@ -2420,11 +2420,11 @@ log "=== Shutdown script completed ==="
                     return None
 
             # Build HostDetails from cached host record + SSH-collected data
-            with trace_span("Assembling host info for {}", host_ref.host_id, _is_trace_span_enabled=False):
+            with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_details = self._build_host_details_from_raw(host, host_ref, host_record, raw)
 
             # Build AgentDetails for each agent
-            with trace_span("Assembling agent info for {}", host_ref.host_id, _is_trace_span_enabled=False):
+            with trace_span("Assembling agent details for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 certified_data = host_record.certified_host_data if host_record is not None else None
                 agent_details_list = self._build_agent_details_from_raw(host_details, certified_data, raw)
 

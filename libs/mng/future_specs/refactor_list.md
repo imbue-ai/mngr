@@ -156,7 +156,7 @@ Also update the helper that builds agent details from the broken-out functions:
 
 | Current (proposed new names) | Purpose |
 |---|---|
-| `_build_host_details_from_online_host(host, host_ref)` | Extract from `_collect_and_emit_details_for_host`, returns `HostDetails` |
+| `_build_host_details_from_host(host, host_ref)` | Extract from `_collect_and_emit_details_for_host`, returns `HostDetails` |
 | `_build_agent_details_from_online_agent(agent, host_details, activity_config, ssh_activity)` | Extract, returns `AgentDetails` |
 | `_build_agent_details_from_offline_ref(agent_ref, host_details)` | Extract, returns `AgentDetails` |
 
@@ -215,7 +215,7 @@ This type would live in `api/discover.py`. Most callers only need `agents_by_hos
 ### New extractions from `_collect_and_emit_details_for_host` (commit 4)
 | Function | Returns |
 |---|---|
-| `_build_host_details_from_online_host()` | `HostDetails` |
+| `_build_host_details_from_host()` | `HostDetails` |
 | `_build_agent_details_from_online_agent()` | `AgentDetails` |
 | `_build_agent_details_from_offline_ref()` | `AgentDetails` |
 

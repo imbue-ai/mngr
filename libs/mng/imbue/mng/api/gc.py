@@ -167,7 +167,7 @@ def gc_machines(
 
             for host in hosts:
                 try:
-                    host_info = HostDetails(
+                    host_details = HostDetails(
                         id=host.id,
                         name=str(host.id),
                         provider_name=provider.name,
@@ -195,7 +195,7 @@ def gc_machines(
                                     #  someone else starts it, you might have a host that is running but is untracked
                                     #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
                                     provider.delete_host(host)
-                                result.machines_deleted.append(host_info)
+                                result.machines_deleted.append(host_details)
                         # no matter what we're done--the rest of the logic only applies to online hosts
                         continue
 
@@ -223,7 +223,7 @@ def gc_machines(
                         provider.destroy_host(host_to_destroy)
                         mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
 
-                    result.machines_destroyed.append(host_info)
+                    result.machines_destroyed.append(host_details)
 
                 except MngError as e:
                     error_msg = f"Failed to check/destroy host {host.id}: {e}"
