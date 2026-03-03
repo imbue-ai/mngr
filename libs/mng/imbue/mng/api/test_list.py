@@ -111,7 +111,7 @@ def test_list_result_defaults_to_empty_lists() -> None:
 
 
 def test_agent_to_cel_context_basic_fields() -> None:
-    """Test that _agent_to_cel_context converts basic AgentInfo fields."""
+    """Test that agent_to_cel_context converts basic AgentInfo fields."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -140,7 +140,7 @@ def test_agent_to_cel_context_basic_fields() -> None:
 
 
 def test_agent_to_cel_context_with_runtime() -> None:
-    """Test that _agent_to_cel_context includes runtime when available."""
+    """Test that agent_to_cel_context includes runtime when available."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -165,7 +165,7 @@ def test_agent_to_cel_context_with_runtime() -> None:
 
 
 def test_agent_to_cel_context_with_activity_time() -> None:
-    """Test that _agent_to_cel_context computes idle from activity times."""
+    """Test that agent_to_cel_context computes idle from activity times."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -193,7 +193,7 @@ def test_agent_to_cel_context_with_activity_time() -> None:
 
 
 def test_agent_to_cel_context_with_state() -> None:
-    """Test that _agent_to_cel_context flattens state enum to lowercase string."""
+    """Test that agent_to_cel_context flattens state enum to lowercase string."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -506,7 +506,7 @@ def test_list_agents_with_error_behavior_continue(
 
 
 def test_agent_to_cel_context_with_host_state() -> None:
-    """Test that _agent_to_cel_context includes host.state field."""
+    """Test that agent_to_cel_context includes host.state field."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -531,7 +531,7 @@ def test_agent_to_cel_context_with_host_state() -> None:
 
 
 def test_agent_to_cel_context_with_host_resources() -> None:
-    """Test that _agent_to_cel_context includes host.resource fields."""
+    """Test that agent_to_cel_context includes host.resource fields."""
     resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
     host_info = HostInfo(
         id=HostId.generate(),
@@ -558,7 +558,7 @@ def test_agent_to_cel_context_with_host_resources() -> None:
 
 
 def test_agent_to_cel_context_with_host_ssh() -> None:
-    """Test that _agent_to_cel_context includes host.ssh fields."""
+    """Test that agent_to_cel_context includes host.ssh fields."""
     ssh_info = SSHInfo(
         user="root",
         host="example.com",
@@ -653,7 +653,7 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
 
 
 def test_agent_to_cel_context_with_host_lock_fields() -> None:
-    """Test that _agent_to_cel_context includes host.is_locked and host.locked_time fields."""
+    """Test that agent_to_cel_context includes host.is_locked and host.locked_time fields."""
     lock_time = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
     host_info = HostInfo(
         id=HostId.generate(),
@@ -681,7 +681,7 @@ def test_agent_to_cel_context_with_host_lock_fields() -> None:
 
 
 def test_agent_to_cel_context_with_host_not_locked() -> None:
-    """Test that _agent_to_cel_context includes is_locked=False when no lock file exists."""
+    """Test that agent_to_cel_context includes is_locked=False when no lock file exists."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -806,7 +806,7 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
 
 
 def test_agent_to_cel_context_with_idle_mode() -> None:
-    """Test that _agent_to_cel_context includes idle_mode field."""
+    """Test that agent_to_cel_context includes idle_mode field."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
@@ -831,7 +831,7 @@ def test_agent_to_cel_context_with_idle_mode() -> None:
 
 
 def test_agent_to_cel_context_with_idle_seconds() -> None:
-    """Test that _agent_to_cel_context includes idle_seconds field."""
+    """Test that agent_to_cel_context includes idle_seconds field."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",

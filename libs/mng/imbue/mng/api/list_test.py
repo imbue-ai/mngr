@@ -267,12 +267,12 @@ def test_list_result_allows_appending() -> None:
 
 
 # =============================================================================
-# _agent_to_cel_context Tests
+# agent_to_cel_context Tests
 # =============================================================================
 
 
 def test_agent_to_cel_context_basic_fields() -> None:
-    """_agent_to_cel_context should convert AgentInfo to a dict with basic fields."""
+    """agent_to_cel_context should convert AgentInfo to a dict with basic fields."""
     host_info = _make_host_info()
     agent = _make_agent_info("my-agent", host_info)
     context = agent_to_cel_context(agent)
@@ -284,7 +284,7 @@ def test_agent_to_cel_context_basic_fields() -> None:
 
 
 def test_agent_to_cel_context_computes_age() -> None:
-    """_agent_to_cel_context should compute 'age' from create_time."""
+    """agent_to_cel_context should compute 'age' from create_time."""
     host_info = _make_host_info()
     create_time = datetime.now(timezone.utc) - timedelta(hours=2)
     agent = AgentInfo(
@@ -307,7 +307,7 @@ def test_agent_to_cel_context_computes_age() -> None:
 
 
 def test_agent_to_cel_context_computes_runtime() -> None:
-    """_agent_to_cel_context should set 'runtime' from runtime_seconds."""
+    """agent_to_cel_context should set 'runtime' from runtime_seconds."""
     host_info = _make_host_info()
     agent = AgentInfo(
         id=AgentId.generate(),
@@ -327,7 +327,7 @@ def test_agent_to_cel_context_computes_runtime() -> None:
 
 
 def test_agent_to_cel_context_computes_idle() -> None:
-    """_agent_to_cel_context should compute 'idle' from activity times."""
+    """agent_to_cel_context should compute 'idle' from activity times."""
     host_info = _make_host_info()
     activity_time = datetime.now(timezone.utc) - timedelta(minutes=5)
     agent = AgentInfo(
@@ -351,7 +351,7 @@ def test_agent_to_cel_context_computes_idle() -> None:
 
 
 def test_agent_to_cel_context_normalizes_host_provider() -> None:
-    """_agent_to_cel_context should rename host.provider_name to host.provider."""
+    """agent_to_cel_context should rename host.provider_name to host.provider."""
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
