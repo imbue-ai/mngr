@@ -4,6 +4,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
+from imbue.mng.utils.claude import _DEFAULT_TIMEOUT_SECONDS
 from imbue.mng.utils.claude import _extract_text_delta
 from imbue.mng.utils.claude import query_claude
 from imbue.mng.utils.claude import query_claude_streaming
@@ -106,6 +107,7 @@ def test_query_claude_returns_none_on_missing_command() -> None:
             prompt="test",
             system_prompt="test",
             cg=cg,
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
         )
     assert result is None
 

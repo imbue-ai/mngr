@@ -72,7 +72,7 @@ def query_claude(
     prompt: str,
     system_prompt: str,
     cg: ConcurrencyGroup,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float,
 ) -> str | None:
     """Query Claude and return the complete response text, or None on failure.
 
