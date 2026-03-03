@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 from loguru import logger
 
-from imbue.mng.testing.plugin_testing import register_plugin_test_fixtures
-from imbue.mng.testing.testing import init_git_repo_with_config
+from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 
 register_plugin_test_fixtures(globals())

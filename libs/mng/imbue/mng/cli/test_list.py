@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.testing.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import tmux_session_cleanup
 
 
 def test_list_command_no_agents(

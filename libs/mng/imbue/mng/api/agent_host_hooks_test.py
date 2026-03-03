@@ -28,7 +28,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.registry import load_local_backend_only
-from imbue.mng.testing.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import tmux_session_cleanup
 
 
 class _AgentHostHookTracker:

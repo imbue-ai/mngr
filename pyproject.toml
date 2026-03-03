@@ -137,7 +137,8 @@ omit = [
     "*/tests/*",
     "*/conftest.py",
     # Test utility modules contain helpers only used by tests
-    "*/testing/*",
+    "*/utils/testing.py",
+    "*/utils/plugin_testing.py",
     "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
     # Modal provider requires network access for testing
     "libs/mng/imbue/mng/providers/modal/*",
@@ -181,6 +182,55 @@ layers = [
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
+]
+# Test modules that need cross-layer imports for test setup, fixtures, and
+# concrete implementations. These are inherent to testing.
+ignore_imports = [
+    # Test utilities import from higher layers
+    "imbue.mng.utils.testing -> imbue.mng.cli.create",
+    # Tests importing test utilities
+    "imbue.mng.agents.base_agent_test -> imbue.mng.utils.testing",
+    "imbue.mng.agents.default_plugins.claude_agent_test -> imbue.mng.utils.testing",
+    "imbue.mng.agents.default_plugins.test_claude_agent_dialog -> imbue.mng.utils.testing",
+    "imbue.mng.agents.default_plugins.test_claude_agent_modal -> imbue.mng.utils.testing",
+    "imbue.mng.api.agent_host_hooks_test -> imbue.mng.utils.testing",
+    "imbue.mng.api.exec_test -> imbue.mng.utils.testing",
+    "imbue.mng.api.sync_test -> imbue.mng.utils.testing",
+    "imbue.mng.api.test_create -> imbue.mng.utils.testing",
+    "imbue.mng.api.test_list -> imbue.mng.utils.testing",
+    "imbue.mng.api.test_pull -> imbue.mng.utils.testing",
+    "imbue.mng.api.test_push -> imbue.mng.utils.testing",
+    "imbue.mng.hosts.host_test -> imbue.mng.utils.testing",
+    "imbue.mng.hosts.test_host -> imbue.mng.utils.testing",
+    "imbue.mng.providers.docker.test_docker_create -> imbue.mng.utils.testing",
+    "imbue.mng.providers.docker.test_docker_integration -> imbue.mng.utils.testing",
+    "imbue.mng.providers.docker.testing -> imbue.mng.utils.testing",
+    "imbue.mng.providers.local.instance_test -> imbue.mng.utils.testing",
+    "imbue.mng.providers.modal.test_modal_create -> imbue.mng.utils.testing",
+    "imbue.mng.providers.modal.conftest -> imbue.mng.utils.testing",
+    "imbue.mng.providers.modal.routes.test_snapshot_and_shutdown -> imbue.mng.utils.testing",
+    # CLI test that depends on cli/conftest fixtures and can't be moved to root
+    "imbue.mng.cli.test_connect -> imbue.mng.main",
+    # Tests importing test fixtures from higher layers
+    "imbue.mng.agents.default_plugins.claude_agent_test -> imbue.mng.api.test_fixtures",
+    "imbue.mng.agents.default_plugins.claude_agent_test -> imbue.mng.conftest",
+    "imbue.mng.agents.default_plugins.skill_agent_test -> imbue.mng.conftest",
+    "imbue.mng.hosts.common_test -> imbue.mng.api.test_fixtures",
+    "imbue.mng.providers.modal.conftest -> imbue.mng.conftest",
+    "imbue.mng.providers.modal.routes.test_snapshot_and_shutdown -> imbue.mng.conftest",
+    # Tests importing concrete implementations for integration testing
+    "imbue.mng.hosts.host_test -> imbue.mng.agents.base_agent",
+    "imbue.mng.hosts.host_test -> imbue.mng.providers.local.instance",
+    "imbue.mng.hosts.test_host -> imbue.mng.providers.local.instance",
+    "imbue.mng.hosts.test_host -> imbue.mng.providers.ssh.instance",
+    "imbue.mng.utils.logging_test -> imbue.mng.config.data_types",
+    # Config-layer tests importing providers/plugins for realistic test scenarios
+    "imbue.mng.config.loader_test -> imbue.mng.plugins.hookspecs",
+    "imbue.mng.config.loader_test -> imbue.mng.providers.registry",
+    "imbue.mng.config.provider_registry_test -> imbue.mng.providers.registry",
+    "imbue.mng.config.provider_registry_test -> imbue.mng.providers.docker.config",
+    "imbue.mng.config.provider_registry_test -> imbue.mng.providers.local.config",
+    "imbue.mng.config.provider_registry_test -> imbue.mng.providers.modal.config",
 ]
 
 [[tool.importlinter.contracts]]

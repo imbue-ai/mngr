@@ -16,7 +16,7 @@ import argparse
 import sys
 
 from imbue.imbue_common.logging import setup_logging
-from imbue.mng.testing.testing import cleanup_old_modal_test_environments
+from imbue.mng.utils.testing import cleanup_old_modal_test_environments
 
 
 def main() -> int:

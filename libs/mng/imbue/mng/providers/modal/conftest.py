@@ -23,7 +23,7 @@ from imbue.mng.providers.modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mng.providers.modal.config import ModalProviderConfig
 from imbue.mng.providers.modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mng.providers.modal.instance import ModalProviderInstance
-from imbue.mng.testing.testing import TEST_ENV_PREFIX
+from imbue.mng.utils.testing import TEST_ENV_PREFIX
 
 
 def make_modal_provider_real(

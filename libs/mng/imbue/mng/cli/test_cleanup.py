@@ -11,9 +11,9 @@ from click.testing import CliRunner
 
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.create import create
-from imbue.mng.testing.testing import tmux_session_cleanup
-from imbue.mng.testing.testing import tmux_session_exists
 from imbue.mng.utils.polling import wait_for
+from imbue.mng.utils.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import tmux_session_exists
 
 # =============================================================================
 # Tests with no agents (lightweight, no tmux)

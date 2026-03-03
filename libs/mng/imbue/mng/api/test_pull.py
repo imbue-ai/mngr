@@ -17,10 +17,10 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import UncommittedChangesMode
-from imbue.mng.testing.testing import get_stash_count
-from imbue.mng.testing.testing import init_git_repo_with_config
-from imbue.mng.testing.testing import run_git_command
 from imbue.mng.utils.git_utils import get_current_branch
+from imbue.mng.utils.testing import get_stash_count
+from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import run_git_command
 
 
 @pytest.fixture

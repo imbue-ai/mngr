@@ -50,10 +50,10 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
-from imbue.mng.testing.testing import generate_ssh_keypair
-from imbue.mng.testing.testing import local_sshd
 from imbue.mng.utils.polling import poll_until
 from imbue.mng.utils.polling import wait_for
+from imbue.mng.utils.testing import generate_ssh_keypair
+from imbue.mng.utils.testing import local_sshd
 
 
 @pytest.fixture

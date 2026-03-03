@@ -15,9 +15,9 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import ConflictMode
 from imbue.mng.primitives import SyncDirection
 from imbue.mng.primitives import UncommittedChangesMode
-from imbue.mng.testing.testing import init_git_repo_with_config
-from imbue.mng.testing.testing import run_git_command
 from imbue.mng.utils.polling import wait_for
+from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import run_git_command
 from imbue.mng_pair.api import UnisonSyncer
 from imbue.mng_pair.api import determine_git_sync_actions
 from imbue.mng_pair.api import pair_files

@@ -23,8 +23,8 @@ from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentName
-from imbue.mng.testing.testing import create_test_agent_via_cli
-from imbue.mng.testing.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import create_test_agent_via_cli
+from imbue.mng.utils.testing import tmux_session_cleanup
 
 
 @pytest.mark.tmux

@@ -25,7 +25,7 @@ from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import VolumeId
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.local.volume import LocalVolume
-from imbue.mng.testing.testing import make_local_provider
+from imbue.mng.utils.testing import make_local_provider
 
 
 def test_local_provider_name(local_provider: LocalProviderInstance) -> None:

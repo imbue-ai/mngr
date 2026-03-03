@@ -10,8 +10,8 @@ from typing import Generator
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.testing.plugin_testing import register_plugin_test_fixtures
-from imbue.mng.testing.testing import init_git_repo
+from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mng.utils.testing import init_git_repo
 
 register_plugin_test_fixtures(globals())
 

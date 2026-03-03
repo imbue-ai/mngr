@@ -4,8 +4,8 @@ from pathlib import Path
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.primitives import ConflictMode
 from imbue.mng.primitives import SyncDirection
-from imbue.mng.testing.testing import init_git_repo_with_config
-from imbue.mng.testing.testing import run_git_command
+from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import run_git_command
 from imbue.mng_pair.api import GitSyncAction
 from imbue.mng_pair.api import UnisonSyncer
 from imbue.mng_pair.api import determine_git_sync_actions

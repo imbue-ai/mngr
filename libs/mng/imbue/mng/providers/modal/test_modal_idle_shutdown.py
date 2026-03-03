@@ -22,9 +22,9 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.primitives import HostState
-from imbue.mng.testing.testing import ModalSubprocessTestEnv
-from imbue.mng.testing.testing import get_short_random_string
 from imbue.mng.utils.polling import wait_for
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
+from imbue.mng.utils.testing import get_short_random_string
 
 
 class MngListError(Exception):

@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mng.testing.testing import get_short_random_string
-from imbue.mng.testing.testing import mng_agent_cleanup
-from imbue.mng.testing.testing import run_mng_subprocess
-from imbue.mng.testing.testing import setup_claude_trust_config_for_subprocess
+from imbue.mng.utils.testing import get_short_random_string
+from imbue.mng.utils.testing import mng_agent_cleanup
+from imbue.mng.utils.testing import run_mng_subprocess
+from imbue.mng.utils.testing import setup_claude_trust_config_for_subprocess
 
 
 def _is_claude_installed() -> bool:

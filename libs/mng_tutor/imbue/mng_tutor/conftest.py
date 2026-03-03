@@ -22,9 +22,9 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
-from imbue.mng.testing.testing import assert_home_is_temp_directory
-from imbue.mng.testing.testing import init_git_repo
-from imbue.mng.testing.testing import isolate_home
+from imbue.mng.utils.testing import assert_home_is_temp_directory
+from imbue.mng.utils.testing import init_git_repo
+from imbue.mng.utils.testing import isolate_home
 
 
 @pytest.fixture

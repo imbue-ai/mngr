@@ -9,9 +9,9 @@ from click.testing import CliRunner
 
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.migrate import migrate
-from imbue.mng.testing.testing import create_test_agent_via_cli
-from imbue.mng.testing.testing import tmux_session_cleanup
-from imbue.mng.testing.testing import tmux_session_exists
+from imbue.mng.utils.testing import create_test_agent_via_cli
+from imbue.mng.utils.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux

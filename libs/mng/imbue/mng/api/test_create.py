@@ -35,8 +35,8 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng.testing.testing import tmux_session_cleanup
-from imbue.mng.testing.testing import tmux_session_exists
+from imbue.mng.utils.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import tmux_session_exists
 
 # =============================================================================
 # Create API Integration Tests

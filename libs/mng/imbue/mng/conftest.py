@@ -27,17 +27,17 @@ from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.modal.backend import ModalProviderBackend
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
-from imbue.mng.testing.testing import ModalSubprocessTestEnv
-from imbue.mng.testing.testing import assert_home_is_temp_directory
-from imbue.mng.testing.testing import cleanup_tmux_session
-from imbue.mng.testing.testing import delete_modal_apps_in_environment
-from imbue.mng.testing.testing import delete_modal_environment
-from imbue.mng.testing.testing import delete_modal_volumes_in_environment
-from imbue.mng.testing.testing import generate_test_environment_name
-from imbue.mng.testing.testing import get_subprocess_test_env
-from imbue.mng.testing.testing import init_git_repo
-from imbue.mng.testing.testing import isolate_home
-from imbue.mng.testing.testing import isolate_tmux_server
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
+from imbue.mng.utils.testing import assert_home_is_temp_directory
+from imbue.mng.utils.testing import cleanup_tmux_session
+from imbue.mng.utils.testing import delete_modal_apps_in_environment
+from imbue.mng.utils.testing import delete_modal_environment
+from imbue.mng.utils.testing import delete_modal_volumes_in_environment
+from imbue.mng.utils.testing import generate_test_environment_name
+from imbue.mng.utils.testing import get_subprocess_test_env
+from imbue.mng.utils.testing import init_git_repo
+from imbue.mng.utils.testing import isolate_home
+from imbue.mng.utils.testing import isolate_tmux_server
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -151,7 +151,7 @@ def _isolate_tmux_server(
     """Give each test its own isolated tmux server.
 
     Delegates to the shared isolate_tmux_server() context manager in
-    imbue.mng.testing.testing, which handles TMUX_TMPDIR creation,
+    imbue.mng.utils.testing, which handles TMUX_TMPDIR creation,
     TMUX env var isolation, and teardown (kill-server + tmpdir cleanup).
     """
     with isolate_tmux_server(monkeypatch):
