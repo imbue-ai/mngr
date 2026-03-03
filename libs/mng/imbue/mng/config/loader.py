@@ -8,6 +8,7 @@ from typing import Sequence
 from uuid import uuid4
 
 import pluggy
+from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -38,6 +39,7 @@ from imbue.mng.errors import UnknownBackendError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.env_utils import parse_bool_env
 from imbue.mng.utils.file_utils import atomic_write
 from imbue.mng.utils.logging import LoggingConfig
 
@@ -107,6 +109,11 @@ def load_config(
         commands={"create": CommandDefaults(defaults={"pass_host_env": ["EDITOR"]})},
     )
 
+    # When MNG_ALLOW_UNKNOWN_CONFIG is set, unknown fields in config files produce
+    # warnings instead of errors.  This is useful during development when a branch
+    # adds a new config field but other branches don't know about it yet.
+    allow_unknown = parse_bool_env(os.environ.get("MNG_ALLOW_UNKNOWN_CONFIG", ""))
+
     # Load and merge config files in precedence order (user, project, local)
     for raw in (
         try_load_toml(get_user_config_path(profile_dir)),
@@ -114,7 +121,9 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins))
+            config = config.merge_with(
+                parse_config(raw, disabled_plugins=config_disabled_plugins, strict=not allow_unknown)
+            )
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNG_PREFIX")
@@ -250,21 +259,32 @@ def _check_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
     context: str,
+    *,
+    strict: bool = True,
 ) -> None:
-    """Raise ConfigParseError if raw_config contains fields not defined on model_class.
+    """Check for unknown fields in raw_config and either raise or warn.
 
-    This catches typos and misconfigured keys early rather than silently ignoring them,
-    which is important because model_construct bypasses pydantic's extra="forbid" validation.
+    When strict=True, raises ConfigParseError (used by config set to catch typos).
+    When strict=False, logs a warning and removes the unknown fields so that config files
+    written for newer versions of mng don't break older versions.
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
     if unknown:
-        raise ConfigParseError(f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}")
+        if strict:
+            raise ConfigParseError(
+                f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
+            )
+        logger.warning("Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields))
+        for key in unknown:
+            del raw_config[key]
 
 
 def _parse_providers(
     raw_providers: dict[str, dict[str, Any]],
     disabled_plugins: frozenset[str],
+    *,
+    strict: bool = True,
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
@@ -289,7 +309,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             raise ConfigParseError(msg) from e
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}")
+        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict)
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
     return providers
@@ -311,6 +331,8 @@ def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, A
 
 def _parse_agent_types(
     raw_types: dict[str, dict[str, Any]],
+    *,
+    strict: bool = True,
 ) -> dict[AgentTypeName, AgentTypeConfig]:
     """Parse agent type configs using the registry.
 
@@ -320,7 +342,7 @@ def _parse_agent_types(
 
     for name, raw_config in raw_types.items():
         config_class = get_agent_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}")
+        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
         normalized_config = _normalize_cli_args_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
@@ -329,6 +351,8 @@ def _parse_agent_types(
 
 def _parse_plugins(
     raw_plugins: dict[str, dict[str, Any]],
+    *,
+    strict: bool = True,
 ) -> dict[PluginName, PluginConfig]:
     """Parse plugin configs using the registry.
 
@@ -338,7 +362,7 @@ def _parse_plugins(
 
     for name, raw_config in raw_plugins.items():
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}")
+        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict)
         plugins[PluginName(name)] = config_class.model_construct(**raw_config)
 
     return plugins
@@ -404,12 +428,12 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
             pm.set_blocked(name)
 
 
-def _parse_logging_config(raw_logging: dict[str, Any]) -> LoggingConfig:
+def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True) -> LoggingConfig:
     """Parse logging config.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging")
+    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict)
     return LoggingConfig.model_construct(**raw_logging)
 
 
@@ -462,25 +486,35 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
 def parse_config(
     raw: dict[str, Any],
     disabled_plugins: frozenset[str],
+    *,
+    strict: bool = True,
 ) -> MngConfig:
     """Parse a raw config dict into MngConfig.
 
     Uses model_construct to bypass defaults and explicitly set None for unset fields.
+
+    When strict=True (default), raises ConfigParseError for unknown fields.
+    When strict=False, logs a warning and ignores unknown fields (used when
+    MNG_ALLOW_UNKNOWN_CONFIG is set to allow forward-compatible config files).
     """
     # Build kwargs with None for unset scalar fields
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
     kwargs["default_host_dir"] = raw.pop("default_host_dir", None)
-    kwargs["agent_types"] = _parse_agent_types(raw.pop("agent_types", {})) if "agent_types" in raw else {}
-    kwargs["providers"] = (
-        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins) if "providers" in raw else {}
+    kwargs["agent_types"] = (
+        _parse_agent_types(raw.pop("agent_types", {}), strict=strict) if "agent_types" in raw else {}
     )
-    kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {})) if "plugins" in raw else {}
+    kwargs["providers"] = (
+        _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
+        if "providers" in raw
+        else {}
+    )
+    kwargs["plugins"] = _parse_plugins(raw.pop("plugins", {}), strict=strict) if "plugins" in raw else {}
     kwargs["commands"] = _parse_commands(raw.pop("commands", {})) if "commands" in raw else {}
     kwargs["create_templates"] = (
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
-    kwargs["logging"] = _parse_logging_config(raw.pop("logging", {})) if "logging" in raw else None
+    kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
     kwargs["is_nested_tmux_allowed"] = (
         raw.pop("is_nested_tmux_allowed", None) if "is_nested_tmux_allowed" in raw else None
     )
@@ -492,7 +526,9 @@ def parse_config(
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
 
     if len(raw) > 0:
-        raise ConfigParseError(f"Unknown configuration fields: {list(raw.keys())}")
+        if strict:
+            raise ConfigParseError(f"Unknown configuration fields: {list(raw.keys())}")
+        logger.warning("Unknown configuration fields: {}", list(raw.keys()))
 
     # Use model_construct to bypass field defaults
     return MngConfig.model_construct(**kwargs)
