@@ -929,11 +929,11 @@ def _format_value_as_string(value: Any) -> str:
         return str(value)
 
 
-# Fields on AgentInfo and HostInfo that are dict-typed (allow arbitrary sub-keys when sorting)
+# Fields on AgentInfo that are dict-typed (allow arbitrary sub-keys when sorting)
 _AGENT_DICT_FIELDS: Final[frozenset[str]] = frozenset({"labels", "plugin"})
-_HOST_DICT_FIELDS: Final[frozenset[str]] = frozenset({"tags", "plugin"})
 
 
+@pure
 def _validate_sort_field(sort_field: str) -> None:
     """Validate that the sort field refers to a known field on AgentInfo/HostInfo.
 
