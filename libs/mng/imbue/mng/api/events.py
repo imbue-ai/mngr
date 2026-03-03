@@ -117,13 +117,6 @@ class _AllEventsStreamState(MutableModel):
     last_source_scan_time: float = Field(default=0.0, description="Monotonic time of last directory scan")
 
 
-class EventFileEntry(FrozenModel):
-    """Information about an available event file."""
-
-    name: str = Field(description="Event file name")
-    size: int = Field(description="File size in bytes")
-
-
 def resolve_events_target(
     identifier: str,
     mng_ctx: MngContext,
@@ -249,73 +242,6 @@ def _try_get_online_host_for_events(
 
     events_path = host_interface.host_dir / str(events_subpath)
     return host_interface, events_path
-
-
-# =============================================================================
-# List event files
-# =============================================================================
-
-
-def list_event_files(target: EventsTarget) -> list[EventFileEntry]:
-    """List available event files in the target's events directory."""
-    # Prefer host-based listing (direct access to the online host)
-    if target.online_host is not None and target.events_path is not None:
-        return _list_event_files_via_host(target.online_host, target.events_path, target.display_name)
-
-    # Fall back to volume-based listing
-    if target.volume is not None:
-        with log_span("Listing event files for {} via volume", target.display_name):
-            entries = target.volume.listdir("")
-            return [
-                EventFileEntry(name=_extract_filename(entry.path), size=entry.size)
-                for entry in entries
-                if entry.file_type == VolumeFileType.FILE
-            ]
-
-    raise MngError(f"Cannot list event files for {target.display_name}: no volume or online host available")
-
-
-def _list_event_files_via_host(
-    online_host: OnlineHostInterface,
-    events_path: Path,
-    display_name: str,
-) -> list[EventFileEntry]:
-    """List event files by executing a command on the online host."""
-    with log_span("Listing event files for {} via host", display_name):
-        # Use a shell loop with stat to get file names and sizes.
-        # Uses GNU stat with macOS fallback (stat -c %s vs stat -f %z).
-        # The trailing "true" ensures exit code 0 regardless of the last [ -f ] test.
-        cmd = (
-            f"cd {shlex.quote(str(events_path))} 2>/dev/null && "
-            f"for f in *; do "
-            f'[ -f "$f" ] && SIZE=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null) '
-            f'&& printf "%s\\t%s\\n" "$f" "$SIZE"; '
-            f"done; true"
-        )
-        result = online_host.execute_command(cmd, timeout_seconds=10.0)
-        if not result.stdout.strip():
-            return []
-
-        return _parse_file_listing_output(result.stdout)
-
-
-@pure
-def _parse_file_listing_output(output: str) -> list[EventFileEntry]:
-    """Parse tab-separated name/size output into EventFileEntry objects."""
-    entries: list[EventFileEntry] = []
-    for line in output.strip().split("\n"):
-        if not line.strip():
-            continue
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            name = parts[0]
-            try:
-                size = int(parts[1])
-            except ValueError:
-                logger.trace("Could not parse file size for '{}': '{}'", name, parts[1])
-                size = 0
-            entries.append(EventFileEntry(name=name, size=size))
-    return entries
 
 
 @pure
@@ -613,6 +539,22 @@ def sort_events_by_timestamp(events: Sequence[EventRecord]) -> list[EventRecord]
     return sorted(events, key=lambda e: e.timestamp)
 
 
+def _event_passes_cel_filters(
+    event: EventRecord,
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+) -> bool:
+    """Check whether an event passes the given CEL include/exclude filters."""
+    if not cel_include_filters and not cel_exclude_filters:
+        return True
+    return apply_cel_filters_to_context(
+        event.data,
+        cel_include_filters,
+        cel_exclude_filters,
+        error_context_description=f"event {event.event_id}",
+    )
+
+
 @pure
 def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
     """Sort rotated file names so oldest (highest number) comes first.
@@ -833,17 +775,9 @@ def read_all_historical_events(
     sorted_events = sort_events_by_timestamp(all_events)
 
     # Apply CEL filters
-    if cel_include_filters or cel_exclude_filters:
-        sorted_events = [
-            event
-            for event in sorted_events
-            if apply_cel_filters_to_context(
-                event.data,
-                cel_include_filters,
-                cel_exclude_filters,
-                error_context_description=f"event {event.event_id}",
-            )
-        ]
+    sorted_events = [
+        e for e in sorted_events if _event_passes_cel_filters(e, cel_include_filters, cel_exclude_filters)
+    ]
 
     return sorted_events, byte_offsets
 
@@ -851,9 +785,6 @@ def read_all_historical_events(
 # =============================================================================
 # Streaming all events
 # =============================================================================
-
-# Sentinel value pushed to the event queue to signal shutdown
-_QUEUE_SENTINEL: Final[None] = None
 
 
 def _collect_historical_events(
@@ -879,7 +810,7 @@ def _start_tail_threads_for_sources(
     target: EventsTarget,
     sources: Sequence[EventSourceInfo],
     initial_byte_offsets: dict[str, int],
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -940,7 +871,7 @@ def stream_all_events(
         last_source_scan_time=time.monotonic(),
     )
     stop_event = threading.Event()
-    event_queue: queue.Queue[EventRecord | None] = queue.Queue()
+    event_queue: queue.Queue[EventRecord] = queue.Queue()
     tail_threads: list[threading.Thread] = []
     offset_dir: tempfile.TemporaryDirectory[str] | None = None
 
@@ -1032,17 +963,7 @@ def _check_for_new_archived_events(
                 state.known_rotated_files[source.source_path].add(rotated_file)
 
     # Apply CEL filters
-    if cel_include_filters or cel_exclude_filters:
-        new_events = [
-            event
-            for event in new_events
-            if apply_cel_filters_to_context(
-                event.data,
-                cel_include_filters,
-                cel_exclude_filters,
-                error_context_description=f"event {event.event_id}",
-            )
-        ]
+    new_events = [e for e in new_events if _event_passes_cel_filters(e, cel_include_filters, cel_exclude_filters)]
 
     return new_events
 
@@ -1050,7 +971,7 @@ def _check_for_new_archived_events(
 def _start_tail_thread(
     target: EventsTarget,
     source_path: str,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1127,7 +1048,7 @@ def _write_pygtail_offset_file(
 def _tail_source_thread_local(
     events_file_path: Path,
     source_path: str,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1156,14 +1077,8 @@ def _tail_source_thread_local(
                 record = parse_event_line(line, source_path)
                 if record is None:
                     continue
-                if cel_include_filters or cel_exclude_filters:
-                    if not apply_cel_filters_to_context(
-                        record.data,
-                        cel_include_filters,
-                        cel_exclude_filters,
-                        error_context_description=f"event {record.event_id}",
-                    ):
-                        continue
+                if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+                    continue
                 event_queue.put(record)
         except (OSError, IOError) as e:
             logger.trace("Pygtail error for source '{}': {}", source_path, e)
@@ -1175,7 +1090,7 @@ def _tail_source_thread_local(
 def _tail_source_thread_remote(
     target: EventsTarget,
     source_path: str,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1207,14 +1122,8 @@ def _tail_source_thread_remote(
                 record = parse_event_line(line, source_path)
                 if record is None:
                     continue
-                if cel_include_filters or cel_exclude_filters:
-                    if not apply_cel_filters_to_context(
-                        record.data,
-                        cel_include_filters,
-                        cel_exclude_filters,
-                        error_context_description=f"event {record.event_id}",
-                    ):
-                        continue
+                if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+                    continue
                 event_queue.put(record)
             byte_offset = current_length
 
@@ -1227,7 +1136,7 @@ _QUEUE_POLL_INTERVAL_SECONDS: Final[float] = 0.1
 def _consume_event_queue(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     on_event: Callable[[EventRecord], None],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
@@ -1276,9 +1185,6 @@ def _consume_event_queue(
 
             continue
 
-        if event is _QUEUE_SENTINEL:
-            break
-
         if event.event_id in state.emitted_event_ids:
             continue
         state.emitted_event_ids.add(event.event_id)
@@ -1288,7 +1194,7 @@ def _consume_event_queue(
 def _rescan_and_start_new_tail_threads(
     target: EventsTarget,
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1360,7 +1266,7 @@ def refresh_events_target(
 def _handle_online_offline_transition(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord | None],
+    event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,

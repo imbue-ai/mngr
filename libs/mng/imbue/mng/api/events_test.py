@@ -20,13 +20,11 @@ from imbue.mng.api.events import _discover_event_sources_via_volume
 from imbue.mng.api.events import _extract_filename
 from imbue.mng.api.events import _handle_online_offline_transition
 from imbue.mng.api.events import _parse_discovered_files
-from imbue.mng.api.events import _parse_file_listing_output
 from imbue.mng.api.events import _sort_rotated_files_oldest_first
 from imbue.mng.api.events import _start_tail_thread
 from imbue.mng.api.events import _tail_source_thread_local
 from imbue.mng.api.events import apply_head_or_tail
 from imbue.mng.api.events import follow_event_file
-from imbue.mng.api.events import list_event_files
 from imbue.mng.api.events import parse_event_line
 from imbue.mng.api.events import read_all_historical_events
 from imbue.mng.api.events import read_event_content
@@ -129,20 +127,8 @@ def test_extract_filename_from_nested_path() -> None:
 
 
 # =============================================================================
-# list_event_files / read_event_content tests
+# read_event_content tests
 # =============================================================================
-
-
-def test_list_event_files_returns_only_files(events_volume_target: tuple[EventsTarget, Path]) -> None:
-    target, events_dir = events_volume_target
-    (events_dir / "output.log").write_text("some log data")
-    (events_dir / "error.log").write_text("some errors")
-    (events_dir / "subdir").mkdir()
-
-    event_files = list_event_files(target)
-
-    names = sorted(ef.name for ef in event_files)
-    assert names == snapshot(["error.log", "output.log"])
 
 
 def test_read_event_content_returns_file_contents(events_volume_target: tuple[EventsTarget, Path]) -> None:
@@ -201,11 +187,7 @@ def test_resolve_events_target_finds_agent(
     target = resolve_events_target("test-resolve-agent", temp_mng_ctx)
     assert "test-resolve-agent" in target.display_name
 
-    # Should be able to list and read event files via the online host
-    event_files = list_event_files(target)
-    assert len(event_files) == 1
-    assert event_files[0].name == "output.log"
-
+    # Should be able to read event files via the online host
     content = read_event_content(target, "output.log")
     assert "agent log content" in content
 
@@ -230,11 +212,7 @@ def test_resolve_events_target_finds_host(
     target = resolve_events_target(str(host.id), temp_mng_ctx)
     assert "host" in target.display_name
 
-    # Should be able to list and read event files via the online host
-    event_files = list_event_files(target)
-    assert len(event_files) == 1
-    assert event_files[0].name == "host-output.log"
-
+    # Should be able to read event files via the online host
     content = read_event_content(target, "host-output.log")
     assert "host log content" in content
 
@@ -337,34 +315,6 @@ def test_follow_event_file_emits_all_content_when_no_tail(events_volume_target: 
 # =============================================================================
 
 
-def test_parse_file_listing_output_parses_tab_separated_entries() -> None:
-    output = "output.log\t1234\nerror.log\t567\n"
-    entries = _parse_file_listing_output(output)
-    assert len(entries) == 2
-    assert entries[0].name == "output.log"
-    assert entries[0].size == 1234
-    assert entries[1].name == "error.log"
-    assert entries[1].size == 567
-
-
-def test_parse_file_listing_output_skips_empty_lines() -> None:
-    output = "output.log\t100\n\n\nerror.log\t200\n"
-    entries = _parse_file_listing_output(output)
-    assert len(entries) == 2
-
-
-def test_parse_file_listing_output_handles_invalid_size() -> None:
-    output = "output.log\tnot_a_number\n"
-    entries = _parse_file_listing_output(output)
-    assert len(entries) == 1
-    assert entries[0].size == 0
-
-
-def test_parse_file_listing_output_handles_empty_output() -> None:
-    entries = _parse_file_listing_output("")
-    assert entries == []
-
-
 # =============================================================================
 # _build_tail_args tests
 # =============================================================================
@@ -408,49 +358,6 @@ def events_host_target(
     return target, events_dir
 
 
-def test_list_event_files_via_host_returns_files(events_host_target: tuple[EventsTarget, Path]) -> None:
-    """Verify list_event_files works via host execute_command when volume is None."""
-    target, events_dir = events_host_target
-    (events_dir / "output.log").write_text("some log data")
-    (events_dir / "error.log").write_text("err")
-    (events_dir / "subdir").mkdir()
-
-    event_files = list_event_files(target)
-
-    names = sorted(ef.name for ef in event_files)
-    assert names == snapshot(["error.log", "output.log"])
-
-
-def test_list_event_files_via_host_returns_correct_sizes(events_host_target: tuple[EventsTarget, Path]) -> None:
-    """Verify list_event_files via host returns correct file sizes."""
-    target, events_dir = events_host_target
-    (events_dir / "test.log").write_text("12345")
-
-    event_files = list_event_files(target)
-
-    assert len(event_files) == 1
-    assert event_files[0].name == "test.log"
-    assert event_files[0].size == 5
-
-
-def test_list_event_files_via_host_returns_empty_for_nonexistent_dir(
-    temp_mng_ctx: MngContext,
-    local_provider,
-) -> None:
-    """Verify list_event_files via host returns empty list when events dir does not exist."""
-    host = local_provider.get_host(HostName("localhost"))
-    target = EventsTarget(
-        volume=None,
-        online_host=host,
-        events_path=Path("/tmp/nonexistent-dir-events-92847"),
-        display_name="test-host",
-    )
-
-    event_files = list_event_files(target)
-
-    assert event_files == []
-
-
 def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Path]) -> None:
     """Verify read_event_content works via host execute_command when volume is None.
 
@@ -473,14 +380,6 @@ def test_read_event_content_via_host_raises_for_missing_file(events_host_target:
 
     with pytest.raises(MngError, match="Failed to read event file"):
         read_event_content(target, "nonexistent-file-58291.log")
-
-
-def test_list_event_files_raises_when_no_volume_or_host() -> None:
-    """Verify list_event_files raises MngError when neither volume nor host is available."""
-    target = EventsTarget(display_name="test-empty")
-
-    with pytest.raises(MngError, match="no volume or online host"):
-        list_event_files(target)
 
 
 def test_read_event_content_raises_when_no_volume_or_host() -> None:
@@ -1095,7 +994,7 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
 
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
 
     thread = threading.Thread(
@@ -1159,7 +1058,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path) -> None:
     # Start a tail thread and verify it picks up new content
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
 
     thread = _start_tail_thread(
@@ -1306,7 +1205,7 @@ def test_handle_online_offline_transition_restarts_threads(
         known_source_paths={"src"},
     )
     target_holder = [target]
-    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
     tail_threads: list[threading.Thread] = []
 
@@ -1344,7 +1243,7 @@ def test_handle_online_offline_transition_no_change_when_same_state(tmp_path: Pa
     # No provider info means refresh returns the same target
     state = _AllEventsStreamState(is_online=False)
     target_holder = [target]
-    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
     tail_threads: list[threading.Thread] = []
 
