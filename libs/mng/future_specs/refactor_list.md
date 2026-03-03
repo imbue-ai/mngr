@@ -6,239 +6,226 @@ The code that handles listing hosts and agents is correct and fast, but its orga
 
 There are two fundamentally distinct operations happening:
 
-1. **Discovery**: Get lightweight references (HostReference + AgentReference) for all hosts and agents across all providers. This is needed by ~17 callers (find, connect, destroy, exec, message, rename, etc.) that just need to resolve a name/ID to a reference.
+1. **Discovery**: Get lightweight references for all hosts and agents across all providers. This is needed by ~17 callers (find, connect, destroy, exec, message, rename, etc.) that just need to resolve a name/ID to a reference.
 
-2. **Enrichment**: Get full detailed info (HostInfo + AgentInfo) for specific hosts and agents. This is only needed by the `mng list` command (and the kanpan/schedule plugins) for display purposes.
+2. **Enrichment**: Get full detailed info for specific hosts and agents. This is only needed by `mng list` (and kanpan/schedule plugins) for display purposes.
 
 Currently these two operations are interleaved in `api/list.py`, and the naming does not make the distinction clear.
 
-## Current State
+## Full Refactoring Plan
 
-### Key functions and where they live
+The plan is organized into 5 commits. Each is a safe, mechanical refactor with no behavioral changes.
 
-| Function | File | What it does |
+### Commit 1: Rename data types
+
+Rename the four core data types to clearly distinguish discovery results from full details.
+
+| Current | New | File |
 |---|---|---|
-| `load_all_agents_grouped_by_host()` | `api/list.py` | Queries all providers in parallel, returns `dict[HostReference, list[AgentReference]]`. Used by 17+ callers. |
-| `load_agent_refs()` | `interfaces/provider_instance.py` | Per-provider: returns `dict[HostReference, list[AgentReference]]`. Default impl calls `list_hosts()` then `get_agent_references()` per host. Modal overrides for speed. |
-| `list_hosts()` | `interfaces/provider_instance.py` | Abstract. Returns `list[HostInterface]` for the provider. |
-| `build_host_listing_data()` | `interfaces/provider_instance.py` | Per-provider optimization hook for enrichment. Returns `tuple[HostInfo, list[AgentInfo]]` or None to fall back. Modal overrides. |
-| `_assemble_host_info()` | `api/list.py` | Builds full HostInfo + AgentInfo for a host. Tries `build_host_listing_data()` first, falls back to per-field collection. Despite the name, assembles both host AND agent info. |
-| `_process_host_for_agent_listing()` | `api/list.py` | Thin error-handling wrapper around `_assemble_host_info()`. |
-| `_process_provider_for_host_listing()` | `api/list.py` | Calls `load_agent_refs()` on a single provider, merges results. |
-| `list_agents()` | `api/list.py` | Main entry point for `mng list`. Orchestrates discovery + enrichment + filtering. |
+| `HostReference` | `DiscoveredHost` | `primitives.py` |
+| `AgentReference` | `DiscoveredAgent` | `primitives.py` |
+| `HostInfo` | `HostDetails` | `interfaces/data_types.py` |
+| `AgentInfo` | `AgentDetails` | `interfaces/data_types.py` |
 
-### Naming problems
+Files that import/use `HostReference` or `AgentReference` (22 files):
+- `primitives.py`, `primitives_test.py`
+- `interfaces/host.py`, `interfaces/provider_instance.py`
+- `hosts/host.py`, `hosts/offline_host.py`
+- `providers/modal/instance.py`, `providers/modal/instance_test.py`
+- `api/list.py`, `api/list_test.py`, `api/test_list.py`, `api/find.py`, `api/find_test.py`, `api/test_find.py`, `api/message.py`
+- `cli/agent_utils.py`, `cli/agent_utils_test.py`, `cli/create.py`, `cli/create_test.py`, `cli/destroy.py`, `cli/limit.py`, `cli/pull_test.py`
 
-- **`load_agent_refs`**: Sounds like it loads only agent refs, but it loads both host AND agent refs.
-- **`_list_all_host_and_agent_records`**: Modal-specific name that leaks the "records on volume" implementation detail. Uses raw `dict[str, Any]` types.
-- **`build_host_listing_data`**: Vague. What it actually does is enrich a host reference into full HostInfo + AgentInfo.
-- **`_assemble_host_info`**: Assembles both host AND agent info, not just host info.
-- **`load_all_agents_grouped_by_host`**: Accurate but long. More importantly, it lives in `api/list.py` despite being a general-purpose discovery function.
-- **`_process_host_for_agent_listing`** vs **`_process_provider_for_host_listing`**: Nearly identical names doing different things.
+Files that import/use `HostInfo` or `AgentInfo` (21 files):
+- `interfaces/data_types.py`, `interfaces/data_types_test.py`, `interfaces/provider_instance.py`
+- `providers/modal/instance.py`
+- `api/list.py`, `api/list_test.py`, `api/test_list.py`, `api/cleanup.py`, `api/cleanup_test.py`, `api/data_types.py`, `api/gc.py`
+- `cli/list.py`, `cli/list_test.py`, `cli/cleanup.py`, `cli/cleanup_test.py`, `cli/conftest.py`, `cli/connect.py`, `cli/test_connect.py`, `cli/gc_test.py`
 
-### Structural problems
+External consumers (also need updating):
+- `libs/mng_kanpan/imbue/mng_kanpan/fetcher.py`, `fetcher_test.py`
+- `libs/mng_tutor/imbue/mng_tutor/checks.py`
+- `apps/sculptor_web/imbue/sculptor_web/data_types.py`, `main.py`
 
-- `api/list.py` contains both the `mng list` command logic AND the general-purpose discovery function (`load_all_agents_grouped_by_host`), so 17 files import from `api/list.py` even though they have nothing to do with listing.
-- `_assemble_host_info` is ~200 lines doing too many things: get host object, build SSH info, build HostInfo, get agents, build AgentInfo per agent, apply filters, append to results.
-- The "enrichment" code in `api/list.py` should arguably live closer to the provider interface, since providers are the ones who know how to efficiently collect full data.
+This is a pure find-and-replace across all files. No logic changes.
 
-## Proposal
+### Commit 2: Rename methods on provider and host interfaces
 
-### Step 1: Separate discovery from enrichment at the module level
+**On `ProviderInstanceInterface`** (`interfaces/provider_instance.py`):
 
-Move the general-purpose discovery function out of `api/list.py` into a new module `api/discover.py` (or just keep it in `api/find.py`, which already does resolution):
-
-**Option A: New `api/discover.py` module**
-
-```
-api/discover.py:
-    discover_all_hosts_and_agents(mng_ctx, ...) -> dict[HostReference, list[AgentReference]]
-
-api/list.py:
-    list_agents(mng_ctx, ...) -> ListResult  (uses discover_all_hosts_and_agents internally)
-```
-
-**Option B: Move into `api/find.py`**
-
-Since `api/find.py` already has the resolution utilities that operate on `dict[HostReference, list[AgentReference]]`, and it's already imported by most of the callers:
-
-```
-api/find.py:
-    discover_all_hosts_and_agents(mng_ctx, ...) -> dict[HostReference, list[AgentReference]]
-    resolve_source_location(...)  # existing
-    find_and_maybe_start_agent_by_name_or_id(...)  # existing (from agent_utils.py)
-
-api/list.py:
-    list_agents(mng_ctx, ...) -> ListResult
-```
-
-**Recommendation**: Option A is cleaner. The discovery function is a distinct concern from "finding a specific agent". It's also used by many callers that don't need any of the find/resolve logic.
-
-### Step 2: Rename provider methods for clarity
-
-On `ProviderInstanceInterface`:
-
-| Current name | Proposed name | Rationale |
+| Current | New | Rationale |
 |---|---|---|
-| `load_agent_refs(cg, include_destroyed)` | `discover_hosts_and_agents(cg, include_destroyed)` | Makes it clear this discovers both hosts and agents, not just agent refs |
-| `build_host_listing_data(host_ref, agent_refs)` | `get_host_and_agent_details(host_ref, agent_refs)` | Describes what it returns, not what it's "for" |
-| `list_hosts(cg, include_destroyed)` | `list_hosts(cg, include_destroyed)` | This name is fine as-is |
+| `load_agent_refs(cg, include_destroyed)` | `discover_hosts_and_agents(cg, include_destroyed)` | Discovers both hosts and agents, not just agent refs |
+| `build_host_listing_data(host_ref, agent_refs)` | `get_host_and_agent_details(host_ref, agent_refs)` | Describes what it returns (details), not what it's "for" (listing) |
 
-Alternative names considered:
-- `discover_hosts_and_agents` could also be `list_host_and_agent_refs` -- "list" fits the naming convention of `list_hosts`, though "discover" better conveys that this is a lightweight enumeration rather than a full data fetch.
-- `get_host_and_agent_details` could also be `enrich_host_and_agents` or `collect_host_and_agent_info` -- "get" is simplest and follows the convention of other methods on the interface like `get_host`, `get_host_resources`, `get_host_tags`.
+Files affected by `load_agent_refs` rename (5 files):
+- `interfaces/provider_instance.py` (definition + default impl)
+- `providers/modal/instance.py` (override)
+- `providers/modal/instance_test.py` (tests)
+- `hosts/offline_host_test.py` (tests)
+- `api/list.py` (callers)
 
-### Step 3: Rename internal functions in `api/list.py`
+Files affected by `build_host_listing_data` rename (3 files):
+- `interfaces/provider_instance.py` (definition + default impl)
+- `providers/modal/instance.py` (override)
+- `api/list.py` (caller)
 
-| Current name | Proposed name | Rationale |
+**On `HostInterface`** (`interfaces/host.py`):
+
+| Current | New | Rationale |
 |---|---|---|
-| `_assemble_host_info` | `_collect_and_emit_agent_details_for_host` | Describes both what it does (collects details) and the scope (per-host). "Emit" because it fires callbacks and appends to result. |
-| `_process_host_for_agent_listing` | `_process_host_with_error_handling` | Makes clear this is just an error-handling wrapper |
-| `_process_provider_for_host_listing` | `_discover_provider_hosts_and_agents` | What it actually does |
-| `_process_provider_streaming` | `_discover_and_process_provider_streaming` | Clarifies two phases |
+| `get_agent_references()` | `discover_agents()` | Consistent with the discovery vocabulary. This discovers what agents exist on this host. |
 
-These internal names matter less than the public API, but they still help readability. Alternative: since `_assemble_host_info` is very long, we could break it into:
-- `_build_host_info_from_online_host(host, host_ref)` -> HostInfo
-- `_build_agent_info_from_online_agent(agent, host_info, activity_config, ssh_activity)` -> AgentInfo
-- `_build_agent_info_from_offline_ref(agent_ref, host_info)` -> AgentInfo
+Files affected (11 files):
+- `interfaces/host.py` (abstract definition)
+- `interfaces/provider_instance.py` (called in default `discover_hosts_and_agents`)
+- `hosts/host.py` (online implementation)
+- `hosts/host_test.py` (tests)
+- `hosts/offline_host.py` (offline implementation)
+- `hosts/offline_host_test.py` (tests)
+- `cli/destroy.py` (caller)
+- `api/find.py` (caller)
+- `api/gc.py` (caller)
+- `api/list.py` (caller)
 
-This would make the code much more readable and testable.
+**Helper function** (`hosts/offline_host.py`):
 
-### Step 4: Consider a typed return for discovery
+| Current | New | Rationale |
+|---|---|---|
+| `validate_and_create_agent_reference()` | `validate_and_create_discovered_agent()` | Matches the new type name |
 
-Currently `discover_all_hosts_and_agents` returns `tuple[dict[HostReference, list[AgentReference]], list[BaseProviderInstance]]`. The tuple-of-two is slightly awkward.
+Files affected (4 files):
+- `hosts/offline_host.py` (definition)
+- `hosts/offline_host_test.py` (tests)
+- `hosts/host.py` (caller)
+- `providers/modal/instance.py` (caller)
 
-Option: Create a `DiscoveryResult` frozen model:
+**Modal provider internals** (`providers/modal/instance.py`):
+
+| Current | New | Rationale |
+|---|---|---|
+| `_build_host_info_from_raw()` | `_build_host_details_from_raw()` | Matches `HostDetails` type name |
+| `_build_agent_infos_from_raw()` | `_build_agent_details_from_raw()` | Matches `AgentDetails` type name |
+
+These are private to the Modal provider, so only 1 file affected.
+
+### Commit 3: Move discovery to `api/discover.py`
+
+Create a new module `api/discover.py` and move the general-purpose discovery function out of `api/list.py`.
+
+**Move from `api/list.py` to `api/discover.py`:**
+- `load_all_agents_grouped_by_host()` -- renamed to `discover_all_hosts_and_agents()`
+- `_process_provider_for_host_listing()` -- renamed to `_discover_provider_hosts_and_agents()` (private helper, moves with its caller)
+- `_warn_on_duplicate_host_names()` -- used by both discovery and streaming listing, so it stays shared. Could live in `discover.py` and be imported by `list.py`, or be extracted to a small utility.
+
+**Update all 17 callers** that currently import `load_all_agents_grouped_by_host` from `api/list.py`:
+
+Within `libs/mng`:
+- `api/list.py` (still calls it internally)
+- `api/list_test.py`
+- `api/events.py`, `api/events_test.py`
+- `api/exec.py`
+- `api/find.py`
+- `api/message.py`
+- `cli/agent_utils.py`, `cli/test_agent_utils.py`
+- `cli/connect.py`
+- `cli/create.py`
+- `cli/destroy.py`
+- `cli/limit.py`
+- `cli/rename.py`
+- `cli/snapshot.py`
+
+External:
+- `libs/mng_kanpan/imbue/mng_kanpan/fetcher.py`
+- `libs/mng_schedule/imbue/mng_schedule/implementations/modal/verification.py`
+
+### Commit 4: Rename internal functions in `api/list.py`
+
+These are all private functions, so only `api/list.py` (and its tests) are affected.
+
+| Current | New | Rationale |
+|---|---|---|
+| `_assemble_host_info()` | `_collect_and_emit_details_for_host()` | Describes what it does (collects details, emits via callbacks) and scope (per host). Covers both host and agent details. |
+| `_process_host_for_agent_listing()` | `_process_host_with_error_handling()` | Makes clear this is just an error-handling wrapper around the above |
+| `_process_provider_streaming()` | `_discover_and_emit_details_for_provider()` | Clarifies it does both discovery and enrichment for one provider |
+| `_list_agents_batch()` | `_list_agents_batch()` | Fine as-is |
+| `_list_agents_streaming()` | `_list_agents_streaming()` | Fine as-is |
+| `_agent_to_cel_context()` | `_agent_details_to_cel_context()` | Matches the `AgentDetails` type |
+| `_apply_cel_filters(agent: AgentDetails, ...)` | `_apply_cel_filters(agent_details: AgentDetails, ...)` | Parameter rename only, matches type |
+
+Also update the helper that builds agent details from the broken-out functions:
+
+| Current (proposed new names) | Purpose |
+|---|---|
+| `_build_host_details_from_online_host(host, host_ref)` | Extract from `_collect_and_emit_details_for_host`, returns `HostDetails` |
+| `_build_agent_details_from_online_agent(agent, host_details, activity_config, ssh_activity)` | Extract, returns `AgentDetails` |
+| `_build_agent_details_from_offline_ref(agent_ref, host_details)` | Extract, returns `AgentDetails` |
+
+### Commit 5 (optional): Create `DiscoveryResult` type
+
+Replace the awkward `tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]` return type:
 
 ```python
 class DiscoveryResult(FrozenModel):
     """Result of discovering all hosts and agents across providers."""
 
-    agent_refs_by_host: dict[HostReference, list[AgentReference]] = Field(
-        description="Agent references grouped by their host"
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = Field(
+        description="Discovered agents grouped by their host"
     )
     providers: list[BaseProviderInstance] = Field(
         description="Provider instances that were queried"
     )
 ```
 
-This would make it clearer what callers are working with. Most callers only need `agent_refs_by_host`, so the providers field is already somewhat awkward -- but at least with a named type it's self-documenting.
+This type would live in `api/discover.py`. Most callers only need `agents_by_host` -- the current pattern of `agents_by_host, _ = discover_all_hosts_and_agents(...)` would become `discovery = discover_all_hosts_and_agents(...); agents_by_host = discovery.agents_by_host` or just `discovery.agents_by_host` inline.
 
-### Step 5 (optional): Move enrichment closer to the provider
+## Complete rename summary
 
-Currently the default enrichment logic (the fallback when `build_host_listing_data` returns None) lives in `api/list.py:_assemble_host_info`. This is ~150 lines of code that builds HostInfo + AgentInfo by calling many methods on the host object.
+### Data types
+| Current | New |
+|---|---|
+| `HostReference` | `DiscoveredHost` |
+| `AgentReference` | `DiscoveredAgent` |
+| `HostInfo` | `HostDetails` |
+| `AgentInfo` | `AgentDetails` |
 
-We could move this default implementation into `ProviderInstanceInterface.get_host_and_agent_details()` itself (as the default implementation, not returning None). Then `api/list.py` would simply call the provider method for every host, without needing to know about the fallback logic.
-
-Pros:
-- Provider owns all data-fetching logic
-- `api/list.py` becomes a pure orchestrator (parallel dispatch + filtering + streaming)
-- Easier for new providers to understand what they need to implement
-
-Cons:
-- The default implementation needs access to `Host` (the concrete class), which creates a dependency from the interface layer to the implementation layer
-- Slight coupling increase
-
-This is a larger change and could be done separately.
-
-## Summary of recommended changes
-
-1. **Create `api/discover.py`** with `discover_all_hosts_and_agents()` (moved from `api/list.py`)
-2. **Rename `load_agent_refs`** to `discover_hosts_and_agents` on `ProviderInstanceInterface`
-3. **Rename `build_host_listing_data`** to `get_host_and_agent_details` on `ProviderInstanceInterface`
-4. **Rename internal functions** in `api/list.py` for clarity
-5. **Break up `_assemble_host_info`** into smaller focused functions
-6. (Optional) Create `DiscoveryResult` type for the return value
-7. (Optional, separate PR) Move default enrichment logic into the provider interface
-
-Steps 1-5 are safe, mechanical refactors that can be done incrementally (each as a separate commit) with no behavioral changes.
-
-## Appendix: Naming the data types
-
-The current type names (`HostReference`/`AgentReference` vs `HostInfo`/`AgentInfo`) don't clearly convey the lightweight-discovery-result vs full-detailed-data distinction. Here are the options considered:
-
-### Option 1: DiscoveredHost/DiscoveredAgent + HostDetails/AgentDetails (recommended)
-
-| Current | Discovery (lightweight) | Full |
+### Public methods
+| Current | New | Where |
 |---|---|---|
-| `HostReference` | `DiscoveredHost` | `HostDetails` |
-| `AgentReference` | `DiscoveredAgent` | `AgentDetails` |
+| `ProviderInstanceInterface.load_agent_refs()` | `.discover_hosts_and_agents()` | `interfaces/provider_instance.py` |
+| `ProviderInstanceInterface.build_host_listing_data()` | `.get_host_and_agent_details()` | `interfaces/provider_instance.py` |
+| `HostInterface.get_agent_references()` | `.discover_agents()` | `interfaces/host.py` |
+| `load_all_agents_grouped_by_host()` | `discover_all_hosts_and_agents()` | `api/list.py` -> `api/discover.py` |
+| `validate_and_create_agent_reference()` | `validate_and_create_discovered_agent()` | `hosts/offline_host.py` |
 
-Pros:
-- Directly ties to the "discovery" operation. `discover_hosts_and_agents()` returns `DiscoveredHost`/`DiscoveredAgent` -- the naming tells you where the data came from.
-- Makes the distinction visceral: "discovered" immediately conveys "I found this thing but haven't deeply inspected it yet".
-- `Details` is clear and conventional for the enriched version.
+### Private functions in `api/list.py`
+| Current | New |
+|---|---|
+| `_assemble_host_info()` | `_collect_and_emit_details_for_host()` |
+| `_process_host_for_agent_listing()` | `_process_host_with_error_handling()` |
+| `_process_provider_for_host_listing()` | `_discover_provider_hosts_and_agents()` (moves to `api/discover.py`) |
+| `_process_provider_streaming()` | `_discover_and_emit_details_for_provider()` |
+| `_agent_to_cel_context()` | `_agent_details_to_cel_context()` |
 
-Cons:
-- Adjective-noun pattern is slightly unusual for data types in this codebase (most are Noun-Qualifier like `HostInfo`).
+### Private functions in Modal provider
+| Current | New |
+|---|---|
+| `_build_host_info_from_raw()` | `_build_host_details_from_raw()` |
+| `_build_agent_infos_from_raw()` | `_build_agent_details_from_raw()` |
 
-The provider methods would then read:
+### New extractions from `_collect_and_emit_details_for_host` (commit 4)
+| Function | Returns |
+|---|---|
+| `_build_host_details_from_online_host()` | `HostDetails` |
+| `_build_agent_details_from_online_agent()` | `AgentDetails` |
+| `_build_agent_details_from_offline_ref()` | `AgentDetails` |
 
-```python
-# Discovery
-def discover_hosts_and_agents(
-    cg, include_destroyed,
-) -> dict[DiscoveredHost, list[DiscoveredAgent]]: ...
-
-# Enrichment
-def get_host_and_agent_details(
-    host: DiscoveredHost, agents: Sequence[DiscoveredAgent],
-) -> tuple[HostDetails, list[AgentDetails]] | None: ...
-```
-
-### Option 2: HostSummary/AgentSummary + HostDetails/AgentDetails
-
-| Current | Discovery (lightweight) | Full |
-|---|---|---|
-| `HostReference` | `HostSummary` | `HostDetails` |
-| `AgentReference` | `AgentSummary` | `AgentDetails` |
-
-Pros:
-- Very clear what each is. "Summary" implies "I know the basics". "Details" implies "I know everything".
-- Follows the Noun-Qualifier pattern used elsewhere in the codebase.
-
-Cons:
-- "Summary" might imply a summarized/reduced version of the full data, when really it's a fundamentally different data source (certified/offline data vs live-queried data).
-
-### Option 3: HostRecord/AgentRecord + HostDetails/AgentDetails
-
-| Current | Discovery (lightweight) | Full |
-|---|---|---|
-| `HostReference` | `HostRecord` | `HostDetails` |
-| `AgentReference` | `AgentRecord` | `AgentDetails` |
-
-Pros:
-- "Record" conveys stored/persisted data. "Details" conveys live-queried data.
-
-Cons:
-- "Record" is already used by Modal's `HostRecord` (the volume-persisted data structure). Would need to rename that to `ModalHostRecord` or `PersistedHostData`.
-
-### Option 4: HostEntry/AgentEntry + HostDetails/AgentDetails
-
-| Current | Discovery (lightweight) | Full |
-|---|---|---|
-| `HostReference` | `HostEntry` | `HostDetails` |
-| `AgentReference` | `AgentEntry` | `AgentDetails` |
-
-Pros:
-- "Entry" is like "a row in a directory listing" -- you know it exists and its basic attributes.
-
-Cons:
-- "Entry" is generic and doesn't convey the discovery context.
-
-### Option 5: HostIdentity/AgentIdentity + HostDetails/AgentDetails
-
-| Current | Discovery (lightweight) | Full |
-|---|---|---|
-| `HostReference` | `HostIdentity` | `HostDetails` |
-| `AgentReference` | `AgentIdentity` | `AgentDetails` |
-
-Pros:
-- Very precise about what the lightweight version is -- it identifies the thing.
-
-Cons:
-- `AgentReference` contains more than just identity (it has certified_data with work_dir, command, labels, etc.), so "Identity" undersells it.
-
-### Recommendation
-
-Option 1 (`DiscoveredHost`/`DiscoveredAgent` + `HostDetails`/`AgentDetails`) best conveys the relationship between the discovery operation and its output. Option 2 (`HostSummary`/`AgentSummary`) is the runner-up if the adjective-noun pattern feels too unusual.
+### Unchanged
+| Name | Why |
+|---|---|
+| `list_hosts()` | Already clear and accurate |
+| `list_agents()` | Already clear (this is the `mng list` entry point) |
+| `ListResult` | Fine -- it's the result of the list command |
+| `_list_agents_batch()` | Fine |
+| `_list_agents_streaming()` | Fine |
+| `ErrorInfo` / `ProviderErrorInfo` / `HostErrorInfo` / `AgentErrorInfo` | These describe errors, not host/agent data |
+| `SSHInfo` | SSH-specific, not part of the discovery/details split |
