@@ -11,8 +11,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.api.data_types import GcResourceTypes
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.gc import gc as api_gc
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
@@ -359,7 +359,7 @@ def _find_agents_to_destroy(
     matched_identifiers: set[str] = set()
     seen_offline_hosts: set[str] = set()
 
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx, include_destroyed=False)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
 
     for host_ref, agent_refs in agents_by_host.items():
         for agent_ref in agent_refs:

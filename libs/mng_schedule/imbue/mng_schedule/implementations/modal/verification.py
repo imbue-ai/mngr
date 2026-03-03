@@ -20,8 +20,8 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.primitives import AgentLifecycleState
@@ -78,7 +78,7 @@ def _resolve_agent(agent_name: str, mng_ctx: MngContext) -> AgentInterface:
 
     Raises UserInputError if the agent cannot be found.
     """
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
     agent, _host = find_and_maybe_start_agent_by_name_or_id(
         agent_name,
         agents_by_host,

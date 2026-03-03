@@ -200,7 +200,7 @@ def test_resolve_events_target_finds_host(
     per_host_dir = local_provider.host_dir
     host = local_provider.get_host(HostName("localhost"))
 
-    # Create an agent so the host appears in load_all_agents_grouped_by_host
+    # Create an agent so the host appears in discover_all_hosts_and_agents
     _create_agent_data_json(per_host_dir, "unrelated-agent-47291", "sleep 47291")
 
     # Create events directly in the host volume (not under agents/)

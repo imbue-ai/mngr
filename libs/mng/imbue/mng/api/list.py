@@ -21,6 +21,8 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discover import _warn_on_duplicate_host_names
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.completion_writer import write_agent_names_cache
@@ -45,7 +47,6 @@ from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostId
-from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
@@ -220,7 +221,7 @@ def _list_agents_batch(
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
     with log_span("Loading agents from all providers"):
-        agents_by_host, providers = load_all_agents_grouped_by_host(mng_ctx, provider_names, include_destroyed=True)
+        agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx, provider_names, include_destroyed=True)
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -657,96 +658,3 @@ def _apply_cel_filters(
         exclude_filters=exclude_filters,
         error_context_description=f"agent {agent.name}",
     )
-
-
-def _warn_on_duplicate_host_names(
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
-) -> None:
-    """Emit a warning if any host names are duplicated within the same provider.
-
-    This should never happen in normal operation -- it indicates a bug or race condition
-    in host creation.
-
-    Only considers hosts that have at least one agent reference, since destroyed
-    hosts (which typically have no agents) may legitimately share a name with a
-    newly created host.
-    """
-    # Group host names by provider, tracking which host IDs share each name
-    host_ids_by_provider_and_name: dict[tuple[ProviderInstanceName, HostName], list[HostId]] = {}
-    for host_ref, agent_refs in agents_by_host.items():
-        if not agent_refs:
-            continue
-        key = (host_ref.provider_name, host_ref.host_name)
-        host_ids_by_provider_and_name.setdefault(key, []).append(host_ref.host_id)
-
-    for (provider_name, host_name), host_ids in host_ids_by_provider_and_name.items():
-        if len(host_ids) > 1:
-            logger.warning(
-                "Duplicate host name '{}' found on provider '{}' (host IDs: {}). "
-                "This should never happen -- it may indicate a bug or a race condition during host creation.",
-                host_name,
-                provider_name,
-                ", ".join(str(hid) for hid in host_ids),
-            )
-
-
-def _process_provider_for_host_listing(
-    provider: BaseProviderInstance,
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
-    include_destroyed: bool,
-    results_lock: Lock,
-    cg: ConcurrencyGroup,
-) -> None:
-    """Process a single provider and collect its hosts and agents.
-
-    This function is run in a thread by load_all_agents_grouped_by_host.
-    Results are merged into the shared agents_by_host dict under the results_lock.
-    """
-    provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-
-    # Merge results into the main dict under lock
-    with results_lock:
-        agents_by_host.update(provider_results)
-
-
-@log_call
-def load_all_agents_grouped_by_host(
-    mng_ctx: MngContext, provider_names: tuple[str, ...] | None = None, include_destroyed: bool = False
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
-    """Load all agents from all providers, grouped by their host.
-
-    Uses ConcurrencyGroup to query providers in parallel for better performance.
-    Handles both online hosts (which can be queried directly) and offline hosts (which use persisted data).
-    """
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-    results_lock = Lock()
-
-    with log_span("Loading all agents from all providers"):
-        providers = get_all_provider_instances(mng_ctx, provider_names)
-        logger.trace("Found {} provider instances", len(providers))
-
-        # Process all providers in parallel using ConcurrencyGroupExecutor
-        futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(
-            parent_cg=mng_ctx.concurrency_group, name="load_all_agents_grouped_by_host", max_workers=32
-        ) as executor:
-            for provider in providers:
-                futures.append(
-                    executor.submit(
-                        _process_provider_for_host_listing,
-                        provider,
-                        agents_by_host,
-                        include_destroyed,
-                        results_lock,
-                        mng_ctx.concurrency_group,
-                    )
-                )
-
-        # Re-raise any thread exceptions
-        for future in futures:
-            future.result()
-
-        # Warn if any host names are duplicated within the same provider
-        _warn_on_duplicate_host_names(agents_by_host)
-
-        return (agents_by_host, providers)

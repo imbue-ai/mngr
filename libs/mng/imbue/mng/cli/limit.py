@@ -7,11 +7,11 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import AgentMatch
 from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.find import resolve_host_reference
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
@@ -207,7 +207,7 @@ def _apply_activity_config_to_host(
 
 def _build_host_references(mng_ctx: MngContext) -> list[DiscoveredHost]:
     """Build a deduplicated list of DiscoveredHosts from all known agents."""
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx, include_destroyed=False)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
     return list(agents_by_host.keys())
 
 

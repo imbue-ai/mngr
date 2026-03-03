@@ -22,9 +22,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.connect import connect_to_agent
 from imbue.mng.api.data_types import ConnectionOptions
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -416,7 +416,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--no-reconnect is not implemented yet")
 
     logger.info("Finding agent...")
-    agents_by_host, providers = load_all_agents_grouped_by_host(mng_ctx)
+    agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx)
 
     agent: AgentInterface
     host: OnlineHostInterface

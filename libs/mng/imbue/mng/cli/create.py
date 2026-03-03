@@ -27,12 +27,12 @@ from imbue.mng.api.create import create as api_create
 from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.data_types import SourceLocation
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import get_host_from_list_by_id
 from imbue.mng.api.find import get_unique_host_from_list_by_name
 from imbue.mng.api.find import resolve_source_location
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
@@ -111,7 +111,7 @@ class _CachedAgentHostLoader(MutableModel):
 
     def __call__(self) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         if self.cached_result is None:
-            self.cached_result = load_all_agents_grouped_by_host(self.mng_ctx)[0]
+            self.cached_result = discover_all_hosts_and_agents(self.mng_ctx)[0]
         return self.cached_result
 
 
