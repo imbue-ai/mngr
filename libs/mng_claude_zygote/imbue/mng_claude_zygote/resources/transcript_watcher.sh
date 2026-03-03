@@ -14,8 +14,8 @@
 #
 # The watcher uses an ID-based dedup strategy: each output event_id is
 # derived from the source event's uuid, so re-processing the same input
-# (which happens every 15s when claude_background_tasks.sh rewrites the
-# full file) never produces duplicate output.
+# never produces duplicate output. The input file is append-only (populated
+# by stream_transcript.sh via tail -f on session files).
 #
 # Usage: transcript_watcher.sh
 #
@@ -71,9 +71,8 @@ log_debug() {
 # Convert new Claude transcript events to the common format.
 #
 # Reads the full input file and the set of event_ids already in the output
-# file, then appends any new events whose IDs are not yet present. This
-# handles the fact that claude_background_tasks.sh rewrites the input file
-# from scratch every 15 seconds.
+# file, then appends any new events whose IDs are not yet present. The
+# ID-based dedup ensures correctness even if the input file is replayed.
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
