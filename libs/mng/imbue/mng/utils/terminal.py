@@ -1,3 +1,5 @@
+import math
+import re
 import sys
 from collections.abc import Callable
 from types import TracebackType
@@ -6,16 +8,50 @@ from typing import Final
 from typing import Self
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 
 ANSI_ERASE_LINE: Final[str] = "\r\x1b[K"
 ANSI_ERASE_TO_END: Final[str] = "\x1b[J"
 ANSI_DIM_GRAY: Final[str] = "\x1b[38;5;245m"
 ANSI_RESET: Final[str] = "\x1b[0m"
 
+_ANSI_ESCAPE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\r")
+
 
 def ansi_cursor_up(lines: int) -> str:
     """ANSI escape sequence to move the cursor up by the given number of lines."""
     return f"\x1b[{lines}A"
+
+
+@pure
+def ansi_visible_length(text: str) -> int:
+    """Return the visible length of text after stripping ANSI escape sequences."""
+    return len(_ANSI_ESCAPE_PATTERN.sub("", text))
+
+
+@pure
+def count_visual_lines(text: str, terminal_width: int) -> int:
+    """Count the number of visual lines text occupies at a given terminal width.
+
+    Splits on newlines, computes ceil(visible_chars / terminal_width) per segment
+    (minimum 1 per segment), and subtracts 1 if text ends with a trailing newline
+    (the trailing newline moves the cursor but does not add a visual line).
+    """
+    if not text:
+        return 0
+
+    segments = text.split("\n")
+    total = 0
+    for segment in segments:
+        visible_length = ansi_visible_length(segment)
+        total += max(math.ceil(visible_length / terminal_width), 1) if terminal_width > 0 else 1
+
+    # A trailing newline moves the cursor to the next line but does not itself
+    # occupy a visual line (the next content will start there).
+    if text.endswith("\n"):
+        total -= 1
+
+    return total
 
 
 class StderrInterceptor(MutableModel):

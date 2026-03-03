@@ -1,6 +1,7 @@
 """Tests for CLI list command helpers."""
 
 import json
+import re
 import threading
 from collections.abc import Callable
 from datetime import datetime
@@ -37,6 +38,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
+from imbue.mng.utils.terminal import count_visual_lines
 
 
 def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:
@@ -1585,3 +1587,212 @@ def test_list_command_human_streaming_with_agents(
     assert result.exit_code == 0
     assert "stream-agent" in result.output
     assert "NAME" in result.output
+
+
+# =============================================================================
+# Tests for visual line counting in streaming renderer (wrapping and resize)
+# =============================================================================
+
+
+def test_streaming_renderer_long_warning_uses_visual_line_count() -> None:
+    """A warning wider than terminal should use visual (wrapped) line count for cursor-up."""
+    captured = StringIO()
+    renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
+    renderer.start()
+    renderer(make_test_agent_info(name="agent-1"))
+
+    # Emit a warning that is 200 chars wide (at default 120-col terminal this wraps)
+    long_warning = "W" * 200 + "\n"
+    renderer.emit_warning(long_warning)
+    renderer(make_test_agent_info(name="agent-2"))
+    renderer.finish()
+
+    output = captured.getvalue()
+    # agent-2 should appear in the output (not overwritten by incorrect cursor-up)
+    assert "agent-2" in output
+    # Warning should be re-written after agent-2 (pinned to bottom)
+    assert output.rfind("W" * 200) > output.rfind("agent-2")
+
+
+def test_streaming_renderer_stores_agents_for_redraw() -> None:
+    """Renderer should store all agents for potential re-rendering on resize."""
+    captured = StringIO()
+    renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
+    renderer.start()
+    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_info(name="agent-2"))
+
+    assert len(renderer._agents) == 2
+
+
+class _ControllableTerminalSize:
+    """Controllable terminal size for tests."""
+
+    def __init__(self, initial_columns: int, initial_lines: int) -> None:
+        self._columns = initial_columns
+        self._lines = initial_lines
+
+    def resize(self, columns: int, lines: int) -> None:
+        self._columns = columns
+        self._lines = lines
+
+    def __call__(self) -> tuple[int, int]:
+        return (self._columns, self._lines)
+
+
+def _create_streaming_renderer_with_fake_size(
+    fields: list[str],
+    is_tty: bool,
+    output: StringIO,
+    fake_size: _ControllableTerminalSize,
+) -> _StreamingHumanRenderer:
+    """Create a streaming renderer with an injectable terminal size function."""
+    renderer = _StreamingHumanRenderer(fields=fields, is_tty=is_tty, output=output)
+    renderer._get_terminal_size_fn = fake_size
+    return renderer
+
+
+def test_streaming_renderer_resize_triggers_full_redraw() -> None:
+    """Simulated terminal resize should trigger a full redraw with new column widths."""
+    captured = StringIO()
+    fake_size = _ControllableTerminalSize(120, 24)
+    renderer = _create_streaming_renderer_with_fake_size(
+        fields=["name", "state"], is_tty=True, output=captured, fake_size=fake_size
+    )
+
+    renderer.start()
+    renderer(make_test_agent_info(name="agent-1"))
+
+    # Resize the terminal before next agent
+    fake_size.resize(80, 24)
+    renderer(make_test_agent_info(name="agent-2"))
+    renderer(make_test_agent_info(name="agent-3"))
+    renderer.finish()
+
+    output = captured.getvalue()
+    # All agents should be present in the output after redraw
+    assert "agent-1" in output
+    assert "agent-2" in output
+    assert "agent-3" in output
+    # After resize, column widths should be recomputed (renderer state updated)
+    assert renderer._terminal_width == 80
+
+
+def test_streaming_renderer_resize_with_warnings() -> None:
+    """Resize with existing warnings should redraw everything including warnings."""
+    captured = StringIO()
+    fake_size = _ControllableTerminalSize(120, 24)
+    renderer = _create_streaming_renderer_with_fake_size(
+        fields=["name"], is_tty=True, output=captured, fake_size=fake_size
+    )
+
+    renderer.start()
+    renderer(make_test_agent_info(name="agent-1"))
+
+    # Resize before emitting warning
+    fake_size.resize(80, 24)
+    renderer.emit_warning("WARNING: test warning\n")
+    renderer(make_test_agent_info(name="agent-2"))
+    renderer.finish()
+
+    output = captured.getvalue()
+    assert "agent-1" in output
+    assert "agent-2" in output
+    assert "WARNING: test warning" in output
+
+
+def test_streaming_renderer_resize_narrow_to_wide_uses_cr_before_erase() -> None:
+    r"""Resize from narrow to wide must use \r before erase to start at column 0.
+
+    cursor_up preserves the column position from the status line. Without \r,
+    erase-to-end and new content start mid-line, garbling old and new content
+    on the same line. With \r, the worst case on non-reflowing terminals is
+    stale lines above, not mid-line corruption.
+
+    The cursor_up distance uses new-width (correct for reflowing terminals).
+    """
+    captured = StringIO()
+    narrow = 40
+    wide = 120
+    fields = ["name", "state", "host.name", "host.provider_name", "host.state", "labels"]
+    fake_size = _ControllableTerminalSize(narrow, 24)
+    renderer = _create_streaming_renderer_with_fake_size(
+        fields=fields, is_tty=True, output=captured, fake_size=fake_size
+    )
+    renderer.start()
+
+    # Write agents at narrow width -- header + rows will wrap (6 fields at 40 cols)
+    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_info(name="agent-2"))
+
+    # Verify content actually wraps at narrow vs wide width
+    old_widths = renderer._column_widths
+    header_text = _format_streaming_header_row(fields, old_widths) + "\n"
+    row1_text = _format_streaming_agent_row(make_test_agent_info(name="agent-1"), fields, old_widths) + "\n"
+    row2_text = _format_streaming_agent_row(make_test_agent_info(name="agent-2"), fields, old_widths) + "\n"
+    old_visual = (
+        count_visual_lines(header_text, narrow)
+        + count_visual_lines(row1_text, narrow)
+        + count_visual_lines(row2_text, narrow)
+    )
+    new_visual = (
+        count_visual_lines(header_text, wide)
+        + count_visual_lines(row1_text, wide)
+        + count_visual_lines(row2_text, wide)
+    )
+    assert old_visual > new_visual, f"Test setup: expected wrapping at width {narrow}"
+
+    # Resize wider and add another agent (triggers full redraw)
+    fake_size.resize(wide, 24)
+    renderer(make_test_agent_info(name="agent-3"))
+
+    output = captured.getvalue()
+
+    # cursor_up should use new-width line count (correct for reflowing terminals)
+    cursor_ups = [int(m.group(1)) for m in re.finditer(r"\x1b\[(\d+)A", output)]
+    assert len(cursor_ups) > 0, "Expected at least one cursor_up in output"
+    redraw_cursor_up = cursor_ups[-1]
+    assert redraw_cursor_up == new_visual, (
+        f"Expected cursor_up({new_visual}) for new-width line count, got cursor_up({redraw_cursor_up})"
+    )
+
+    # \r must appear between cursor_up and erase-to-end to reset column to 0
+    assert f"\x1b[{redraw_cursor_up}A\r\x1b[J" in output
+
+
+def test_streaming_renderer_resize_cursor_up_not_off_by_one() -> None:
+    """The cursor_up during full redraw should not overshoot by 1.
+
+    The cursor sits ON the status line. To reach the header (first content line),
+    cursor_up needs exactly content_visual_lines (distance from status to header),
+    not content_visual_lines + 1.
+    """
+    captured = StringIO()
+    fake_size = _ControllableTerminalSize(120, 50)
+    renderer = _create_streaming_renderer_with_fake_size(
+        fields=["name"], is_tty=True, output=captured, fake_size=fake_size
+    )
+    renderer.start()
+
+    # Write one agent -- at 120-col with one field, header + row are each 1 visual line
+    renderer(make_test_agent_info(name="agent-1"))
+
+    old_widths = renderer._column_widths
+    header_text = _format_streaming_header_row(["name"], old_widths) + "\n"
+    row_text = _format_streaming_agent_row(make_test_agent_info(name="agent-1"), ["name"], old_widths) + "\n"
+    content_lines = count_visual_lines(header_text, 120) + count_visual_lines(row_text, 120)
+    # With 1 field at 120 cols, header + 1 row = 2 visual lines
+    assert content_lines == 2
+
+    # Trigger a resize (same principle, different width) to exercise _full_redraw
+    fake_size.resize(80, 50)
+    renderer(make_test_agent_info(name="agent-2"))
+
+    output = captured.getvalue()
+    cursor_ups = [int(m.group(1)) for m in re.finditer(r"\x1b\[(\d+)A", output)]
+    # The redraw cursor_up: cursor is on status line, content is 2 visual lines above.
+    # Correct distance = content_lines (2), not content_lines + 1 (3).
+    redraw_cursor_up = cursor_ups[-1]
+    assert redraw_cursor_up == content_lines, (
+        f"Expected cursor_up({content_lines}) but got cursor_up({redraw_cursor_up}); off-by-one in _full_redraw"
+    )
