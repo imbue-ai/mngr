@@ -225,7 +225,6 @@ You can interact with `mng` via the terminal (run `mng --help` to learn more).
 `mng` uses robust open source tools like SSH, git, and tmux to run and manage your agents:
 
 - **[agents](libs/mng/docs/concepts/agents.md)** are simply processes that run in [tmux](https://github.com/tmux/tmux/wiki) sessions, each with their own `work_dir` (working folder) and configuration (ex: secrets, environment variables, etc)
-<!-- - [agents](libs/mng/docs/concepts/agents.md) usually expose URLs so you can access them from the web [future: mng open] -->
 - [agents](libs/mng/docs/concepts/agents.md) run on **[hosts](libs/mng/docs/concepts/hosts.md)**--either locally (by default), or special environments like [Modal](https://modal.com) [Sandboxes](https://modal.com/docs/guide/sandboxes) (`--in modal`) or [Docker](https://www.docker.com) [containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/) (`--in docker`).  Use `--host <name>` to target an existing host.
 - multiple [agents](libs/mng/docs/concepts/agents.md) can share a single [host](libs/mng/docs/concepts/hosts.md).
 - [hosts](libs/mng/docs/concepts/hosts.md) come from **[providers](libs/mng/docs/concepts/providers.md)** (ex: Modal, AWS, docker, etc)
