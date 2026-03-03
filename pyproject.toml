@@ -138,12 +138,14 @@ omit = [
     "*/conftest.py",
     # Test utility modules contain helpers only used by tests
     "*/utils/testing.py",
+    "*/utils/plugin_testing.py",
     "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
     # Modal provider requires network access for testing
     "libs/mng/imbue/mng/providers/modal/*",
     # Docker provider requires a Docker daemon for testing
     "libs/mng/imbue/mng/providers/docker/instance.py",
     "libs/mng/imbue/mng/providers/docker/volume.py",
+    "libs/mng/imbue/mng/providers/docker/testing.py",
     # Changeling deploy modules run on Modal and require infrastructure to test
     "apps/changelings/imbue/changelings/deploy/cron_runner.py",
     "apps/changelings/imbue/changelings/deploy/remote_runner.py",

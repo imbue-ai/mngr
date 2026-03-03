@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from imbue.mng.cli.create import create
 from imbue.mng.cli.provision import provision
 from imbue.mng.cli.stop import stop
-from imbue.mng.conftest import ModalSubprocessTestEnv
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import run_mng_subprocess

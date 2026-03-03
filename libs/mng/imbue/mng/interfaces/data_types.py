@@ -37,7 +37,6 @@ from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
 
 # Canonical mapping from IdleMode to the activity sources it enables.
-# hosts/common.py delegates to this mapping via get_activity_sources_for_idle_mode().
 ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]] = {
     IdleMode.IO: (
         ActivitySource.USER,
@@ -83,6 +82,11 @@ ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]]
 IDLE_MODE_BY_ACTIVITY_SOURCES: Final[dict[frozenset[ActivitySource], IdleMode]] = {
     frozenset(sources): mode for mode, sources in ACTIVITY_SOURCES_BY_IDLE_MODE.items()
 }
+
+
+def get_activity_sources_for_idle_mode(idle_mode: IdleMode) -> tuple[ActivitySource, ...]:
+    """Get the activity sources that should be monitored for a given idle mode."""
+    return ACTIVITY_SOURCES_BY_IDLE_MODE[idle_mode]
 
 
 def get_idle_mode_for_activity_sources(activity_sources: tuple[ActivitySource, ...]) -> IdleMode:
