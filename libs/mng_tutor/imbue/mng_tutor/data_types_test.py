@@ -6,6 +6,7 @@ from imbue.mng_tutor.data_types import AgentNotExistsCheck
 from imbue.mng_tutor.data_types import FileExistsInAgentWorkDirCheck
 from imbue.mng_tutor.data_types import Lesson
 from imbue.mng_tutor.data_types import LessonStep
+from imbue.mng_tutor.data_types import TmuxSessionHasClientsCheck
 
 
 def test_agent_exists_check_construction() -> None:
@@ -46,6 +47,12 @@ def test_file_exists_check_construction() -> None:
     assert check.check_type == "file_exists_in_work_dir"
     assert check.agent_name == AgentName("test-agent")
     assert check.file_path == "hello.txt"
+
+
+def test_tmux_session_has_clients_check_construction() -> None:
+    check = TmuxSessionHasClientsCheck(agent_name=AgentName("test-agent"))
+    assert check.check_type == "tmux_session_has_clients"
+    assert check.agent_name == AgentName("test-agent")
 
 
 def test_lesson_step_with_agent_exists_check() -> None:
