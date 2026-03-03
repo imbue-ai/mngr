@@ -129,7 +129,7 @@ install_uv() {
 
 info "Detected OS: ${OS}"
 
-# macOS ships /bin/bash 3.2 which lacks features mng scripts need (declare -A).
+# macOS ships /bin/bash 3.2 which lacks features mng scripts need.
 # `command -v bash` always succeeds, so find_missing won't detect this. We check
 # the version explicitly and force-add bash to the missing arrays if too old.
 _NEED_MODERN_BASH=false
