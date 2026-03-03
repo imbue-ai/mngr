@@ -78,15 +78,15 @@ mng create my-task --in modal --edit-message
 ## SPECIFYING DATA FOR THE AGENT
 
 # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
-mng create my-task --context /path/to/some/other/project
+mng create my-task --source-path /path/to/some/other/project
 
 # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
 mng create my-task --project my-project
 
-# mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as context.
+# mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mng create my-task --context /tmp/my_random_folder --agent-command python -- script.py
+mng create my-task --source-path /tmp/my_random_folder --agent-command python -- script.py
 
 # however, if you do use git, mng makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
