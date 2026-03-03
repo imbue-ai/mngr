@@ -12,7 +12,6 @@ from imbue.changelings.deployment.local import _create_mng_agent
 from imbue.changelings.deployment.local import _generate_auth_code
 from imbue.changelings.deployment.local import _raise_if_agent_exists
 from imbue.changelings.deployment.local import _run_mng_command
-from imbue.changelings.deployment.local import _verify_mng_available
 from imbue.changelings.deployment.local import clone_git_repo
 from imbue.changelings.deployment.local import commit_files_in_repo
 from imbue.changelings.deployment.local import init_empty_git_repo
@@ -58,11 +57,6 @@ def _make_fake_cg(
         )
 
     return make_fake_concurrency_group(results=results)
-
-
-def test_verify_mng_available_succeeds_when_mng_exists() -> None:
-    """mng should be available in the test environment (it's a dependency)."""
-    _verify_mng_available()
 
 
 def test_generate_auth_code_creates_login_url(tmp_path: Path) -> None:

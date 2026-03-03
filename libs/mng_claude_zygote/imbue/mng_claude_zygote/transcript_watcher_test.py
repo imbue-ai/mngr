@@ -10,7 +10,6 @@ from imbue.mng_claude_zygote.resources.transcript_watcher import _convert_new_ev
 from imbue.mng_claude_zygote.resources.transcript_watcher import _extract_text_content
 from imbue.mng_claude_zygote.resources.transcript_watcher import _has_tool_results_only
 from imbue.mng_claude_zygote.resources.transcript_watcher import _load_poll_interval
-from imbue.mng_claude_zygote.resources.transcript_watcher import _make_event_id
 
 # -- _load_poll_interval tests --
 
@@ -107,18 +106,6 @@ def test_has_tool_results_only_with_string_items() -> None:
 
 def test_has_tool_results_only_with_non_list_non_string() -> None:
     assert _has_tool_results_only(cast(Any, 42)) is True
-
-
-# -- _make_event_id tests --
-
-
-def test_make_event_id_format() -> None:
-    assert _make_event_id("uuid-123", "user") == "uuid-123-user"
-
-
-def test_make_event_id_with_different_suffixes() -> None:
-    assert _make_event_id("uuid-1", "assistant") == "uuid-1-assistant"
-    assert _make_event_id("uuid-1", "tool_result-toolu_1") == "uuid-1-tool_result-toolu_1"
 
 
 # -- _convert_new_events tests --

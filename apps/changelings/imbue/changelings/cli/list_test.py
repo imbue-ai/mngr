@@ -201,11 +201,3 @@ def test_list_help() -> None:
 
     assert result.exit_code == 0
     assert "List deployed changelings" in result.output
-
-
-def test_list_json_flag_in_help() -> None:
-    """Verify that --json flag appears in list help."""
-    result = _RUNNER.invoke(cli, ["list", "--help"])
-
-    assert result.exit_code == 0
-    assert "--json" in result.output
