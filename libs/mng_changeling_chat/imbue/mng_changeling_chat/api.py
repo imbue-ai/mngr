@@ -217,13 +217,13 @@ def list_conversations_on_agent(
     )
 
     if not result.success:
-        logger.debug("Failed to list conversations: {}", result.stderr)
+        logger.warning("Failed to list conversations: {}", result.stderr)
         return []
 
     try:
         raw_conversations = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
-        logger.debug("Failed to parse conversation list output: {}", result.stdout)
+        logger.warning("Failed to parse conversation list output: {}", result.stdout)
         return []
 
     return [ConversationInfo.model_validate(conv) for conv in raw_conversations]
