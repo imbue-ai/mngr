@@ -21,8 +21,8 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discover import _warn_on_duplicate_host_names
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.completion_writer import write_agent_names_cache
@@ -314,7 +314,7 @@ def _discover_and_emit_details_for_provider(
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
 
         # Warn if any host names are duplicated within this provider
-        _warn_on_duplicate_host_names(provider_results)
+        warn_on_duplicate_host_names(provider_results)
 
         # Phase 2: immediately process hosts (fire on_agent for this provider)
         host_futures: list[Future[None]] = []
@@ -545,7 +545,7 @@ def _collect_and_emit_details_for_host(
     for agent_ref in agent_refs:
         try:
             agent_details: AgentDetails | None = None
-            if agents is not None:
+            if agents is not None and isinstance(host, OnlineHostInterface):
                 # Find the agent in the list for running hosts
                 agent = next((a for a in (agents or []) if a.id == agent_ref.agent_id), None)
 

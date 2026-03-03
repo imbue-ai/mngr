@@ -17,7 +17,7 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
 
 
-def _warn_on_duplicate_host_names(
+def warn_on_duplicate_host_names(
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
 ) -> None:
     """Emit a warning if any host names are duplicated within the same provider.
@@ -105,6 +105,6 @@ def discover_all_hosts_and_agents(
             future.result()
 
         # Warn if any host names are duplicated within the same provider
-        _warn_on_duplicate_host_names(agents_by_host)
+        warn_on_duplicate_host_names(agents_by_host)
 
         return (agents_by_host, providers)
