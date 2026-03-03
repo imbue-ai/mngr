@@ -1,6 +1,19 @@
 """Unit tests for environment utilities."""
 
+import pytest
+
+from imbue.mng.utils.env_utils import parse_bool_env
 from imbue.mng.utils.env_utils import parse_env_file
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", "yes", "Yes", "YES"])
+def test_parse_bool_env_truthy(value: str) -> None:
+    assert parse_bool_env(value) is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "False", "no", "No", "anything", "2"])
+def test_parse_bool_env_falsy(value: str) -> None:
+    assert parse_bool_env(value) is False
 
 
 def test_parse_env_file_simple() -> None:

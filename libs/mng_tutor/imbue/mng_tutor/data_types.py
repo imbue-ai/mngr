@@ -39,8 +39,19 @@ class FileExistsInAgentWorkDirCheck(FrozenModel):
     file_path: str = Field(description="Relative path within the agent's work_dir")
 
 
+class TmuxSessionHasClientsCheck(FrozenModel):
+    """Check that an agent's tmux session has at least one attached client."""
+
+    check_type: Literal["tmux_session_has_clients"] = "tmux_session_has_clients"
+    agent_name: AgentName = Field(description="Name of the agent whose tmux session to check")
+
+
 StepCheck = Annotated[
-    AgentExistsCheck | AgentNotExistsCheck | AgentInStateCheck | FileExistsInAgentWorkDirCheck,
+    AgentExistsCheck
+    | AgentNotExistsCheck
+    | AgentInStateCheck
+    | FileExistsInAgentWorkDirCheck
+    | TmuxSessionHasClientsCheck,
     Discriminator("check_type"),
 ]
 
