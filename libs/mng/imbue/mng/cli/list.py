@@ -2,16 +2,12 @@ import re
 import shutil
 import string
 import sys
-import types
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
 from threading import Lock
 from typing import Any
 from typing import Final
-from typing import Union
-from typing import get_args
-from typing import get_origin
 
 import click
 from click_option_group import optgroup
@@ -20,7 +16,6 @@ from pydantic import BaseModel
 from pydantic import PrivateAttr
 from tabulate import tabulate
 
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.list import ErrorInfo
@@ -42,6 +37,8 @@ from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.model_field_utils import InvalidFieldPathError
+from imbue.mng.utils.model_field_utils import validate_field_path
 from imbue.mng.utils.terminal import ANSI_DIM_GRAY
 from imbue.mng.utils.terminal import ANSI_ERASE_LINE
 from imbue.mng.utils.terminal import ANSI_ERASE_TO_END
@@ -933,74 +930,12 @@ def _format_value_as_string(value: Any) -> str:
         return str(value)
 
 
-@pure
-def _resolve_model_type(annotation: Any) -> type[BaseModel] | None:
-    """Extract a BaseModel subclass from a type annotation, unwrapping Optional/list/tuple."""
-    origin = get_origin(annotation)
-
-    # Handle X | None (Optional types)
-    if origin is types.UnionType or origin is Union:
-        args = get_args(annotation)
-        if len(args) != 2 or type(None) not in args:
-            raise SwitchError(f"Cannot resolve non-optional union type: {annotation}")
-        inner = args[0] if args[1] is type(None) else args[1]
-        return _resolve_model_type(inner)
-
-    # Handle list[X]
-    elif origin is list:
-        args = get_args(annotation)
-        if not args or len(args) != 1:
-            raise SwitchError(f"Expected list[X], got: {annotation}")
-        return _resolve_model_type(args[0])
-
-    # Handle tuple[X, ...] (homogeneous variable-length tuples)
-    elif origin is tuple:
-        args = get_args(annotation)
-        if len(args) != 2 or args[1] is not Ellipsis:
-            raise SwitchError(f"Expected tuple[X, ...], got: {annotation}")
-        return _resolve_model_type(args[0])
-
-    # Handle dict[K, V] -- dynamic keys, stop validation
-    elif origin is dict:
-        return None
-
-    # No generic origin -- either a direct model class or a primitive type
-    elif origin is None:
-        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            return annotation
-        return None
-
-    else:
-        raise SwitchError(f"Unhandled annotation origin: {origin} (from annotation {annotation})")
-
-
-@pure
 def _validate_sort_field(sort_field: str) -> None:
-    """Validate that the sort field refers to known fields by walking the model type hierarchy.
-
-    Raises click.BadParameter if the field is not recognized.
-    """
-    parts = sort_field.split(".")
-    current_model: type[BaseModel] = AgentInfo
-
-    for part in parts:
-        field_name = part.split("[")[0]
-
-        if field_name not in current_model.model_fields:
-            raise click.BadParameter(
-                f"Unknown sort field: '{sort_field}'. "
-                f"'{field_name}' is not a valid field. "
-                f"Valid fields at this level: {', '.join(sorted(current_model.model_fields.keys()))}",
-                param_hint="--sort",
-            )
-
-        # Resolve the type of this field to check deeper levels
-        field_info = current_model.model_fields[field_name]
-        next_model = _resolve_model_type(field_info.annotation)
-        if next_model is None:
-            # Reached a primitive, dict, or non-model type -- can't validate further
-            return
-        current_model = next_model
+    """Validate the --sort field and raise click.BadParameter if invalid."""
+    try:
+        validate_field_path(model=AgentInfo, field_path=sort_field)
+    except InvalidFieldPathError as e:
+        raise click.BadParameter(str(e), param_hint="--sort") from None
 
 
 # Pattern to match a field part with optional bracket notation

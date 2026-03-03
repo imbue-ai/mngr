@@ -8,12 +8,10 @@ from datetime import timezone
 from io import StringIO
 from typing import Any
 
-import click
 import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.imbue_common.errors import SwitchError
 from imbue.mng.api.list import ListResult
 from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.cli.list import _StreamingHumanRenderer
@@ -29,10 +27,8 @@ from imbue.mng.cli.list import _get_sortable_value
 from imbue.mng.cli.list import _is_streaming_eligible
 from imbue.mng.cli.list import _parse_slice_spec
 from imbue.mng.cli.list import _render_format_template
-from imbue.mng.cli.list import _resolve_model_type
 from imbue.mng.cli.list import _should_use_streaming_mode
 from imbue.mng.cli.list import _sort_agents
-from imbue.mng.cli.list import _validate_sort_field
 from imbue.mng.cli.list import list_command
 from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.interfaces.data_types import SnapshotInfo
@@ -566,71 +562,6 @@ def test_sort_agents_by_name_descending() -> None:
     ]
     result = _sort_agents(agents, "name", reverse=True)
     assert [str(a.name) for a in result] == ["charlie", "bravo", "alpha"]
-
-
-# =============================================================================
-# Tests for _validate_sort_field
-# =============================================================================
-
-
-def test_validate_sort_field_accepts_valid_top_level_field() -> None:
-    """_validate_sort_field should accept known AgentInfo fields."""
-    _validate_sort_field("name")
-    _validate_sort_field("state")
-    _validate_sort_field("create_time")
-
-
-def test_validate_sort_field_accepts_valid_host_field() -> None:
-    """_validate_sort_field should accept known HostInfo fields."""
-    _validate_sort_field("host.name")
-    _validate_sort_field("host.state")
-    _validate_sort_field("host.provider_name")
-
-
-def test_validate_sort_field_accepts_dict_subkeys() -> None:
-    """_validate_sort_field should accept arbitrary sub-keys on dict-typed fields."""
-    _validate_sort_field("labels.project")
-    _validate_sort_field("plugin.chat_history.messages")
-    _validate_sort_field("host.tags.env")
-    _validate_sort_field("host.plugin.aws.iam_user")
-
-
-def test_validate_sort_field_rejects_unknown_top_level_field() -> None:
-    """_validate_sort_field should raise for unknown top-level fields."""
-    with pytest.raises(click.BadParameter, match="Unknown sort field"):
-        _validate_sort_field("akldfsdkfjdklfj")
-
-
-def test_validate_sort_field_rejects_unknown_host_field() -> None:
-    """_validate_sort_field should raise for unknown host sub-fields."""
-    with pytest.raises(click.BadParameter, match="'nonexistent_field' is not a valid field"):
-        _validate_sort_field("host.nonexistent_field")
-
-
-def test_validate_sort_field_accepts_deep_host_fields() -> None:
-    """_validate_sort_field should accept deeper nesting under known host fields."""
-    _validate_sort_field("host.resource.cpu.count")
-    _validate_sort_field("host.ssh.host")
-
-
-def test_validate_sort_field_rejects_unknown_deep_field() -> None:
-    """_validate_sort_field should reject invalid fields at any nesting depth."""
-    with pytest.raises(click.BadParameter, match="'nonexistent' is not a valid field"):
-        _validate_sort_field("host.resource.nonexistent")
-    with pytest.raises(click.BadParameter, match="'bogus' is not a valid field"):
-        _validate_sort_field("host.resource.cpu.bogus")
-
-
-def test_resolve_model_type_raises_on_non_optional_union() -> None:
-    """_resolve_model_type should raise SwitchError for unions that are not X | None."""
-    with pytest.raises(SwitchError, match="Cannot resolve non-optional union"):
-        _resolve_model_type(str | int)
-
-
-def test_resolve_model_type_raises_on_fixed_length_tuple() -> None:
-    """_resolve_model_type should raise SwitchError for tuple[X, Y] (not tuple[X, ...])."""
-    with pytest.raises(SwitchError, match="Expected tuple"):
-        _resolve_model_type(tuple[str, int])
 
 
 # =============================================================================
@@ -1649,7 +1580,7 @@ def test_list_command_rejects_invalid_sort_field(
     )
 
     assert result.exit_code != 0
-    assert "Unknown sort field" in result.output
+    assert "Unknown field path" in result.output
 
 
 def test_list_command_rejects_invalid_host_sort_field(
@@ -1668,7 +1599,7 @@ def test_list_command_rejects_invalid_host_sort_field(
     )
 
     assert result.exit_code != 0
-    assert "Unknown sort field" in result.output
+    assert "Unknown field path" in result.output
     assert "'nonexistent' is not a valid field" in result.output
 
 
