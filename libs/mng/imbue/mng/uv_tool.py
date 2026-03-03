@@ -31,6 +31,13 @@ class ToolRequirement(FrozenModel):
     git: str | None = Field(default=None, description="Git URL")
 
 
+class ToolReceipt(FrozenModel):
+    """Parsed uv-receipt.toml split into the base mng requirement and extras."""
+
+    base: ToolRequirement = Field(description="The base mng requirement (positional arg to uv tool install)")
+    extras: list[ToolRequirement] = Field(description="Additional --with / --with-editable dependencies")
+
+
 @pure
 def _requirement_to_with_arg(req: ToolRequirement) -> tuple[str, str]:
     """Convert a requirement to a (flag, value) pair for ``uv tool install``.
@@ -76,37 +83,23 @@ def require_uv_tool_receipt() -> Path:
     return receipt
 
 
-def read_receipt_requirements(receipt_path: Path) -> list[ToolRequirement]:
-    """Parse the requirements list from a uv-receipt.toml file."""
+def read_receipt(receipt_path: Path) -> ToolReceipt:
+    """Parse a uv-receipt.toml into a base requirement and extras."""
     with receipt_path.open("rb") as f:
         data = tomllib.load(f)
 
     raw_reqs: list[dict[str, Any]] = data.get("tool", {}).get("requirements", [])
-    return [ToolRequirement(**r) for r in raw_reqs]
+    requirements = [ToolRequirement(**r) for r in raw_reqs]
 
-
-@pure
-def get_base_requirement(requirements: list[ToolRequirement]) -> ToolRequirement:
-    """Return the base ``mng`` requirement from the list.
-
-    The base requirement is the one that ``uv tool install`` was originally
-    called with (i.e. the positional argument).  It is always the first
-    entry in the receipt and has name ``mng``.
-    """
+    base = ToolRequirement(name="mng")
     for req in requirements:
         if req.name == "mng":
-            return req
-    # If there's no mng entry the receipt is corrupt; fall back to plain "mng".
-    return ToolRequirement(name="mng")
+            base = req
+            break
 
+    extras = [r for r in requirements if r.name != "mng"]
 
-@pure
-def get_extra_requirements(requirements: list[ToolRequirement]) -> list[ToolRequirement]:
-    """Return all requirements except the base ``mng`` requirement.
-
-    These are the ``--with`` / ``--with-editable`` dependencies.
-    """
-    return [r for r in requirements if r.name != "mng"]
+    return ToolReceipt(base=base, extras=extras)
 
 
 @pure
@@ -121,7 +114,7 @@ def build_base_specifier(base: ToolRequirement) -> str:
 
 
 @pure
-def build_uv_tool_install_command(
+def _build_uv_tool_install_command(
     base: ToolRequirement,
     extras: list[ToolRequirement],
 ) -> tuple[str, ...]:
@@ -138,22 +131,20 @@ def build_uv_tool_install_command(
 
 @pure
 def build_uv_tool_install_add(
-    base: ToolRequirement,
-    existing_extras: list[ToolRequirement],
+    receipt: ToolReceipt,
     new_specifier: str,
 ) -> tuple[str, ...]:
     """Build a ``uv tool install`` command that adds a PyPI dependency.
 
     Preserves all existing extras and appends the new one.
     """
-    all_extras = list(existing_extras) + [ToolRequirement(name=new_specifier)]
-    return build_uv_tool_install_command(base, all_extras)
+    all_extras = list(receipt.extras) + [ToolRequirement(name=new_specifier)]
+    return _build_uv_tool_install_command(receipt.base, all_extras)
 
 
 @pure
 def build_uv_tool_install_add_path(
-    base: ToolRequirement,
-    existing_extras: list[ToolRequirement],
+    receipt: ToolReceipt,
     local_path: str,
     package_name: str,
 ) -> tuple[str, ...]:
@@ -162,14 +153,13 @@ def build_uv_tool_install_add_path(
     Preserves all existing extras and appends the new editable one.
     """
     new_req = ToolRequirement(name=package_name, editable=local_path)
-    all_extras = list(existing_extras) + [new_req]
-    return build_uv_tool_install_command(base, all_extras)
+    all_extras = list(receipt.extras) + [new_req]
+    return _build_uv_tool_install_command(receipt.base, all_extras)
 
 
 @pure
 def build_uv_tool_install_add_git(
-    base: ToolRequirement,
-    existing_extras: list[ToolRequirement],
+    receipt: ToolReceipt,
     url: str,
 ) -> tuple[str, ...]:
     """Build a ``uv tool install`` command that adds a git dependency.
@@ -181,19 +171,18 @@ def build_uv_tool_install_add_git(
     # URL as the --with argument directly in PEP 508 format.
     git_url = url if url.startswith("git+") else f"git+{url}"
     new_req = ToolRequirement(name=git_url)
-    all_extras = list(existing_extras) + [new_req]
-    return build_uv_tool_install_command(base, all_extras)
+    all_extras = list(receipt.extras) + [new_req]
+    return _build_uv_tool_install_command(receipt.base, all_extras)
 
 
 @pure
 def build_uv_tool_install_remove(
-    base: ToolRequirement,
-    existing_extras: list[ToolRequirement],
+    receipt: ToolReceipt,
     package_name: str,
 ) -> tuple[str, ...]:
     """Build a ``uv tool install`` command that removes a dependency.
 
     Rebuilds with all extras *except* the one matching ``package_name``.
     """
-    filtered = [r for r in existing_extras if r.name != package_name]
-    return build_uv_tool_install_command(base, filtered)
+    filtered = [r for r in receipt.extras if r.name != package_name]
+    return _build_uv_tool_install_command(receipt.base, filtered)

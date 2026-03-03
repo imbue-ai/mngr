@@ -44,9 +44,7 @@ from imbue.mng.uv_tool import build_uv_tool_install_add
 from imbue.mng.uv_tool import build_uv_tool_install_add_git
 from imbue.mng.uv_tool import build_uv_tool_install_add_path
 from imbue.mng.uv_tool import build_uv_tool_install_remove
-from imbue.mng.uv_tool import get_base_requirement
-from imbue.mng.uv_tool import get_extra_requirements
-from imbue.mng.uv_tool import read_receipt_requirements
+from imbue.mng.uv_tool import read_receipt
 from imbue.mng.uv_tool import require_uv_tool_receipt
 
 # Default fields to display
@@ -498,9 +496,7 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     source = _parse_add_source(opts)
 
     receipt_path = require_uv_tool_receipt()
-    requirements = read_receipt_requirements(receipt_path)
-    base = get_base_requirement(requirements)
-    extras = get_extra_requirements(requirements)
+    receipt = read_receipt(receipt_path)
 
     # Build the uv tool install command and determine the display specifier
     match source:
@@ -512,13 +508,13 @@ def _plugin_add_impl(ctx: click.Context) -> None:
             except PluginSpecifierError:
                 logger.debug("Could not read package name from pyproject.toml at '{}', using raw path", path)
                 package_name = path
-            command = build_uv_tool_install_add_path(base, extras, resolved_path, package_name)
+            command = build_uv_tool_install_add_path(receipt, resolved_path, package_name)
         case _GitSource(url=url):
             specifier = url
-            command = build_uv_tool_install_add_git(base, extras, url)
+            command = build_uv_tool_install_add_git(receipt, url)
         case _PypiSource(name=name):
             specifier = name
-            command = build_uv_tool_install_add(base, extras, name)
+            command = build_uv_tool_install_add(receipt, name)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -567,9 +563,7 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
     source = _parse_remove_source(opts)
 
     receipt_path = require_uv_tool_receipt()
-    requirements = read_receipt_requirements(receipt_path)
-    base = get_base_requirement(requirements)
-    extras = get_extra_requirements(requirements)
+    receipt = read_receipt(receipt_path)
 
     match source:
         case _PathSource(path=path):
@@ -584,11 +578,11 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
             assert_never(unreachable)
 
     # Verify the package is actually a dependency before trying to remove
-    extra_names = {r.name for r in extras}
+    extra_names = {r.name for r in receipt.extras}
     if package_name not in extra_names:
         raise AbortError(f"Package '{package_name}' is not installed as a plugin")
 
-    command = build_uv_tool_install_remove(base, extras, package_name)
+    command = build_uv_tool_install_remove(receipt, package_name)
 
     with log_span("Removing plugin package '{}'", package_name):
         try:

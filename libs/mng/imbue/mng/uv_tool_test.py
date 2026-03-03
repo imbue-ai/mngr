@@ -3,18 +3,17 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.cli.output_helpers import AbortError
+from imbue.mng.uv_tool import ToolReceipt
 from imbue.mng.uv_tool import ToolRequirement
+from imbue.mng.uv_tool import _build_uv_tool_install_command
 from imbue.mng.uv_tool import _requirement_to_with_arg
 from imbue.mng.uv_tool import build_base_specifier
 from imbue.mng.uv_tool import build_uv_tool_install_add
 from imbue.mng.uv_tool import build_uv_tool_install_add_git
 from imbue.mng.uv_tool import build_uv_tool_install_add_path
-from imbue.mng.uv_tool import build_uv_tool_install_command
 from imbue.mng.uv_tool import build_uv_tool_install_remove
-from imbue.mng.uv_tool import get_base_requirement
-from imbue.mng.uv_tool import get_extra_requirements
 from imbue.mng.uv_tool import get_receipt_path
-from imbue.mng.uv_tool import read_receipt_requirements
+from imbue.mng.uv_tool import read_receipt
 from imbue.mng.uv_tool import require_uv_tool_receipt
 
 # =============================================================================
@@ -101,24 +100,24 @@ def test_require_uv_tool_receipt_raises_in_dev_mode() -> None:
 
 
 # =============================================================================
-# Tests for read_receipt_requirements
+# Tests for read_receipt
 # =============================================================================
 
 
-def test_read_receipt_requirements_minimal(tmp_path: Path) -> None:
-    """read_receipt_requirements should parse a minimal receipt."""
-    receipt = tmp_path / "uv-receipt.toml"
-    receipt.write_text('[tool]\nrequirements = [{ name = "mng" }]\n')
+def test_read_receipt_minimal(tmp_path: Path) -> None:
+    """read_receipt should parse a minimal receipt into base + empty extras."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text('[tool]\nrequirements = [{ name = "mng" }]\n')
 
-    reqs = read_receipt_requirements(receipt)
-    assert len(reqs) == 1
-    assert reqs[0].name == "mng"
+    receipt = read_receipt(receipt_path)
+    assert receipt.base.name == "mng"
+    assert receipt.extras == []
 
 
-def test_read_receipt_requirements_with_extras(tmp_path: Path) -> None:
-    """read_receipt_requirements should parse a receipt with extra deps."""
-    receipt = tmp_path / "uv-receipt.toml"
-    receipt.write_text(
+def test_read_receipt_with_extras(tmp_path: Path) -> None:
+    """read_receipt should split mng from extras."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text(
         "[tool]\nrequirements = [\n"
         '  { name = "mng" },\n'
         '  { name = "coolname" },\n'
@@ -126,78 +125,53 @@ def test_read_receipt_requirements_with_extras(tmp_path: Path) -> None:
         "]\n"
     )
 
-    reqs = read_receipt_requirements(receipt)
-    assert len(reqs) == 3
-    assert reqs[0].name == "mng"
-    assert reqs[1].name == "coolname"
-    assert reqs[2].name == "mng-opencode"
-    assert reqs[2].editable == "/path/to/opencode"
+    receipt = read_receipt(receipt_path)
+    assert receipt.base.name == "mng"
+    assert len(receipt.extras) == 2
+    assert receipt.extras[0].name == "coolname"
+    assert receipt.extras[1].name == "mng-opencode"
+    assert receipt.extras[1].editable == "/path/to/opencode"
 
 
-def test_read_receipt_requirements_with_specifier(tmp_path: Path) -> None:
-    """read_receipt_requirements should parse version specifiers."""
-    receipt = tmp_path / "uv-receipt.toml"
-    receipt.write_text(
+def test_read_receipt_with_specifier(tmp_path: Path) -> None:
+    """read_receipt should preserve version specifiers on the base requirement."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text(
         "[tool]\nrequirements = [\n"
         '  { name = "mng", specifier = ">=0.1.0" },\n'
         '  { name = "coolname", specifier = ">=2.0" },\n'
         "]\n"
     )
 
-    reqs = read_receipt_requirements(receipt)
-    assert reqs[0].specifier == ">=0.1.0"
-    assert reqs[1].specifier == ">=2.0"
+    receipt = read_receipt(receipt_path)
+    assert receipt.base.specifier == ">=0.1.0"
+    assert receipt.extras[0].specifier == ">=2.0"
 
 
-def test_read_receipt_requirements_with_git(tmp_path: Path) -> None:
-    """read_receipt_requirements should parse git URLs."""
-    receipt = tmp_path / "uv-receipt.toml"
-    receipt.write_text(
+def test_read_receipt_with_git(tmp_path: Path) -> None:
+    """read_receipt should parse git URLs in extras."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text(
         "[tool]\nrequirements = [\n"
         '  { name = "mng" },\n'
         '  { name = "mng-opencode", git = "https://github.com/imbue-ai/mng.git" },\n'
         "]\n"
     )
 
-    reqs = read_receipt_requirements(receipt)
-    assert reqs[1].git == "https://github.com/imbue-ai/mng.git"
+    receipt = read_receipt(receipt_path)
+    assert receipt.extras[0].git == "https://github.com/imbue-ai/mng.git"
 
 
-# =============================================================================
-# Tests for get_base_requirement / get_extra_requirements
-# =============================================================================
+def test_read_receipt_fallback_when_mng_missing(tmp_path: Path) -> None:
+    """read_receipt should fall back to a plain mng base if not in requirements."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text('[tool]\nrequirements = [{ name = "something-else" }]\n')
 
-
-def test_get_base_requirement_finds_mng() -> None:
-    """get_base_requirement should return the mng entry."""
-    reqs = [
-        ToolRequirement(name="mng", specifier=">=0.1.0"),
-        ToolRequirement(name="coolname"),
-    ]
-    base = get_base_requirement(reqs)
-    assert base.name == "mng"
-    assert base.specifier == ">=0.1.0"
-
-
-def test_get_base_requirement_fallback_when_missing() -> None:
-    """get_base_requirement should return a plain mng entry if not found."""
-    reqs = [ToolRequirement(name="something-else")]
-    base = get_base_requirement(reqs)
-    assert base.name == "mng"
-    assert base.specifier is None
-
-
-def test_get_extra_requirements_excludes_mng() -> None:
-    """get_extra_requirements should return everything except mng."""
-    reqs = [
-        ToolRequirement(name="mng"),
-        ToolRequirement(name="coolname"),
-        ToolRequirement(name="mng-opencode"),
-    ]
-    extras = get_extra_requirements(reqs)
-    assert len(extras) == 2
-    assert extras[0].name == "coolname"
-    assert extras[1].name == "mng-opencode"
+    receipt = read_receipt(receipt_path)
+    assert receipt.base.name == "mng"
+    assert receipt.base.specifier is None
+    assert len(receipt.extras) == 1
+    assert receipt.extras[0].name == "something-else"
 
 
 # =============================================================================
@@ -216,25 +190,25 @@ def test_build_base_specifier_with_version() -> None:
 
 
 # =============================================================================
-# Tests for build_uv_tool_install_command
+# Tests for _build_uv_tool_install_command
 # =============================================================================
 
 
 def test_build_uv_tool_install_command_no_extras() -> None:
-    """build_uv_tool_install_command with no extras should produce minimal command."""
+    """_build_uv_tool_install_command with no extras should produce minimal command."""
     base = ToolRequirement(name="mng")
-    cmd = build_uv_tool_install_command(base, [])
+    cmd = _build_uv_tool_install_command(base, [])
     assert cmd == ("uv", "tool", "install", "mng", "--reinstall")
 
 
 def test_build_uv_tool_install_command_with_extras() -> None:
-    """build_uv_tool_install_command should include --with for each extra."""
+    """_build_uv_tool_install_command should include --with for each extra."""
     base = ToolRequirement(name="mng")
     extras = [
         ToolRequirement(name="coolname"),
         ToolRequirement(name="mng-opencode", editable="/path/to/opencode"),
     ]
-    cmd = build_uv_tool_install_command(base, extras)
+    cmd = _build_uv_tool_install_command(base, extras)
     assert cmd == (
         "uv",
         "tool",
@@ -253,11 +227,19 @@ def test_build_uv_tool_install_command_with_extras() -> None:
 # =============================================================================
 
 
+def _make_receipt(
+    base_specifier: str | None = None,
+    extras: list[ToolRequirement] | None = None,
+) -> ToolReceipt:
+    """Create a ToolReceipt for testing."""
+    base = ToolRequirement(name="mng", specifier=base_specifier)
+    return ToolReceipt(base=base, extras=extras or [])
+
+
 def test_build_uv_tool_install_add_appends_new_dep() -> None:
     """build_uv_tool_install_add should preserve existing extras and append."""
-    base = ToolRequirement(name="mng")
-    existing = [ToolRequirement(name="coolname")]
-    cmd = build_uv_tool_install_add(base, existing, "mng-opencode")
+    receipt = _make_receipt(extras=[ToolRequirement(name="coolname")])
+    cmd = build_uv_tool_install_add(receipt, "mng-opencode")
     assert cmd == (
         "uv",
         "tool",
@@ -273,8 +255,8 @@ def test_build_uv_tool_install_add_appends_new_dep() -> None:
 
 def test_build_uv_tool_install_add_path() -> None:
     """build_uv_tool_install_add_path should use --with-editable."""
-    base = ToolRequirement(name="mng")
-    cmd = build_uv_tool_install_add_path(base, [], "/path/to/plugin", "my-plugin")
+    receipt = _make_receipt()
+    cmd = build_uv_tool_install_add_path(receipt, "/path/to/plugin", "my-plugin")
     assert cmd == (
         "uv",
         "tool",
@@ -288,8 +270,8 @@ def test_build_uv_tool_install_add_path() -> None:
 
 def test_build_uv_tool_install_add_git() -> None:
     """build_uv_tool_install_add_git should use git+ prefixed URL."""
-    base = ToolRequirement(name="mng")
-    cmd = build_uv_tool_install_add_git(base, [], "https://github.com/user/repo.git")
+    receipt = _make_receipt()
+    cmd = build_uv_tool_install_add_git(receipt, "https://github.com/user/repo.git")
     assert cmd == (
         "uv",
         "tool",
@@ -303,12 +285,13 @@ def test_build_uv_tool_install_add_git() -> None:
 
 def test_build_uv_tool_install_remove_filters_dep() -> None:
     """build_uv_tool_install_remove should rebuild without the target dep."""
-    base = ToolRequirement(name="mng")
-    existing = [
-        ToolRequirement(name="coolname"),
-        ToolRequirement(name="mng-opencode"),
-    ]
-    cmd = build_uv_tool_install_remove(base, existing, "mng-opencode")
+    receipt = _make_receipt(
+        extras=[
+            ToolRequirement(name="coolname"),
+            ToolRequirement(name="mng-opencode"),
+        ]
+    )
+    cmd = build_uv_tool_install_remove(receipt, "mng-opencode")
     assert cmd == (
         "uv",
         "tool",
@@ -322,7 +305,6 @@ def test_build_uv_tool_install_remove_filters_dep() -> None:
 
 def test_build_uv_tool_install_remove_last_dep() -> None:
     """build_uv_tool_install_remove should work when removing the only extra."""
-    base = ToolRequirement(name="mng")
-    existing = [ToolRequirement(name="mng-opencode")]
-    cmd = build_uv_tool_install_remove(base, existing, "mng-opencode")
+    receipt = _make_receipt(extras=[ToolRequirement(name="mng-opencode")])
+    cmd = build_uv_tool_install_remove(receipt, "mng-opencode")
     assert cmd == ("uv", "tool", "install", "mng", "--reinstall")
