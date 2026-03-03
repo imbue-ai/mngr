@@ -10,7 +10,7 @@ Usage: python3 event_watcher.py
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
   MNG_AGENT_NAME       - name of the primary agent to send messages to
-  MNG_HOST_DIR         - host data directory (contains logs/ for log output)
+  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ def main() -> None:
     offsets_dir = events_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("event_watcher", host_dir / "logs")
+    setup_watcher_logging("event_watcher", host_dir / "events" / "logs")
 
     settings = _load_watcher_settings(agent_work_dir)
 

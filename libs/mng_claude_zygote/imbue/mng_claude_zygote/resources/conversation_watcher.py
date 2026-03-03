@@ -9,7 +9,7 @@ Usage: python3 conversation_watcher.py
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-  MNG_HOST_DIR         - host data directory (contains logs/ for log output)
+  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -207,7 +207,7 @@ def main() -> None:
     messages_file = agent_state_dir / "events" / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("conversation_watcher", host_dir / "logs")
+    setup_watcher_logging("conversation_watcher", host_dir / "events" / "logs")
 
     poll_interval = _load_poll_interval(agent_work_dir)
     db_path = _get_llm_db_path()

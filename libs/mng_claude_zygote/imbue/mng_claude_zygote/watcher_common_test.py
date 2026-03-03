@@ -41,7 +41,7 @@ def test_setup_watcher_logging_writes_jsonl_on_log(tmp_path: Path) -> None:
     event = json.loads(content)
     assert event["message"] == "hello world"
     assert event["level"] == "INFO"
-    assert event["source"] == "test_watcher"
+    assert event["source"] == "logs/test_watcher"
     assert event["type"] == "watcher"
     assert "timestamp" in event
     assert event["event_id"].startswith("evt-")
