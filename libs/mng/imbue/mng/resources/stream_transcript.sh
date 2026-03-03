@@ -109,23 +109,17 @@ _build_output_uuid_set() {
     log_debug "Built UUID set with ${#_OUTPUT_UUIDS[@]} entries"
 }
 
-# Verify and correct the stored offset for a session file.
-# Quick path: check the line at the stored offset. If its UUID is in the
-# output, the offset is correct.
-# Slow path: work backwards from the end of the session file to find the
-# last line that actually made it into the output.
+# Find the true offset for a session file by working backwards from the end
+# to find the last line whose UUID is already in the output file. This
+# handles crash recovery correctly: if we crashed after emitting lines
+# N+1..M but before saving the offset, the backwards scan finds line M
+# (the actual last emitted line) rather than the stale stored offset N.
 _reconcile_offset() {
     local sid="$1"
     local session_file="$2"
-    local stored_offset="$3"
 
     local file_lines
     file_lines=$(_line_count "$session_file")
-
-    # Clamp to file size
-    if [ "$stored_offset" -gt "$file_lines" ]; then
-        stored_offset=$file_lines
-    fi
 
     # If output is empty, everything needs to be emitted
     if [ ${#_OUTPUT_UUIDS[@]} -eq 0 ]; then
@@ -139,20 +133,8 @@ _reconcile_offset() {
         return
     fi
 
-    # Quick path: verify the line at the stored offset
-    if [ "$stored_offset" -gt 0 ]; then
-        local check_line
-        check_line=$(sed -n "${stored_offset}p" "$session_file")
-        local check_uuid
-        check_uuid=$(_extract_uuid "$check_line")
-        if [ -n "$check_uuid" ] && [ "${_OUTPUT_UUIDS[$check_uuid]+exists}" ]; then
-            echo "$stored_offset"
-            return
-        fi
-    fi
-
-    # Slow path: work backwards through the file
-    log_debug "Reconciling offset for $sid (stored=$stored_offset, file_lines=$file_lines)"
+    # Work backwards through the file to find the last emitted line
+    log_debug "Reconciling offset for $sid (file_lines=$file_lines)"
     local reverse_idx=0
     while IFS= read -r line; do
         reverse_idx=$((reverse_idx + 1))
@@ -172,6 +154,11 @@ _reconcile_offset() {
 # -- Session processing --
 
 # Check a session file for new lines and append them to the output.
+# Uses sed with a bounded range to avoid a TOCTOU race: wc -l captures the
+# line count at time T1, and sed reads exactly lines offset+1..file_lines.
+# If Claude appends more lines between T1 and the sed read, those extra lines
+# are NOT emitted (they'll be picked up on the next poll cycle), and the
+# saved offset accurately reflects what was actually emitted.
 _emit_new_lines() {
     local sid="$1"
     local session_file="${_FILE_BY_SID[$sid]}"
@@ -185,7 +172,7 @@ _emit_new_lines() {
     fi
 
     local start=$((offset + 1))
-    tail -n "+${start}" "$session_file" >> "$OUTPUT_FILE"
+    sed -n "${start},${file_lines}p" "$session_file" >> "$OUTPUT_FILE"
 
     local new_count=$((file_lines - offset))
     _OFFSET_BY_SID[$sid]=$file_lines
@@ -238,7 +225,7 @@ _initialize() {
         if _try_resolve_file "$sid"; then
             local stored="${_OFFSET_BY_SID[$sid]}"
             local reconciled
-            reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}" "$stored")
+            reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
             _OFFSET_BY_SID[$sid]=$reconciled
             if [ "$reconciled" != "$stored" ]; then
                 log_info "Reconciled offset for $sid: $stored -> $reconciled"
@@ -281,20 +268,18 @@ main() {
                 if ! _try_resolve_file "$sid"; then
                     continue
                 fi
-                # File just appeared -- reconcile if we have a stored offset
-                # from a previous run (otherwise offset is 0, no reconciliation needed)
+                # File just appeared -- reconcile against the output file to
+                # find the true offset (handles both fresh starts and restarts)
+                _build_output_uuid_set
                 local stored="${_OFFSET_BY_SID[$sid]}"
-                if [ "$stored" -gt 0 ]; then
-                    _build_output_uuid_set
-                    local reconciled
-                    reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}" "$stored")
-                    _OFFSET_BY_SID[$sid]=$reconciled
-                    if [ "$reconciled" != "$stored" ]; then
-                        log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
-                        _save_offset "$sid" "$reconciled"
-                    fi
-                    _OUTPUT_UUIDS=()
+                local reconciled
+                reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
+                _OFFSET_BY_SID[$sid]=$reconciled
+                if [ "$reconciled" != "$stored" ]; then
+                    log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
+                    _save_offset "$sid" "$reconciled"
                 fi
+                _OUTPUT_UUIDS=()
             fi
 
             _emit_new_lines "$sid"
