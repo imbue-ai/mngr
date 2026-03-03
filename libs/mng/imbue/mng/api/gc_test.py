@@ -7,9 +7,18 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.data_types import GcResult
+from imbue.mng.api.gc import _handle_error
+from imbue.mng.api.gc import gc
+from imbue.mng.api.gc import gc_build_cache
+from imbue.mng.api.gc import gc_logs
 from imbue.mng.api.gc import gc_machines
+from imbue.mng.api.gc import gc_snapshots
+from imbue.mng.api.gc import gc_volumes
+from imbue.mng.api.gc import gc_work_dirs
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import MngError
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.primitives import AgentId
@@ -193,3 +202,475 @@ def test_gc_machines_deletes_old_destroyed_host_with_agents(
 
     assert len(result.machines_deleted) == 1
     assert gc_mock_provider.deleted_hosts == [host.id]
+
+
+# =========================================================================
+# _handle_error tests
+# =========================================================================
+
+
+def test_handle_error_abort_raises_provided_exception() -> None:
+    """ABORT behavior re-raises the provided exception."""
+    exc = MngError("test error")
+    with pytest.raises(MngError, match="test error"):
+        _handle_error("some message", ErrorBehavior.ABORT, exc=exc)
+
+
+def test_handle_error_abort_raises_mng_error_when_no_exception() -> None:
+    """ABORT behavior raises MngError from the message when no exception is provided."""
+    with pytest.raises(MngError, match="some message"):
+        _handle_error("some message", ErrorBehavior.ABORT, exc=None)
+
+
+def test_handle_error_continue_does_not_raise() -> None:
+    """CONTINUE behavior logs instead of raising."""
+    # Should not raise
+    _handle_error("some message", ErrorBehavior.CONTINUE, exc=MngError("test"))
+    _handle_error("some message", ErrorBehavior.CONTINUE, exc=None)
+
+
+# =========================================================================
+# gc_logs tests
+# =========================================================================
+
+
+def test_gc_logs_finds_and_deletes_log_files(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs finds log files in the log directory and deletes them."""
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create some log files
+    (log_dir / "test1.log").write_text("log content 1")
+    (log_dir / "test2.json").write_text('{"msg": "log2"}')
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 2
+    # Files should be deleted
+    assert not (log_dir / "test1.log").exists()
+    assert not (log_dir / "test2.json").exists()
+
+
+def test_gc_logs_dry_run_does_not_delete(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """In dry_run mode, gc_logs identifies files but does not delete them."""
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    (log_dir / "test.log").write_text("log content")
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    # File should still exist
+    assert (log_dir / "test.log").exists()
+
+
+def test_gc_logs_skips_nonexistent_directory(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs returns early when the log directory does not exist."""
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 0
+
+
+def test_gc_logs_skips_subdirectories(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs only processes files, not subdirectories."""
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a subdirectory (should be skipped) and a file
+    (log_dir / "subdir").mkdir()
+    (log_dir / "test.log").write_text("content")
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    assert result.logs_destroyed[0].path == log_dir / "test.log"
+
+
+def test_gc_logs_populates_log_file_info(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs populates LogFileInfo with correct path, size, and creation time."""
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    content = "some log content here"
+    (log_dir / "test.log").write_text(content)
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    info = result.logs_destroyed[0]
+    assert info.path == log_dir / "test.log"
+    assert info.size_bytes == len(content)
+    assert info.created_at is not None
+
+
+# =========================================================================
+# gc_build_cache tests
+# =========================================================================
+
+
+def test_gc_build_cache_finds_and_deletes_cache_entries(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_build_cache finds cache entry directories and deletes them."""
+    cache_dir = temp_mng_ctx.profile_dir / "providers" / "some-provider" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create cache entries with files inside
+    entry1 = cache_dir / "entry-1"
+    entry1.mkdir()
+    (entry1 / "layer.tar").write_text("layer data")
+
+    entry2 = cache_dir / "entry-2"
+    entry2.mkdir()
+    (entry2 / "manifest.json").write_text("{}")
+
+    result = GcResult()
+    gc_build_cache(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.build_cache_destroyed) >= 2
+    # Directories should be deleted
+    assert not entry1.exists()
+    assert not entry2.exists()
+
+
+def test_gc_build_cache_dry_run_does_not_delete(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """In dry_run mode, gc_build_cache identifies entries but does not delete them."""
+    cache_dir = temp_mng_ctx.profile_dir / "providers" / "some-provider" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    entry = cache_dir / "entry-1"
+    entry.mkdir()
+    (entry / "data.bin").write_text("binary data")
+
+    result = GcResult()
+    gc_build_cache(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.build_cache_destroyed) >= 1
+    # Directory should still exist
+    assert entry.exists()
+
+
+def test_gc_build_cache_skips_nonexistent_directory(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_build_cache returns early when the providers directory does not exist."""
+    result = GcResult()
+    gc_build_cache(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.build_cache_destroyed) == 0
+
+
+def test_gc_build_cache_skips_provider_without_cache_dir(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_build_cache skips provider directories that have no cache subdirectory."""
+    providers_dir = temp_mng_ctx.profile_dir / "providers" / "some-provider"
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    # No "cache" subdirectory created
+
+    result = GcResult()
+    gc_build_cache(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.build_cache_destroyed) == 0
+
+
+def test_gc_build_cache_populates_build_cache_info(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_build_cache populates BuildCacheInfo with correct path, size, and creation time."""
+    cache_dir = temp_mng_ctx.profile_dir / "providers" / "test-provider" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    entry = cache_dir / "entry-1"
+    entry.mkdir()
+    content = "some cached data"
+    (entry / "file.bin").write_text(content)
+
+    result = GcResult()
+    gc_build_cache(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=True,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.build_cache_destroyed) >= 1
+    # Find the entry for our top-level cache entry
+    entry_info = [info for info in result.build_cache_destroyed if info.path == entry]
+    assert len(entry_info) == 1
+    assert entry_info[0].size_bytes >= len(content)
+    assert entry_info[0].created_at is not None
+
+
+# =========================================================================
+# gc() main function tests
+# =========================================================================
+
+
+def test_gc_with_only_logs_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() only collects logs when is_logs=True and other flags are False."""
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "test.log").write_text("content")
+
+    resource_types = GcResourceTypes(is_logs=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    assert len(result.machines_destroyed) == 0
+    assert len(result.build_cache_destroyed) == 0
+
+
+def test_gc_with_only_build_cache_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() only collects build cache when is_build_cache=True and other flags are False."""
+    cache_dir = temp_mng_ctx.profile_dir / "providers" / "prov" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = cache_dir / "entry-1"
+    entry.mkdir()
+    (entry / "data").write_text("data")
+
+    resource_types = GcResourceTypes(is_build_cache=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+
+    assert len(result.build_cache_destroyed) >= 1
+    assert len(result.machines_destroyed) == 0
+    assert len(result.logs_destroyed) == 0
+
+
+def test_gc_with_no_flags_does_nothing(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() does nothing when all resource type flags are False."""
+    resource_types = GcResourceTypes()
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+
+    assert len(result.logs_destroyed) == 0
+    assert len(result.machines_destroyed) == 0
+    assert len(result.machines_deleted) == 0
+    assert len(result.build_cache_destroyed) == 0
+    assert len(result.snapshots_destroyed) == 0
+    assert len(result.volumes_destroyed) == 0
+    assert len(result.work_dirs_destroyed) == 0
+
+
+def test_gc_with_multiple_flags(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() collects both logs and build cache when both flags are set."""
+    # Set up logs
+    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "test.log").write_text("content")
+
+    # Set up build cache
+    cache_dir = temp_mng_ctx.profile_dir / "providers" / "prov" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = cache_dir / "entry-1"
+    entry.mkdir()
+    (entry / "data").write_text("data")
+
+    resource_types = GcResourceTypes(is_logs=True, is_build_cache=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+
+    assert len(result.logs_destroyed) == 1
+    assert len(result.build_cache_destroyed) >= 1
+
+
+# =========================================================================
+# gc_work_dirs tests
+# =========================================================================
+
+
+def test_gc_work_dirs_no_orphans_on_fresh_provider(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_work_dirs should find no orphaned work dirs on a fresh local provider."""
+    result = GcResult()
+    gc_work_dirs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+    assert len(result.work_dirs_destroyed) == 0
+
+
+# =========================================================================
+# gc_snapshots tests
+# =========================================================================
+
+
+def test_gc_snapshots_skips_provider_without_snapshot_support(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_snapshots should skip providers that do not support snapshots."""
+    result = GcResult()
+    gc_snapshots(
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+    assert len(result.snapshots_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+# =========================================================================
+# gc_volumes tests
+# =========================================================================
+
+
+def test_gc_volumes_skips_provider_without_volume_support(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_volumes should skip providers that do not support volumes."""
+    result = GcResult()
+    gc_volumes(
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+    assert len(result.volumes_destroyed) == 0
+    assert len(result.errors) == 0
+
+
+# =========================================================================
+# gc() with work_dirs, snapshots, volumes flags
+# =========================================================================
+
+
+def test_gc_with_work_dirs_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() with is_work_dirs=True should run work directory garbage collection."""
+    resource_types = GcResourceTypes(is_work_dirs=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+    assert len(result.work_dirs_destroyed) == 0
+
+
+def test_gc_with_snapshots_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() with is_snapshots=True should run snapshot garbage collection."""
+    resource_types = GcResourceTypes(is_snapshots=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+    assert len(result.snapshots_destroyed) == 0
+
+
+def test_gc_with_volumes_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() with is_volumes=True should run volume garbage collection."""
+    resource_types = GcResourceTypes(is_volumes=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+    assert len(result.volumes_destroyed) == 0
+
+
+def test_gc_with_machines_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc() with is_machines=True should run machine garbage collection."""
+    resource_types = GcResourceTypes(is_machines=True)
+    result = gc(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        resource_types=resource_types,
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+    assert len(result.machines_destroyed) == 0

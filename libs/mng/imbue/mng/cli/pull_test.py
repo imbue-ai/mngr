@@ -3,15 +3,14 @@
 from pathlib import Path
 from typing import cast
 
+import pluggy
 import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
-from imbue.mng.api.sync import SyncFilesResult
-from imbue.mng.cli.output_helpers import output_sync_files_result
 from imbue.mng.cli.pull import PullCliOptions
+from imbue.mng.cli.pull import pull
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import AgentNotFoundError
 from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.host import CreateAgentOptions
@@ -24,10 +23,60 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostReference
-from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import SyncMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
+
+
+def test_pull_cli_options_can_be_instantiated() -> None:
+    """Test that PullCliOptions can be instantiated with all required fields."""
+    opts = PullCliOptions(
+        source_pos=None,
+        destination_pos=None,
+        source=None,
+        source_agent=None,
+        source_host=None,
+        source_path=None,
+        destination=None,
+        dry_run=False,
+        stop=False,
+        delete=False,
+        sync_mode="files",
+        exclude=(),
+        uncommitted_changes="fail",
+        target_branch=None,
+        target=None,
+        target_agent=None,
+        target_host=None,
+        target_path=None,
+        stdin=False,
+        include=(),
+        include_gitignored=False,
+        include_file=None,
+        exclude_file=None,
+        rsync_arg=(),
+        rsync_args=None,
+        branch=(),
+        all_branches=False,
+        tags=False,
+        force_git=False,
+        merge=False,
+        rebase=False,
+        uncommitted_source=None,
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        log_command_output=None,
+        log_env_vars=None,
+        project_context_path=None,
+        plugin=(),
+        disable_plugin=(),
+    )
+    assert opts.sync_mode == "files"
+    assert opts.dry_run is False
+    assert opts.delete is False
+    assert opts.uncommitted_changes == "fail"
 
 
 def test_pull_cli_options_has_all_fields() -> None:
@@ -80,71 +129,6 @@ def test_pull_command_sync_mode_choices() -> None:
     assert "full" in result.output
 
 
-def test_output_files_result_human_format() -> None:
-    """Test output formatting for human-readable format."""
-    result = SyncFilesResult(
-        files_transferred=5,
-        bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PULL,
-    )
-    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-
-    output_sync_files_result(result, output_opts.output_format)
-
-
-def test_output_files_result_human_format_dry_run() -> None:
-    """Test output formatting for human-readable format with dry run."""
-    result = SyncFilesResult(
-        files_transferred=5,
-        bytes_transferred=0,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        mode=SyncMode.PULL,
-    )
-    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-
-    output_sync_files_result(result, output_opts.output_format)
-
-
-def test_output_files_result_json_format(capsys) -> None:
-    """Test output formatting for JSON format."""
-    result = SyncFilesResult(
-        files_transferred=5,
-        bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PULL,
-    )
-    output_opts = OutputOptions(output_format=OutputFormat.JSON)
-
-    output_sync_files_result(result, output_opts.output_format)
-    captured = capsys.readouterr()
-    assert '"files_transferred": 5' in captured.out
-    assert '"bytes_transferred": 1024' in captured.out
-
-
-def test_output_files_result_jsonl_format(capsys) -> None:
-    """Test output formatting for JSONL format."""
-    result = SyncFilesResult(
-        files_transferred=3,
-        bytes_transferred=512,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        mode=SyncMode.PULL,
-        is_dry_run=False,
-    )
-    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-
-    output_sync_files_result(result, output_opts.output_format)
-    captured = capsys.readouterr()
-    assert "pull_complete" in captured.out
-
-
 def test_find_agent_by_name_or_id_raises_for_empty_agents(temp_mng_ctx: MngContext) -> None:
     """Test that find_agent_by_name_or_id raises UserInputError for unknown agent."""
     agents_by_host: dict[HostReference, list[AgentReference]] = {}
@@ -164,6 +148,7 @@ def test_find_agent_by_name_or_id_raises_agent_not_found_for_valid_id(temp_mng_c
         find_and_maybe_start_agent_by_name_or_id(str(nonexistent_id), agents_by_host, temp_mng_ctx, "test")
 
 
+@pytest.mark.tmux
 def test_find_agent_by_name_or_id_raises_for_multiple_matches(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
@@ -257,6 +242,7 @@ def _create_stopped_agent_with_references(
     return local_host, agent_ref, agents_by_host
 
 
+@pytest.mark.tmux
 def test_find_agent_with_skip_agent_state_check_succeeds_for_stopped_agent(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
@@ -276,6 +262,7 @@ def test_find_agent_with_skip_agent_state_check_succeeds_for_stopped_agent(
     assert found_host.id == local_host.id
 
 
+@pytest.mark.tmux
 def test_find_agent_without_skip_raises_for_stopped_agent(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
@@ -290,3 +277,18 @@ def test_find_agent_without_skip_raises_for_stopped_agent(
     # Without skip_agent_state_check, should raise for stopped agent
     with pytest.raises(UserInputError, match="stopped and automatic starting is disabled"):
         find_and_maybe_start_agent_by_name_or_id(str(agent_name), agents_by_host, temp_mng_ctx, "test")
+
+
+def test_pull_target_branch_requires_git_mode(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --target-branch requires --sync-mode=git."""
+    result = cli_runner.invoke(
+        pull,
+        ["nonexistent-pull-agent-222", "--target-branch", "main"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "--target-branch can only be used with --sync-mode=git" in result.output

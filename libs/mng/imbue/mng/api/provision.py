@@ -81,8 +81,12 @@ def provision_agent(
 
     try:
         with host.lock_cooperatively():
+            with log_span("Calling on_before_provisioning hooks"):
+                mng_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mng_ctx=mng_ctx)
             with log_span("Provisioning agent {}", agent.name):
                 host.provision_agent(agent, options, mng_ctx)
+            with log_span("Calling on_after_provisioning hooks"):
+                mng_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mng_ctx=mng_ctx)
     finally:
         # Clean up the temp file if we created one
         if existing_env_content is not None:

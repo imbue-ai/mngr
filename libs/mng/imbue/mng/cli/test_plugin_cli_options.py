@@ -18,10 +18,10 @@ import imbue.mng.main
 from imbue.mng import hookimpl
 from imbue.mng.cli.common_opts import TCommand
 from imbue.mng.cli.common_opts import _apply_plugin_option_overrides
-from imbue.mng.cli.data_types import OptionStackItem
 from imbue.mng.main import apply_plugin_cli_options
 from imbue.mng.main import reset_plugin_manager
 from imbue.mng.plugins import hookspecs
+from imbue.mng.plugins.hookspecs import OptionStackItem
 
 
 @contextmanager

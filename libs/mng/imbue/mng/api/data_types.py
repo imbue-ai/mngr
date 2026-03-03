@@ -7,27 +7,18 @@ from pydantic import computed_field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mng.config.data_types import EnvVar
-from imbue.mng.hosts.common import get_activity_sources_for_idle_mode
 from imbue.mng.interfaces.agent import AgentInterface
-from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.interfaces.data_types import BuildCacheInfo
 from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import VolumeInfo
 from imbue.mng.interfaces.data_types import WorkDirInfo
-from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import HostNameStyle
-from imbue.mng.primitives import IdleMode
-from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import SnapshotName
 
 
 class CreateAgentResult(FrozenModel):
@@ -70,128 +61,6 @@ class SourceLocation(FrozenModel):
     def is_from_agent(self) -> bool:
         """Returns True if this source is from an existing agent."""
         return self.agent_id is not None or self.agent_name is not None
-
-
-class NewHostBuildOptions(FrozenModel):
-    """Options for building a new host image."""
-
-    snapshot: SnapshotName | None = Field(
-        default=None,
-        description="Use existing snapshot instead of building",
-    )
-    context_path: Path | None = Field(
-        default=None,
-        description="Build context directory [default: local .git root]",
-    )
-    build_args: tuple[str, ...] = Field(
-        default=(),
-        description="Arguments for the build command",
-    )
-    start_args: tuple[str, ...] = Field(
-        default=(),
-        description="Arguments for the start command",
-    )
-
-
-class HostEnvironmentOptions(FrozenModel):
-    """Environment variable configuration for a host."""
-
-    env_vars: tuple[EnvVar, ...] = Field(
-        default=(),
-        description="Environment variables to set (KEY=VALUE)",
-    )
-    env_files: tuple[Path, ...] = Field(
-        default=(),
-        description="Files to load environment variables from",
-    )
-    known_hosts: tuple[str, ...] = Field(
-        default=(),
-        description="SSH known_hosts entries to add to the host (for outbound SSH connections)",
-    )
-    authorized_keys: tuple[str, ...] = Field(
-        default=(),
-        description="SSH authorized_keys entries to add to the host (for inbound SSH connections)",
-    )
-
-
-class HostLifecycleOptions(FrozenModel):
-    """Lifecycle and idle detection options for the host.
-
-    These options control when a host is considered idle and should be shut down.
-    All fields are optional; when None, provider defaults are used.
-    """
-
-    idle_timeout_seconds: int | None = Field(
-        default=None,
-        description="Shutdown after idle for N seconds (None for provider default)",
-    )
-    idle_mode: IdleMode | None = Field(
-        default=None,
-        description="When to consider host idle (None for provider default)",
-    )
-    activity_sources: tuple[ActivitySource, ...] | None = Field(
-        default=None,
-        description="Activity sources for idle detection (None for provider default)",
-    )
-
-    def to_activity_config(
-        self,
-        default_idle_timeout_seconds: int,
-        default_idle_mode: IdleMode,
-        default_activity_sources: tuple[ActivitySource, ...],
-    ) -> ActivityConfig:
-        """Convert to ActivityConfig, using provided defaults for None values.
-
-        When activity_sources is not explicitly provided, it is derived from the
-        resolved idle_mode using get_activity_sources_for_idle_mode. This ensures
-        that specifying --idle-mode boot results in only BOOT activity being monitored,
-        without needing to also explicitly specify --activity-sources boot.
-        """
-        resolved_idle_mode = self.idle_mode if self.idle_mode is not None else default_idle_mode
-
-        if self.activity_sources is not None:
-            resolved_activity_sources = self.activity_sources
-        else:
-            resolved_activity_sources = get_activity_sources_for_idle_mode(resolved_idle_mode)
-
-        return ActivityConfig(
-            idle_timeout_seconds=self.idle_timeout_seconds
-            if self.idle_timeout_seconds is not None
-            else default_idle_timeout_seconds,
-            activity_sources=resolved_activity_sources,
-        )
-
-
-class NewHostOptions(FrozenModel):
-    """Options for creating a new host."""
-
-    provider: ProviderInstanceName = Field(
-        description="Provider to use for creating the host (docker, modal, local, ...)",
-    )
-    name: HostName | None = Field(
-        default=None,
-        description="Name for the new host (None means use provider default or auto-generate)",
-    )
-    name_style: HostNameStyle = Field(
-        default=HostNameStyle.ASTRONOMY,
-        description="Style for auto-generated host name (used when name is None and provider has no default)",
-    )
-    tags: dict[str, str] = Field(
-        default_factory=dict,
-        description="Metadata tags for the host",
-    )
-    build: NewHostBuildOptions = Field(
-        default_factory=NewHostBuildOptions,
-        description="Build options for the host image",
-    )
-    environment: HostEnvironmentOptions = Field(
-        default_factory=HostEnvironmentOptions,
-        description="Environment variable configuration",
-    )
-    lifecycle: HostLifecycleOptions = Field(
-        default_factory=HostLifecycleOptions,
-        description="Lifecycle and idle detection options",
-    )
 
 
 class ConnectionOptions(FrozenModel):
@@ -290,23 +159,3 @@ class CleanupResult(MutableModel):
         default_factory=list,
         description="Errors encountered during cleanup",
     )
-
-
-class OnBeforeCreateArgs(FrozenModel):
-    """Arguments passed to and returned from the on_before_create hook.
-
-    This bundles all the modifiable arguments to the create() API function.
-    Plugins can return a modified copy of this object to change the create behavior.
-
-    Note: source_host is not included because it represents the resolved source
-    location which should not typically be modified by plugins. The source_path
-    within the resolved location can still be modified if needed via the path field.
-    """
-
-    model_config = {"arbitrary_types_allowed": True}
-
-    target_host: OnlineHostInterface | NewHostOptions = Field(
-        description="The target host (or options to create one) for the agent"
-    )
-    agent_options: CreateAgentOptions = Field(description="Options for creating the agent")
-    create_work_dir: bool = Field(description="Whether to create a work directory")

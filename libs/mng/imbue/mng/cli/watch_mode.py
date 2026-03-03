@@ -9,7 +9,7 @@ from imbue.mng.utils.polling import run_periodically
 def _run_iteration_with_logging(
     iteration_fn: Callable[[], None],
     on_error_continue: bool,
-    interval_seconds: int,
+    interval_seconds: float,
 ) -> None:
     """Run a single watch-mode iteration with error handling and logging."""
     try:
@@ -24,7 +24,7 @@ def _run_iteration_with_logging(
 
 def run_watch_loop(
     iteration_fn: Callable[[], None],
-    interval_seconds: int,
+    interval_seconds: float,
     *,
     on_error_continue: bool = True,
 ) -> None:

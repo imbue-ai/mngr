@@ -393,7 +393,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)
     - claude_session_id: current session UUID (atomically written via .tmp + mv)
-    - claude_session_id_history: append-only log of all session UUIDs (one per line)
+    - claude_session_id_history: append-only log of session entries (one per line,
+      format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
 
     The tmux wait-for signal on UserPromptSubmit allows instant detection of
@@ -417,9 +418,10 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' echo "mng: SessionStart hook failed to extract session_id from hook input: $_MNG_HOOK_INPUT" >&2;'
                                 " exit 1;"
                                 " fi;"
+                                ' _MNG_SOURCE=$(echo "$_MNG_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' echo "$_MNG_NEW_SID" > "$MNG_AGENT_STATE_DIR/claude_session_id.tmp"'
                                 ' && mv "$MNG_AGENT_STATE_DIR/claude_session_id.tmp" "$MNG_AGENT_STATE_DIR/claude_session_id";'
-                                ' echo "$_MNG_NEW_SID" >> "$MNG_AGENT_STATE_DIR/claude_session_id_history"'
+                                ' echo "$_MNG_NEW_SID${_MNG_SOURCE:+ $_MNG_SOURCE}" >> "$MNG_AGENT_STATE_DIR/claude_session_id_history"'
                             ),
                         },
                     ]

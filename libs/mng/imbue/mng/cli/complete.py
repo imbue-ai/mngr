@@ -1,4 +1,4 @@
-"""Lightweight tab completion entrypoint -- stdlib only, no third-party imports.
+"""Lightweight tab completion entrypoint -- no heavy third-party imports.
 
 Reads COMP_WORDS and COMP_CWORD from the environment (same protocol click
 uses), resolves the completion context from a JSON cache file, and prints
@@ -12,9 +12,10 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+from imbue.mng.config.host_dir import read_default_host_dir
 
 _COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
 _AGENT_COMPLETIONS_CACHE_FILENAME = ".agent_completions.json"
@@ -24,12 +25,12 @@ _BACKGROUND_REFRESH_COOLDOWN_SECONDS = 30
 def _get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
-    Mirrors get_completion_cache_dir() in completion_writer.py but uses only stdlib.
+    Mirrors get_completion_cache_dir() in completion_writer.py.
     """
     env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
     if env_dir:
         return Path(env_dir)
-    return Path(tempfile.gettempdir()) / f"mng-completions-{os.getuid()}"
+    return read_default_host_dir()
 
 
 def _read_cache() -> dict:
@@ -107,6 +108,7 @@ def _get_completions() -> list[str]:
     aliases: dict[str, str] = cache.get("aliases", {})
     subcommand_by_command: dict[str, list[str]] = cache.get("subcommand_by_command", {})
     options_by_command: dict[str, list[str]] = cache.get("options_by_command", {})
+    flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
     option_choices: dict[str, list[str]] = cache.get("option_choices", {})
     agent_name_arguments: list[str] = cache.get("agent_name_arguments", [])
 
@@ -148,21 +150,28 @@ def _get_completions() -> list[str]:
         # Completing a subcommand of a group
         assert resolved_command is not None
         candidates = subcommand_by_command.get(resolved_command, [])
-    elif prev_word is not None and prev_word.startswith("--"):
-        # Check if previous word is an option with choices
+    elif prev_word is not None and prev_word.startswith("-"):
         choice_key = f"{option_key}.{prev_word}"
+        flag_options = flag_options_by_command.get(option_key, [])
         if choice_key in option_choices:
+            # Option with predefined choices (e.g. --on-error abort|continue)
             candidates = option_choices[choice_key]
+        elif prev_word in flag_options:
+            # Previous word is a flag -- next position is positional
+            if incomplete.startswith("--"):
+                candidates = options_by_command.get(option_key, [])
+            else:
+                candidates = _get_positional_candidates(option_key, agent_name_arguments)
         elif incomplete.startswith("--"):
+            # Previous word is value-taking, but user started typing an option
             candidates = options_by_command.get(option_key, [])
         else:
-            # Previous word is a flag, current word doesn't start with --
-            # Could be a value for an option without predefined choices
-            candidates = _get_positional_candidates(resolved_command, agent_name_arguments)
+            # Previous word is value-taking, current word is its value -- no completions
+            candidates = []
     elif incomplete.startswith("--"):
         candidates = options_by_command.get(option_key, [])
     else:
-        candidates = _get_positional_candidates(resolved_command, agent_name_arguments)
+        candidates = _get_positional_candidates(option_key, agent_name_arguments)
 
     return [c for c in candidates if c.startswith(incomplete)]
 
@@ -182,13 +191,17 @@ def _filter_aliases(
 
 
 def _get_positional_candidates(
-    resolved_command: str | None,
+    command_key: str,
     agent_name_arguments: list[str],
 ) -> list[str]:
-    """Return positional argument candidates (agent names) if applicable."""
-    if resolved_command is not None and resolved_command in agent_name_arguments:
+    """Return positional argument candidates (agent names) if applicable.
+
+    command_key is the dotted command key (e.g. "destroy", "snapshot.create", or "").
+    """
+    if command_key and command_key in agent_name_arguments:
         return _read_agent_names()
-    return []
+    else:
+        return []
 
 
 def _generate_zsh_script() -> str:

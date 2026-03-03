@@ -8,8 +8,9 @@
 #   MNG_AGENT_STATE_DIR  - the agent state directory (contains claude_session_id_history)
 #
 # Session IDs are read from $MNG_AGENT_STATE_DIR/claude_session_id_history
-# (one per line). Falls back to $MNG_AGENT_STATE_DIR/claude_session_id or
-# $MAIN_CLAUDE_SESSION_ID if the history file is missing.
+# (one per line, format: "session_id source"). Falls back to
+# $MNG_AGENT_STATE_DIR/claude_session_id or $MAIN_CLAUDE_SESSION_ID if the
+# history file is missing.
 
 set -euo pipefail
 
@@ -26,7 +27,8 @@ _process_session() {
 _SESSION_IDS=()
 
 if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_session_id_history" ]; then
-    while IFS= read -r sid; do
+    # Each line is "session_id source" -- extract just the session_id (first field)
+    while read -r sid _rest; do
         if [ -n "$sid" ]; then
             _SESSION_IDS+=("$sid")
         fi

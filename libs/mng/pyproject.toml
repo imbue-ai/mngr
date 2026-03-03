@@ -1,6 +1,6 @@
 [project]
 name = "mng"
-version = "0.1.4"
+version = "0.1.5"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.11"
 license = "MIT"
@@ -17,11 +17,11 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.4",
+    "imbue-common==0.1.5",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.4",
+    "concurrency-group==0.1.5",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     "docker>=7.0",
@@ -72,6 +72,7 @@ junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov-report=term-missing",
   "--cov-report=html",

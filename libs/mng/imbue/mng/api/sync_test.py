@@ -1,5 +1,6 @@
 """Unit tests for sync API functions."""
 
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -13,10 +14,14 @@ from imbue.mng.api.sync import RemoteGitContext
 from imbue.mng.api.sync import SyncFilesResult
 from imbue.mng.api.sync import SyncGitResult
 from imbue.mng.api.sync import UncommittedChangesError
+from imbue.mng.api.sync import sync_git
+from imbue.mng.api.test_fixtures import FakeAgent
 from imbue.mng.api.test_fixtures import FakeHost
 from imbue.mng.errors import MngError
+from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import SyncMode
+from imbue.mng.primitives import UncommittedChangesMode
 from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng.utils.testing import run_git_command
 
@@ -446,3 +451,65 @@ def test_remote_git_context_is_git_repository_returns_false_for_non_git_dir(
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
     assert ctx.is_git_repository(tmp_path) is False
+
+
+# =============================================================================
+# sync_git safe.directory regression test
+# =============================================================================
+
+
+def test_sync_git_adds_safe_directory_for_non_local_host(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Regression test: sync_git must add safe.directory for non-local hosts.
+
+    Without this, git operations on remote hosts can fail with "detected dubious
+    ownership" when file ownership differs from the SSH user (e.g., after rsync
+    from a local machine with a different UID).
+    """
+    local_dir = tmp_path / "local"
+    agent_dir = tmp_path / "agent"
+
+    init_git_repo_with_config(local_dir)
+
+    subprocess.run(
+        ["git", "clone", str(local_dir), str(agent_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    run_git_command(agent_dir, "config", "user.email", "test@example.com")
+    run_git_command(agent_dir, "config", "user.name", "Test User")
+
+    host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    agent = cast(AgentInterface, FakeAgent(work_dir=agent_dir))
+
+    # Add a commit to agent so there's something to pull
+    (agent_dir / "agent_file.txt").write_text("agent content")
+    run_git_command(agent_dir, "add", "agent_file.txt")
+    run_git_command(agent_dir, "commit", "-m", "Agent commit")
+
+    sync_git(
+        agent=agent,
+        host=host,
+        mode=SyncMode.PULL,
+        local_path=local_dir,
+        source_branch=None,
+        target_branch=None,
+        is_dry_run=False,
+        uncommitted_changes=UncommittedChangesMode.FAIL,
+        is_mirror=False,
+        cg=cg,
+    )
+
+    # Verify safe.directory was added to the global gitconfig
+    result = subprocess.run(
+        ["git", "config", "--global", "--get-all", "safe.directory"],
+        capture_output=True,
+        text=True,
+    )
+    assert str(agent_dir) in result.stdout.strip().splitlines()
+
+    # Also verify the pull actually worked
+    assert (local_dir / "agent_file.txt").read_text() == "agent content"

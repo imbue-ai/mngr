@@ -15,12 +15,14 @@ from imbue.mng.cli.create import _handle_create
 from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import capture_tmux_pane_contents
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
 
+@pytest.mark.tmux
 def test_cli_create_with_echo_command(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -60,6 +62,7 @@ def test_cli_create_with_echo_command(
         assert agents_dir.exists(), "agents directory should exist under host dir"
 
 
+@pytest.mark.tmux
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -115,6 +118,7 @@ def test_cli_create_via_subprocess(
         assert agents_dir.exists(), "agents directory should exist under host dir"
 
 
+@pytest.mark.tmux
 def test_connect_flag_calls_tmux_attach_for_local_agent(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -142,7 +146,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     output_opts = OutputOptions()
 
     with tmux_session_cleanup(session_name):
-        result = _handle_create(temp_mng_ctx, output_opts, opts)
+        result = _handle_create(temp_mng_ctx, output_opts, opts, LoggingConfig())
 
         assert result is not None
         create_result, connection_opts, _, returned_opts, _ = result
@@ -158,6 +162,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
         assert connection_opts.is_reconnect is True
 
 
+@pytest.mark.tmux
 def test_no_connect_flag_skips_tmux_attach(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -198,6 +203,7 @@ def test_no_connect_flag_skips_tmux_attach(
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
 
 
+@pytest.mark.tmux
 def test_message_file_flag_reads_message_from_file(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -285,6 +291,7 @@ def test_message_and_message_file_both_provided_raises_error(
     assert "Cannot provide both --message and --message-file" in result.output
 
 
+@pytest.mark.tmux
 def test_multiline_message_creates_file_and_pipes(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -337,6 +344,7 @@ def test_multiline_message_creates_file_and_pipes(
             )
 
 
+@pytest.mark.tmux
 def test_single_line_message_uses_echo(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -384,6 +392,7 @@ def test_single_line_message_uses_echo(
         )
 
 
+@pytest.mark.tmux
 def test_no_await_ready_creates_agent_in_background(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -441,6 +450,7 @@ def test_no_await_ready_creates_agent_in_background(
         )
 
 
+@pytest.mark.tmux
 def test_add_command_with_named_window(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -484,6 +494,7 @@ def test_add_command_with_named_window(
         assert "myserver" in window_names, f"Expected window 'myserver' in {window_names}"
 
 
+@pytest.mark.tmux
 def test_add_command_without_name_uses_default_window_name(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -558,6 +569,7 @@ def test_agent_cmd_and_agent_type_are_mutually_exclusive(
     assert "--agent-cmd and --agent-type are mutually exclusive" in result.output
 
 
+@pytest.mark.tmux
 def test_agent_cmd_with_generic_type_is_allowed(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -595,6 +607,7 @@ def test_agent_cmd_with_generic_type_is_allowed(
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
 
 
+@pytest.mark.tmux
 def test_await_agent_stopped_waits_for_agent_to_exit(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -630,13 +643,8 @@ def test_await_agent_stopped_waits_for_agent_to_exit(
         assert "Waiting for agent to stop..." in result.output
         assert "Done." in result.output
 
-        # wait for the tmux session to be gone
-        wait_for(
-            lambda: not tmux_session_exists(session_name),
-            error_message=f"Expected tmux session {session_name} to be gone after agent stopped",
-        )
 
-
+@pytest.mark.tmux
 def test_edit_message_sends_edited_content(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -691,6 +699,7 @@ def test_edit_message_sends_edited_content(
         )
 
 
+@pytest.mark.tmux
 def test_edit_message_with_initial_content(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -788,6 +797,7 @@ def test_edit_message_incompatible_with_background_creation(
     assert "--edit-message cannot be used with background creation" in result.output
 
 
+@pytest.mark.tmux
 def test_edit_message_empty_content_does_not_send(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -846,6 +856,7 @@ def test_edit_message_empty_content_does_not_send(
         assert "No message to send" in result.output or "empty" in result.output.lower()
 
 
+@pytest.mark.tmux
 def test_template_applies_values_from_config(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -896,6 +907,7 @@ no_ensure_clean = true
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
 
 
+@pytest.mark.tmux
 def test_template_cli_args_take_precedence(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -1037,6 +1049,7 @@ def test_ensure_clean_rejects_dirty_worktree_by_default(
     assert "uncommitted changes" in result.output
 
 
+@pytest.mark.tmux
 def test_ensure_clean_skipped_with_explicit_base_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,

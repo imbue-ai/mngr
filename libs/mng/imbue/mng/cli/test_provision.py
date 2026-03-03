@@ -17,6 +17,7 @@ from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
 
+@pytest.mark.tmux
 def test_provision_existing_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -41,6 +42,7 @@ def test_provision_existing_agent(
         assert result.exit_code == 0, f"Provision failed with: {result.output}"
 
 
+@pytest.mark.tmux
 def test_provision_with_user_command(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -73,6 +75,7 @@ def test_provision_with_user_command(
         assert marker_file.read_text().strip() == "provisioned"
 
 
+@pytest.mark.tmux
 def test_provision_with_env_var(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -112,6 +115,7 @@ def test_provision_with_env_var(
         assert "MY_NEW_VAR=hello_world" in env_content
 
 
+@pytest.mark.tmux
 def test_provision_preserves_existing_env_vars(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -170,6 +174,7 @@ def test_provision_preserves_existing_env_vars(
         assert "ADDED_VAR=new_value" in env_content
 
 
+@pytest.mark.tmux
 def test_provision_with_upload_file(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -220,6 +225,7 @@ def test_provision_agent_not_found(
     assert result.exit_code != 0
 
 
+@pytest.mark.tmux
 def test_provision_with_agent_option(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -266,6 +272,7 @@ def test_provision_both_positional_and_option_raises_error(
     assert "Cannot specify both" in result.output
 
 
+@pytest.mark.tmux
 def test_provision_json_output(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -294,6 +301,7 @@ def test_provision_json_output(
         assert '"provisioned": true' in result.output
 
 
+@pytest.mark.tmux
 def test_provision_stopped_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -333,6 +341,7 @@ def test_provision_stopped_agent(
         assert result.exit_code == 0, f"Provision stopped agent failed with: {result.output}"
 
 
+@pytest.mark.tmux
 def test_provision_stopped_agent_with_user_command(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -380,6 +389,7 @@ def test_provision_stopped_agent_with_user_command(
         assert marker_file.read_text().strip() == "provisioned-while-stopped"
 
 
+@pytest.mark.tmux
 def test_provision_running_agent_restarts_by_default(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -415,6 +425,7 @@ def test_provision_running_agent_restarts_by_default(
         assert tmux_session_exists(session_name), "Agent should be running after provision with restart"
 
 
+@pytest.mark.tmux
 def test_provision_running_agent_no_restart_keeps_running(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -446,6 +457,7 @@ def test_provision_running_agent_no_restart_keeps_running(
         assert tmux_session_exists(session_name), "Agent should still be running after provision with --no-restart"
 
 
+@pytest.mark.tmux
 def test_provision_stopped_agent_stays_stopped_with_restart(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -507,6 +519,7 @@ def _get_agent_info(agent_name: str, env: dict[str, str]) -> dict | None:
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_provision_stopped_modal_agent(
     tmp_path: Path,

@@ -293,17 +293,21 @@ def build_start_activity_watcher_command(
 
     This command:
     1. Creates the commands directory
-    2. Writes the activity watcher script to the host
-    3. Makes it executable
-    4. Starts it in the background with nohup
+    2. Writes the shared logging library (mng_log.sh) to the host
+    3. Writes the activity watcher script to the host
+    4. Makes both executable
+    5. Starts the activity watcher in the background with nohup
 
     Returns a shell command string that can be executed via sh -c.
     """
+    log_lib_content = load_resource_script("mng_log.sh")
     script_content = load_resource_script("activity_watcher.sh")
 
     # Escape single quotes in script content
+    escaped_log_lib = log_lib_content.replace("'", "'\"'\"'")
     escaped_script = script_content.replace("'", "'\"'\"'")
 
+    log_lib_path = f"{mng_host_dir}/commands/mng_log.sh"
     script_path = f"{mng_host_dir}/commands/activity_watcher.sh"
     log_path = f"{mng_host_dir}/logs/activity_watcher.log"
 
@@ -311,6 +315,9 @@ def build_start_activity_watcher_command(
         # Create commands and logs directories
         f"mkdir -p '{mng_host_dir}/commands'",
         f"mkdir -p '{mng_host_dir}/logs'",
+        # Write the shared logging library
+        f"printf '%s' '{escaped_log_lib}' > '{log_lib_path}'",
+        f"chmod +x '{log_lib_path}'",
         # Write the activity watcher script
         f"printf '%s' '{escaped_script}' > '{script_path}'",
         # Make it executable

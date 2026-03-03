@@ -1,0 +1,29 @@
+[project]
+name = "mng-kanpan"
+version = "0.1.0"
+description = "All-seeing agent tracker"
+requires-python = ">=3.11"
+dependencies = [
+    "mng==0.1.4",
+    "click>=8.0",
+    "click-option-group>=0.5.6",
+]
+
+[project.entry-points.mng]
+kanpan = "imbue.mng_kanpan.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+
+[tool.uv.sources]
+mng = { workspace = true }
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]

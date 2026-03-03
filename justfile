@@ -35,11 +35,11 @@ test-offload args="":
     ./scripts/make_tar_of_repo.sh $LAST_COMMIT_SHA $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
     mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID" EXIT
+    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     ./scripts/generate_patch_for_offload.sh $LAST_COMMIT_SHA > /tmp/$OFFLOAD_PATCH_UUID/patch
     cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz" EXIT
+    trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal.toml {{args}} run --env="LAST_COMMIT_SHA=${LAST_COMMIT_SHA}" --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" || [[ $? -eq 2 ]]
@@ -56,11 +56,11 @@ test-offload-acceptance args="":
     ./scripts/make_tar_of_repo.sh $LAST_COMMIT_SHA $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
     mkdir -p /tmp/$OFFLOAD_PATCH_UUID
-    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID" EXIT
+    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     ./scripts/generate_patch_for_offload.sh $LAST_COMMIT_SHA > /tmp/$OFFLOAD_PATCH_UUID/patch
     cp $tmpdir/current.tar.gz .
-    trap "rm -f current.tar.gz" EXIT
+    trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
 
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal-acceptance.toml {{args}} run --env="LAST_COMMIT_SHA=${LAST_COMMIT_SHA}" --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]

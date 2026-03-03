@@ -311,6 +311,7 @@ def test_get_agent_references_skips_bad_records_but_loads_good_ones(
     assert bad_id not in ref_ids
 
 
+@pytest.mark.tmux
 def test_destroy_agent_calls_on_destroy(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -328,6 +329,7 @@ def test_destroy_agent_calls_on_destroy(
     assert not agent_dir.exists()
 
 
+@pytest.mark.tmux
 def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,
@@ -397,6 +399,49 @@ def test_create_agent_state_stores_created_branch_name(
     agent = host.create_agent_state(temp_work_dir, options, created_branch_name="mng/my-branch-local")
 
     assert agent.get_created_branch_name() == "mng/my-branch-local"
+
+
+def test_create_agent_state_uses_explicit_agent_id(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Test that create_agent_state uses the provided agent_id instead of generating one."""
+    host = local_provider.create_host(HostName("localhost"))
+    assert isinstance(host, Host)
+
+    explicit_id = AgentId()
+    options = CreateAgentOptions(
+        agent_id=explicit_id,
+        name=AgentName("test-explicit-id"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    assert agent.id == explicit_id
+
+
+def test_create_agent_state_generates_id_when_not_provided(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Test that create_agent_state auto-generates an agent ID when none is provided."""
+    host = local_provider.create_host(HostName("localhost"))
+    assert isinstance(host, Host)
+
+    options = CreateAgentOptions(
+        name=AgentName("test-auto-id"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    assert agent.id is not None
+    assert str(agent.id).startswith("agent-")
 
 
 def test_create_agent_state_stores_none_created_branch_name(

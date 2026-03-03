@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from imbue.mng.api.data_types import HostLifecycleOptions
 from imbue.mng.api.data_types import SourceLocation
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName

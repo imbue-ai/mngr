@@ -1,13 +1,18 @@
 """Tests for CLI list command helpers."""
 
+import json
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
+from typing import Any
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
+from imbue.mng.api.list import ListResult
 from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.cli.list import _StreamingHumanRenderer
 from imbue.mng.cli.list import _StreamingTemplateEmitter
@@ -25,6 +30,7 @@ from imbue.mng.cli.list import _render_format_template
 from imbue.mng.cli.list import _should_use_streaming_mode
 from imbue.mng.cli.list import _sort_agents
 from imbue.mng.cli.list import list_command
+from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -1292,3 +1298,290 @@ def test_get_field_value_returns_empty_for_missing_label() -> None:
     agent = make_test_agent_info(labels={"project": "mng"})
     result = _get_field_value(agent, "labels.nonexistent")
     assert result == ""
+
+
+# =============================================================================
+# Fake api_list_agents for CLI-level list command output formatting tests
+# =============================================================================
+
+
+class FakeApiListAgents:
+    """Replacement for api_list_agents that returns pre-built agents.
+
+    When the list command calls api_list_agents, this callable returns a
+    ListResult containing the pre-configured agents. If the caller passes
+    an on_agent callback (streaming mode), agents are delivered via that
+    callback as well.
+    """
+
+    def __init__(self, agents: list[AgentInfo]) -> None:
+        self.agents = agents
+
+    def __call__(self, **kwargs: Any) -> ListResult:
+        result = ListResult(agents=list(self.agents))
+        on_agent: Callable[[AgentInfo], None] | None = kwargs.get("on_agent")
+        if on_agent is not None:
+            for agent in self.agents:
+                on_agent(agent)
+        return result
+
+
+def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentInfo]) -> None:
+    """Replace api_list_agents with a fake that returns the given agents."""
+    monkeypatch.setattr("imbue.mng.cli.list.api_list_agents", FakeApiListAgents(agents))
+
+
+# =============================================================================
+# CLI-level tests: list_command output formatting with monkeypatched agents
+# =============================================================================
+
+
+def test_list_command_json_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json should emit JSON with agent data."""
+    agents = [
+        make_test_agent_info(name="alpha", state=AgentLifecycleState.RUNNING),
+        make_test_agent_info(name="bravo", state=AgentLifecycleState.STOPPED),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert len(output["agents"]) == 2
+    names = [a["name"] for a in output["agents"]]
+    assert "alpha" in names
+    assert "bravo" in names
+
+
+def test_list_command_jsonl_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format jsonl should emit one JSON line per agent."""
+    agents = [
+        make_test_agent_info(name="agent-one"),
+        make_test_agent_info(name="agent-two"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "jsonl"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    parsed_names = {json.loads(line)["name"] for line in lines}
+    assert parsed_names == {"agent-one", "agent-two"}
+
+
+def test_list_command_human_format_table_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format human --sort name should emit a table with default fields."""
+    agents = [
+        make_test_agent_info(name="my-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    # Default human format includes NAME, STATE, HOST, PROVIDER headers
+    assert "NAME" in result.output
+    assert "STATE" in result.output
+    assert "my-agent" in result.output
+    assert "RUNNING" in result.output
+
+
+def test_list_command_human_format_custom_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --fields name,type --sort name should show only specified columns."""
+    agents = [
+        make_test_agent_info(name="field-test"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--fields", "name,type", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "NAME" in result.output
+    assert "TYPE" in result.output
+    assert "field-test" in result.output
+    assert "generic" in result.output
+    # Should not contain default fields that were not requested
+    assert "PROVIDER" not in result.output
+
+
+def test_list_command_template_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format '{name}\\t{state}' should produce template-expanded lines."""
+    agents = [
+        make_test_agent_info(name="tpl-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "{name}\\t{state}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "tpl-agent\tRUNNING" in result.output
+
+
+def test_list_command_json_format_with_sort(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json --sort name --sort-order asc should sort agents."""
+    agents = [
+        make_test_agent_info(name="zeta"),
+        make_test_agent_info(name="alpha"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name", "--sort-order", "asc"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    names = [a["name"] for a in output["agents"]]
+    assert names == ["alpha", "zeta"]
+
+
+def test_list_command_json_format_with_limit(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json --sort name --limit 1 should return only one agent."""
+    agents = [
+        make_test_agent_info(name="first"),
+        make_test_agent_info(name="second"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name", "--limit", "1"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert len(output["agents"]) == 1
+
+
+def test_list_command_jsonl_format_with_limit(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format jsonl --limit 1 should emit at most one JSONL line."""
+    agents = [
+        make_test_agent_info(name="first"),
+        make_test_agent_info(name="second"),
+        make_test_agent_info(name="third"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "jsonl", "--limit", "1"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 1
+
+
+def test_list_command_template_format_with_sort_falls_back_to_batch(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format template --sort name should use batch mode and sort."""
+    agents = [
+        make_test_agent_info(name="zz-last"),
+        make_test_agent_info(name="aa-first"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "{name}", "--sort", "name", "--sort-order", "asc"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert lines[0] == "aa-first"
+    assert lines[1] == "zz-last"
+
+
+def test_list_command_human_streaming_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list (default human, no sort) should use streaming mode and show agents."""
+    agents = [
+        make_test_agent_info(name="stream-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        [],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "stream-agent" in result.output
+    assert "NAME" in result.output

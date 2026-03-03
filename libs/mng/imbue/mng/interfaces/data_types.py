@@ -37,8 +37,8 @@ from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
 
 # Canonical mapping from IdleMode to the activity sources it enables.
-# This must stay in sync with get_activity_sources_for_idle_mode in hosts/common.py.
-_ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]] = {
+# hosts/common.py delegates to this mapping via get_activity_sources_for_idle_mode().
+ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]] = {
     IdleMode.IO: (
         ActivitySource.USER,
         ActivitySource.AGENT,
@@ -80,17 +80,17 @@ _ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]
 }
 
 # Reverse mapping: frozenset of activity sources -> IdleMode
-_IDLE_MODE_BY_ACTIVITY_SOURCES: Final[dict[frozenset[ActivitySource], IdleMode]] = {
-    frozenset(sources): mode for mode, sources in _ACTIVITY_SOURCES_BY_IDLE_MODE.items()
+IDLE_MODE_BY_ACTIVITY_SOURCES: Final[dict[frozenset[ActivitySource], IdleMode]] = {
+    frozenset(sources): mode for mode, sources in ACTIVITY_SOURCES_BY_IDLE_MODE.items()
 }
 
 
-def _get_idle_mode_for_activity_sources(activity_sources: tuple[ActivitySource, ...]) -> IdleMode:
+def get_idle_mode_for_activity_sources(activity_sources: tuple[ActivitySource, ...]) -> IdleMode:
     """Derive the IdleMode from a set of activity sources.
 
     Returns CUSTOM if the activity sources don't match any known IdleMode preset.
     """
-    return _IDLE_MODE_BY_ACTIVITY_SOURCES.get(frozenset(activity_sources), IdleMode.CUSTOM)
+    return IDLE_MODE_BY_ACTIVITY_SOURCES.get(frozenset(activity_sources), IdleMode.CUSTOM)
 
 
 class PyinfraConnector:
@@ -230,7 +230,7 @@ class ActivityConfig(FrozenModel):
 
     idle_timeout_seconds: int = Field(description="Maximum idle time before stopping")
     activity_sources: tuple[ActivitySource, ...] = Field(
-        default=_ACTIVITY_SOURCES_BY_IDLE_MODE[IdleMode.IO],
+        default=ACTIVITY_SOURCES_BY_IDLE_MODE[IdleMode.IO],
         description="Activity sources that count toward keeping host active",
     )
 
@@ -238,7 +238,7 @@ class ActivityConfig(FrozenModel):
     @cached_property
     def idle_mode(self) -> IdleMode:
         """Derived from activity_sources."""
-        return _get_idle_mode_for_activity_sources(self.activity_sources)
+        return get_idle_mode_for_activity_sources(self.activity_sources)
 
 
 class HostConfig(FrozenModel):
@@ -261,7 +261,7 @@ class CertifiedHostData(FrozenModel):
         description="Maximum idle time before stopping",
     )
     activity_sources: tuple[ActivitySource, ...] = Field(
-        default=_ACTIVITY_SOURCES_BY_IDLE_MODE[IdleMode.IO],
+        default=ACTIVITY_SOURCES_BY_IDLE_MODE[IdleMode.IO],
         description="Activity sources that count toward keeping host active",
     )
 
@@ -289,7 +289,7 @@ class CertifiedHostData(FrozenModel):
     @cached_property
     def idle_mode(self) -> IdleMode:
         """Derived from activity_sources."""
-        return _get_idle_mode_for_activity_sources(self.activity_sources)
+        return get_idle_mode_for_activity_sources(self.activity_sources)
 
     max_host_age: int | None = Field(
         default=None,
@@ -532,3 +532,51 @@ class FileTransferSpec(FrozenModel):
     is_required: bool = Field(
         description="If True, provisioning fails if local file doesn't exist. If False, skipped if missing."
     )
+
+
+class HostLifecycleOptions(FrozenModel):
+    """Lifecycle and idle detection options for the host.
+
+    These options control when a host is considered idle and should be shut down.
+    All fields are optional; when None, provider defaults are used.
+    """
+
+    idle_timeout_seconds: int | None = Field(
+        default=None,
+        description="Shutdown after idle for N seconds (None for provider default)",
+    )
+    idle_mode: IdleMode | None = Field(
+        default=None,
+        description="When to consider host idle (None for provider default)",
+    )
+    activity_sources: tuple[ActivitySource, ...] | None = Field(
+        default=None,
+        description="Activity sources for idle detection (None for provider default)",
+    )
+
+    def to_activity_config(
+        self,
+        default_idle_timeout_seconds: int,
+        default_idle_mode: IdleMode,
+        default_activity_sources: tuple[ActivitySource, ...],
+    ) -> ActivityConfig:
+        """Convert to ActivityConfig, using provided defaults for None values.
+
+        When activity_sources is not explicitly provided, it is derived from the
+        resolved idle_mode using ACTIVITY_SOURCES_BY_IDLE_MODE. This ensures
+        that specifying --idle-mode boot results in only BOOT activity being monitored,
+        without needing to also explicitly specify --activity-sources boot.
+        """
+        resolved_idle_mode = self.idle_mode if self.idle_mode is not None else default_idle_mode
+
+        if self.activity_sources is not None:
+            resolved_activity_sources = self.activity_sources
+        else:
+            resolved_activity_sources = ACTIVITY_SOURCES_BY_IDLE_MODE[resolved_idle_mode]
+
+        return ActivityConfig(
+            idle_timeout_seconds=self.idle_timeout_seconds
+            if self.idle_timeout_seconds is not None
+            else default_idle_timeout_seconds,
+            activity_sources=resolved_activity_sources,
+        )

@@ -13,6 +13,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.api.exec import ExecResult
 from imbue.mng.api.exec import MultiExecResult
+from imbue.mng.api.exec import _record_failure
 from imbue.mng.api.exec import exec_command_on_agent
 from imbue.mng.api.exec import exec_command_on_agents
 from imbue.mng.config.data_types import AgentTypeConfig
@@ -22,6 +23,7 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.testing import cleanup_tmux_session
@@ -124,6 +126,7 @@ def test_exec_result_failure() -> None:
     assert result.stderr == "command not found\n"
 
 
+@pytest.mark.tmux
 def test_exec_command_on_agent_runs_command(
     temp_mng_ctx: MngContext,
     running_test_agent: RunningTestAgent,
@@ -140,6 +143,7 @@ def test_exec_command_on_agent_runs_command(
     assert result.success is True
 
 
+@pytest.mark.tmux
 def test_exec_command_on_agent_uses_custom_cwd(
     temp_mng_ctx: MngContext,
     running_test_agent: RunningTestAgent,
@@ -161,6 +165,7 @@ def test_exec_command_on_agent_uses_custom_cwd(
     assert result.success is True
 
 
+@pytest.mark.tmux
 def test_exec_command_on_agent_returns_failure(
     temp_mng_ctx: MngContext,
     running_test_agent: RunningTestAgent,
@@ -194,6 +199,7 @@ def test_multi_exec_result_accumulates_results() -> None:
     assert result.failed_agents[0] == ("agent-2", "host offline")
 
 
+@pytest.mark.tmux
 def test_exec_command_on_agents_single_agent(
     temp_mng_ctx: MngContext,
     running_test_agent: RunningTestAgent,
@@ -226,6 +232,7 @@ def test_exec_command_on_agents_nonexistent_agent(
         )
 
 
+@pytest.mark.tmux
 def test_exec_command_on_agents_invokes_callbacks(
     temp_mng_ctx: MngContext,
     running_test_agent: RunningTestAgent,
@@ -244,3 +251,84 @@ def test_exec_command_on_agents_invokes_callbacks(
     assert len(callback_results) == 1
     assert "callback-test" in callback_results[0].stdout
     assert len(result.successful_results) == 1
+
+
+# =============================================================================
+# MultiExecResult.is_any_failure Tests
+# =============================================================================
+
+
+def test_multi_exec_result_is_any_failure_false_when_all_success() -> None:
+    """is_any_failure should return False when all results are successful and no failed_agents."""
+    result = MultiExecResult()
+    result.successful_results.append(ExecResult(agent_name="a", stdout="ok", stderr="", success=True))
+    assert result.is_any_failure is False
+
+
+def test_multi_exec_result_is_any_failure_true_when_failed_agents() -> None:
+    """is_any_failure should return True when there are failed_agents."""
+    result = MultiExecResult()
+    result.failed_agents.append(("agent-x", "host down"))
+    assert result.is_any_failure is True
+
+
+def test_multi_exec_result_is_any_failure_true_when_exec_failed() -> None:
+    """is_any_failure should return True when a successful_result has success=False."""
+    result = MultiExecResult()
+    result.successful_results.append(ExecResult(agent_name="a", stdout="", stderr="error", success=False))
+    assert result.is_any_failure is True
+
+
+def test_multi_exec_result_is_any_failure_false_when_empty() -> None:
+    """is_any_failure should return False when result is empty."""
+    result = MultiExecResult()
+    assert result.is_any_failure is False
+
+
+# =============================================================================
+# _record_failure Tests
+# =============================================================================
+
+
+def test_record_failure_appends_to_result() -> None:
+    """_record_failure should add the failure to the result."""
+    result = MultiExecResult()
+    _record_failure(result, AgentName("test"), "error msg", None, ErrorBehavior.CONTINUE)
+    assert len(result.failed_agents) == 1
+    assert result.failed_agents[0] == ("test", "error msg")
+
+
+def test_record_failure_calls_on_error_callback() -> None:
+    """_record_failure should call the on_error callback if provided."""
+    result = MultiExecResult()
+    errors: list[tuple[str, str]] = []
+    _record_failure(result, AgentName("test"), "err", lambda n, e: errors.append((n, e)), ErrorBehavior.CONTINUE)
+    assert errors == [("test", "err")]
+
+
+def test_record_failure_returns_true_for_abort() -> None:
+    """_record_failure should return True when error_behavior is ABORT."""
+    result = MultiExecResult()
+    should_abort = _record_failure(result, AgentName("test"), "err", None, ErrorBehavior.ABORT)
+    assert should_abort is True
+
+
+def test_record_failure_returns_false_for_continue() -> None:
+    """_record_failure should return False when error_behavior is CONTINUE."""
+    result = MultiExecResult()
+    should_abort = _record_failure(result, AgentName("test"), "err", None, ErrorBehavior.CONTINUE)
+    assert should_abort is False
+
+
+def test_exec_command_on_agents_returns_empty_when_no_agents_match(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """exec_command_on_agents should return empty result when no agents exist and is_all=True."""
+    result = exec_command_on_agents(
+        mng_ctx=temp_mng_ctx,
+        agent_identifiers=[],
+        command="echo test",
+        is_all=True,
+    )
+    assert result.successful_results == []
+    assert result.failed_agents == []

@@ -24,7 +24,6 @@ from imbue.mng.errors import ParseSpecError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import LifecycleHook
-from imbue.mng.primitives import LogLevel
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import Permission
 from imbue.mng.primitives import PluginName
@@ -32,6 +31,7 @@ from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
 from imbue.mng.utils.file_utils import atomic_write
+from imbue.mng.utils.logging import LoggingConfig
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -266,67 +266,6 @@ class PluginConfig(FrozenModel):
         """
         merged_enabled = override.enabled if override.enabled is not None else self.enabled
         return self.__class__(enabled=merged_enabled)
-
-
-class LoggingConfig(FrozenModel):
-    """Logging configuration for mng."""
-
-    file_level: LogLevel = Field(
-        default=LogLevel.DEBUG,
-        description="Log level for file logging",
-    )
-    log_dir: Path = Field(
-        default=Path("logs"),
-        description="Directory for log files (relative to data root if relative)",
-    )
-    max_log_files: int = Field(
-        default=1000,
-        description="Maximum number of log files to keep",
-    )
-    max_log_size_mb: int = Field(
-        default=10,
-        description="Maximum size of each log file in MB",
-    )
-    console_level: LogLevel = Field(
-        default=LogLevel.BUILD,
-        description="Log level for console output",
-    )
-    is_logging_commands: bool = Field(
-        default=True,
-        description="Log what commands were executed",
-    )
-    is_logging_command_output: bool = Field(
-        default=False,
-        description="Log stdout/stderr from executed commands",
-    )
-    is_logging_env_vars: bool = Field(
-        default=False,
-        description="Log environment variables (security risk)",
-    )
-
-    def merge_with(self, override: "LoggingConfig") -> "LoggingConfig":
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        """
-        return LoggingConfig(
-            file_level=override.file_level if override.file_level is not None else self.file_level,
-            log_dir=override.log_dir if override.log_dir is not None else self.log_dir,
-            max_log_files=override.max_log_files if override.max_log_files is not None else self.max_log_files,
-            max_log_size_mb=override.max_log_size_mb if override.max_log_size_mb is not None else self.max_log_size_mb,
-            console_level=override.console_level if override.console_level is not None else self.console_level,
-            is_logging_commands=override.is_logging_commands
-            if override.is_logging_commands is not None
-            else self.is_logging_commands,
-            is_logging_command_output=override.is_logging_command_output
-            if override.is_logging_command_output is not None
-            else self.is_logging_command_output,
-            is_logging_env_vars=override.is_logging_env_vars
-            if override.is_logging_env_vars is not None
-            else self.is_logging_env_vars,
-        )
 
 
 class CommandDefaults(FrozenModel):
@@ -694,7 +633,7 @@ class MngContext(FrozenModel):
 
 
 class OutputOptions(FrozenModel):
-    """Options for command output formatting and logging."""
+    """Options for command output formatting."""
 
     output_format: OutputFormat = Field(
         default=OutputFormat.HUMAN,
@@ -704,29 +643,9 @@ class OutputOptions(FrozenModel):
         default=None,
         description="Format template string for custom output formatting (set when --format is a template string rather than a built-in format name)",
     )
-    console_level: LogLevel = Field(
-        default=LogLevel.BUILD,
-        description="Log level for console output",
-    )
-    log_level: LogLevel = Field(
-        default=LogLevel.NONE,
-        description="Log level for outputting to stderr",
-    )
-    log_file_path: Path | None = Field(
-        default=None,
-        description="Override path for log file (if None, uses default ~/.mng/logs/<timestamp>-<pid>.json)",
-    )
-    is_log_commands: bool = Field(
-        default=True,
-        description="Log what commands were executed",
-    )
-    is_log_command_output: bool = Field(
+    is_quiet: bool = Field(
         default=False,
-        description="Log stdout/stderr from executed commands",
-    )
-    is_log_env_vars: bool = Field(
-        default=False,
-        description="Log environment variables (security risk)",
+        description="Whether to suppress all stdout output (set by --quiet)",
     )
 
 

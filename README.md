@@ -111,7 +111,7 @@ mng pair my-agent          # or sync changes continuously!
 > mng ask "How do I create a container on modal with custom packages installed by default?"
 
 Simply run:
-    mng create --in modal --build-arg "--dockerfile path/to/Dockerfile"
+    mng create --in modal --build-arg "--file path/to/Dockerfile"
 ```
 
 <!--

@@ -2,17 +2,27 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mng.api.find import AgentMatch
 from imbue.mng.api.find import ParsedSourceLocation
 from imbue.mng.api.find import determine_resolved_path
+from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import get_host_from_list_by_id
 from imbue.mng.api.find import get_unique_host_from_list_by_name
+from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.find import parse_source_string
 from imbue.mng.api.find import resolve_agent_reference
 from imbue.mng.api.find import resolve_host_reference
+from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import AgentNotFoundError
 from imbue.mng.errors import UserInputError
+from imbue.mng.hosts.host import Host
+from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentReference
+from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostReference
@@ -577,3 +587,278 @@ def test_parse_source_string_with_empty_prefix_before_colon() -> None:
         host=None,
         path="/path/to/dir",
     )
+
+
+# =============================================================================
+# AgentMatch Tests
+# =============================================================================
+
+
+def test_agent_match_construction() -> None:
+    """AgentMatch should be constructable with required fields."""
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    match = AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("my-agent"),
+        host_id=host_id,
+        provider_name=ProviderInstanceName("local"),
+    )
+    assert match.agent_id == agent_id
+    assert match.agent_name == AgentName("my-agent")
+    assert match.host_id == host_id
+    assert match.provider_name == ProviderInstanceName("local")
+
+
+# =============================================================================
+# group_agents_by_host Tests
+# =============================================================================
+
+
+def test_group_agents_by_host_empty_list() -> None:
+    """group_agents_by_host should return empty dict for empty input."""
+    result = group_agents_by_host([])
+    assert result == {}
+
+
+def test_group_agents_by_host_single_host() -> None:
+    """group_agents_by_host should group agents on the same host."""
+    host_id = HostId.generate()
+    provider_name = ProviderInstanceName("local")
+    match1 = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-1"),
+        host_id=host_id,
+        provider_name=provider_name,
+    )
+    match2 = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-2"),
+        host_id=host_id,
+        provider_name=provider_name,
+    )
+
+    result = group_agents_by_host([match1, match2])
+    key = f"{host_id}:{provider_name}"
+    assert key in result
+    assert len(result[key]) == 2
+    assert result[key][0] == match1
+    assert result[key][1] == match2
+
+
+def test_group_agents_by_host_multiple_hosts() -> None:
+    """group_agents_by_host should separate agents from different hosts."""
+    host_id_1 = HostId.generate()
+    host_id_2 = HostId.generate()
+    provider_name = ProviderInstanceName("local")
+
+    match1 = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-1"),
+        host_id=host_id_1,
+        provider_name=provider_name,
+    )
+    match2 = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-2"),
+        host_id=host_id_2,
+        provider_name=provider_name,
+    )
+
+    result = group_agents_by_host([match1, match2])
+    assert len(result) == 2
+
+    key1 = f"{host_id_1}:{provider_name}"
+    key2 = f"{host_id_2}:{provider_name}"
+    assert key1 in result
+    assert key2 in result
+    assert result[key1] == [match1]
+    assert result[key2] == [match2]
+
+
+def test_group_agents_by_host_key_format() -> None:
+    """group_agents_by_host should use '{host_id}:{provider_name}' as key format."""
+    host_id = HostId.generate()
+    provider_name = ProviderInstanceName("docker")
+    match = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent"),
+        host_id=host_id,
+        provider_name=provider_name,
+    )
+
+    result = group_agents_by_host([match])
+    expected_key = f"{host_id}:docker"
+    assert expected_key in result
+
+
+# =============================================================================
+# find_agents_by_identifiers_or_state Tests
+# =============================================================================
+
+
+def test_find_agents_by_identifiers_or_state_no_agents_returns_empty(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """find_agents_by_identifiers_or_state should return empty list when no agents exist and filter_all is True."""
+    result = find_agents_by_identifiers_or_state(
+        agent_identifiers=[],
+        filter_all=True,
+        target_state=None,
+        mng_ctx=temp_mng_ctx,
+    )
+    assert result == []
+
+
+def test_find_agents_by_identifiers_or_state_no_identifiers_and_not_all(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """find_agents_by_identifiers_or_state should return empty list when no identifiers and filter_all is False."""
+    result = find_agents_by_identifiers_or_state(
+        agent_identifiers=[],
+        filter_all=False,
+        target_state=None,
+        mng_ctx=temp_mng_ctx,
+    )
+    assert result == []
+
+
+def test_find_agents_by_identifiers_or_state_raises_on_unknown_identifier(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """find_agents_by_identifiers_or_state should raise AgentNotFoundError for unrecognized identifiers."""
+    with pytest.raises(AgentNotFoundError, match="No agent"):
+        find_agents_by_identifiers_or_state(
+            agent_identifiers=["nonexistent-agent-xyz"],
+            filter_all=False,
+            target_state=None,
+            mng_ctx=temp_mng_ctx,
+        )
+
+
+@pytest.mark.tmux
+def test_find_agents_by_identifiers_or_state_finds_by_name(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+) -> None:
+    """find_agents_by_identifiers_or_state should find an agent by its name."""
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("find-by-name-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847310"),
+        ),
+    )
+
+    results = find_agents_by_identifiers_or_state(
+        agent_identifiers=["find-by-name-test"],
+        filter_all=False,
+        target_state=None,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    local_host.destroy_agent(agent)
+
+    assert len(results) == 1
+    assert results[0].agent_name == AgentName("find-by-name-test")
+
+
+@pytest.mark.tmux
+def test_find_agents_by_identifiers_or_state_finds_by_id(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+) -> None:
+    """find_agents_by_identifiers_or_state should find an agent by its ID."""
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("find-by-id-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847311"),
+        ),
+    )
+
+    agent_id_str = str(agent.id)
+    results = find_agents_by_identifiers_or_state(
+        agent_identifiers=[agent_id_str],
+        filter_all=False,
+        target_state=None,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    local_host.destroy_agent(agent)
+
+    assert len(results) == 1
+    assert str(results[0].agent_id) == agent_id_str
+
+
+@pytest.mark.tmux
+def test_find_agents_by_identifiers_or_state_filter_all_returns_all(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+) -> None:
+    """find_agents_by_identifiers_or_state with filter_all=True, target_state=None returns all agents."""
+    agent1 = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("find-all-1"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847312"),
+        ),
+    )
+    agent2 = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("find-all-2"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847313"),
+        ),
+    )
+
+    results = find_agents_by_identifiers_or_state(
+        agent_identifiers=[],
+        filter_all=True,
+        target_state=None,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    local_host.destroy_agent(agent1)
+    local_host.destroy_agent(agent2)
+
+    found_names = {str(r.agent_name) for r in results}
+    assert "find-all-1" in found_names
+    assert "find-all-2" in found_names
+
+
+@pytest.mark.tmux
+def test_find_agents_by_identifiers_or_state_filter_by_stopped_state(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+) -> None:
+    """find_agents_by_identifiers_or_state with target_state=STOPPED should only return stopped agents."""
+    # Create an agent but don't start it (so it's stopped)
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("find-stopped-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847314"),
+        ),
+    )
+
+    results = find_agents_by_identifiers_or_state(
+        agent_identifiers=[],
+        filter_all=True,
+        target_state=AgentLifecycleState.STOPPED,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    local_host.destroy_agent(agent)
+
+    found_names = {str(r.agent_name) for r in results}
+    assert "find-stopped-test" in found_names

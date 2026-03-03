@@ -9,6 +9,7 @@ from click_option_group import optgroup
 from imbue.mng.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import _run_pager_with_subprocess
+from imbue.mng.cli.help_formatter import _wrap_text
 from imbue.mng.cli.help_formatter import _write_to_stdout
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.help_formatter import format_git_style_help
@@ -570,3 +571,85 @@ def test_all_subcommands_have_git_style_help() -> None:
                 f"Help tests must invoke through the root cli group (not the subgroup directly) "
                 f"for key resolution to work."
             )
+
+
+# =============================================================================
+# CommandHelpMetadata.full_description
+# =============================================================================
+
+
+def test_get_pager_command_with_config_pager() -> None:
+    """get_pager_command should return config.pager when set."""
+    config = MngConfig(pager="bat", prefix="mng-", is_error_reporting_enabled=False)
+    assert get_pager_command(config) == "bat"
+
+
+def test_get_pager_command_with_none_config() -> None:
+    """get_pager_command should fall back to PAGER env or 'less' when config is None."""
+    result = get_pager_command(None)
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_get_pager_command_with_no_pager_in_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_pager_command should fall back to PAGER env when config.pager is None."""
+    monkeypatch.setenv("PAGER", "more")
+    config = MngConfig(prefix="mng-", is_error_reporting_enabled=False)
+    assert get_pager_command(config) == "more"
+
+
+def test_full_description_without_extended_description() -> None:
+    """full_description should return one-line description with period when no extended description."""
+    meta = CommandHelpMetadata(
+        key="test-cmd",
+        one_line_description="Do something useful",
+        synopsis="mng test-cmd [options]",
+        description="",
+    )
+    assert meta.full_description == "Do something useful."
+
+
+def test_full_description_with_extended_description() -> None:
+    """full_description should combine one-line and extended description."""
+    meta = CommandHelpMetadata(
+        key="test-cmd",
+        one_line_description="Do something useful",
+        synopsis="mng test-cmd [options]",
+        description="This command does many things.\nIt is very powerful.",
+    )
+    result = meta.full_description
+    assert result.startswith("Do something useful.")
+    assert "This command does many things." in result
+
+
+def test_full_description_does_not_double_period() -> None:
+    """full_description should not add a double period if one already exists."""
+    meta = CommandHelpMetadata(
+        key="test-cmd",
+        one_line_description="Already has period.",
+        synopsis="mng test-cmd [options]",
+        description="",
+    )
+    assert meta.full_description == "Already has period."
+    assert ".." not in meta.full_description
+
+
+# =============================================================================
+# _wrap_text
+# =============================================================================
+
+
+def test_wrap_text_simple() -> None:
+    """_wrap_text should wrap text with proper indentation."""
+    result = _wrap_text("hello world", width=80, indent="  ", subsequent_indent=None)
+    assert result == "  hello world"
+
+
+def test_wrap_text_wraps_long_lines() -> None:
+    """_wrap_text should wrap lines that exceed width."""
+    long_text = "word " * 20
+    result = _wrap_text(long_text.strip(), width=30, indent="  ", subsequent_indent="    ")
+    lines = result.split("\n")
+    assert len(lines) > 1
+    assert lines[0].startswith("  ")
+    assert lines[1].startswith("    ")

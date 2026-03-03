@@ -171,6 +171,7 @@ def test_pair_files_raises_when_git_required_but_not_present(
     assert "Git repositories required" in str(exc_info.value)
 
 
+@pytest.mark.unison
 def test_pair_files_starts_and_stops_syncer(pair_ctx: SyncTestContext, cg: ConcurrencyGroup) -> None:
     """Test that pair_files properly starts and stops the unison syncer."""
     with pair_files(
@@ -208,6 +209,7 @@ def test_pair_files_starts_and_stops_syncer(pair_ctx: SyncTestContext, cg: Concu
         assert syncer.is_running is False
 
 
+@pytest.mark.unison
 def test_pair_files_syncs_git_state_before_starting(pair_ctx: SyncTestContext, cg: ConcurrencyGroup) -> None:
     """Test that pair_files syncs git state before starting continuous sync."""
     # Add a commit to source (agent) that should be pulled to target
@@ -239,6 +241,7 @@ def test_pair_files_syncs_git_state_before_starting(pair_ctx: SyncTestContext, c
         syncer.stop()
 
 
+@pytest.mark.unison
 def test_pair_files_with_no_git_requirement(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that pair_files works without git when is_require_git=False."""
     source_dir = tmp_path / "source"
@@ -282,6 +285,7 @@ def test_pair_files_with_no_git_requirement(tmp_path: Path, cg: ConcurrencyGroup
 # =============================================================================
 
 
+@pytest.mark.unison
 def test_unison_syncer_start_and_stop(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer can start and stop unison process."""
     source = tmp_path / "source"
@@ -319,6 +323,7 @@ def test_unison_syncer_start_and_stop(tmp_path: Path, cg: ConcurrencyGroup) -> N
     assert syncer.is_running is False
 
 
+@pytest.mark.unison
 def test_unison_syncer_syncs_file_changes(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer actually syncs file changes."""
     source = tmp_path / "source"
@@ -353,6 +358,7 @@ def test_unison_syncer_syncs_file_changes(tmp_path: Path, cg: ConcurrencyGroup) 
         syncer.stop()
 
 
+@pytest.mark.unison
 def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer correctly syncs symlinks."""
     source = tmp_path / "source"
@@ -391,6 +397,7 @@ def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> N
         syncer.stop()
 
 
+@pytest.mark.unison
 def test_unison_syncer_syncs_directory_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer correctly syncs directory symlinks."""
     source = tmp_path / "source"
@@ -429,6 +436,7 @@ def test_unison_syncer_syncs_directory_symlinks(tmp_path: Path, cg: ConcurrencyG
         syncer.stop()
 
 
+@pytest.mark.unison
 def test_unison_syncer_handles_process_crash(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer handles unison process crash gracefully."""
     source = tmp_path / "source"
@@ -477,6 +485,7 @@ def test_unison_syncer_handles_process_crash(tmp_path: Path, cg: ConcurrencyGrou
 
 
 @pytest.mark.acceptance
+@pytest.mark.unison
 def test_unison_syncer_handles_large_files(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer correctly syncs large files (50MB)."""
     source = tmp_path / "source"

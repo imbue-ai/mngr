@@ -1,3 +1,4 @@
+import sys
 from io import StringIO
 
 from imbue.mng.utils.terminal import StderrInterceptor
@@ -82,3 +83,32 @@ def test_interceptor_errors_from_original() -> None:
 
     interceptor = StderrInterceptor(callback=lambda s: None, original_stderr=_WithErrors())
     assert interceptor.errors == "replace"
+
+
+def test_interceptor_flush_is_noop() -> None:
+    """flush should be a no-op and not raise."""
+    interceptor = StderrInterceptor(callback=lambda s: None, original_stderr=StringIO())
+    interceptor.flush()
+
+
+def test_interceptor_fileno_delegates_to_original() -> None:
+    """fileno should delegate to original stderr."""
+
+    class _WithFileno:
+        def fileno(self) -> int:
+            return 42
+
+        def isatty(self) -> bool:
+            return False
+
+    interceptor = StderrInterceptor(callback=lambda s: None, original_stderr=_WithFileno())
+    assert interceptor.fileno() == 42
+
+
+def test_interceptor_context_manager_installs_and_restores_stderr() -> None:
+    """Context manager should install interceptor as sys.stderr and restore on exit."""
+    original = sys.stderr
+    interceptor = StderrInterceptor(callback=lambda s: None, original_stderr=original)
+    with interceptor:
+        assert sys.stderr is interceptor
+    assert sys.stderr is original

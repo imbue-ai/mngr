@@ -7,6 +7,7 @@ import setproctitle
 from click_option_group import OptionGroup
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.agents.agent_registry import load_agents_from_plugins
 from imbue.mng.cli.ask import ask
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.clone import clone
@@ -260,6 +261,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     # load all classes defined by plugins so they are available later
     load_all_registries(pm)
+    load_agents_from_plugins(pm)
+
+    # Wire up the agent type resolver so hosts can resolve agent types
+    # without directly importing from the agents layer
 
     return pm
 

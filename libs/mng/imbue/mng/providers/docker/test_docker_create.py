@@ -7,7 +7,7 @@ from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import get_subprocess_test_env
 
-pytestmark = [pytest.mark.docker, pytest.mark.acceptance]
+pytestmark = [pytest.mark.docker, pytest.mark.acceptance, pytest.mark.rsync]
 
 
 @pytest.fixture

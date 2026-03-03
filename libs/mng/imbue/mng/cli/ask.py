@@ -37,7 +37,7 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I create a container on modal with custom packages installed by default?\n"
     "response: Simply run:\n"
-    '    mng create --in modal --build-arg "--dockerfile path/to/Dockerfile"\n'
+    '    mng create --in modal --build-arg "--file path/to/Dockerfile"\n'
     "If you don't have a Dockerfile for your project, run:\n"
     "    mng bootstrap\n"
     "from the repo where you would like a Dockerfile created.\n\n"

@@ -73,13 +73,19 @@ class RatchetMatchChunk(FrozenModel):
     matched_content: str = Field(description="The content that matched the regex")
     start_line: LineNumber = Field(description="The starting line number (1-indexed)")
     end_line: LineNumber = Field(description="The ending line number (1-indexed)")
-    last_modified_date: datetime = Field(description="The date this chunk was last modified in git")
 
     @property
     def matched_lines(self) -> str:
         contents = _read_file_contents(self.file_path)
         lines = contents.splitlines()
         return "\n".join(lines[self.start_line - 1 : self.end_line])
+
+
+class DatedRatchetMatchChunk(FrozenModel):
+    """A ratchet match chunk with its git blame date resolved."""
+
+    chunk: RatchetMatchChunk = Field(description="The matched chunk")
+    last_modified_date: datetime = Field(description="The date this chunk was last modified in git")
 
 
 class RatchetsError(Exception):
@@ -161,30 +167,74 @@ def _parse_file_ast(file_path: Path) -> ast.Module | None:
         return None
 
 
-def _get_line_commit_date(
-    file_path: Path,
-    line_number: LineNumber,
-) -> datetime:
-    """Get the date of the last commit that touched a specific line."""
+@lru_cache(maxsize=None)
+def _get_ast_nodes_by_type(file_path: Path) -> dict[type, list[ast.AST]]:
+    """Walk the AST once per file and cache all nodes grouped by type.
+
+    This avoids redundant ast.walk() calls when multiple ratchet checks
+    need to inspect nodes from the same file.
+    """
+    tree = _parse_file_ast(file_path)
+    if tree is None:
+        return {}
+    nodes_by_type: dict[type, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        node_type = type(node)
+        if node_type not in nodes_by_type:
+            nodes_by_type[node_type] = []
+        nodes_by_type[node_type].append(node)
+    return nodes_by_type
+
+
+@lru_cache(maxsize=None)
+def _get_file_blame_dates(file_path: Path) -> dict[int, datetime]:
+    """Run git blame once for an entire file and return a mapping of line_number -> commit_date.
+
+    Uses --line-porcelain to get full porcelain output for every line, then parses
+    committer-time timestamps. Results are cached per file to avoid repeated subprocess calls.
+    """
     try:
         result = subprocess.run(
-            ["git", "blame", "-L", f"{line_number},{line_number}", "--porcelain", str(file_path)],
+            ["git", "blame", "--line-porcelain", str(file_path)],
             cwd=file_path.parent,
             capture_output=True,
             text=True,
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        raise GitCommandError(f"Failed to get git blame for {file_path}:{line_number}") from e
+        raise GitCommandError(f"Failed to get git blame for {file_path}") from e
 
-    # Parse the porcelain output to extract the committer-time
+    line_dates: dict[int, datetime] = {}
+    current_line_number: int | None = None
+
     for line in result.stdout.splitlines():
-        if line.startswith("committer-time "):
+        # Each block starts with: <sha1> <orig-line> <final-line> [<num-lines>]
+        # The final-line (3rd field) is the line number in the current file.
+        if len(line) >= 40 and not line.startswith("\t") and not line.startswith(" "):
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    current_line_number = int(parts[2])
+                except ValueError:
+                    current_line_number = None
+        elif line.startswith("committer-time ") and current_line_number is not None:
             timestamp_str = line.split(" ", 1)[1]
             timestamp = int(timestamp_str)
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            line_dates[current_line_number] = datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
-    raise GitCommandError(f"Could not find commit date for {file_path}:{line_number}")
+    return line_dates
+
+
+def _get_line_commit_date(
+    file_path: Path,
+    line_number: LineNumber,
+) -> datetime:
+    """Get the date of the last commit that touched a specific line."""
+    blame_dates = _get_file_blame_dates(file_path)
+    commit_date = blame_dates.get(int(line_number))
+    if commit_date is None:
+        raise GitCommandError(f"Could not find commit date for {file_path}:{line_number}")
+    return commit_date
 
 
 def _get_chunk_commit_date(
@@ -209,16 +259,13 @@ def get_ratchet_failures(
     pattern: RegexPattern,
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[RatchetMatchChunk, ...]:
-    """Find all regex matches in git-tracked files and return them sorted by modification date.
-
-    Applies a regex pattern to all git-tracked files in the given folder. For each match,
-    it determines the date of the last commit that touched any line in the match and returns
-    all matches sorted from most recently changed to least recently changed.
+    """Find all regex matches in git-tracked files and return them sorted by file path and line number.
 
     If extension is provided, only files matching that extension are searched.
     If extension is None, all tracked files are searched.
 
-    File contents are transparently cached to avoid repeated reads when called multiple times.
+    Blame dates are not computed here; they are resolved on demand via _resolve_blame_dates()
+    when a failure message needs to be formatted.
     """
     file_paths = _get_non_ignored_files_with_extension(folder_path, extension, excluded_path_patterns)
 
@@ -242,28 +289,19 @@ def get_ratchet_failures(
             # Count newlines within the match to get end line
             end_line_number = start_line_number + matched_text.count("\n")
 
-            # Get the commit date for this chunk
-            commit_date = _get_chunk_commit_date(
-                file_path,
-                LineNumber(start_line_number),
-                LineNumber(end_line_number),
-            )
-
             # Create the chunk
             chunk = RatchetMatchChunk(
                 file_path=file_path,
                 matched_content=matched_text,
                 start_line=LineNumber(start_line_number),
                 end_line=LineNumber(end_line_number),
-                last_modified_date=commit_date,
             )
             chunks.append(chunk)
 
-    # Sort by most recently changed first
+    # Sort deterministically by file path and line number
     sorted_chunks = sorted(
         chunks,
-        key=lambda c: c.last_modified_date,
-        reverse=True,
+        key=lambda c: (str(c.file_path), c.start_line),
     )
 
     return tuple(sorted_chunks)
@@ -280,6 +318,19 @@ def clear_ratchet_caches() -> None:
     _get_all_files_with_extension.cache_clear()
     _read_file_contents.cache_clear()
     _parse_file_ast.cache_clear()
+    _get_ast_nodes_by_type.cache_clear()
+    _get_file_blame_dates.cache_clear()
+
+
+def _resolve_blame_dates(
+    chunks: tuple[RatchetMatchChunk, ...],
+) -> tuple[DatedRatchetMatchChunk, ...]:
+    """Resolve blame dates for chunks via git blame."""
+    resolved: list[DatedRatchetMatchChunk] = []
+    for chunk in chunks:
+        commit_date = _get_chunk_commit_date(chunk.file_path, chunk.start_line, chunk.end_line)
+        resolved.append(DatedRatchetMatchChunk(chunk=chunk, last_modified_date=commit_date))
+    return tuple(resolved)
 
 
 def format_ratchet_failure_message(
@@ -292,8 +343,17 @@ def format_ratchet_failure_message(
     if not chunks:
         return f"No {rule_name} found (this is good!)"
 
-    # Get the most recent violations (chunks are already sorted by most recent first)
-    recent_violations = chunks[:max_display_count]
+    # Resolve blame dates for display
+    dated_chunks = _resolve_blame_dates(chunks)
+
+    # Sort by most recently changed first for display
+    sorted_by_date = sorted(
+        dated_chunks,
+        key=lambda c: c.last_modified_date,
+        reverse=True,
+    )
+
+    recent_violations = sorted_by_date[:max_display_count]
 
     lines = [
         "\n",
@@ -309,7 +369,8 @@ def format_ratchet_failure_message(
         "",
     ]
 
-    for idx, chunk in enumerate(recent_violations, 1):
+    for idx, dated in enumerate(recent_violations, 1):
+        chunk = dated.chunk
         # Make path relative to a reasonable base for readability
         try:
             # Try to make path relative to project root (4 levels up from typical location)
@@ -321,7 +382,7 @@ def format_ratchet_failure_message(
         lines.extend(
             [
                 f"{idx}. {relative_path}:{chunk.start_line}",
-                f"   Last modified: {chunk.last_modified_date.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                f"   Last modified: {dated.last_modified_date.strftime('%Y-%m-%d %H:%M:%S UTC')}",
                 f"   Content lines:\n{chunk.matched_lines}",
                 "",
             ]

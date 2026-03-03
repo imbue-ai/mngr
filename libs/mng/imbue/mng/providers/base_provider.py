@@ -2,9 +2,9 @@ from typing import Mapping
 from typing import Sequence
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.api.data_types import HostLifecycleOptions
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.offline_host import OfflineHost
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import HostId

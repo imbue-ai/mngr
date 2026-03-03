@@ -54,6 +54,7 @@ mng create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | ---- | ---- | ----------- | ------- |
 | `-t`, `--template` | text | Use a named template from create_templates config [repeatable, stacks in order] | None |
 | `-n`, `--name` | text | Agent name (alternative to positional argument) [default: auto-generated] | None |
+| `--agent-id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `english` |
 | `--agent-type` | text | Which type of agent to run [default: claude] | None |
 | `--agent-cmd`, `--agent-command` | text | Run a literal command using the generic agent type (mutually exclusive with --agent-type) | None |
@@ -234,12 +235,12 @@ Provider: local
 
 Provider: modal
   Supported build arguments for the modal provider:
-    --dockerfile PATH     Path to the Dockerfile to build the sandbox image. Default: Dockerfile in context dir
+    --file PATH           Path to the Dockerfile to build the sandbox image. Default: Dockerfile in context dir
     --context-dir PATH    Build context directory for Dockerfile COPY/ADD instructions. Default: Dockerfile's directory
     --cpu COUNT           Number of CPU cores (0.25-16). Default: 1.0
     --memory GB           Memory in GB (0.5-32). Default: 1.0
     --gpu TYPE            GPU type to use (e.g., t4, a10g, a100, any). Default: no GPU
-    --image NAME          Base Docker image to use. Not required if using a dockerfile. Default: debian:bookworm-slim
+    --image NAME          Base Docker image to use. Not required if using --file. Default: debian:bookworm-slim
     --timeout SEC         Maximum sandbox lifetime in seconds. Default: 900 (15 min)
     --region NAME         Region to run the sandbox in (e.g., us-east, us-west, eu-west). Default: auto
     --secret VAR          Pass an environment variable as a secret to the image build. The value of

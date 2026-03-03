@@ -153,10 +153,10 @@ mng create my-task --in modal --build-arg cpu=4 --build-arg memory=16 --build-ar
 # (-b is an alternative forms of --build-arg; see "mng create --help" for all provider-specific build args)
 # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
 
-# the most important build args for Modal are probably "--dockerfile" and "--context-dir",
+# the most important build args for Modal are probably "--file" and "--context-dir",
 # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
 # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
-mng create my-task --in modal --build-args "dockerfile=./Dockerfile.agent context-dir=./agent-context"
+mng create my-task --in modal --build-args "file=./Dockerfile.agent context-dir=./agent-context"
 # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
 # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
 # that command also demonstrates how to pass multiple build args in a single --build-args string (instead of using multiple --build-arg flags)

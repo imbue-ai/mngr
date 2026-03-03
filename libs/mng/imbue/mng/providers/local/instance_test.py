@@ -18,6 +18,7 @@ from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
+from imbue.mng.primitives import HostNameStyle
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
@@ -431,3 +432,45 @@ def test_get_max_destroyed_host_persisted_seconds_provider_override_takes_preced
 
     result = provider.get_max_destroyed_host_persisted_seconds()
     assert result == provider_seconds
+
+
+# =============================================================================
+# Tests for LocalProviderInstance properties and methods
+# =============================================================================
+
+
+def test_get_host_name_returns_localhost(local_provider: LocalProviderInstance) -> None:
+    """get_host_name should always return 'localhost' regardless of style."""
+    name = local_provider.get_host_name(HostNameStyle.ASTRONOMY)
+    assert name == HostName("localhost")
+
+
+def test_supports_shutdown_hosts(local_provider: LocalProviderInstance) -> None:
+    """Local provider should support shutdown hosts (even though stop always raises)."""
+    assert local_provider.supports_shutdown_hosts is True
+
+
+def test_delete_host_raises(local_provider: LocalProviderInstance) -> None:
+    """delete_host should raise because local hosts are never offline."""
+    host = local_provider.create_host(HostName("localhost"))
+    with pytest.raises(Exception, match="delete_host should not be called"):
+        local_provider.delete_host(host)
+
+
+def test_delete_volume_raises_when_no_hosts_dir(local_provider: LocalProviderInstance) -> None:
+    """delete_volume should raise MngError when hosts directory doesn't exist."""
+    # Ensure there is no hosts/ dir at all
+    hosts_dir = local_provider.mng_ctx.config.default_host_dir.expanduser() / "hosts"
+    assert not hosts_dir.exists()
+    with pytest.raises(MngError, match="no hosts directory"):
+        local_provider.delete_volume(VolumeId.generate())
+
+
+def test_delete_volume_raises_when_volume_not_found(local_provider: LocalProviderInstance) -> None:
+    """delete_volume should raise MngError when hosts dir exists but volume ID doesn't match."""
+    hosts_dir = local_provider.mng_ctx.config.default_host_dir.expanduser() / "hosts"
+    # Create hosts dir with a subdirectory that won't match our volume ID
+    some_dir = hosts_dir / "some-host-dir"
+    some_dir.mkdir(parents=True)
+    with pytest.raises(MngError, match="not found"):
+        local_provider.delete_volume(VolumeId.generate())

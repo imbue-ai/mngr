@@ -22,6 +22,7 @@ from imbue.mng.utils.testing import tmux_session_cleanup
 # =============================================================================
 
 
+@pytest.mark.tmux
 def test_snapshot_create_local_agent_rejects_unsupported_provider(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -46,6 +47,7 @@ def test_snapshot_create_local_agent_rejects_unsupported_provider(
         assert "does not support snapshots" in result.output
 
 
+@pytest.mark.tmux
 def test_snapshot_create_dry_run_jsonl_resolves_local_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -118,6 +120,7 @@ def test_snapshot_create_nonexistent_agent_errors(
     assert result.exit_code != 0
 
 
+@pytest.mark.tmux
 def test_snapshot_create_on_error_continue_reports_failure(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -142,6 +145,7 @@ def test_snapshot_create_on_error_continue_reports_failure(
         assert "does not support snapshots" in result.output or "Failed to create" in result.output
 
 
+@pytest.mark.tmux
 def test_snapshot_create_on_error_abort_reports_failure(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -288,6 +292,7 @@ def temp_source_dir(tmp_path: Path) -> Path:
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
 @pytest.mark.timeout(400)
 def test_snapshot_create_then_list_on_modal(
     temp_source_dir: Path,
@@ -339,6 +344,7 @@ def test_snapshot_create_then_list_on_modal(
 
 
 @pytest.mark.release
+@pytest.mark.rsync
 @pytest.mark.skip(
     "Just not worth the extra testing time right now (above and beyond what we're already getting via the above)"
 )

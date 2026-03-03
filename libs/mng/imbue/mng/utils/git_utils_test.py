@@ -3,14 +3,21 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.errors import MngError
 from imbue.mng.utils.git_utils import _parse_project_name_from_url
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.git_utils import find_git_worktree_root
+from imbue.mng.utils.git_utils import find_source_repo_of_worktree
+from imbue.mng.utils.git_utils import get_current_branch
 from imbue.mng.utils.git_utils import get_git_author_info
 from imbue.mng.utils.git_utils import get_git_remote_url
+from imbue.mng.utils.git_utils import get_head_commit
 from imbue.mng.utils.git_utils import is_git_repository
+from imbue.mng.utils.git_utils import parse_worktree_git_file
 
 
 def test_github_https_url() -> None:
@@ -272,3 +279,140 @@ def test_get_git_remote_url_returns_none_for_non_git_dir(tmp_path: Path, cg: Con
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
     assert get_git_remote_url(plain_dir, "origin", cg) is None
+
+
+# =============================================================================
+# parse_worktree_git_file Tests
+# =============================================================================
+
+
+def test_parse_worktree_git_file_valid_gitdir() -> None:
+    """parse_worktree_git_file should extract the source repo path from a valid gitdir line."""
+    content = "gitdir: /home/user/myrepo/.git/worktrees/my-worktree"
+    result = parse_worktree_git_file(content)
+    assert result == Path("/home/user/myrepo")
+
+
+def test_parse_worktree_git_file_with_trailing_whitespace() -> None:
+    """parse_worktree_git_file should handle trailing whitespace."""
+    content = "gitdir: /home/user/myrepo/.git/worktrees/my-worktree\n"
+    result = parse_worktree_git_file(content)
+    assert result == Path("/home/user/myrepo")
+
+
+def test_parse_worktree_git_file_invalid_content() -> None:
+    """parse_worktree_git_file should return None for content without gitdir prefix."""
+    content = "not a valid gitdir line"
+    result = parse_worktree_git_file(content)
+    assert result is None
+
+
+def test_parse_worktree_git_file_non_gitdir_path() -> None:
+    """parse_worktree_git_file should return None when parent.parent is not .git."""
+    # This is a gitdir line, but the path structure doesn't have .git as the grandparent
+    content = "gitdir: /home/user/myrepo/.notgit/worktrees/my-worktree"
+    result = parse_worktree_git_file(content)
+    assert result is None
+
+
+# =============================================================================
+# find_source_repo_of_worktree Tests
+# =============================================================================
+
+
+def test_find_source_repo_of_worktree_returns_none_for_missing_git_file(tmp_path: Path) -> None:
+    """find_source_repo_of_worktree should return None when .git file does not exist."""
+    result = find_source_repo_of_worktree(tmp_path / "nonexistent")
+    assert result is None
+
+
+def test_find_source_repo_of_worktree_returns_none_for_directory_git(tmp_path: Path) -> None:
+    """find_source_repo_of_worktree should return None when .git is a directory (regular repo)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    # .git is a directory, not a file, so read_text will raise
+    result = find_source_repo_of_worktree(repo)
+    assert result is None
+
+
+def test_find_source_repo_of_worktree_returns_path_for_valid_worktree(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """find_source_repo_of_worktree should return the source repo from a real worktree."""
+    worktree_path = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "wt-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    result = find_source_repo_of_worktree(worktree_path)
+    assert result == temp_git_repo
+
+
+# =============================================================================
+# get_current_branch Tests
+# =============================================================================
+
+
+def test_get_current_branch_returns_branch_name(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """get_current_branch should return the current branch name."""
+    # temp_git_repo is initialized with git init, which creates a default branch
+    branch = get_current_branch(temp_git_repo, cg)
+    # The branch name depends on git config, but it should be a non-empty string
+    assert isinstance(branch, str)
+    assert len(branch) > 0
+    assert branch != "HEAD"
+
+
+def test_get_current_branch_raises_on_detached_head(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """get_current_branch should raise MngError for detached HEAD."""
+    # Get the commit hash, then detach HEAD
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    commit_hash = result.stdout.strip()
+    subprocess.run(
+        ["git", "checkout", commit_hash],
+        cwd=temp_git_repo,
+        capture_output=True,
+        check=True,
+    )
+
+    with pytest.raises(MngError, match="HEAD is detached"):
+        get_current_branch(temp_git_repo, cg)
+
+
+def test_get_current_branch_raises_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """get_current_branch should raise MngError for a non-git directory."""
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    with pytest.raises(MngError, match="Failed to get current branch"):
+        get_current_branch(plain_dir, cg)
+
+
+# =============================================================================
+# get_head_commit Tests
+# =============================================================================
+
+
+def test_get_head_commit_returns_commit_hash(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
+    """get_head_commit should return the HEAD commit hash."""
+    commit = get_head_commit(temp_git_repo, cg)
+    assert commit is not None
+    # SHA-1 hash is 40 hex characters
+    assert len(commit) == 40
+    assert all(c in "0123456789abcdef" for c in commit)
+
+
+def test_get_head_commit_returns_none_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """get_head_commit should return None for a non-git directory."""
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    result = get_head_commit(plain_dir, cg)
+    assert result is None

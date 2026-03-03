@@ -1,7 +1,5 @@
 import os
 import subprocess
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -72,7 +70,6 @@ def test_ratchet_match_chunk_creation() -> None:
         matched_content="def foo():\n    pass",
         start_line=LineNumber(10),
         end_line=LineNumber(11),
-        last_modified_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
     )
     assert chunk.file_path == Path("/tmp/test.py")
     assert chunk.start_line == 10
@@ -85,7 +82,6 @@ def test_ratchet_match_chunk_is_frozen() -> None:
         matched_content="test",
         start_line=LineNumber(1),
         end_line=LineNumber(1),
-        last_modified_date=datetime(2024, 1, 1, tzinfo=timezone.utc),
     )
     with pytest.raises(ValidationError):
         chunk.start_line = LineNumber(2)
@@ -196,44 +192,6 @@ def test_get_ratchet_failures_finds_matches_in_git_repo(git_repo: Path) -> None:
     assert chunks[0].matched_content in ["# TODO: Fix this", "# TODO: And this"]
     assert chunks[1].matched_content in ["# TODO: Fix this", "# TODO: And this"]
     assert all(chunk.file_path.name == "test.py" for chunk in chunks)
-    assert all(isinstance(chunk.last_modified_date, datetime) for chunk in chunks)
-    assert all(chunk.last_modified_date.tzinfo == timezone.utc for chunk in chunks)
-
-
-def test_get_ratchet_failures_sorts_by_most_recent_first(git_repo: Path) -> None:
-    # Create file with first TODO using a fixed old timestamp
-    test_file = git_repo / "test.py"
-    test_file.write_text("# TODO: Old issue\n")
-    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
-    # Use git environment variables to set a specific commit timestamp (Jan 1, 2024)
-    old_env = {**os.environ, "GIT_COMMITTER_DATE": "2024-01-01T00:00:00"}
-    subprocess.run(
-        ["git", "commit", "-m", "First commit"],
-        cwd=git_repo,
-        check=True,
-        capture_output=True,
-        env=old_env,
-    )
-
-    # Add second TODO with a newer timestamp (Jan 2, 2024) - no sleep needed
-    test_file.write_text("# TODO: Old issue\n# TODO: New issue\n")
-    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
-    new_env = {**os.environ, "GIT_COMMITTER_DATE": "2024-01-02T00:00:00"}
-    subprocess.run(
-        ["git", "commit", "-m", "Second commit"],
-        cwd=git_repo,
-        check=True,
-        capture_output=True,
-        env=new_env,
-    )
-
-    pattern = RegexPattern(r"# TODO:.*")
-    chunks = get_ratchet_failures(git_repo, FileExtension(".py"), pattern)
-
-    # Most recent should be first
-    assert len(chunks) == 2
-    assert chunks[0].last_modified_date > chunks[1].last_modified_date
-    assert chunks[0].matched_content == "# TODO: New issue"
 
 
 def test_get_ratchet_failures_handles_multiline_matches(git_repo: Path) -> None:
@@ -307,18 +265,72 @@ def test_get_ratchet_failures_raises_on_non_git_directory(tmp_path: Path) -> Non
         get_ratchet_failures(test_dir, FileExtension(".py"), pattern)
 
 
-def test_formatting():
-    format_ratchet_failure_message(
+def test_formatting(git_repo: Path):
+    test_file = git_repo / "test.py"
+    test_file.write_text("    suspicious_code_here()\n    another_bad_line()\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Add file"], cwd=git_repo, check=True, capture_output=True)
+
+    pattern = RegexPattern(r"suspicious_code_here.*\n.*another_bad_line", multiline=True)
+    chunks = get_ratchet_failures(git_repo, FileExtension(".py"), pattern)
+    assert len(chunks) == 1
+
+    message = format_ratchet_failure_message(
         rule_name="Test Rule",
         rule_description="This is a test rule for demonstration purposes.",
-        chunks=(
-            RatchetMatchChunk(
-                file_path=Path(__file__),
-                start_line=LineNumber(42),
-                end_line=LineNumber(43),
-                matched_content="    suspicious_code_here()\n    another_bad_line()",
-                last_modified_date=datetime(2024, 6, 1, 12, 0, 0),
-            ),
-        ),
+        chunks=chunks,
         max_display_count=3,
     )
+    assert "Test Rule" in message
+    assert "suspicious_code_here" in message
+
+
+def test_format_ratchet_failure_message_resolves_blame_and_sorts_by_date(git_repo: Path) -> None:
+    """Verify that format_ratchet_failure_message lazily resolves blame dates and sorts by most recent first."""
+    test_file = git_repo / "test.py"
+    env = {"GIT_COMMITTER_DATE": "", "GIT_AUTHOR_DATE": ""}
+
+    # Create first commit (2020) with one TODO
+    test_file.write_text("# TODO: Old issue\nprint('hello')\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00+00:00"
+    env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00+00:00"
+    subprocess.run(
+        ["git", "commit", "-m", "First commit"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        env={**os.environ, **env},
+    )
+
+    # Create second commit (2025) with a newer TODO
+    test_file.write_text("# TODO: Old issue\nprint('hello')\n# TODO: New issue\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    env["GIT_COMMITTER_DATE"] = "2025-06-15T00:00:00+00:00"
+    env["GIT_AUTHOR_DATE"] = "2025-06-15T00:00:00+00:00"
+    subprocess.run(
+        ["git", "commit", "-m", "Second commit"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        env={**os.environ, **env},
+    )
+
+    pattern = RegexPattern(r"# TODO:.*")
+    chunks = get_ratchet_failures(git_repo, FileExtension(".py"), pattern)
+
+    assert len(chunks) == 2
+
+    # format_ratchet_failure_message resolves blame and sorts by date
+    message = format_ratchet_failure_message(
+        rule_name="TODOs",
+        rule_description="No TODOs allowed",
+        chunks=chunks,
+        max_display_count=5,
+    )
+
+    # The message should show the newer violation first
+    old_pos = message.find("Old issue")
+    new_pos = message.find("New issue")
+    assert old_pos > 0 and new_pos > 0, f"Expected both issues in message, got: {message}"
+    assert new_pos < old_pos, "Newer violation should appear before older one in the failure message"

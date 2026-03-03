@@ -25,21 +25,6 @@ class VerifyMode(UpperCaseStrEnum):
     FULL = auto()
 
 
-class MngInstallMode(UpperCaseStrEnum):
-    """Controls how mng and mng-schedule are made available in the deployed image.
-
-    AUTO: Detect automatically based on how mng-schedule is currently installed.
-    PACKAGE: Install from PyPI (or configured index) via pip install.
-    EDITABLE: Package the local source tree and install it in the image.
-    SKIP: Assume mng is already available in the base image
-    """
-
-    AUTO = auto()
-    PACKAGE = auto()
-    EDITABLE = auto()
-    SKIP = auto()
-
-
 class ScheduleTriggerDefinition(FrozenModel):
     """A scheduled trigger that runs an mng command on a cron schedule."""
 

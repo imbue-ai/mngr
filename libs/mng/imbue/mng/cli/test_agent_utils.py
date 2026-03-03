@@ -27,6 +27,7 @@ from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import tmux_session_cleanup
 
 
+@pytest.mark.tmux
 def test_select_agent_interactively_with_host_returns_selected_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -59,6 +60,7 @@ def test_select_agent_interactively_with_host_returns_selected_agent(
         assert agent.name == AgentName(agent_name)
 
 
+@pytest.mark.tmux
 def test_select_agent_interactively_with_host_returns_none_when_user_quits(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -86,6 +88,7 @@ def test_select_agent_interactively_with_host_returns_none_when_user_quits(
         assert result is None
 
 
+@pytest.mark.tmux
 def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -128,6 +131,7 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
         assert agent.name == AgentName(agent_name)
 
 
+@pytest.mark.tmux
 def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
     cli_runner: CliRunner,
     temp_work_dir: Path,
