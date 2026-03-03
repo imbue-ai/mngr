@@ -22,6 +22,7 @@ members = [
     "mng-pair",
     "mng-recursive",
     "mng-schedule",
+    "mng-tip",
     "mng-ttyd",
     "mng-tutor",
     "sculptor-web",
@@ -1961,6 +1962,17 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
 ]
+
+[[package]]
+name = "mng-tip"
+version = "0.1.0"
+source = { editable = "libs/mng_tip" }
+dependencies = [
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-ttyd"

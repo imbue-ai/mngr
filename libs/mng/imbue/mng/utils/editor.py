@@ -5,8 +5,10 @@ import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 from typing import Final
+from typing import Self
 
 from loguru import logger
 
@@ -253,6 +255,17 @@ class EditorSession:
             self._result_ready.wait(timeout=1.0)
 
         return self._result_content
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.cleanup()
 
     def cleanup(self) -> None:
         """Clean up the temporary file and terminate the editor process if running.

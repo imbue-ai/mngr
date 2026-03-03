@@ -1,7 +1,12 @@
 import sys
 from io import StringIO
 
+from imbue.mng.utils.terminal import ANSI_DIM
+from imbue.mng.utils.terminal import ANSI_RESET
 from imbue.mng.utils.terminal import StderrInterceptor
+from imbue.mng.utils.terminal import write_dim_stderr
+
+# -- StderrInterceptor tests --
 
 
 def test_interceptor_routes_writes_through_callback() -> None:
@@ -112,3 +117,34 @@ def test_interceptor_context_manager_installs_and_restores_stderr() -> None:
     with interceptor:
         assert sys.stderr is interceptor
     assert sys.stderr is original
+
+
+# -- write_dim_stderr tests --
+
+
+class _TtyStringIO(StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_write_dim_stderr_no_op_for_empty_text() -> None:
+    stderr = StringIO()
+    write_dim_stderr("", stream=stderr)
+    assert stderr.getvalue() == ""
+
+
+def test_write_dim_stderr_writes_dim_on_tty() -> None:
+    stderr = _TtyStringIO()
+    write_dim_stderr("hello", stream=stderr)
+    output = stderr.getvalue()
+    assert ANSI_DIM in output
+    assert ANSI_RESET in output
+    assert "hello" in output
+
+
+def test_write_dim_stderr_writes_plain_on_non_tty() -> None:
+    stderr = StringIO()
+    write_dim_stderr("hello", stream=stderr)
+    output = stderr.getvalue()
+    assert "\x1b" not in output
+    assert "hello\n" == output

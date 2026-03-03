@@ -61,6 +61,7 @@ addopts = [
   "--cov=imbue.imbue_common",
   "--cov=imbue.mng_opencode",
   "--cov=imbue.mng_pair",
+  "--cov=imbue.mng_tip",
   "--cov=imbue.mng_schedule",
   "--cov=imbue.mng_ttyd",
   "--cov=imbue.mng_tutor",

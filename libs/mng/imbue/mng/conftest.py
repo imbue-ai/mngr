@@ -149,14 +149,11 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def _isolate_tmux_server(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Generator[None, None, None]:
+def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Give each test its own isolated tmux server.
 
-    Delegates to the shared isolate_tmux_server() context manager in
-    imbue.mng.utils.testing, which handles TMUX_TMPDIR creation,
-    TMUX env var isolation, and teardown (kill-server + tmpdir cleanup).
+    Delegates to the shared isolate_tmux_server() context manager in testing.py.
+    See its docstring for details on the isolation strategy and why /tmp is used.
     """
     with isolate_tmux_server(monkeypatch):
         yield

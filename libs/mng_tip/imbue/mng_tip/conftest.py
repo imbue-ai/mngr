@@ -1,12 +1,5 @@
-"""Shared test fixtures for mng plugin libraries.
-
-Provides common pytest fixtures that plugin libraries need for their tests.
-Call register_plugin_test_fixtures(globals()) from a plugin's conftest.py
-to register the standard set of fixtures.
-"""
-
+import os
 from pathlib import Path
-from typing import Any
 from typing import Generator
 from uuid import uuid4
 
@@ -21,8 +14,7 @@ from imbue.mng.plugins import hookspecs
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
 from imbue.mng.utils.testing import assert_home_is_temp_directory
-from imbue.mng.utils.testing import isolate_home
-from imbue.mng.utils.testing import isolate_tmux_server
+from imbue.mng.utils.testing import isolated_tmux_server
 
 
 @pytest.fixture
@@ -33,14 +25,7 @@ def cli_runner() -> CliRunner:
 
 @pytest.fixture(autouse=True)
 def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with mng hookspecs and local backend only.
-
-    Also loads external plugins via setuptools entry points to match the behavior
-    of load_config(). This ensures that external plugins are discovered and registered.
-
-    This fixture also resets the module-level plugin manager singleton to ensure
-    test isolation.
-    """
+    """Create a plugin manager with mng hookspecs and local backend only."""
     imbue.mng.main.reset_plugin_manager()
     reset_backend_registry()
     reset_agent_registry()
@@ -67,13 +52,13 @@ def temp_host_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+def _isolate_tmux_server() -> Generator[None, None, None]:
     """Give each test its own isolated tmux server.
 
-    Delegates to the shared isolate_tmux_server() context manager in testing.py.
+    Delegates to the shared isolated_tmux_server() context manager in testing.py.
     See its docstring for details on the isolation strategy and why /tmp is used.
     """
-    with isolate_tmux_server(monkeypatch):
+    with isolated_tmux_server():
         yield
 
 
@@ -89,7 +74,7 @@ def setup_test_mng_env(
     mng_test_prefix = f"mng_{mng_test_id}-"
     mng_test_root_name = f"mng-test-{mng_test_id}"
 
-    isolate_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
     monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
     monkeypatch.setenv("MNG_ROOT_NAME", mng_test_root_name)
@@ -101,16 +86,3 @@ def setup_test_mng_env(
     assert_home_is_temp_directory()
 
     yield
-
-
-def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
-    """Register common plugin test fixtures into the given namespace.
-
-    Call this from a plugin's conftest.py to get the standard set of fixtures
-    needed for testing mng plugins.
-    """
-    namespace["cli_runner"] = cli_runner
-    namespace["plugin_manager"] = plugin_manager
-    namespace["temp_host_dir"] = temp_host_dir
-    namespace["_isolate_tmux_server"] = _isolate_tmux_server
-    namespace["setup_test_mng_env"] = setup_test_mng_env

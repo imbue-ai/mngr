@@ -148,33 +148,32 @@ def add_host_to_known_hosts(
     # The public key should already be in OpenSSH format: "ssh-ed25519 AAAA..."
     entry = f"{host_pattern} {public_key}\n"
 
-    # Use file locking to prevent race conditions
+    # Use file locking to prevent race conditions.
+    # The lock is released automatically when the file is closed on exit of the with block.
     with open(known_hosts_path, "a+") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            # Read existing content to check if entry already exists
+
+        # Read existing content to check if entry already exists
+        f.seek(0)
+        existing_content = f.read()
+
+        # Check if this exact entry already exists
+        if entry.strip() not in existing_content:
+            # Also check if we already have an entry for this host (might be stale)
+            # and remove it before adding the new one
+            lines = existing_content.splitlines(keepends=True)
+            new_lines = [line for line in lines if not line.startswith(f"{host_pattern} ")]
+            new_lines.append(entry)
+
+            # Rewrite the file
             f.seek(0)
-            existing_content = f.read()
+            f.truncate()
+            f.writelines(new_lines)
 
-            # Check if this exact entry already exists
-            if entry.strip() not in existing_content:
-                # Also check if we already have an entry for this host (might be stale)
-                # and remove it before adding the new one
-                lines = existing_content.splitlines(keepends=True)
-                new_lines = [line for line in lines if not line.startswith(f"{host_pattern} ")]
-                new_lines.append(entry)
-
-                # Rewrite the file
-                f.seek(0)
-                f.truncate()
-                f.writelines(new_lines)
-
-            # Ensure the file is flushed to disk before we return
-            # This prevents race conditions where paramiko reads a stale version
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        # Ensure the file is flushed to disk before we return
+        # This prevents race conditions where paramiko reads a stale version
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> None:
@@ -184,17 +183,15 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     """
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(2.0)
-            sock.connect((hostname, port))
-            banner = sock.recv(256)
-            if banner.startswith(b"SSH-"):
-                return
-        except (socket.error, socket.timeout):
-            pass
-        finally:
-            sock.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.settimeout(2.0)
+                sock.connect((hostname, port))
+                banner = sock.recv(256)
+                if banner.startswith(b"SSH-"):
+                    return
+            except (socket.error, socket.timeout):
+                pass
     raise MngError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 
