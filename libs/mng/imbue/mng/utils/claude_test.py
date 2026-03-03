@@ -4,7 +4,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
-from imbue.mng.utils.claude import extract_text_delta
+from imbue.mng.utils.claude import _extract_text_delta
 from imbue.mng.utils.claude import query_claude
 from imbue.mng.utils.claude import query_claude_streaming
 
@@ -23,7 +23,7 @@ def test_extract_text_delta_valid_event() -> None:
             },
         }
     )
-    assert extract_text_delta(event) == "hello"
+    assert _extract_text_delta(event) == "hello"
 
 
 def test_extract_text_delta_non_delta_event() -> None:
@@ -34,18 +34,18 @@ def test_extract_text_delta_non_delta_event() -> None:
             "event": {"type": "content_block_start", "index": 0},
         }
     )
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 def test_extract_text_delta_malformed_json() -> None:
     """Malformed JSON should return None, not raise."""
-    assert extract_text_delta("not valid json {{{") is None
+    assert _extract_text_delta("not valid json {{{") is None
 
 
 def test_extract_text_delta_non_stream_event() -> None:
     """Events that are not stream_event type should return None."""
     event = json.dumps({"type": "result", "subtype": "success"})
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 def test_extract_text_delta_missing_delta() -> None:
@@ -56,7 +56,7 @@ def test_extract_text_delta_missing_delta() -> None:
             "event": {"type": "content_block_delta", "index": 0},
         }
     )
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 def test_extract_text_delta_non_text_delta_type() -> None:
@@ -71,16 +71,16 @@ def test_extract_text_delta_non_text_delta_type() -> None:
             },
         }
     )
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 def test_extract_text_delta_empty_string() -> None:
-    assert extract_text_delta("") is None
+    assert _extract_text_delta("") is None
 
 
 def test_extract_text_delta_event_field_not_dict() -> None:
     event = json.dumps({"type": "stream_event", "event": "not a dict"})
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 def test_extract_text_delta_delta_field_not_dict() -> None:
@@ -93,7 +93,7 @@ def test_extract_text_delta_delta_field_not_dict() -> None:
             },
         }
     )
-    assert extract_text_delta(event) is None
+    assert _extract_text_delta(event) is None
 
 
 # -- query_claude tests --

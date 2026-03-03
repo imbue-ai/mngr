@@ -33,7 +33,7 @@ def _build_base_args(system_prompt: str) -> list[str]:
 
 
 @pure
-def extract_text_delta(line: str) -> str | None:
+def _extract_text_delta(line: str) -> str | None:
     """Extract text from a stream-json content_block_delta event.
 
     Returns the delta text if the line is a content_block_delta with a text_delta,
@@ -139,7 +139,7 @@ def query_claude_streaming(
             except (json.JSONDecodeError, ValueError):
                 pass
 
-            text = extract_text_delta(stripped)
+            text = _extract_text_delta(stripped)
             if text is not None:
                 yield text
 
