@@ -1,9 +1,3 @@
-"""Shared utilities for querying Claude via the CLI.
-
-Provides both streaming and non-streaming interfaces, all managed
-through ConcurrencyGroup for proper subprocess lifecycle handling.
-"""
-
 import json
 import shutil
 import tempfile
