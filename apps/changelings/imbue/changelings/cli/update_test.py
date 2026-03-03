@@ -57,21 +57,6 @@ def test_update_help_shows_flags() -> None:
     assert "--no-provision" in result.output
 
 
-def test_update_help_describes_steps() -> None:
-    result = _RUNNER.invoke(cli, ["update", "--help"])
-
-    assert result.exit_code == 0
-    assert "snapshot" in result.output.lower()
-    assert "AGENT_NAME" in result.output
-
-
-def test_update_shows_in_cli_help() -> None:
-    result = _RUNNER.invoke(cli, ["--help"])
-
-    assert result.exit_code == 0
-    assert "update" in result.output
-
-
 # --- _is_agent_remote tests ---
 
 

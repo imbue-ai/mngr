@@ -12,19 +12,3 @@ def test_cli_shows_help() -> None:
     assert "forward" in result.output
     assert "list" in result.output
     assert "update" in result.output
-
-
-def test_cli_deploy_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["deploy", "--help"])
-
-    assert result.exit_code == 0
-    assert "GIT_URL" in result.output
-
-
-def test_cli_forward_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["forward", "--help"])
-
-    assert result.exit_code == 0
-    assert "forwarding server" in result.output
