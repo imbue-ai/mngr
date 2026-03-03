@@ -9,11 +9,11 @@ from click.testing import CliRunner
 from imbue.mng.cli.create import create
 from imbue.mng.cli.provision import provision
 from imbue.mng.cli.stop import stop
-from imbue.mng.testing import ModalSubprocessTestEnv
-from imbue.mng.testing import get_short_random_string
-from imbue.mng.testing import run_mng_subprocess
-from imbue.mng.testing import tmux_session_cleanup
-from imbue.mng.testing import tmux_session_exists
+from imbue.mng.testing.testing import ModalSubprocessTestEnv
+from imbue.mng.testing.testing import get_short_random_string
+from imbue.mng.testing.testing import run_mng_subprocess
+from imbue.mng.testing.testing import tmux_session_cleanup
+from imbue.mng.testing.testing import tmux_session_exists
 
 
 @pytest.mark.tmux

@@ -9,7 +9,7 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.docker.config import DockerProviderConfig
 from imbue.mng.providers.docker.instance import DockerProviderInstance
 from imbue.mng.providers.local.volume import LocalVolume
-from imbue.mng.testing import get_short_random_string
+from imbue.mng.testing.testing import get_short_random_string
 
 
 def make_docker_provider(mng_ctx: MngContext, name: str = "test-docker") -> DockerProviderInstance:

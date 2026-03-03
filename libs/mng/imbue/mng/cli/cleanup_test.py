@@ -23,7 +23,7 @@ from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CleanupAction
 from imbue.mng.primitives import OutputFormat
-from imbue.mng.testing import make_test_agent_info
+from imbue.mng.testing.testing import make_test_agent_info
 
 # =============================================================================
 # Tests for _build_cel_filters_from_options

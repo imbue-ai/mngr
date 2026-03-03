@@ -19,12 +19,12 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.errors import MngError
-from imbue.mng.testing import get_short_random_string
-from imbue.mng.testing import init_git_repo_with_config
-from imbue.mng.testing import mng_agent_cleanup
-from imbue.mng.testing import run_git_command
-from imbue.mng.testing import run_mng_subprocess
-from imbue.mng.testing import setup_claude_trust_config_for_subprocess
+from imbue.mng.testing.testing import get_short_random_string
+from imbue.mng.testing.testing import init_git_repo_with_config
+from imbue.mng.testing.testing import mng_agent_cleanup
+from imbue.mng.testing.testing import run_git_command
+from imbue.mng.testing.testing import run_mng_subprocess
+from imbue.mng.testing.testing import setup_claude_trust_config_for_subprocess
 
 
 @pytest.fixture

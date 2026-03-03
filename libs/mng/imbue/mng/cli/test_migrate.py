@@ -8,8 +8,8 @@ from click.testing import CliRunner
 
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.migrate import migrate
-from imbue.mng.testing import tmux_session_cleanup
-from imbue.mng.testing import tmux_session_exists
+from imbue.mng.testing.testing import tmux_session_cleanup
+from imbue.mng.testing.testing import tmux_session_exists
 
 
 @pytest.mark.tmux

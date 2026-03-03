@@ -7,7 +7,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.testing import make_mng_ctx
+from imbue.mng.testing.testing import make_mng_ctx
 
 
 @pytest.fixture

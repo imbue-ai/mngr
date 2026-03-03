@@ -7,7 +7,7 @@ from imbue.mng.agents.default_plugins.claude_agent_test import make_claude_agent
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import SendMessageError
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.testing import cleanup_tmux_session
+from imbue.mng.testing.testing import cleanup_tmux_session
 from imbue.mng.utils.polling import wait_for
 
 

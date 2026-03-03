@@ -24,8 +24,8 @@ from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.providers.mock_provider_test import MockProviderInstance
-from imbue.mng.providers.mock_provider_test import make_offline_host
+from imbue.mng.testing.mock_provider import MockProviderInstance
+from imbue.mng.testing.mock_provider import make_offline_host
 
 
 @pytest.fixture

@@ -19,11 +19,11 @@ from imbue.mng.providers.modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mng.providers.modal.config import ModalProviderConfig
 from imbue.mng.providers.modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mng.providers.modal.instance import ModalProviderInstance
-from imbue.mng.testing import TEST_ENV_PREFIX
-from imbue.mng.testing import make_mng_ctx
-from imbue.mng.testing import register_modal_test_app
-from imbue.mng.testing import register_modal_test_environment
-from imbue.mng.testing import register_modal_test_volume
+from imbue.mng.testing.testing import TEST_ENV_PREFIX
+from imbue.mng.testing.testing import make_mng_ctx
+from imbue.mng.testing.testing import register_modal_test_app
+from imbue.mng.testing.testing import register_modal_test_environment
+from imbue.mng.testing.testing import register_modal_test_volume
 
 
 def make_modal_provider_real(

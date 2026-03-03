@@ -8,7 +8,6 @@ from pathlib import PurePosixPath
 import pytest
 
 from imbue.mng.errors import InvalidRelativePathError
-from imbue.mng.hosts.common import get_activity_sources_for_idle_mode
 from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CpuResources
@@ -16,6 +15,7 @@ from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import RelativePath
 from imbue.mng.interfaces.data_types import SSHInfo
+from imbue.mng.interfaces.data_types import get_activity_sources_for_idle_mode
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode

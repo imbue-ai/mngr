@@ -36,7 +36,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.testing import make_test_agent_info
+from imbue.mng.testing.testing import make_test_agent_info
 
 
 def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:

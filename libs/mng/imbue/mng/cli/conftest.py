@@ -28,8 +28,8 @@ from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
 from imbue.mng.main import cli
-from imbue.mng.testing import cleanup_tmux_session
-from imbue.mng.testing import create_test_agent_via_cli
+from imbue.mng.testing.testing import cleanup_tmux_session
+from imbue.mng.testing.testing import create_test_agent_via_cli
 
 
 @pytest.fixture

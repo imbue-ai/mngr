@@ -33,7 +33,7 @@ from imbue.mng.providers.docker.instance import LABEL_PROVIDER
 from imbue.mng.providers.docker.instance import LABEL_TAGS
 from imbue.mng.providers.docker.instance import build_container_labels
 from imbue.mng.providers.docker.testing import make_docker_provider_with_cleanup
-from imbue.mng.testing import get_short_random_string
+from imbue.mng.testing.testing import get_short_random_string
 
 pytestmark = [pytest.mark.docker, pytest.mark.acceptance]
 

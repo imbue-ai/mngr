@@ -26,8 +26,8 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.testing import cleanup_tmux_session
-from imbue.mng.testing import get_short_random_string
+from imbue.mng.testing.testing import cleanup_tmux_session
+from imbue.mng.testing.testing import get_short_random_string
 
 _AGENT_COMMAND = "sleep 98761"
 

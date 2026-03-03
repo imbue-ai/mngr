@@ -12,7 +12,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mng.testing.plugin_testing import register_plugin_test_fixtures
 
 register_plugin_test_fixtures(globals())
 

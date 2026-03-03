@@ -30,9 +30,9 @@ from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.main import cli
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.testing import cleanup_tmux_session
-from imbue.mng.testing import make_test_agent_info
-from imbue.mng.testing import tmux_session_exists
+from imbue.mng.testing.testing import cleanup_tmux_session
+from imbue.mng.testing.testing import make_test_agent_info
+from imbue.mng.testing.testing import tmux_session_exists
 
 # =============================================================================
 # CLI-level integration tests for connect command

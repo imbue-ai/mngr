@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from imbue.mng.testing import ModalSubprocessTestEnv
+from imbue.mng.testing.testing import ModalSubprocessTestEnv
 
 
 @pytest.fixture

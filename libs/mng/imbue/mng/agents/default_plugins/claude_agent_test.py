@@ -46,8 +46,8 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.testing import init_git_repo
-from imbue.mng.testing import make_mng_ctx
+from imbue.mng.testing.testing import init_git_repo
+from imbue.mng.testing.testing import make_mng_ctx
 
 # =============================================================================
 # Test Helpers

@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from imbue.mng.testing import isolate_home
-from imbue.mng.testing import isolate_tmux_server
+from imbue.mng.testing.testing import isolate_home
+from imbue.mng.testing.testing import isolate_tmux_server
 
 
 @pytest.fixture(autouse=True)

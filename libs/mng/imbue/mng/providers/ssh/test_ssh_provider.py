@@ -15,8 +15,8 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
-from imbue.mng.testing import generate_ssh_keypair
-from imbue.mng.testing import local_sshd
+from imbue.mng.testing.testing import generate_ssh_keypair
+from imbue.mng.testing.testing import local_sshd
 
 
 @pytest.fixture

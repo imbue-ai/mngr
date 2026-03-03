@@ -7,7 +7,7 @@ from imbue.mng.cli.connect import filter_agents
 from imbue.mng.cli.connect import handle_search_key
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.testing import make_test_agent_info
+from imbue.mng.testing.testing import make_test_agent_info
 
 # =============================================================================
 # Helpers

@@ -27,7 +27,7 @@ from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
-from imbue.mng.testing import make_mng_ctx
+from imbue.mng.testing.testing import make_mng_ctx
 
 # Each tuple: (type_name, agent_class, config_class, skill_name, skill_content)
 _SKILL_AGENTS = [

@@ -17,7 +17,6 @@ from imbue.mng.api.list import ProviderErrorInfo
 from imbue.mng.api.list import _agent_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
 from imbue.mng.api.list import list_agents
-from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentInfo
@@ -34,7 +33,8 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.testing import tmux_session_cleanup
+from imbue.mng.testing.testing import create_test_agent_via_cli
+from imbue.mng.testing.testing import tmux_session_cleanup
 from imbue.mng.utils.cel_utils import compile_cel_filters
 
 # =============================================================================
@@ -387,27 +387,10 @@ def test_list_agents_with_agent(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent first
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847291",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847291"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # Now list agents
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
         assert len(result.agents) >= 1
@@ -428,27 +411,10 @@ def test_list_agents_with_include_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 938274",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 938274"
         )
-        assert create_result.exit_code == 0
 
-        # List with filter that matches
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             include_filters=(f'name == "{agent_name}"',),
@@ -472,27 +438,10 @@ def test_list_agents_with_exclude_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 726485",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 726485"
         )
-        assert create_result.exit_code == 0
 
-        # List with filter that excludes the agent
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             exclude_filters=(f'name == "{agent_name}"',),
@@ -521,34 +470,16 @@ def test_list_agents_with_callbacks(
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 619274",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 619274"
         )
-        assert create_result.exit_code == 0
 
-        # List with callback
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             on_agent=on_agent,
             is_streaming=False,
         )
 
-        # Callback should have been called for each agent
         assert len(agents_received) == len(result.agents)
         if result.agents:
             assert agents_received[0].name == result.agents[0].name
@@ -998,34 +929,15 @@ def test_list_agents_populates_idle_mode(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 123456",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 123456"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List agents and check idle_mode is populated
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
-        # Find our agent
         our_agent = next((a for a in result.agents if a.name == AgentName(agent_name)), None)
         assert our_agent is not None, f"Agent {agent_name} not found in list"
 
-        # idle_mode should be populated (default is "agent")
         assert our_agent.idle_mode is not None
         assert our_agent.idle_mode == IdleMode.IO.value
 
@@ -1043,24 +955,9 @@ def test_list_agents_populates_lock_fields_for_online_host(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847292",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847292"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
@@ -1091,42 +988,22 @@ def test_list_agents_streaming_with_callback(
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 519283",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 519283"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List with streaming mode and callback
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             on_agent=on_agent,
             is_streaming=True,
         )
 
-        # Callback should have been called for each agent
         assert len(agents_received) >= 1
         assert len(agents_received) == len(result.agents)
 
-        # The agent we created should be in the results
         agent_names = [a.name for a in agents_received]
         assert AgentName(agent_name) in agent_names
 
-        # Result object should also be populated
         result_names = [a.name for a in result.agents]
         assert AgentName(agent_name) in result_names
 
@@ -1177,33 +1054,15 @@ def test_list_agents_with_provider_names_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent on the local provider
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 234567",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 234567"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List agents filtering to local provider - should find the agent
         result = list_agents(mng_ctx=temp_mng_ctx, provider_names=("local",), is_streaming=False)
 
         agent_names = [a.name for a in result.agents]
         assert AgentName(agent_name) in agent_names
 
-        # List agents filtering to nonexistent provider - should not find any agents
         result_empty = list_agents(mng_ctx=temp_mng_ctx, provider_names=("nonexistent",), is_streaming=False)
 
         assert len(result_empty.agents) == 0

@@ -34,7 +34,7 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.testing import get_short_random_string
+from imbue.mng.testing.testing import get_short_random_string
 
 
 class _TestableAgent(BaseAgent):

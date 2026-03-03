@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mng.testing import ModalSubprocessTestEnv
-from imbue.mng.testing import get_short_random_string
+from imbue.mng.testing.testing import ModalSubprocessTestEnv
+from imbue.mng.testing.testing import get_short_random_string
 
 
 @pytest.fixture
