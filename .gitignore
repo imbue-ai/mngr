@@ -263,5 +263,8 @@ current.tar.gz
 # Autofix working artifacts
 .autofix/
 
+# Demo recordings (asciinema .cast, .txt, and scripts)
+.demos/
+
 # for git worktrees from other repos
 .external_worktrees/
