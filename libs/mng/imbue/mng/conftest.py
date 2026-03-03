@@ -41,7 +41,7 @@ from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
-from imbue.mng.utils.testing import isolated_tmux_server
+from imbue.mng.utils.testing import isolate_tmux_server
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -149,13 +149,13 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def _isolate_tmux_server() -> Generator[None, None, None]:
+def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Give each test its own isolated tmux server.
 
-    Delegates to the shared isolated_tmux_server() context manager in testing.py.
+    Delegates to the shared isolate_tmux_server() context manager in testing.py.
     See its docstring for details on the isolation strategy and why /tmp is used.
     """
-    with isolated_tmux_server():
+    with isolate_tmux_server(monkeypatch):
         yield
 
 

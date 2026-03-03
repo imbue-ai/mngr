@@ -789,7 +789,6 @@ def _handle_create(
         return
 
     # Call the API create function (synchronously)
-    # Wrap in context manager to ensure editor cleanup on failure
     with _editor_cleanup_scope(editor_session):
         create_result = api_create(
             source_location=source_location,
