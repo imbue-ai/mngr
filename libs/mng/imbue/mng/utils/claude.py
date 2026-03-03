@@ -1,14 +1,10 @@
-"""Shared utilities for querying Claude via the CLI.
-
-Provides both streaming and non-streaming interfaces, all managed
-through ConcurrencyGroup for proper subprocess lifecycle handling.
-"""
-
 import json
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
+
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
@@ -38,7 +34,7 @@ def _build_base_args(system_prompt: str) -> list[str]:
 
 
 @pure
-def extract_text_delta(line: str) -> str | None:
+def _extract_text_delta(line: str) -> str | None:
     """Extract text from a stream-json content_block_delta event.
 
     Returns the delta text if the line is a content_block_delta with a text_delta,
@@ -77,7 +73,7 @@ def query_claude(
     prompt: str,
     system_prompt: str,
     cg: ConcurrencyGroup,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float,
 ) -> str | None:
     """Query Claude and return the complete response text, or None on failure.
 
@@ -99,8 +95,10 @@ def query_claude(
             text = result.stdout.strip()
             return text if text else None
         except ProcessSetupError:
+            logger.debug("Failed to start claude process (not installed or not in PATH)")
             return None
         except ProcessTimeoutError:
+            logger.debug("Claude process timed out after {} seconds", timeout)
             return None
 
 
@@ -144,7 +142,7 @@ def query_claude_streaming(
                 except (json.JSONDecodeError, ValueError):
                     pass
 
-                text = extract_text_delta(stripped)
+                text = _extract_text_delta(stripped)
                 if text is not None:
                     yield text
 
