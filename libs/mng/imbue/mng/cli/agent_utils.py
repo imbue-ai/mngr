@@ -132,7 +132,7 @@ def find_agent_for_command(
     """Find an agent by identifier, or interactively if no identifier given.
 
     Returns (agent, host) tuple, or None if the user cancelled interactive selection.
-    Raises UserInputError if no agent specified and stdin is not a TTY.
+    Raises UserInputError if no agent specified and not running in interactive mode.
     """
     if agent_identifier is not None:
         agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx, include_destroyed=False)
