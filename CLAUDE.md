@@ -68,6 +68,18 @@ Only after doing all of the above should you begin writing code.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
+## Test fixture discovery
+
+Before writing new tests, read the relevant `conftest.py` and `testing.py` files to avoid reimplementing things that already exist. Test infrastructure lives in these files:
+
+| File pattern | Purpose |
+|---|---|
+| `conftest.py` | Pytest fixtures and hooks, scoped to the directory they're in (auto-discovered by pytest) |
+| `testing.py` | Non-fixture test utilities: factory functions, helpers, context managers (explicitly imported) |
+| `mock_*_test.py` | Concrete mock implementations of interfaces (explicitly imported) |
+
+All fixtures must be in conftest.py, not in individual test files.
+
 # Manual verification and testing
 
 Before declaring any feature complete, manually verify it: exercise the feature exactly as a real user would, with real inputs, and critically evaluate whether it *actually does the right thing*. Do not confuse "no errors" with "correct behavior" -- a command that exits 0 but produces wrong output is not working.

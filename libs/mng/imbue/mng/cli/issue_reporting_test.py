@@ -1,10 +1,10 @@
 import json
+from uuid import uuid4
 
 import pytest
 from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mng.cli.issue_reporting import ExistingIssue
 from imbue.mng.cli.issue_reporting import GITHUB_BASE_URL
@@ -100,12 +100,13 @@ def test_build_new_issue_url_truncates_long_body() -> None:
 def test_search_for_existing_issue_returns_none_when_both_fail(
     cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When both GitHub API and gh CLI fail, search returns None."""
+    """When both GitHub API and gh CLI fail, search returns None.
 
-    def failing_run(*args, **kwargs):
-        raise ProcessSetupError(command=("curl",), stdout="", stderr="curl not found")
-
-    monkeypatch.setattr(ConcurrencyGroup, "run_process_to_completion", failing_run)
+    Points at a nonexistent GitHub repo so both curl and gh CLI fail
+    with real errors rather than mocking the failure.
+    """
+    fake_repo = f"nonexistent-org/nonexistent-repo-{uuid4().hex}"
+    monkeypatch.setattr("imbue.mng.cli.issue_reporting.GITHUB_REPO", fake_repo)
 
     result = search_for_existing_issue("some error", cg)
     assert result is None

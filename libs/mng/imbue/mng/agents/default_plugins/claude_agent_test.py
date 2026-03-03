@@ -27,12 +27,11 @@ from imbue.mng.agents.default_plugins.claude_agent import get_files_for_deploy
 from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
-from imbue.mng.api.test_fixtures import FakeHost
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.conftest import make_mng_ctx
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import PluginMngError
 from imbue.mng.hosts.host import Host
@@ -48,6 +47,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.testing import init_git_repo
+from imbue.mng.utils.testing import make_mng_ctx
 
 # =============================================================================
 # Test Helpers

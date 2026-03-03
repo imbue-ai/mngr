@@ -32,6 +32,8 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="mng", pypi_name="mng", internal_deps=("imbue-common", "concurrency-group")),
     PackageInfo(dir_name="mng_pair", pypi_name="mng-pair", internal_deps=("mng",)),
     PackageInfo(dir_name="mng_opencode", pypi_name="mng-opencode", internal_deps=("mng",)),
+    PackageInfo(dir_name="mng_kanpan", pypi_name="mng-kanpan", internal_deps=("mng",)),
+    PackageInfo(dir_name="mng_tutor", pypi_name="mng-tutor", internal_deps=("mng",)),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}

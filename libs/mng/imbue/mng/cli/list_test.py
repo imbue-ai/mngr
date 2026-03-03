@@ -13,7 +13,6 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.list import ListResult
-from imbue.mng.cli.conftest import make_test_agent_info
 from imbue.mng.cli.list import _StreamingHumanRenderer
 from imbue.mng.cli.list import _StreamingTemplateEmitter
 from imbue.mng.cli.list import _compute_column_widths
@@ -37,6 +36,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
+from imbue.mng.utils.testing import make_test_agent_info
 
 
 def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:
