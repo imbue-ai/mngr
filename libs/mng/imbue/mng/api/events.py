@@ -940,8 +940,9 @@ def stream_all_events(
             return
 
         # Phase 5: Consume events from queue (follow mode)
+        target_holder: list[EventsTarget] = [target]
         _consume_event_queue(
-            target=target,
+            target_holder=target_holder,
             state=state,
             event_queue=event_queue,
             on_event=on_event,
@@ -1159,7 +1160,7 @@ _QUEUE_POLL_INTERVAL_SECONDS: Final[float] = 0.1
 
 
 def _consume_event_queue(
-    target: EventsTarget,
+    target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
     event_queue: queue.Queue[EventRecord | None],
     on_event: Callable[[EventRecord], None],
@@ -1169,19 +1170,21 @@ def _consume_event_queue(
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
 ) -> None:
-    """Consume events from the queue, periodically re-scanning for new sources."""
+    """Consume events from the queue, periodically re-scanning for new sources and checking online/offline."""
     state.last_source_scan_time = time.monotonic()
+    last_online_check_time = time.monotonic()
 
     while not stop_event.is_set():
         # Drain available events from the queue
         try:
             event = event_queue.get(timeout=_QUEUE_POLL_INTERVAL_SECONDS)
         except queue.Empty:
-            # Check if it's time to re-scan for new source directories
             now = time.monotonic()
+
+            # Periodically re-scan for new source directories
             if now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
                 _rescan_and_start_new_tail_threads(
-                    target=target,
+                    target=target_holder[0],
                     state=state,
                     event_queue=event_queue,
                     cel_include_filters=cel_include_filters,
@@ -1191,6 +1194,21 @@ def _consume_event_queue(
                     offset_dir_path=offset_dir_path,
                 )
                 state.last_source_scan_time = now
+
+            # Periodically check for online/offline transitions
+            if now - last_online_check_time > ONLINE_CHECK_INTERVAL_SECONDS:
+                _handle_online_offline_transition(
+                    target_holder=target_holder,
+                    state=state,
+                    event_queue=event_queue,
+                    cel_include_filters=cel_include_filters,
+                    cel_exclude_filters=cel_exclude_filters,
+                    stop_event=stop_event,
+                    tail_threads=tail_threads,
+                    offset_dir_path=offset_dir_path,
+                )
+                last_online_check_time = now
+
             continue
 
         if event is _QUEUE_SENTINEL:
@@ -1272,3 +1290,65 @@ def refresh_events_target(
         host_id=target.host_id,
         events_subpath=target.events_subpath,
     )
+
+
+def _handle_online_offline_transition(
+    target_holder: list[EventsTarget],
+    state: _AllEventsStreamState,
+    event_queue: queue.Queue[EventRecord | None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    tail_threads: list[threading.Thread],
+    offset_dir_path: Path | None,
+) -> None:
+    """Check for online/offline transitions and restart tail threads if needed.
+
+    When the host transitions between online and offline states, the existing
+    tail threads are stopped and new ones are started with the updated target.
+    Event deduplication via emitted_event_ids ensures no events are emitted twice.
+    """
+    target = target_holder[0]
+    try:
+        new_target = refresh_events_target(target)
+    except (MngError, OSError) as e:
+        logger.trace("Failed to check online status: {}", e)
+        return
+
+    was_online = state.is_online
+    is_now_online = new_target.online_host is not None
+
+    if was_online == is_now_online:
+        return
+
+    logger.debug(
+        "Target {} {}",
+        target.display_name,
+        "came online" if is_now_online else "went offline",
+    )
+    state.is_online = is_now_online
+    target_holder[0] = new_target
+
+    # Stop existing tail threads so they can be restarted with the new target
+    stop_event.set()
+    for thread in tail_threads:
+        thread.join(timeout=5.0)
+    tail_threads.clear()
+
+    # Reset the stop event for the new threads
+    stop_event.clear()
+
+    # Restart tail threads for all known sources with the new target
+    if offset_dir_path is not None:
+        for source_path in state.known_source_paths:
+            thread = _start_tail_thread(
+                target=new_target,
+                source_path=source_path,
+                event_queue=event_queue,
+                cel_include_filters=cel_include_filters,
+                cel_exclude_filters=cel_exclude_filters,
+                stop_event=stop_event,
+                offset_dir_path=offset_dir_path,
+                initial_byte_offset=0,
+            )
+            tail_threads.append(thread)
