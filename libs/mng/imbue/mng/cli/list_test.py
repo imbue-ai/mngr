@@ -1592,11 +1592,11 @@ def test_list_command_human_streaming_with_agents(
 # =============================================================================
 
 
-def test_headless_flag_sets_is_interactive_false(
+def test_headless_flag_is_accepted_by_list_command(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--headless flag should set is_interactive=False on MngContext via setup_command_context."""
+    """--headless flag should be accepted by the list command without errors."""
     result = cli_runner.invoke(
         list_command,
         ["--headless"],
