@@ -26,7 +26,7 @@ from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 
 
-def validate_and_create_agent_reference(
+def validate_and_create_discovered_agent(
     agent_data: dict[str, Any],
     host_id: HostId,
     provider_name: ProviderInstanceName,
@@ -148,15 +148,15 @@ class BaseHost(HostInterface):
     # Agent Information
     # =========================================================================
 
-    def _validate_and_create_agent_reference(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
+    def _validate_and_create_discovered_agent(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
         """Validate agent data and create an DiscoveredAgent if valid.
 
         Returns None if the agent data is malformed (missing or invalid id/name).
         Logs warnings for malformed records.
         """
-        return validate_and_create_agent_reference(agent_data, self.id, self.provider_instance.name)
+        return validate_and_create_discovered_agent(agent_data, self.id, self.provider_instance.name)
 
-    def get_agent_references(self) -> list[DiscoveredAgent]:
+    def discover_agents(self) -> list[DiscoveredAgent]:
         """Return a list of all agent references for this host.
 
         For offline hosts, get agent information from the provider's persisted data.
@@ -167,7 +167,7 @@ class BaseHost(HostInterface):
 
         agent_refs: list[DiscoveredAgent] = []
         for agent_data in agent_records:
-            ref = self._validate_and_create_agent_reference(agent_data)
+            ref = self._validate_and_create_discovered_agent(agent_data)
             if ref is not None:
                 agent_refs.append(ref)
 
@@ -229,7 +229,7 @@ class BaseHost(HostInterface):
         requiring the host to be online.
         """
         permissions: set[str] = set()
-        for agent_ref in self.get_agent_references():
+        for agent_ref in self.discover_agents():
             permissions.update(str(p) for p in agent_ref.permissions)
         return list(permissions)
 

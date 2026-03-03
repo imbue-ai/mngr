@@ -313,7 +313,7 @@ def _process_provider_streaming(
     """
     try:
         # Phase 1: list hosts and get agent refs
-        provider_results = provider.load_agent_refs(cg=cg, include_destroyed=True)
+        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
 
         # Warn if any host names are duplicated within this provider
         _warn_on_duplicate_host_names(provider_results)
@@ -369,7 +369,7 @@ def _assemble_host_info(
     is_authentication_failure = False
     try:
         # Try the provider's optimized listing method first
-        listing_data = provider.build_host_listing_data(host_ref, agent_refs)
+        listing_data = provider.get_host_and_agent_details(host_ref, agent_refs)
         if listing_data is not None:
             host_info, agent_infos = listing_data
             for agent_info in agent_infos:
@@ -517,7 +517,7 @@ def _assemble_host_info(
             # if this host is offline, or if we failed to get the online host (ex: because it went offline)
             if agents is None or agent_info is None:
                 # Use certified_data from the agent_ref directly
-                # agent_ref already has all the data we need from host.get_agent_references()
+                # agent_ref already has all the data we need from host.discover_agents()
                 create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
                 agent_info = AgentDetails(
                     id=agent_ref.agent_id,
@@ -702,7 +702,7 @@ def _process_provider_for_host_listing(
     This function is run in a thread by load_all_agents_grouped_by_host.
     Results are merged into the shared agents_by_host dict under the results_lock.
     """
-    provider_results = provider.load_agent_refs(cg=cg, include_destroyed=include_destroyed)
+    provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
 
     # Merge results into the main dict under lock
     with results_lock:

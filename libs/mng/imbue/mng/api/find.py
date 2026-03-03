@@ -242,7 +242,7 @@ def resolve_source_location(
     # Resolve the final path
     agent_work_dir: Path | None = None
     if resolved_agent is not None:
-        for agent_ref in online_host.get_agent_references():
+        for agent_ref in online_host.discover_agents():
             if agent_ref.agent_id == resolved_agent.agent_id:
                 agent_work_dir = agent_ref.work_dir
                 break

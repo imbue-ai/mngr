@@ -849,7 +849,7 @@ class Host(BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def get_agent_references(self) -> list[DiscoveredAgent]:
+    def discover_agents(self) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -886,7 +886,7 @@ class Host(BaseHost, OnlineHostInterface):
                                 "Could not load agent reference from {} because json was invalid: {}", data_path, e
                             )
                             continue
-                        ref = self._validate_and_create_agent_reference(data)
+                        ref = self._validate_and_create_discovered_agent(data)
                         if ref is not None:
                             agent_refs.append(ref)
 

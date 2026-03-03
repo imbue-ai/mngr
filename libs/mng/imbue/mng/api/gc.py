@@ -183,7 +183,7 @@ def gc_machines(
                             seconds_since_stopped is not None
                             and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
                         ):
-                            if len(host.get_agent_references()) == 0 or host.get_state() in (
+                            if len(host.discover_agents()) == 0 or host.get_state() in (
                                 HostState.FAILED,
                                 HostState.CRASHED,
                                 HostState.DESTROYED,
@@ -205,7 +205,7 @@ def gc_machines(
 
                     try:
                         # Only consider online hosts with no agents
-                        agent_refs = host.get_agent_references()
+                        agent_refs = host.discover_agents()
                         if len(agent_refs) > 0:
                             continue
                         host_to_destroy: HostInterface = host

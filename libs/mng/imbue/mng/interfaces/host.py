@@ -136,8 +136,8 @@ class HostInterface(MutableModel, ABC):
     # =========================================================================
 
     @abstractmethod
-    def get_agent_references(self) -> list[DiscoveredAgent]:
-        """Return a list of all agent references for this host."""
+    def discover_agents(self) -> list[DiscoveredAgent]:
+        """Return lightweight data for all agents on this host."""
         ...
 
     # =========================================================================

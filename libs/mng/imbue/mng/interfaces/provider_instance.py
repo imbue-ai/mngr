@@ -180,7 +180,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """List all hosts managed by this provider instance."""
         ...
 
-    def load_agent_refs(
+    def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
@@ -192,7 +192,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host and agent data in parallel from a shared volume instead of SSH-ing into
         each host individually).
 
-        The default implementation calls list_hosts() and then get_agent_references()
+        The default implementation calls list_hosts() and then discover_agents()
         on each host in parallel.
         """
         logger.trace("Loading hosts from provider {}", self.name)
@@ -207,7 +207,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     host_name=host.get_name(),
                     provider_name=self.name,
                 )
-                future_by_host_ref[host_ref] = executor.submit(host.get_agent_references)
+                future_by_host_ref[host_ref] = executor.submit(host.discover_agents)
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
 
@@ -216,7 +216,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Get CPU, memory, disk, and GPU resource information for a host."""
         ...
 
-    def build_host_listing_data(
+    def get_host_and_agent_details(
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],

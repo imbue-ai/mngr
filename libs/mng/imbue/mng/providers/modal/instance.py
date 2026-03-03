@@ -48,7 +48,7 @@ from imbue.mng.hosts.common import resolve_expected_process_name
 from imbue.mng.hosts.common import timestamp_to_datetime
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.offline_host import OfflineHost
-from imbue.mng.hosts.offline_host import validate_and_create_agent_reference
+from imbue.mng.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import CertifiedHostData
@@ -2309,7 +2309,7 @@ log "=== Shutdown script completed ==="
             return running_host_ids
 
     @handle_modal_auth_error
-    def load_agent_refs(
+    def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
@@ -2327,7 +2327,7 @@ log "=== Shutdown script completed ==="
         with trace_span("Loading data for refs", _is_trace_span_enabled=False):
             try:
                 with ConcurrencyGroupExecutor(
-                    parent_cg=cg, name=f"modal_load_agent_refs_{self.name}", max_workers=3
+                    parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
                 ) as executor:
                     running_ids_future = executor.submit(self._list_running_host_ids, cg)
                     host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
@@ -2359,7 +2359,7 @@ log "=== Shutdown script completed ==="
 
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_data_by_host_id.get(host_id, []):
-                ref = validate_and_create_agent_reference(agent_data, host_id, self.name)
+                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
                 if ref is not None:
                     agent_refs.append(ref)
 
@@ -2396,7 +2396,7 @@ log "=== Shutdown script completed ==="
     # Optimized Listing
     # =========================================================================
 
-    def build_host_listing_data(
+    def get_host_and_agent_details(
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
@@ -2421,12 +2421,12 @@ log "=== Shutdown script completed ==="
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host info for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                host_info = self._build_host_info_from_raw(host, host_ref, host_record, raw)
+                host_info = self._build_host_details_from_raw(host, host_ref, host_record, raw)
 
             # Build AgentDetails for each agent
             with trace_span("Assembling agent info for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 certified_data = host_record.certified_host_data if host_record is not None else None
-                agent_infos = self._build_agent_infos_from_raw(host_info, certified_data, raw)
+                agent_infos = self._build_agent_details_from_raw(host_info, certified_data, raw)
 
             return host_info, agent_infos
 
@@ -2447,7 +2447,7 @@ log "=== Shutdown script completed ==="
 
         return _parse_listing_collection_output(result.stdout)
 
-    def _build_host_info_from_raw(
+    def _build_host_details_from_raw(
         self,
         host: Host,
         host_ref: DiscoveredHost,
@@ -2535,7 +2535,7 @@ log "=== Shutdown script completed ==="
             failure_reason=certified_data.failure_reason,
         )
 
-    def _build_agent_infos_from_raw(
+    def _build_agent_details_from_raw(
         self,
         host_info: HostDetails,
         certified_host_data: CertifiedHostData | None,
