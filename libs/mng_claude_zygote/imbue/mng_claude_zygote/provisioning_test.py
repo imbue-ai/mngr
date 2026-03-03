@@ -643,9 +643,9 @@ def test_context_tool_gather_context_returns_no_new_context_on_second_call(
 ) -> None:
     """Verify gather_context returns incremental results on subsequent calls."""
     # Set up a minimal agent data dir with one scheduled event
-    logs_dir = tmp_path / "logs" / "scheduled"
-    logs_dir.mkdir(parents=True)
-    events_file = logs_dir / "events.jsonl"
+    events_source_dir = tmp_path / "events" / "scheduled"
+    events_source_dir.mkdir(parents=True)
+    events_file = events_source_dir / "events.jsonl"
     events_file.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"test","event_id":"e1","source":"scheduled"}\n')
 
     module = _load_fresh_context_tool("context_tool_incremental_test")
@@ -810,13 +810,13 @@ def test_gather_context_first_call_shows_transcript_and_triggers(
     module = _load_fresh_context_tool("gc_transcript")
 
     # Set up transcript
-    transcript_dir = tmp_path / "logs" / "claude_transcript"
+    transcript_dir = tmp_path / "events" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
 
     # Set up monitor events
-    monitor_dir = tmp_path / "logs" / "monitor"
+    monitor_dir = tmp_path / "events" / "monitor"
     monitor_dir.mkdir(parents=True)
     monitor_file = monitor_dir / "events.jsonl"
     monitor_file.write_text(_make_data_event("m1", "monitor") + "\n")
@@ -835,7 +835,7 @@ def test_gather_context_first_call_groups_messages_by_conversation(
     """Verify gather_context groups messages by conversation on first call."""
     module = _load_fresh_context_tool("gc_messages")
 
-    msgs_dir = tmp_path / "logs" / "messages"
+    msgs_dir = tmp_path / "events" / "messages"
     msgs_dir.mkdir(parents=True)
     msgs_file = msgs_dir / "events.jsonl"
     lines = [
@@ -860,7 +860,7 @@ def test_gather_context_incremental_returns_new_trigger_events(
     """Verify gather_context returns new trigger events on subsequent calls."""
     module = _load_fresh_context_tool("gc_incremental_triggers")
 
-    sched_dir = tmp_path / "logs" / "scheduled"
+    sched_dir = tmp_path / "events" / "scheduled"
     sched_dir.mkdir(parents=True)
     events_file = sched_dir / "events.jsonl"
     events_file.write_text(_make_event_line("s1", "scheduled") + "\n")
@@ -886,7 +886,7 @@ def test_gather_context_incremental_returns_new_messages_from_other_conversation
     """Verify gather_context returns new messages from other conversations incrementally."""
     module = _load_fresh_context_tool("gc_incremental_msgs")
 
-    msgs_dir = tmp_path / "logs" / "messages"
+    msgs_dir = tmp_path / "events" / "messages"
     msgs_dir.mkdir(parents=True)
     msgs_file = msgs_dir / "events.jsonl"
     msgs_file.write_text(_make_message_line("m1", "other-conv") + "\n")
@@ -992,7 +992,7 @@ def test_gather_context_first_call_returns_no_context_when_all_empty(
     module = _load_fresh_context_tool("gc_all_empty")
     # Create all the log directories but leave them empty (no events.jsonl files)
     for source in ("claude_transcript", "messages", "scheduled", "mng_agents", "stop", "monitor"):
-        (tmp_path / "logs" / source).mkdir(parents=True)
+        (tmp_path / "events" / source).mkdir(parents=True)
 
     monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(tmp_path))
 
@@ -1007,7 +1007,7 @@ def test_gather_context_incremental_new_inner_monologue(
     """Verify gather_context returns new inner monologue entries on subsequent calls."""
     module = _load_fresh_context_tool("gc_inc_monologue")
 
-    transcript_dir = tmp_path / "logs" / "claude_transcript"
+    transcript_dir = tmp_path / "events" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
@@ -1048,7 +1048,7 @@ def gather_context_msg_env(
     """Set up a fresh context_tool module with a messages directory and conversation env vars."""
     module = _load_fresh_context_tool("gc_msg_env")
 
-    msgs_dir = tmp_path / "logs" / "messages"
+    msgs_dir = tmp_path / "events" / "messages"
     msgs_dir.mkdir(parents=True)
     msgs_file = msgs_dir / "events.jsonl"
 
@@ -1300,7 +1300,7 @@ def test_extra_context_tool_with_transcript(extra_context_env: tuple[Any, Path])
     """Verify gather_extra_context reads transcript entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "logs" / "claude_transcript"
+    transcript_dir = data_dir / "events" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(5)]
@@ -1315,7 +1315,7 @@ def test_extra_context_tool_with_conversations(extra_context_env: tuple[Any, Pat
     """Verify gather_extra_context reads conversation events."""
     module, data_dir = extra_context_env
 
-    conv_dir = data_dir / "logs" / "conversations"
+    conv_dir = data_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True)
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
@@ -1362,7 +1362,7 @@ def test_extra_context_tool_with_empty_transcript(extra_context_env: tuple[Any, 
     """Verify gather_extra_context handles empty transcript file."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "logs" / "claude_transcript"
+    transcript_dir = data_dir / "events" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     (transcript_dir / "events.jsonl").write_text("")
 
@@ -1374,7 +1374,7 @@ def test_extra_context_tool_conversations_with_malformed_json(extra_context_env:
     """Verify gather_extra_context skips malformed conversation lines."""
     module, data_dir = extra_context_env
 
-    conv_dir = data_dir / "logs" / "conversations"
+    conv_dir = data_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True)
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
@@ -1391,7 +1391,7 @@ def test_extra_context_tool_conversations_missing_key(extra_context_env: tuple[A
     """Verify gather_extra_context skips conversations lines missing conversation_id."""
     module, data_dir = extra_context_env
 
-    conv_dir = data_dir / "logs" / "conversations"
+    conv_dir = data_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True)
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"test","event_id":"c1"}\n')
@@ -1404,7 +1404,7 @@ def test_extra_context_tool_transcript_with_many_entries(extra_context_env: tupl
     """Verify gather_extra_context limits transcript to last 50 entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "logs" / "claude_transcript"
+    transcript_dir = data_dir / "events" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(100)]
@@ -1420,7 +1420,7 @@ def test_extra_context_tool_conversations_updates_existing_conversation(
     """Verify gather_extra_context uses the latest event for each conversation."""
     module, data_dir = extra_context_env
 
-    conv_dir = data_dir / "logs" / "conversations"
+    conv_dir = data_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True)
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
@@ -1439,7 +1439,7 @@ def test_extra_context_tool_conversations_with_empty_lines(extra_context_env: tu
     """Verify gather_extra_context skips empty lines in conversations file."""
     module, data_dir = extra_context_env
 
-    conv_dir = data_dir / "logs" / "conversations"
+    conv_dir = data_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True)
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(

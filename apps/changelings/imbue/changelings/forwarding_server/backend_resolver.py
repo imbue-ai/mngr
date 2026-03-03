@@ -105,7 +105,7 @@ class MngCliInterface(MutableModel, ABC):
 
     @abstractmethod
     def read_agent_log(self, agent_id: AgentId, log_file: str) -> str | None:
-        """Read an agent's log file via `mng logs`. Returns file contents or None on failure."""
+        """Read an agent's log file via `mng events`. Returns file contents or None on failure."""
 
     @abstractmethod
     def list_agents_json(self) -> str | None:
@@ -116,20 +116,20 @@ class SubprocessMngCli(MngCliInterface):
     """Real implementation that shells out to the mng binary via ConcurrencyGroup."""
 
     def read_agent_log(self, agent_id: AgentId, log_file: str) -> str | None:
-        cg = ConcurrencyGroup(name="mng-logs")
+        cg = ConcurrencyGroup(name="mng-events")
         try:
             with cg:
                 result = cg.run_process_to_completion(
-                    command=[MNG_BINARY, "logs", str(agent_id), log_file, "--quiet"],
+                    command=[MNG_BINARY, "events", str(agent_id), log_file, "--quiet"],
                     timeout=_SUBPROCESS_TIMEOUT_SECONDS,
                     is_checked_after=False,
                 )
         except ConcurrencyExceptionGroup as e:
-            logger.warning("Failed to run mng logs for {}: {}", agent_id, e)
+            logger.warning("Failed to run mng events for {}: {}", agent_id, e)
             return None
 
         if result.returncode != 0:
-            logger.debug("mng logs returned non-zero for {}: {}", agent_id, result.stderr.strip())
+            logger.debug("mng events returned non-zero for {}: {}", agent_id, result.stderr.strip())
             return None
 
         return result.stdout
@@ -241,7 +241,7 @@ def _parse_server_log_records(text: str) -> list[ServerLogRecord]:
 class MngCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs by calling mng CLI commands.
 
-    Uses `mng logs <agent-id> servers.jsonl` to read server info and
+    Uses `mng events <agent-id> servers.jsonl` to read server info and
     `mng list --json` to discover agents. Results are cached with a short
     TTL to avoid excessive subprocess calls on every request.
 

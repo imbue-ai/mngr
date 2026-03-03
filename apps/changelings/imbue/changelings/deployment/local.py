@@ -225,7 +225,7 @@ def deploy_changeling(
     4. Returns the deployment result with the login URL
 
     The agent itself is responsible for writing its server info to
-    $MNG_AGENT_STATE_DIR/logs/servers.jsonl on startup, which the forwarding
+    $MNG_AGENT_STATE_DIR/events/servers.jsonl on startup, which the forwarding
     server reads to discover backends.
     """
     with log_span("Deploying changeling '{}' via provider '{}'", agent_name, provider.value):

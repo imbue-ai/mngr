@@ -168,7 +168,7 @@ def test_build_start_volume_sync_command() -> None:
     assert "sync /host_volume" in cmd
     assert "nohup" in cmd
     assert "/mng/commands/volume_sync.sh" in cmd
-    assert "/mng/logs/volume_sync.log" in cmd
+    assert "/mng/events/logs/volume_sync.log" in cmd
     assert "sleep 60" in cmd
 
 

@@ -2,10 +2,10 @@
 # Chat wrapper for changeling conversations.
 #
 # Manages conversation threads backed by the `llm` CLI tool. Events are
-# written to the standard log structure: logs/<source>/events.jsonl
+# written to the standard log structure: events/<source>/events.jsonl
 #
 # Event sources used:
-#   logs/conversations/events.jsonl  - conversation lifecycle (created, model changed)
+#   events/conversations/events.jsonl  - conversation lifecycle (created, model changed)
 #
 # Usage:
 #   chat --new [message]              Create a new conversation (user-initiated)
@@ -16,21 +16,21 @@
 #   chat                             List conversations and show help hint
 #
 # Environment:
-#   MNG_AGENT_STATE_DIR  - agent state directory (contains logs/)
+#   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
 #   MNG_HOST_DIR         - host data directory (contains commands/)
 #   MNG_AGENT_WORK_DIR   - agent work directory (contains talking/PROMPT.md)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
-CONVERSATIONS_EVENTS="$AGENT_DATA_DIR/logs/conversations/events.jsonl"
+CONVERSATIONS_EVENTS="$AGENT_DATA_DIR/events/conversations/events.jsonl"
 LLM_TOOLS_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}/commands/llm_tools"
 TALKING_PROMPT="${MNG_AGENT_WORK_DIR:-}/talking/PROMPT.md"
 
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="chat"
-_MNG_LOG_SOURCE="chat"
-_MNG_LOG_FILE="${MNG_HOST_DIR}/logs/chat/events.jsonl"
+_MNG_LOG_SOURCE="logs/chat"
+_MNG_LOG_FILE="${MNG_HOST_DIR}/events/logs/chat/events.jsonl"
 # shellcheck source=../../../../mng/imbue/mng/resources/mng_log.sh
 source "$MNG_HOST_DIR/commands/mng_log.sh"
 
@@ -80,7 +80,7 @@ generate_cid() {
     echo "conv-$(date +%s)-$(head -c 4 /dev/urandom | xxd -p)"
 }
 
-# Append a conversation_created event to logs/conversations/events.jsonl
+# Append a conversation_created event to events/conversations/events.jsonl
 # Uses the standard envelope: timestamp, type, event_id, source + conversation fields
 append_conversation_event() {
     local cid="$1"
@@ -240,7 +240,7 @@ import json, os, sys
 from pathlib import Path
 
 events_file = '$CONVERSATIONS_EVENTS'
-messages_file = '${AGENT_DATA_DIR}/logs/messages/events.jsonl'
+messages_file = '${AGENT_DATA_DIR}/events/messages/events.jsonl'
 convs = {}
 line_num = 0
 for line in open(events_file):

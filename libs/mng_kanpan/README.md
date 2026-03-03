@@ -14,8 +14,8 @@ name = "connect"
 command = "mng connect $MNG_AGENT_NAME"
 
 [plugins.kanpan.commands.l]
-name = "logs"
-command = "mng logs $MNG_AGENT_NAME"
+name = "events"
+command = "mng events $MNG_AGENT_NAME"
 refresh_afterwards = true
 ```
 

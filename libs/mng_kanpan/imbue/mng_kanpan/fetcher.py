@@ -16,6 +16,7 @@ from imbue.mng.interfaces.data_types import AgentInfo
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
+from imbue.mng.primitives import default_branch_name
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSnapshot
@@ -135,7 +136,7 @@ def _resolve_agent_branch(agent: AgentInfo, cg: ConcurrencyGroup) -> str | None:
     """Determine the git branch associated with an agent.
 
     For local agents with an accessible work_dir, reads the branch via git.
-    Falls back to the naming convention mng/<name>-<provider>.
+    Falls back to the naming convention mng/<name>.
     """
     if agent.host.provider_name == LOCAL_PROVIDER_NAME:
         work_dir = agent.work_dir
@@ -146,7 +147,7 @@ def _resolve_agent_branch(agent: AgentInfo, cg: ConcurrencyGroup) -> str | None:
             logger.debug("Could not determine git branch for agent {} at {}", agent.name, work_dir)
 
     # Fallback: naming convention
-    return f"mng/{agent.name}-{agent.host.provider_name}"
+    return default_branch_name(agent.name)
 
 
 def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:

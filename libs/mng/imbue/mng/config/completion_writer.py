@@ -41,7 +41,7 @@ _AGENT_NAME_COMMANDS: Final[frozenset[str]] = frozenset(
         "destroy",
         "exec",
         "limit",
-        "logs",
+        "events",
         "message",
         "pair",
         "provision",

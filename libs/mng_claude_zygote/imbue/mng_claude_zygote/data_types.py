@@ -28,7 +28,7 @@ class MessageRole(NonEmptyStr):
 
 # -- Event log sources --
 # These constants define the source names and corresponding log paths.
-# Each source writes to logs/<SOURCE>/events.jsonl.
+# Each source writes to events/<SOURCE>/events.jsonl.
 
 SOURCE_CONVERSATIONS: Final[EventSource] = EventSource("conversations")
 SOURCE_MESSAGES: Final[EventSource] = EventSource("messages")
@@ -41,7 +41,7 @@ SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("common_transcript")
 
 
 class ConversationEvent(EventEnvelope):
-    """An event in logs/conversations/events.jsonl tracking conversation lifecycle.
+    """An event in events/conversations/events.jsonl tracking conversation lifecycle.
 
     Emitted when a conversation is created or its model is changed.
     """
@@ -51,7 +51,7 @@ class ConversationEvent(EventEnvelope):
 
 
 class MessageEvent(EventEnvelope):
-    """An event in logs/messages/events.jsonl recording a conversation message.
+    """An event in events/messages/events.jsonl recording a conversation message.
 
     Each event represents a single user or assistant message. All messages
     across all conversations go into the same file, with conversation_id
@@ -75,7 +75,7 @@ class ChangelingEvent(EventEnvelope):
 
 # -- Common transcript types --
 # These define the agent-agnostic common message format written to
-# logs/common_transcript/events.jsonl. Inspired by oh-my-pi's session
+# events/common_transcript/events.jsonl. Inspired by oh-my-pi's session
 # entry format, but adapted to our EventEnvelope conventions.
 #
 # The common format focuses on semantically important messages (user input,

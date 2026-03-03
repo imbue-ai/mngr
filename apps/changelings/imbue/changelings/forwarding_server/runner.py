@@ -17,7 +17,7 @@ def start_forwarding_server(
 ) -> None:
     """Start the forwarding server using uvicorn.
 
-    The server discovers backend URLs by calling `mng logs <agent-id> servers.jsonl`
+    The server discovers backend URLs by calling `mng events <agent-id> servers.jsonl`
     and discovers agents via `mng list`. For remote agents (those with SSH info in the
     mng list output), the server tunnels traffic through SSH using paramiko.
 

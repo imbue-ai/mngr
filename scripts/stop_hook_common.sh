@@ -28,7 +28,7 @@ STOP_HOOK_SCRIPT_NAME="${STOP_HOOK_SCRIPT_NAME:-unknown}"
 # Source the shared logging library for _json_escape and _log_jsonl.
 # Configure the library variables so _log_to_file can delegate to _log_jsonl.
 _MNG_LOG_TYPE="stop_hook"
-_MNG_LOG_SOURCE="stop_hook"
+_MNG_LOG_SOURCE="logs/stop_hook"
 _MNG_LOG_FILE="${STOP_HOOK_LOG:-/dev/null}"
 # shellcheck source=mng_log.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mng_log.sh"

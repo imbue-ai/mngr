@@ -10,7 +10,7 @@ For a summary of all event types and their fields, use the `list-event-types` sk
 To inspect raw events for a specific source, read the corresponding log file:
 
 ```bash
-cat "$MNG_AGENT_STATE_DIR/logs/<source>/events.jsonl"
+cat "$MNG_AGENT_STATE_DIR/events/<source>/events.jsonl"
 ```
 
 Where `<source>` is one of: `messages`, `mng_agents`, `scheduled`, `stop`, `conversations`, `monitor`, `claude_transcript`.
@@ -20,23 +20,23 @@ Where `<source>` is one of: `messages`, `mng_agents`, `scheduled`, `stop`, `conv
 View the most recent events from a source:
 
 ```bash
-tail -20 "$MNG_AGENT_STATE_DIR/logs/messages/events.jsonl"
+tail -20 "$MNG_AGENT_STATE_DIR/events/messages/events.jsonl"
 ```
 
 Count events per source:
 
 ```bash
-wc -l "$MNG_AGENT_STATE_DIR/logs/"*/events.jsonl
+wc -l "$MNG_AGENT_STATE_DIR/events/"*/events.jsonl
 ```
 
 Find events for a specific conversation:
 
 ```bash
-grep '"conversation_id":"<cid>"' "$MNG_AGENT_STATE_DIR/logs/messages/events.jsonl"
+grep '"conversation_id":"<cid>"' "$MNG_AGENT_STATE_DIR/events/messages/events.jsonl"
 ```
 
 Find events for a specific sub-agent:
 
 ```bash
-grep '"agent_id":"<agent_id>"' "$MNG_AGENT_STATE_DIR/logs/mng_agents/events.jsonl"
+grep '"agent_id":"<agent_id>"' "$MNG_AGENT_STATE_DIR/events/mng_agents/events.jsonl"
 ```

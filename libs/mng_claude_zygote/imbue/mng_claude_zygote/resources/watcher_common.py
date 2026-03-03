@@ -47,7 +47,7 @@ def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
     sink = _make_jsonl_file_sink(
         file_path=str(log_file),
         event_type="watcher",
-        event_source=watcher_name,
+        event_source=f"logs/{watcher_name}",
     )
     logger.add(
         sink,

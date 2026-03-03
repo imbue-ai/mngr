@@ -4,24 +4,24 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mng.api.logs import LogFileEntry
-from imbue.mng.cli.logs import LogsCliOptions
-from imbue.mng.cli.logs import _emit_log_content
-from imbue.mng.cli.logs import _emit_log_file_list
-from imbue.mng.cli.logs import _write_and_flush_stdout
-from imbue.mng.cli.logs import logs
+from imbue.mng.api.events import EventFileEntry
+from imbue.mng.cli.events import EventsCliOptions
+from imbue.mng.cli.events import _emit_event_content
+from imbue.mng.cli.events import _emit_event_file_list
+from imbue.mng.cli.events import _write_and_flush_stdout
+from imbue.mng.cli.events import events
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import OutputFormat
 
 
-def _make_logs_opts(
+def _make_events_opts(
     target: str = "my-agent",
-    log_filename: str | None = None,
+    event_filename: str | None = None,
     follow: bool = False,
     tail: int | None = None,
     head: int | None = None,
-) -> LogsCliOptions:
-    return LogsCliOptions(
+) -> EventsCliOptions:
+    return EventsCliOptions(
         output_format="human",
         quiet=False,
         verbose=0,
@@ -33,41 +33,41 @@ def _make_logs_opts(
         plugin=(),
         disable_plugin=(),
         target=target,
-        log_filename=log_filename,
+        event_filename=event_filename,
         follow=follow,
         tail=tail,
         head=head,
     )
 
 
-def test_logs_cli_options_can_be_constructed() -> None:
+def test_events_cli_options_can_be_constructed() -> None:
     """Verify the options class can be instantiated with all required fields."""
-    opts = _make_logs_opts()
+    opts = _make_events_opts()
     assert opts.target == "my-agent"
     assert opts.follow is False
     assert opts.tail is None
     assert opts.head is None
-    assert opts.log_filename is None
+    assert opts.event_filename is None
 
 
-def test_logs_cli_options_with_tail() -> None:
-    opts = _make_logs_opts(follow=True, tail=50)
+def test_events_cli_options_with_tail() -> None:
+    opts = _make_events_opts(follow=True, tail=50)
     assert opts.follow is True
     assert opts.tail == 50
 
 
-def test_logs_cli_options_with_head() -> None:
-    opts = _make_logs_opts(head=20)
+def test_events_cli_options_with_head() -> None:
+    opts = _make_events_opts(head=20)
     assert opts.head == 20
 
 
-def test_logs_cli_rejects_head_and_tail_together(
+def test_events_cli_rejects_head_and_tail_together(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that --head and --tail cannot be used together."""
     result = cli_runner.invoke(
-        logs,
+        events,
         ["my-agent", "output.log", "--head", "5", "--tail", "10"],
         obj=plugin_manager,
     )
@@ -75,13 +75,13 @@ def test_logs_cli_rejects_head_and_tail_together(
     assert "Cannot specify both --head and --tail" in result.output
 
 
-def test_logs_cli_rejects_head_with_follow(
+def test_events_cli_rejects_head_with_follow(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Verify that --head cannot be used with --follow."""
     result = cli_runner.invoke(
-        logs,
+        events,
         ["my-agent", "output.log", "--head", "5", "--follow"],
         obj=plugin_manager,
     )
@@ -89,13 +89,13 @@ def test_logs_cli_rejects_head_with_follow(
     assert "Cannot use --head with --follow" in result.output
 
 
-def test_logs_cli_log_filename_does_not_conflict_with_common_log_file(
+def test_events_cli_event_filename_does_not_conflict_with_common_log_file(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Verify the log_filename argument does not collide with the --log-file common option."""
+    """Verify the event_filename argument does not collide with the --log-file common option."""
     result = cli_runner.invoke(
-        logs,
+        events,
         ["nonexistent-agent-xyz", "output.log", "--log-file", "/tmp/test-log-82741.log"],
         obj=plugin_manager,
     )
@@ -116,75 +116,75 @@ def test_write_and_flush_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == "hello world"
 
 
-def test_emit_log_file_list_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_file_list with no log files in HUMAN format."""
+def test_emit_event_file_list_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_file_list with no event files in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _emit_log_file_list([], "my-agent", output_opts)
+    _emit_event_file_list([], "my-agent", output_opts)
     captured = capsys.readouterr()
-    assert "No log files found for my-agent" in captured.out
+    assert "No event files found for my-agent" in captured.out
 
 
-def test_emit_log_file_list_human_with_files(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_file_list with log files in HUMAN format."""
-    log_files = [
-        LogFileEntry(name="output.log", size=1024),
-        LogFileEntry(name="error.log", size=512),
+def test_emit_event_file_list_human_with_files(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_file_list with event files in HUMAN format."""
+    event_files = [
+        EventFileEntry(name="output.log", size=1024),
+        EventFileEntry(name="error.log", size=512),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _emit_log_file_list(log_files, "my-agent", output_opts)
+    _emit_event_file_list(event_files, "my-agent", output_opts)
     captured = capsys.readouterr()
     output = captured.out
-    assert "Log files for my-agent" in output
+    assert "Event files for my-agent" in output
     assert "output.log" in output
     assert "error.log" in output
 
 
-def test_emit_log_file_list_json_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_file_list in JSON format."""
-    log_files = [
-        LogFileEntry(name="output.log", size=1024),
+def test_emit_event_file_list_json_format(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_file_list in JSON format."""
+    event_files = [
+        EventFileEntry(name="output.log", size=1024),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _emit_log_file_list(log_files, "my-agent", output_opts)
+    _emit_event_file_list(event_files, "my-agent", output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["target"] == "my-agent"
-    assert len(data["log_files"]) == 1
-    assert data["log_files"][0]["name"] == "output.log"
+    assert len(data["event_files"]) == 1
+    assert data["event_files"][0]["name"] == "output.log"
 
 
-def test_emit_log_file_list_format_template(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_file_list with a format template."""
-    log_files = [
-        LogFileEntry(name="output.log", size=1024),
+def test_emit_event_file_list_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_file_list with a format template."""
+    event_files = [
+        EventFileEntry(name="output.log", size=1024),
     ]
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    _emit_log_file_list(log_files, "my-agent", output_opts)
+    _emit_event_file_list(event_files, "my-agent", output_opts)
     captured = capsys.readouterr()
     assert "output.log" in captured.out
 
 
-def test_emit_log_content_human_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_content in HUMAN format."""
+def test_emit_event_content_human_format(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_content in HUMAN format."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _emit_log_content("line 1\nline 2\n", "output.log", output_opts)
+    _emit_event_content("line 1\nline 2\n", "output.log", output_opts)
     captured = capsys.readouterr()
     assert "line 1\nline 2\n" in captured.out
 
 
-def test_emit_log_content_human_adds_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_content adds trailing newline if missing."""
+def test_emit_event_content_human_adds_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_content adds trailing newline if missing."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _emit_log_content("no trailing newline", "output.log", output_opts)
+    _emit_event_content("no trailing newline", "output.log", output_opts)
     captured = capsys.readouterr()
     assert captured.out.endswith("\n")
 
 
-def test_emit_log_content_json_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _emit_log_content in JSON format."""
+def test_emit_event_content_json_format(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _emit_event_content in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _emit_log_content("log content", "output.log", output_opts)
+    _emit_event_content("log content", "output.log", output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
-    assert data["log_file"] == "output.log"
+    assert data["event_file"] == "output.log"
     assert data["content"] == "log content"

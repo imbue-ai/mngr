@@ -11,7 +11,7 @@ The actual terminal sessions are handled by companion ttyd processes
 - Agent-tmux ttyd: ?arg=<agent_name> to attach to an agent's tmux
 
 Environment:
-    MNG_AGENT_STATE_DIR  - Agent state directory (contains logs/)
+    MNG_AGENT_STATE_DIR  - Agent state directory (contains events/)
     MNG_HOST_DIR         - Host data directory (contains commands/)
     MNG_AGENT_NAME       - This agent's name
     MNG_HOST_NAME        - Name of the host this agent runs on
@@ -38,12 +38,14 @@ HOST_DIR: Final[str] = os.environ.get("MNG_HOST_DIR", "")
 AGENT_NAME: Final[str] = os.environ.get("MNG_AGENT_NAME", "")
 HOST_NAME: Final[str] = os.environ.get("MNG_HOST_NAME", "")
 
-SERVERS_JSONL_PATH: Final[Path | None] = Path(AGENT_STATE_DIR) / "logs" / "servers.jsonl" if AGENT_STATE_DIR else None
+SERVERS_JSONL_PATH: Final[Path | None] = (
+    Path(AGENT_STATE_DIR) / "events" / "servers.jsonl" if AGENT_STATE_DIR else None
+)
 MESSAGES_EVENTS_PATH: Final[Path | None] = (
-    Path(AGENT_STATE_DIR) / "logs" / "messages" / "events.jsonl" if AGENT_STATE_DIR else None
+    Path(AGENT_STATE_DIR) / "events" / "messages" / "events.jsonl" if AGENT_STATE_DIR else None
 )
 CONVERSATIONS_EVENTS_PATH: Final[Path | None] = (
-    Path(AGENT_STATE_DIR) / "logs" / "conversations" / "events.jsonl" if AGENT_STATE_DIR else None
+    Path(AGENT_STATE_DIR) / "events" / "conversations" / "events.jsonl" if AGENT_STATE_DIR else None
 )
 
 # -- Constants --

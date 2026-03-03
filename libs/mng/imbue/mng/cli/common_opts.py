@@ -110,7 +110,7 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "--log-file",
         type=click.Path(),
         default=None,
-        help="Path to log file (overrides default ~/.mng/logs/<timestamp>-<pid>.json)",
+        help="Path to log file (overrides default ~/.mng/events/logs/<timestamp>-<pid>.json)",
     )(command)
     command = optgroup.option(
         "-v", "--verbose", count=True, help="Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE"

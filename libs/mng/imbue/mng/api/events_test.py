@@ -7,17 +7,17 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.mng.api.connect import build_ssh_base_args
-from imbue.mng.api.logs import LogsTarget
-from imbue.mng.api.logs import _FollowState
-from imbue.mng.api.logs import _build_tail_args
-from imbue.mng.api.logs import _check_for_new_content
-from imbue.mng.api.logs import _extract_filename
-from imbue.mng.api.logs import _parse_file_listing_output
-from imbue.mng.api.logs import apply_head_or_tail
-from imbue.mng.api.logs import follow_log_file
-from imbue.mng.api.logs import list_log_files
-from imbue.mng.api.logs import read_log_content
-from imbue.mng.api.logs import resolve_logs_target
+from imbue.mng.api.events import EventsTarget
+from imbue.mng.api.events import _FollowState
+from imbue.mng.api.events import _build_tail_args
+from imbue.mng.api.events import _check_for_new_content
+from imbue.mng.api.events import _extract_filename
+from imbue.mng.api.events import _parse_file_listing_output
+from imbue.mng.api.events import apply_head_or_tail
+from imbue.mng.api.events import follow_event_file
+from imbue.mng.api.events import list_event_files
+from imbue.mng.api.events import read_event_content
+from imbue.mng.api.events import resolve_events_target
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
@@ -28,7 +28,7 @@ from imbue.mng.providers.local.volume import LocalVolume
 
 
 class _StopFollow(Exception):
-    """Raised by test callbacks to break out of follow_log_file."""
+    """Raised by test callbacks to break out of follow_event_file."""
 
 
 def _capture_and_stop_after(captured: list[str], after_count: int = 1) -> Callable[[str], None]:
@@ -45,16 +45,16 @@ def _capture_and_stop_after(captured: list[str], after_count: int = 1) -> Callab
 
 
 @pytest.fixture
-def logs_volume_target(tmp_path: Path) -> tuple[LogsTarget, Path]:
-    """Create a LogsTarget backed by a temp directory.
+def events_volume_target(tmp_path: Path) -> tuple[EventsTarget, Path]:
+    """Create an EventsTarget backed by a temp directory.
 
-    Returns (target, logs_dir) so tests can write files into the volume.
+    Returns (target, events_dir) so tests can write files into the volume.
     """
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    volume = LocalVolume(root_path=logs_dir)
-    target = LogsTarget(volume=volume, display_name="test")
-    return target, logs_dir
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    volume = LocalVolume(root_path=events_dir)
+    target = EventsTarget(volume=volume, display_name="test")
+    return target, events_dir
 
 
 # =============================================================================
@@ -111,33 +111,33 @@ def test_extract_filename_from_nested_path() -> None:
 
 
 # =============================================================================
-# list_log_files / read_log_content tests
+# list_event_files / read_event_content tests
 # =============================================================================
 
 
-def test_list_log_files_returns_only_files(logs_volume_target: tuple[LogsTarget, Path]) -> None:
-    target, logs_dir = logs_volume_target
-    (logs_dir / "output.log").write_text("some log data")
-    (logs_dir / "error.log").write_text("some errors")
-    (logs_dir / "subdir").mkdir()
+def test_list_event_files_returns_only_files(events_volume_target: tuple[EventsTarget, Path]) -> None:
+    target, events_dir = events_volume_target
+    (events_dir / "output.log").write_text("some log data")
+    (events_dir / "error.log").write_text("some errors")
+    (events_dir / "subdir").mkdir()
 
-    log_files = list_log_files(target)
+    event_files = list_event_files(target)
 
-    names = sorted(lf.name for lf in log_files)
+    names = sorted(ef.name for ef in event_files)
     assert names == snapshot(["error.log", "output.log"])
 
 
-def test_read_log_content_returns_file_contents(logs_volume_target: tuple[LogsTarget, Path]) -> None:
-    target, logs_dir = logs_volume_target
-    (logs_dir / "test.log").write_text("hello world\nsecond line\n")
+def test_read_event_content_returns_file_contents(events_volume_target: tuple[EventsTarget, Path]) -> None:
+    target, events_dir = events_volume_target
+    (events_dir / "test.log").write_text("hello world\nsecond line\n")
 
-    content = read_log_content(target, "test.log")
+    content = read_event_content(target, "test.log")
 
     assert content == snapshot("hello world\nsecond line\n")
 
 
 # =============================================================================
-# resolve_logs_target tests
+# resolve_events_target tests
 # =============================================================================
 
 
@@ -166,66 +166,66 @@ def _create_agent_data_json(
     return agent_id
 
 
-def test_resolve_logs_target_finds_agent(
+def test_resolve_events_target_finds_agent(
     temp_mng_ctx: MngContext,
     local_provider,
 ) -> None:
-    """Verify resolve_logs_target finds an agent and returns a scoped logs volume."""
+    """Verify resolve_events_target finds an agent and returns a scoped events volume."""
     per_host_dir = local_provider.host_dir
     agent_id = _create_agent_data_json(per_host_dir, "test-resolve-agent", "sleep 94817")
 
-    # Create logs in the agent's directory (volume and host_dir are the same path now)
-    agent_logs_dir = per_host_dir / "agents" / str(agent_id) / "logs"
-    agent_logs_dir.mkdir(parents=True, exist_ok=True)
-    (agent_logs_dir / "output.log").write_text("agent log content\n")
+    # Create events in the agent's directory (volume and host_dir are the same path now)
+    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events"
+    agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (agent_events_dir / "output.log").write_text("agent log content\n")
 
     # Resolve should find the agent
-    target = resolve_logs_target("test-resolve-agent", temp_mng_ctx)
+    target = resolve_events_target("test-resolve-agent", temp_mng_ctx)
     assert "test-resolve-agent" in target.display_name
 
-    # Should be able to list and read log files via the online host
-    log_files = list_log_files(target)
-    assert len(log_files) == 1
-    assert log_files[0].name == "output.log"
+    # Should be able to list and read event files via the online host
+    event_files = list_event_files(target)
+    assert len(event_files) == 1
+    assert event_files[0].name == "output.log"
 
-    content = read_log_content(target, "output.log")
+    content = read_event_content(target, "output.log")
     assert "agent log content" in content
 
 
-def test_resolve_logs_target_finds_host(
+def test_resolve_events_target_finds_host(
     temp_mng_ctx: MngContext,
     local_provider,
 ) -> None:
-    """Verify resolve_logs_target falls back to host when no agent matches."""
+    """Verify resolve_events_target falls back to host when no agent matches."""
     per_host_dir = local_provider.host_dir
     host = local_provider.get_host(HostName("localhost"))
 
     # Create an agent so the host appears in load_all_agents_grouped_by_host
     _create_agent_data_json(per_host_dir, "unrelated-agent-47291", "sleep 47291")
 
-    # Create logs directly in the host volume (not under agents/)
-    host_logs_dir = per_host_dir / "logs"
-    host_logs_dir.mkdir(parents=True, exist_ok=True)
-    (host_logs_dir / "host-output.log").write_text("host log content\n")
+    # Create events directly in the host volume (not under agents/)
+    host_events_dir = per_host_dir / "events"
+    host_events_dir.mkdir(parents=True, exist_ok=True)
+    (host_events_dir / "host-output.log").write_text("host log content\n")
 
     # Resolve using the host ID (not name, since "local" doesn't match agent-first)
-    target = resolve_logs_target(str(host.id), temp_mng_ctx)
+    target = resolve_events_target(str(host.id), temp_mng_ctx)
     assert "host" in target.display_name
 
-    # Should be able to list and read log files via the online host
-    log_files = list_log_files(target)
-    assert len(log_files) == 1
-    assert log_files[0].name == "host-output.log"
+    # Should be able to list and read event files via the online host
+    event_files = list_event_files(target)
+    assert len(event_files) == 1
+    assert event_files[0].name == "host-output.log"
 
-    content = read_log_content(target, "host-output.log")
+    content = read_event_content(target, "host-output.log")
     assert "host log content" in content
 
 
-def test_resolve_logs_target_raises_for_unknown_identifier(
+def test_resolve_events_target_raises_for_unknown_identifier(
     temp_mng_ctx: MngContext,
 ) -> None:
     with pytest.raises(UserInputError, match="No agent or host found"):
-        resolve_logs_target("nonexistent-identifier-abc123", temp_mng_ctx)
+        resolve_events_target("nonexistent-identifier-abc123", temp_mng_ctx)
 
 
 # =============================================================================
@@ -233,11 +233,11 @@ def test_resolve_logs_target_raises_for_unknown_identifier(
 # =============================================================================
 
 
-def test_check_for_new_content_detects_appended_content(logs_volume_target: tuple[LogsTarget, Path]) -> None:
-    """Verify _check_for_new_content detects new content appended to a log file."""
-    target, logs_dir = logs_volume_target
-    log_file = logs_dir / "test.log"
-    log_file.write_text("initial content\n")
+def test_check_for_new_content_detects_appended_content(events_volume_target: tuple[EventsTarget, Path]) -> None:
+    """Verify _check_for_new_content detects new content appended to an event file."""
+    target, events_dir = events_volume_target
+    event_file = events_dir / "test.log"
+    event_file.write_text("initial content\n")
 
     captured_content: list[str] = []
     state = _FollowState(previous_length=len("initial content\n"))
@@ -247,24 +247,24 @@ def test_check_for_new_content_detects_appended_content(logs_volume_target: tupl
     assert captured_content == []
 
     # Append new content
-    log_file.write_text("initial content\nnew line\n")
+    event_file.write_text("initial content\nnew line\n")
 
     _check_for_new_content(target, "test.log", captured_content.append, state)
     assert len(captured_content) == 1
     assert captured_content[0] == "new line\n"
 
 
-def test_check_for_new_content_handles_truncated_file(logs_volume_target: tuple[LogsTarget, Path]) -> None:
+def test_check_for_new_content_handles_truncated_file(events_volume_target: tuple[EventsTarget, Path]) -> None:
     """Verify _check_for_new_content handles file truncation."""
-    target, logs_dir = logs_volume_target
-    log_file = logs_dir / "test.log"
-    log_file.write_text("long content that will be truncated\n")
+    target, events_dir = events_volume_target
+    event_file = events_dir / "test.log"
+    event_file.write_text("long content that will be truncated\n")
 
     captured_content: list[str] = []
     state = _FollowState(previous_length=len("long content that will be truncated\n"))
 
     # Truncate the file
-    log_file.write_text("short\n")
+    event_file.write_text("short\n")
 
     _check_for_new_content(target, "test.log", captured_content.append, state)
     assert len(captured_content) == 1
@@ -272,21 +272,21 @@ def test_check_for_new_content_handles_truncated_file(logs_volume_target: tuple[
 
 
 # =============================================================================
-# follow_log_file tests
+# follow_event_file tests
 # =============================================================================
 
 
-def test_follow_log_file_emits_initial_content_with_tail(logs_volume_target: tuple[LogsTarget, Path]) -> None:
-    """Verify follow_log_file emits tailed initial content via the callback."""
-    target, logs_dir = logs_volume_target
-    (logs_dir / "test.log").write_text("line1\nline2\nline3\nline4\nline5\n")
+def test_follow_event_file_emits_initial_content_with_tail(events_volume_target: tuple[EventsTarget, Path]) -> None:
+    """Verify follow_event_file emits tailed initial content via the callback."""
+    target, events_dir = events_volume_target
+    (events_dir / "test.log").write_text("line1\nline2\nline3\nline4\nline5\n")
 
     captured: list[str] = []
 
     with pytest.raises(_StopFollow):
-        follow_log_file(
+        follow_event_file(
             target=target,
-            log_file_name="test.log",
+            event_file_name="test.log",
             on_new_content=_capture_and_stop_after(captured),
             tail_count=2,
         )
@@ -295,17 +295,17 @@ def test_follow_log_file_emits_initial_content_with_tail(logs_volume_target: tup
     assert captured[0] == "line4\nline5\n"
 
 
-def test_follow_log_file_emits_all_content_when_no_tail(logs_volume_target: tuple[LogsTarget, Path]) -> None:
-    """Verify follow_log_file emits all content when tail_count is None."""
-    target, logs_dir = logs_volume_target
-    (logs_dir / "test.log").write_text("line1\nline2\n")
+def test_follow_event_file_emits_all_content_when_no_tail(events_volume_target: tuple[EventsTarget, Path]) -> None:
+    """Verify follow_event_file emits all content when tail_count is None."""
+    target, events_dir = events_volume_target
+    (events_dir / "test.log").write_text("line1\nline2\n")
 
     captured: list[str] = []
 
     with pytest.raises(_StopFollow):
-        follow_log_file(
+        follow_event_file(
             target=target,
-            log_file_name="test.log",
+            event_file_name="test.log",
             on_new_content=_capture_and_stop_after(captured),
             tail_count=None,
         )
@@ -368,162 +368,164 @@ def test_build_tail_args_without_tail_count_shows_from_beginning() -> None:
 
 
 @pytest.fixture
-def logs_host_target(
+def events_host_target(
     tmp_path: Path,
     temp_mng_ctx: MngContext,
     local_provider,
-) -> tuple[LogsTarget, Path]:
-    """Create a LogsTarget backed by a local online host (no volume).
+) -> tuple[EventsTarget, Path]:
+    """Create an EventsTarget backed by a local online host (no volume).
 
-    Returns (target, logs_dir) so tests can write files into the logs directory.
+    Returns (target, events_dir) so tests can write files into the events directory.
     """
-    logs_dir = tmp_path / "host_logs"
-    logs_dir.mkdir()
+    events_dir = tmp_path / "host_events"
+    events_dir.mkdir()
     host = local_provider.get_host(HostName("localhost"))
     assert isinstance(host, OnlineHostInterface)
-    target = LogsTarget(
+    target = EventsTarget(
         volume=None,
         online_host=host,
-        logs_path=logs_dir,
+        events_path=events_dir,
         display_name="test-host",
     )
-    return target, logs_dir
+    return target, events_dir
 
 
-def test_list_log_files_via_host_returns_files(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify list_log_files works via host execute_command when volume is None."""
-    target, logs_dir = logs_host_target
-    (logs_dir / "output.log").write_text("some log data")
-    (logs_dir / "error.log").write_text("err")
-    (logs_dir / "subdir").mkdir()
+def test_list_event_files_via_host_returns_files(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify list_event_files works via host execute_command when volume is None."""
+    target, events_dir = events_host_target
+    (events_dir / "output.log").write_text("some log data")
+    (events_dir / "error.log").write_text("err")
+    (events_dir / "subdir").mkdir()
 
-    log_files = list_log_files(target)
+    event_files = list_event_files(target)
 
-    names = sorted(lf.name for lf in log_files)
+    names = sorted(ef.name for ef in event_files)
     assert names == snapshot(["error.log", "output.log"])
 
 
-def test_list_log_files_via_host_returns_correct_sizes(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify list_log_files via host returns correct file sizes."""
-    target, logs_dir = logs_host_target
-    (logs_dir / "test.log").write_text("12345")
+def test_list_event_files_via_host_returns_correct_sizes(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify list_event_files via host returns correct file sizes."""
+    target, events_dir = events_host_target
+    (events_dir / "test.log").write_text("12345")
 
-    log_files = list_log_files(target)
+    event_files = list_event_files(target)
 
-    assert len(log_files) == 1
-    assert log_files[0].name == "test.log"
-    assert log_files[0].size == 5
+    assert len(event_files) == 1
+    assert event_files[0].name == "test.log"
+    assert event_files[0].size == 5
 
 
-def test_list_log_files_via_host_returns_empty_for_nonexistent_dir(
+def test_list_event_files_via_host_returns_empty_for_nonexistent_dir(
     temp_mng_ctx: MngContext,
     local_provider,
 ) -> None:
-    """Verify list_log_files via host returns empty list when logs dir does not exist."""
+    """Verify list_event_files via host returns empty list when events dir does not exist."""
     host = local_provider.get_host(HostName("localhost"))
-    target = LogsTarget(
+    target = EventsTarget(
         volume=None,
         online_host=host,
-        logs_path=Path("/tmp/nonexistent-dir-logs-92847"),
+        events_path=Path("/tmp/nonexistent-dir-events-92847"),
         display_name="test-host",
     )
 
-    log_files = list_log_files(target)
+    event_files = list_event_files(target)
 
-    assert log_files == []
+    assert event_files == []
 
 
-def test_read_log_content_via_host(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify read_log_content works via host execute_command when volume is None.
+def test_read_event_content_via_host(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify read_event_content works via host execute_command when volume is None.
 
     Note: pyinfra's CommandOutput.stdout joins lines with newlines but drops
     the final trailing newline, so host-based reads may differ from volume-based
     reads in trailing whitespace.
     """
-    target, logs_dir = logs_host_target
-    (logs_dir / "test.log").write_text("hello from host\nsecond line\n")
+    target, events_dir = events_host_target
+    (events_dir / "test.log").write_text("hello from host\nsecond line\n")
 
-    content = read_log_content(target, "test.log")
+    content = read_event_content(target, "test.log")
 
     assert "hello from host" in content
     assert "second line" in content
 
 
-def test_read_log_content_via_host_raises_for_missing_file(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify read_log_content via host raises MngError for missing files."""
-    target, _logs_dir = logs_host_target
+def test_read_event_content_via_host_raises_for_missing_file(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify read_event_content via host raises MngError for missing files."""
+    target, _events_dir = events_host_target
 
-    with pytest.raises(MngError, match="Failed to read log file"):
-        read_log_content(target, "nonexistent-file-58291.log")
-
-
-def test_list_log_files_raises_when_no_volume_or_host() -> None:
-    """Verify list_log_files raises MngError when neither volume nor host is available."""
-    target = LogsTarget(display_name="test-empty")
-
-    with pytest.raises(MngError, match="no volume or online host"):
-        list_log_files(target)
+    with pytest.raises(MngError, match="Failed to read event file"):
+        read_event_content(target, "nonexistent-file-58291.log")
 
 
-def test_read_log_content_raises_when_no_volume_or_host() -> None:
-    """Verify read_log_content raises MngError when neither volume nor host is available."""
-    target = LogsTarget(display_name="test-empty")
+def test_list_event_files_raises_when_no_volume_or_host() -> None:
+    """Verify list_event_files raises MngError when neither volume nor host is available."""
+    target = EventsTarget(display_name="test-empty")
 
     with pytest.raises(MngError, match="no volume or online host"):
-        read_log_content(target, "test.log")
+        list_event_files(target)
 
 
-def test_follow_log_file_raises_when_no_volume_or_host() -> None:
-    """Verify follow_log_file raises MngError when neither volume nor host is available."""
-    target = LogsTarget(display_name="test-empty")
+def test_read_event_content_raises_when_no_volume_or_host() -> None:
+    """Verify read_event_content raises MngError when neither volume nor host is available."""
+    target = EventsTarget(display_name="test-empty")
 
     with pytest.raises(MngError, match="no volume or online host"):
-        follow_log_file(target, "test.log", lambda _: None, tail_count=None)
+        read_event_content(target, "test.log")
+
+
+def test_follow_event_file_raises_when_no_volume_or_host() -> None:
+    """Verify follow_event_file raises MngError when neither volume nor host is available."""
+    target = EventsTarget(display_name="test-empty")
+
+    with pytest.raises(MngError, match="no volume or online host"):
+        follow_event_file(target, "test.log", lambda _: None, tail_count=None)
 
 
 # =============================================================================
-# resolve_logs_target with online host tests
+# resolve_events_target with online host tests
 # =============================================================================
 
 
-def test_resolve_logs_target_populates_online_host_for_agent(
+def test_resolve_events_target_populates_online_host_for_agent(
     temp_mng_ctx: MngContext,
     local_provider,
 ) -> None:
-    """Verify resolve_logs_target sets online_host and logs_path when host is online."""
+    """Verify resolve_events_target sets online_host and events_path when host is online."""
     per_host_dir = local_provider.host_dir
     agent_id = _create_agent_data_json(per_host_dir, "test-online-agent-82719", "sleep 82719")
 
-    # Create logs directory
-    agent_logs_dir = per_host_dir / "agents" / str(agent_id) / "logs"
-    agent_logs_dir.mkdir(parents=True, exist_ok=True)
-    (agent_logs_dir / "output.log").write_text("test content\n")
+    # Create events directory
+    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events"
+    agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (agent_events_dir / "output.log").write_text("test content\n")
 
-    target = resolve_logs_target("test-online-agent-82719", temp_mng_ctx)
+    target = resolve_events_target("test-online-agent-82719", temp_mng_ctx)
 
     # Both volume and online_host should be populated for local provider
     assert target.volume is not None
     assert target.online_host is not None
-    assert target.logs_path is not None
-    assert str(target.logs_path).endswith(f"agents/{agent_id}/logs")
+    assert target.events_path is not None
+    assert str(target.events_path).endswith(f"agents/{agent_id}/events")
 
 
 # =============================================================================
-# follow_log_file via host tests
+# follow_event_file via host tests
 # =============================================================================
 
 
-def test_follow_log_file_via_host_streams_existing_content(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify follow_log_file uses tail -f on host and emits existing file content."""
-    target, logs_dir = logs_host_target
-    (logs_dir / "test.log").write_text("line1\nline2\nline3\n")
+def test_follow_event_file_via_host_streams_existing_content(
+    events_host_target: tuple[EventsTarget, Path],
+) -> None:
+    """Verify follow_event_file uses tail -f on host and emits existing file content."""
+    target, events_dir = events_host_target
+    (events_dir / "test.log").write_text("line1\nline2\nline3\n")
 
     captured: list[str] = []
 
     with pytest.raises(_StopFollow):
-        follow_log_file(
+        follow_event_file(
             target=target,
-            log_file_name="test.log",
+            event_file_name="test.log",
             on_new_content=_capture_and_stop_after(captured, after_count=3),
             tail_count=None,
         )
@@ -535,17 +537,17 @@ def test_follow_log_file_via_host_streams_existing_content(logs_host_target: tup
     assert "line3" in joined
 
 
-def test_follow_log_file_via_host_with_tail_count(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify follow_log_file via host respects tail_count."""
-    target, logs_dir = logs_host_target
-    (logs_dir / "test.log").write_text("line1\nline2\nline3\nline4\nline5\n")
+def test_follow_event_file_via_host_with_tail_count(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify follow_event_file via host respects tail_count."""
+    target, events_dir = events_host_target
+    (events_dir / "test.log").write_text("line1\nline2\nline3\nline4\nline5\n")
 
     captured: list[str] = []
 
     with pytest.raises(_StopFollow):
-        follow_log_file(
+        follow_event_file(
             target=target,
-            log_file_name="test.log",
+            event_file_name="test.log",
             on_new_content=_capture_and_stop_after(captured, after_count=2),
             tail_count=2,
         )
@@ -557,11 +559,11 @@ def test_follow_log_file_via_host_with_tail_count(logs_host_target: tuple[LogsTa
     assert "line1" not in joined
 
 
-def test_follow_log_file_via_host_detects_new_content(logs_host_target: tuple[LogsTarget, Path]) -> None:
-    """Verify follow_log_file via host streams new content appended to the file."""
-    target, logs_dir = logs_host_target
-    log_file = logs_dir / "test.log"
-    log_file.write_text("initial\n")
+def test_follow_event_file_via_host_detects_new_content(events_host_target: tuple[EventsTarget, Path]) -> None:
+    """Verify follow_event_file via host streams new content appended to the file."""
+    target, events_dir = events_host_target
+    event_file = events_dir / "test.log"
+    event_file.write_text("initial\n")
 
     captured: list[str] = []
     append_event = threading.Event()
@@ -578,7 +580,7 @@ def test_follow_log_file_via_host_detects_new_content(logs_host_target: tuple[Lo
     # Start a writer thread that waits for the signal then appends content
     def append_content() -> None:
         append_event.wait(timeout=10.0)
-        with log_file.open("a") as f:
+        with event_file.open("a") as f:
             f.write("appended\n")
             f.flush()
 
@@ -586,9 +588,9 @@ def test_follow_log_file_via_host_detects_new_content(logs_host_target: tuple[Lo
     writer.start()
 
     with pytest.raises(_StopFollow):
-        follow_log_file(
+        follow_event_file(
             target=target,
-            log_file_name="test.log",
+            event_file_name="test.log",
             on_new_content=capture_signal_and_stop,
             tail_count=None,
         )

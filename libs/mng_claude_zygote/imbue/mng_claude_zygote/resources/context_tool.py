@@ -4,7 +4,7 @@ This file is passed to `llm live-chat` via `--functions` and provides
 the conversation agent with context about the current state of the changeling.
 
 All event data follows the standard envelope format with timestamp, type,
-event_id, and source fields. Events are read from logs/<source>/events.jsonl.
+event_id, and source fields. Events are read from events/<source>/events.jsonl.
 
 The tool tracks which events have already been returned, so each call only
 returns new events since the last invocation. This makes conversations more
@@ -161,9 +161,9 @@ def gather_context() -> str:
     calls, returns only events that appeared since the previous invocation.
 
     Returns context from:
-    - New messages from other active conversations (from logs/messages/events.jsonl)
-    - New inner monologue entries (from logs/claude_transcript/events.jsonl)
-    - New trigger events (from logs/scheduled/, mng_agents/, stop/, monitor/)
+    - New messages from other active conversations (from events/messages/events.jsonl)
+    - New inner monologue entries (from events/claude_transcript/events.jsonl)
+    - New trigger events (from events/scheduled/, mng_agents/, stop/, monitor/)
 
     Call this at the start of each conversation turn for situational awareness.
     If it returns "No new context", nothing has changed since the last call.
@@ -179,8 +179,8 @@ def gather_context() -> str:
     sections: list[str] = []
     is_first_call = len(_last_file_sizes) == 0
 
-    # Inner monologue (from logs/claude_transcript/events.jsonl)
-    transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
+    # Inner monologue (from events/claude_transcript/events.jsonl)
+    transcript = agent_data_dir / "events" / "claude_transcript" / "events.jsonl"
     if is_first_call:
         recent = _read_tail_lines(transcript, _MAX_TRANSCRIPT_LINES)
         if recent:
@@ -192,8 +192,8 @@ def gather_context() -> str:
             formatted = _format_events(new_lines)
             sections.append(f"## New Inner Monologue ({len(new_lines)} entries)\n{formatted}")
 
-    # Messages from other conversations (from logs/messages/events.jsonl)
-    messages_file = agent_data_dir / "logs" / "messages" / "events.jsonl"
+    # Messages from other conversations (from events/messages/events.jsonl)
+    messages_file = agent_data_dir / "events" / "messages" / "events.jsonl"
     current_cid = os.environ.get("LLM_CONVERSATION_ID", "")
     if is_first_call:
         recent_msgs = _read_tail_lines(messages_file, _MAX_MESSAGES_LINES)
@@ -233,7 +233,7 @@ def gather_context() -> str:
 
     # Trigger events from all sources
     for source in ("scheduled", "mng_agents", "stop", "monitor"):
-        events_file = agent_data_dir / "logs" / source / "events.jsonl"
+        events_file = agent_data_dir / "events" / source / "events.jsonl"
         if is_first_call:
             recent = _read_tail_lines(events_file, _MAX_TRIGGER_LINES)
             if recent:

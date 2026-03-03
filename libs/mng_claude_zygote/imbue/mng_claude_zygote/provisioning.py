@@ -500,14 +500,14 @@ def create_event_log_directories(
     """Create the event log directory structure.
 
     Creates directories for each event source:
-    - logs/conversations/     conversation lifecycle events
-    - logs/messages/          conversation messages
-    - logs/scheduled/         scheduled trigger events
-    - logs/mng_agents/        agent state transitions
-    - logs/stop/              agent stop events
-    - logs/monitor/           (future) monitor agent events
-    - logs/claude_transcript/ inner monologue (written by Claude background tasks)
-    - logs/common_transcript/ agent-agnostic transcript (written by transcript watcher)
+    - events/conversations/     conversation lifecycle events
+    - events/messages/          conversation messages
+    - events/scheduled/         scheduled trigger events
+    - events/mng_agents/        agent state transitions
+    - events/stop/              agent stop events
+    - events/monitor/           (future) monitor agent events
+    - events/claude_transcript/ inner monologue (written by Claude background tasks)
+    - events/common_transcript/ agent-agnostic transcript (written by transcript watcher)
     """
     for source in (
         "conversations",
@@ -519,13 +519,13 @@ def create_event_log_directories(
         "claude_transcript",
         "common_transcript",
     ):
-        source_dir = agent_state_dir / "logs" / source
+        source_dir = agent_state_dir / "events" / source
         _execute_with_timing(
             host,
             f"mkdir -p {shlex.quote(str(source_dir))}",
             hard_timeout=settings.fs_hard_timeout_seconds,
             warn_threshold=settings.fs_warn_threshold_seconds,
-            label=f"mkdir logs/{source}",
+            label=f"mkdir events/{source}",
         )
 
 

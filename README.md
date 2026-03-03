@@ -208,7 +208,7 @@ mng <command> [options]
 ### For maintenance:
 
 - [`cleanup`](libs/mng/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
-- [`logs`](libs/mng/docs/commands/secondary/logs.md): View agent and host logs
+- [`events`](libs/mng/docs/commands/secondary/events.md): View agent and host event files
 - [`gc`](libs/mng/docs/commands/secondary/gc.md): Garbage collect unused resources
 
 ### For managing mng itself:

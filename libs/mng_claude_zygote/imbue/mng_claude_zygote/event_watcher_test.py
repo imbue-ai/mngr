@@ -232,16 +232,16 @@ def test_check_all_sources_iterates_all_sources(
     tmp_path: Path,
     mock_subprocess_success: SubprocessCapture,
 ) -> None:
-    logs_dir = tmp_path / "logs"
-    offsets_dir = logs_dir / ".event_offsets"
+    events_dir = tmp_path / "events"
+    offsets_dir = events_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True)
 
     for source in ("messages", "stop"):
-        source_dir = logs_dir / source
+        source_dir = events_dir / source
         source_dir.mkdir(parents=True)
         (source_dir / "events.jsonl").write_text(f'{{"source": "{source}"}}\n')
 
-    _check_all_sources(logs_dir, ["messages", "stop"], offsets_dir, "agent")
+    _check_all_sources(events_dir, ["messages", "stop"], offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 2
 
 
@@ -249,9 +249,9 @@ def test_check_all_sources_skips_missing_event_files(
     tmp_path: Path,
     mock_subprocess_success: SubprocessCapture,
 ) -> None:
-    logs_dir = tmp_path / "logs"
-    offsets_dir = logs_dir / ".event_offsets"
+    events_dir = tmp_path / "events"
+    offsets_dir = events_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True)
 
-    _check_all_sources(logs_dir, ["nonexistent"], offsets_dir, "agent")
+    _check_all_sources(events_dir, ["nonexistent"], offsets_dir, "agent")
     assert len(mock_subprocess_success.calls) == 0

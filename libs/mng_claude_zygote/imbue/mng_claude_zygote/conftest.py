@@ -142,9 +142,9 @@ class ChatScriptEnv:
         os.chmod(self.chat_script, 0o755)
 
         self.agent_state_dir = temp_host_dir / "agents" / "test-agent"
-        self.conversations_dir = self.agent_state_dir / "logs" / "conversations"
+        self.conversations_dir = self.agent_state_dir / "events" / "conversations"
         self.conversations_dir.mkdir(parents=True)
-        self.messages_dir = self.agent_state_dir / "logs" / "messages"
+        self.messages_dir = self.agent_state_dir / "events" / "messages"
         self.messages_dir.mkdir(parents=True)
 
         self.work_dir = temp_host_dir / "work"

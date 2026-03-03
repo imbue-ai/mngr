@@ -1081,9 +1081,9 @@ class ModalProviderInstance(BaseProviderInstance):
                     sandbox.exec("sh", "-c", add_authorized_keys_cmd).wait()
 
         with log_span("Starting sshd in sandbox"):
-            sshd_log_path = f"{self.host_dir}/logs/sshd.log"
-            # Ensure the logs directory exists before sshd starts writing to it
-            sandbox.exec("mkdir", "-p", f"{self.host_dir}/logs").wait()
+            sshd_log_path = f"{self.host_dir}/events/logs/sshd.log"
+            # Ensure the events/logs directory exists before sshd starts writing to it
+            sandbox.exec("mkdir", "-p", f"{self.host_dir}/events/logs").wait()
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
             # stdout/stderr are suppressed so Modal doesn't track them for performance/stability reasons.
             sandbox.exec(
@@ -1258,7 +1258,7 @@ set -euo pipefail
 # Usage: shutdown.sh [stop_reason]
 #   stop_reason: 'PAUSED' (idle shutdown, default) or 'STOPPED' (user requested)
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{host_dir_str}/events/logs/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{

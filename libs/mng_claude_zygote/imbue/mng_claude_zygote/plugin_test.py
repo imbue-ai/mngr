@@ -56,7 +56,8 @@ def test_adds_conv_watcher_window(zygote_create_params: dict[str, Any]) -> None:
 
 
 def test_adds_event_watcher_window(zygote_create_params: dict[str, Any]) -> None:
-    entries = [c for c in zygote_create_params["add_command"] if EVENT_WATCHER_WINDOW_NAME in c]
+    prefix = f'{EVENT_WATCHER_WINDOW_NAME}="'
+    entries = [c for c in zygote_create_params["add_command"] if c.startswith(prefix)]
     assert len(entries) == 1
     assert EVENT_WATCHER_COMMAND in entries[0]
 

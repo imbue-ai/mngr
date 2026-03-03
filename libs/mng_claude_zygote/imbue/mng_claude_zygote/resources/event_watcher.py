@@ -8,9 +8,9 @@ with periodic mtime-based polling as a safety net.
 Usage: python3 event_watcher.py
 
 Environment:
-  MNG_AGENT_STATE_DIR  - agent state directory (contains logs/)
+  MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
   MNG_AGENT_NAME       - name of the primary agent to send messages to
-  MNG_HOST_DIR         - host data directory (contains logs/ for log output)
+  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -137,14 +137,14 @@ def _check_and_send_new_events(
 
 
 def _check_all_sources(
-    logs_dir: Path,
+    events_dir: Path,
     watched_sources: list[str],
     offsets_dir: Path,
     agent_name: str,
 ) -> None:
     """Check all watched sources for new events."""
     for source in watched_sources:
-        events_file = logs_dir / source / "events.jsonl"
+        events_file = events_dir / source / "events.jsonl"
         _check_and_send_new_events(events_file, source, offsets_dir, agent_name)
 
 
@@ -154,11 +154,11 @@ def main() -> None:
     agent_name = require_env("MNG_AGENT_NAME")
     host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    logs_dir = agent_state_dir / "logs"
-    offsets_dir = logs_dir / ".event_offsets"
+    events_dir = agent_state_dir / "events"
+    offsets_dir = events_dir / ".event_offsets"
     offsets_dir.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("event_watcher", host_dir / "logs")
+    setup_watcher_logging("event_watcher", host_dir / "events" / "logs")
 
     settings = _load_watcher_settings(agent_work_dir)
 
@@ -172,12 +172,12 @@ def main() -> None:
     # Ensure watched directories exist (watchdog needs them to exist)
     watch_dirs: list[Path] = []
     for source in settings.sources:
-        source_dir = logs_dir / source
+        source_dir = events_dir / source
         source_dir.mkdir(parents=True, exist_ok=True)
         watch_dirs.append(source_dir)
 
     def on_tick() -> None:
-        _check_all_sources(logs_dir, settings.sources, offsets_dir, agent_name)
+        _check_all_sources(events_dir, settings.sources, offsets_dir, agent_name)
 
     run_watcher_loop(
         "Event watcher",

@@ -143,8 +143,8 @@ def test_provisioning_creates_event_log_directories(
         "claude_transcript",
     )
     for source in expected_sources:
-        source_dir = agent_state_dir / "logs" / source
-        assert source_dir.exists(), f"Expected logs/{source}/ directory to exist"
+        source_dir = agent_state_dir / "events" / source
+        assert source_dir.exists(), f"Expected events/{source}/ directory to exist"
 
 
 @pytest.mark.timeout(30)
@@ -540,14 +540,14 @@ def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh creates a log file with operation records."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
-    # The log dir is at $MNG_HOST_DIR/logs/
-    log_dir = Path(chat_env.env["MNG_HOST_DIR"]) / "logs"
+    # The log dir is at $MNG_HOST_DIR/events/logs/
+    log_dir = Path(chat_env.env["MNG_HOST_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     chat_env.run("--new", "--as-agent")
 
     log_file = log_dir / "chat" / "events.jsonl"
-    assert log_file.exists(), "chat/events.jsonl should be created"
+    assert log_file.exists(), "events/logs/chat/events.jsonl should be created"
     log_content = log_file.read_text()
     assert "Creating new conversation" in log_content
 

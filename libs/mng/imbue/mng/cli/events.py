@@ -6,12 +6,12 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mng.api.logs import LogFileEntry
-from imbue.mng.api.logs import apply_head_or_tail
-from imbue.mng.api.logs import follow_log_file
-from imbue.mng.api.logs import list_log_files
-from imbue.mng.api.logs import read_log_content
-from imbue.mng.api.logs import resolve_logs_target
+from imbue.mng.api.events import EventFileEntry
+from imbue.mng.api.events import apply_head_or_tail
+from imbue.mng.api.events import follow_event_file
+from imbue.mng.api.events import list_event_files
+from imbue.mng.api.events import read_event_content
+from imbue.mng.api.events import resolve_events_target
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -26,14 +26,14 @@ from imbue.mng.errors import UserInputError
 from imbue.mng.primitives import OutputFormat
 
 
-class LogsCliOptions(CommonCliOptions):
-    """Options passed from the CLI to the logs command.
+class EventsCliOptions(CommonCliOptions):
+    """Options passed from the CLI to the events command.
 
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
     target: str
-    log_filename: str | None
+    event_filename: str | None
     follow: bool
     tail: int | None
     head: int | None
@@ -45,9 +45,9 @@ def _write_and_flush_stdout(content: str) -> None:
     sys.stdout.flush()
 
 
-@click.command(name="logs")
+@click.command(name="events")
 @click.argument("target")
-@click.argument("log_filename", required=False, default=None)
+@click.argument("event_filename", required=False, default=None)
 @optgroup.group("Display")
 @optgroup.option(
     "--follow/--no-follow",
@@ -59,21 +59,21 @@ def _write_and_flush_stdout(content: str) -> None:
     "--tail",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the last N lines of the log",
+    help="Print the last N lines of the event file",
 )
 @optgroup.option(
     "--head",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the first N lines of the log",
+    help="Print the first N lines of the event file",
 )
 @add_common_options
 @click.pass_context
-def logs(ctx: click.Context, **kwargs: Any) -> None:
+def events(ctx: click.Context, **kwargs: Any) -> None:
     mng_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
-        command_name="logs",
-        command_class=LogsCliOptions,
+        command_name="events",
+        command_class=EventsCliOptions,
         is_format_template_supported=True,
     )
 
@@ -85,31 +85,31 @@ def logs(ctx: click.Context, **kwargs: Any) -> None:
         raise UserInputError("Cannot use --head with --follow")
 
     # Resolve the target (agent or host)
-    target = resolve_logs_target(
+    target = resolve_events_target(
         identifier=opts.target,
         mng_ctx=mng_ctx,
     )
 
-    # If no log file specified, list available log files
-    if opts.log_filename is None:
-        log_files = list_log_files(target)
-        _emit_log_file_list(log_files, target.display_name, output_opts)
+    # If no event file specified, list available event files
+    if opts.event_filename is None:
+        event_files = list_event_files(target)
+        _emit_event_file_list(event_files, target.display_name, output_opts)
         return
 
     # Format templates only apply to file listing, not to viewing file content
     if output_opts.format_template is not None:
         raise UserInputError(
-            "Format template strings are only supported when listing log files (without a filename argument). "
-            "Use --format human, --format json, or --format jsonl when viewing log content."
+            "Format template strings are only supported when listing event files (without a filename argument). "
+            "Use --format human, --format json, or --format jsonl when viewing event content."
         )
 
     if opts.follow:
         # Follow mode: poll and print new content
-        logger.info("Following log file '{}' for {} (Ctrl+C to stop)", opts.log_filename, target.display_name)
+        logger.info("Following event file '{}' for {} (Ctrl+C to stop)", opts.event_filename, target.display_name)
         try:
-            follow_log_file(
+            follow_event_file(
                 target=target,
-                log_file_name=opts.log_filename,
+                event_file_name=opts.event_filename,
                 on_new_content=_write_and_flush_stdout,
                 tail_count=opts.tail,
             )
@@ -119,51 +119,51 @@ def logs(ctx: click.Context, **kwargs: Any) -> None:
             sys.stdout.flush()
         return
 
-    # Read and display the log file
+    # Read and display the event file
     try:
-        content = read_log_content(target, opts.log_filename)
+        content = read_event_content(target, opts.event_filename)
     except (MngError, OSError) as e:
-        raise MngError(f"Failed to read log file '{opts.log_filename}': {e}") from e
+        raise MngError(f"Failed to read event file '{opts.event_filename}': {e}") from e
 
     filtered_content = apply_head_or_tail(content, head_count=opts.head, tail_count=opts.tail)
-    _emit_log_content(filtered_content, opts.log_filename, output_opts)
+    _emit_event_content(filtered_content, opts.event_filename, output_opts)
 
 
-def _emit_log_file_list(
-    log_files: list[LogFileEntry],
+def _emit_event_file_list(
+    event_files: list[EventFileEntry],
     display_name: str,
     output_opts: OutputOptions,
 ) -> None:
-    """Emit the list of available log files."""
+    """Emit the list of available event files."""
     if output_opts.format_template is not None:
-        items = [{"name": lf.name, "size": str(lf.size)} for lf in log_files]
+        items = [{"name": ef.name, "size": str(ef.size)} for ef in event_files]
         emit_format_template_lines(output_opts.format_template, items)
         return
     match output_opts.output_format:
         case OutputFormat.HUMAN:
-            if not log_files:
-                write_human_line("No log files found for {}", display_name)
+            if not event_files:
+                write_human_line("No event files found for {}", display_name)
             else:
-                write_human_line("Log files for {}:", display_name)
-                for log_file in log_files:
-                    write_human_line("  {} ({} bytes)", log_file.name, log_file.size)
+                write_human_line("Event files for {}:", display_name)
+                for event_file in event_files:
+                    write_human_line("  {} ({} bytes)", event_file.name, event_file.size)
         case OutputFormat.JSON | OutputFormat.JSONL:
             emit_final_json(
                 {
                     "target": display_name,
-                    "log_files": [{"name": lf.name, "size": lf.size} for lf in log_files],
+                    "event_files": [{"name": ef.name, "size": ef.size} for ef in event_files],
                 }
             )
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _emit_log_content(
+def _emit_event_content(
     content: str,
-    log_file_name: str,
+    event_file_name: str,
     output_opts: OutputOptions,
 ) -> None:
-    """Emit log content in the appropriate format."""
+    """Emit event content in the appropriate format."""
     match output_opts.output_format:
         case OutputFormat.HUMAN:
             sys.stdout.write(content)
@@ -173,7 +173,7 @@ def _emit_log_content(
         case OutputFormat.JSON | OutputFormat.JSONL:
             emit_final_json(
                 {
-                    "log_file": log_file_name,
+                    "event_file": event_file_name,
                     "content": content,
                 }
             )
@@ -183,18 +183,18 @@ def _emit_log_content(
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
-    key="logs",
-    one_line_description="View log files from an agent or host [experimental]",
-    synopsis="mng logs TARGET [LOG_FILE] [--follow] [--tail N] [--head N]",
+    key="events",
+    one_line_description="View event files from an agent or host [experimental]",
+    synopsis="mng events TARGET [EVENT_FILE] [--follow] [--tail N] [--head N]",
     arguments_description=(
-        "- `TARGET`: Agent or host name/ID whose logs to view\n"
-        "- `LOG_FILE`: Name of the log file to view (optional; lists files if omitted)"
+        "- `TARGET`: Agent or host name/ID whose events to view\n"
+        "- `EVENT_FILE`: Name of the event file to view (optional; lists files if omitted)"
     ),
     description="""TARGET identifies an agent (by name or ID) or a host (by name or ID).
 The command first tries to match TARGET as an agent, then as a host.
 
-If LOG_FILE is not specified, lists all available log files.
-If LOG_FILE is specified, prints its contents.
+If EVENT_FILE is not specified, lists all available event files.
+If EVENT_FILE is specified, prints its contents.
 
 In follow mode (--follow), the command uses tail -f for real-time
 streaming when the host is online (locally or via SSH). When the host
@@ -203,11 +203,11 @@ Press Ctrl+C to stop.
 
 When listing files, supports custom format templates via --format. Available fields: name, size.""",
     examples=(
-        ("List available log files for an agent", "mng logs my-agent"),
-        ("View a specific log file", "mng logs my-agent output.log"),
-        ("View the last 50 lines", "mng logs my-agent output.log --tail 50"),
-        ("Follow a log file", "mng logs my-agent output.log --follow"),
-        ("List files with custom format template", "mng logs my-agent --format '{name}\\t{size}'"),
+        ("List available event files for an agent", "mng events my-agent"),
+        ("View a specific event file", "mng events my-agent output.log"),
+        ("View the last 50 lines", "mng events my-agent output.log --tail 50"),
+        ("Follow an event file", "mng events my-agent output.log --follow"),
+        ("List files with custom format template", "mng events my-agent --format '{name}\\t{size}'"),
     ),
     see_also=(
         ("list", "List available agents"),
@@ -215,5 +215,5 @@ When listing files, supports custom format templates via --format. Available fie
     ),
 ).register()
 
-# Add pager-enabled help option to the logs command
-add_pager_help_option(logs)
+# Add pager-enabled help option to the events command
+add_pager_help_option(events)

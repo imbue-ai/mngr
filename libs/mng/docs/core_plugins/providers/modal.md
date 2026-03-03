@@ -153,7 +153,7 @@ See [`mng snapshot`](../../commands/secondary/snapshot.md) for all options.
 
 ## Host Volume
 
-By default, mng creates a persistent Modal Volume for each host's data directory. This volume stores logs, agent data, and other host state, making them accessible even when the host is offline (e.g., via `mng logs`).
+By default, mng creates a persistent Modal Volume for each host's data directory. This volume stores logs, agent data, and other host state, making them accessible even when the host is offline (e.g., via `mng events`).
 
 You can disable this behavior by setting `is_host_volume_created = false` in your provider configuration:
 

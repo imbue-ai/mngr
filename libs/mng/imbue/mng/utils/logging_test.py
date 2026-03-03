@@ -50,7 +50,7 @@ def test_setup_logging_creates_log_dir(temp_mng_ctx: MngContext) -> None:
     setup_logging(logging_config, default_host_dir=temp_mng_ctx.config.default_host_dir, command="test")
 
     # The source subdirectory should be created
-    source_dir = log_dir / "mng"
+    source_dir = log_dir / "logs" / "mng"
     assert source_dir.exists()
     assert source_dir.is_dir()
 
@@ -65,7 +65,7 @@ def test_setup_logging_creates_events_jsonl_file(temp_mng_ctx: MngContext) -> No
     # Log a message to trigger file creation
     logger.info("test log message")
 
-    events_file = log_dir / "mng" / "events.jsonl"
+    events_file = log_dir / "logs" / "mng" / "events.jsonl"
     assert events_file.exists()
 
 
@@ -78,7 +78,7 @@ def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mn
 
     logger.info("Listed 3 agents")
 
-    events_file = log_dir / "mng" / "events.jsonl"
+    events_file = log_dir / "logs" / "mng" / "events.jsonl"
     content = events_file.read_text().strip()
     assert content, "events.jsonl should not be empty"
 
@@ -90,7 +90,7 @@ def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mn
     assert "timestamp" in parsed
     assert parsed["type"] == "mng"
     assert parsed["event_id"].startswith("evt-")
-    assert parsed["source"] == "mng"
+    assert parsed["source"] == "logs/mng"
     assert parsed["level"] == "INFO"
     assert parsed["message"] == "Listed 3 agents"
     assert "pid" in parsed

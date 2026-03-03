@@ -21,7 +21,7 @@ Run the chat script with `--list`:
 $MNG_HOST_DIR/commands/chat.sh --list
 ```
 
-This reads `logs/conversations/events.jsonl` and displays each conversation with:
+This reads `events/conversations/events.jsonl` and displays each conversation with:
 - Conversation ID
 - Creation timestamp
 - Model being used

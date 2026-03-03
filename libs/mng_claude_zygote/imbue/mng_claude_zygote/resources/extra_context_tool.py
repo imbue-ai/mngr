@@ -4,7 +4,7 @@ This file is passed to `llm live-chat` via `--functions` and provides
 deeper context information beyond what gather_context() returns.
 
 All event data follows the standard envelope format with timestamp, type,
-event_id, and source fields. Events are read from logs/<source>/events.jsonl.
+event_id, and source fields. Events are read from events/<source>/events.jsonl.
 
 Settings are read from $MNG_AGENT_WORK_DIR/.changelings/settings.toml.
 Missing file or keys fall back to built-in defaults.
@@ -61,8 +61,8 @@ def gather_extra_context() -> str:
 
     Returns a formatted string with:
     - Current mng agent list (active agents and their states)
-    - Extended inner monologue history (from logs/transcript/events.jsonl)
-    - Full conversation list (from logs/conversations/events.jsonl)
+    - Extended inner monologue history (from events/transcript/events.jsonl)
+    - Full conversation list (from events/conversations/events.jsonl)
 
     Use this when you need deeper context than gather_context() provides.
     """
@@ -96,8 +96,8 @@ def gather_extra_context() -> str:
     if agent_data_dir_str:
         agent_data_dir = pathlib.Path(agent_data_dir_str)
 
-        # Extended inner monologue (from logs/claude_transcript/events.jsonl)
-        transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
+        # Extended inner monologue (from events/claude_transcript/events.jsonl)
+        transcript = agent_data_dir / "events" / "claude_transcript" / "events.jsonl"
         if transcript.exists():
             try:
                 lines = transcript.read_text().strip().split("\n")
@@ -110,8 +110,8 @@ def gather_extra_context() -> str:
             except OSError as e:
                 print(f"WARNING: failed to read transcript file {transcript}: {e}", file=sys.stderr)
 
-        # Full conversation list (from logs/conversations/events.jsonl)
-        conversations_file = agent_data_dir / "logs" / "conversations" / "events.jsonl"
+        # Full conversation list (from events/conversations/events.jsonl)
+        conversations_file = agent_data_dir / "events" / "conversations" / "events.jsonl"
         if conversations_file.exists():
             try:
                 lines = conversations_file.read_text().strip().split("\n")

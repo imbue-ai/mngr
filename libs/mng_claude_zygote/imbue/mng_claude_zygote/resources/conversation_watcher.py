@@ -2,14 +2,14 @@
 """Conversation watcher for changeling agents.
 
 Syncs messages from the llm database to the standard event log at
-logs/messages/events.jsonl. Uses watchdog for fast filesystem event
+events/messages/events.jsonl. Uses watchdog for fast filesystem event
 detection, with periodic mtime-based polling as a safety net.
 
 Usage: python3 conversation_watcher.py
 
 Environment:
-  MNG_AGENT_STATE_DIR  - agent state directory (contains logs/)
-  MNG_HOST_DIR         - host data directory (contains logs/ for log output)
+  MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
+  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _get_llm_db_path() -> Path:
 
 
 def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
-    """Read tracked conversation IDs from logs/conversations/events.jsonl."""
+    """Read tracked conversation IDs from events/conversations/events.jsonl."""
     tracked_cids: set[str] = set()
     if not conversations_file.is_file():
         return tracked_cids
@@ -77,7 +77,7 @@ def _sync_messages(
     conversations_file: Path,
     messages_file: Path,
 ) -> int:
-    """Sync missing messages from the llm DB to logs/messages/events.jsonl.
+    """Sync missing messages from the llm DB to events/messages/events.jsonl.
 
     Uses an adaptive window: starts by fetching the most recent 200 responses
     from the DB and checks which event IDs are missing from the output file.
@@ -203,11 +203,11 @@ def main() -> None:
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
     host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    conversations_file = agent_state_dir / "logs" / "conversations" / "events.jsonl"
-    messages_file = agent_state_dir / "logs" / "messages" / "events.jsonl"
+    conversations_file = agent_state_dir / "events" / "conversations" / "events.jsonl"
+    messages_file = agent_state_dir / "events" / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("conversation_watcher", host_dir / "logs")
+    setup_watcher_logging("conversation_watcher", host_dir / "events" / "logs")
 
     poll_interval = _load_poll_interval(agent_work_dir)
     db_path = _get_llm_db_path()
@@ -224,7 +224,7 @@ def main() -> None:
     def on_tick() -> None:
         synced_count = _sync_messages(db_path, conversations_file, messages_file)
         if synced_count > 0:
-            logger.info("Synced {} new message event(s) -> logs/messages/events.jsonl", synced_count)
+            logger.info("Synced {} new message event(s) -> events/messages/events.jsonl", synced_count)
         else:
             logger.debug("No new messages to sync")
 

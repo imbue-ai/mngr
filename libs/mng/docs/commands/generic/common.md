@@ -15,7 +15,7 @@ Command results are sent to stdout. Console logging is sent to stderr.
 
 ### File Logging
 
-Logs are automatically saved to `~/.mng/logs/<timestamp>-<pid>.json` with rotation based on config settings.
+Logs are automatically saved to `~/.mng/events/logs/<timestamp>-<pid>.json` with rotation based on config settings.
 
 - `--log-file PATH`: Override the log file path (e.g., `/tmp/mng.log`)
 - `--[no-]log-commands`: Log what commands were executed [default: from config]

@@ -18,7 +18,7 @@ from imbue.mng.primitives import LogLevel
 
 # Default event type and source for mng CLI logs
 _DEFAULT_EVENT_TYPE: Final[str] = "mng"
-_DEFAULT_EVENT_SOURCE: Final[str] = "mng"
+_DEFAULT_EVENT_SOURCE: Final[str] = "logs/mng"
 
 
 class LoggingConfig(FrozenModel):
@@ -29,8 +29,8 @@ class LoggingConfig(FrozenModel):
         description="Log level for file logging",
     )
     log_dir: Path = Field(
-        default=Path("logs"),
-        description="Directory for log files (relative to data root if relative)",
+        default=Path("events"),
+        description="Directory for event files (relative to data root if relative)",
     )
     max_log_size_mb: int = Field(
         default=10,
@@ -62,7 +62,7 @@ class LoggingConfig(FrozenModel):
     )
     event_source: NonEmptyStr = Field(
         default=NonEmptyStr(_DEFAULT_EVENT_SOURCE),
-        description="Event source for JSONL log events, matching logs/<source>/",
+        description="Event source for JSONL log events, matching events/<source>/",
     )
 
     def merge_with(self, override: "LoggingConfig") -> "LoggingConfig":
@@ -251,7 +251,7 @@ def setup_logging(
         log_file.parent.mkdir(parents=True, exist_ok=True)
     else:
         resolved_log_dir = _resolve_log_dir(config.log_dir, default_host_dir)
-        # Write to logs/<source>/events.jsonl
+        # Write to events/<source>/events.jsonl
         log_source_dir = resolved_log_dir / config.event_source
         log_source_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_source_dir / "events.jsonl"

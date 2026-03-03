@@ -23,9 +23,9 @@ def build_ttyd_server_command(ttyd_invocation: str, server_name: str) -> str:
         '_PORT=$(echo "$line" | awk '
         "'{print $NF}'); "
         'if [ -n "$MNG_AGENT_STATE_DIR" ] && [ -n "$_PORT" ]; then '
-        'mkdir -p "$MNG_AGENT_STATE_DIR/logs" && '
+        'mkdir -p "$MNG_AGENT_STATE_DIR/events" && '
         'printf \'{"server":"' + server_name + '","url":"http://127.0.0.1:%s"}\\n\' '
-        '"$_PORT" >> "$MNG_AGENT_STATE_DIR/logs/servers.jsonl"; '
+        '"$_PORT" >> "$MNG_AGENT_STATE_DIR/events/servers.jsonl"; '
         "fi; fi; done"
     )
 

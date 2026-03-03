@@ -7,7 +7,7 @@ How mng handles logging and output.
 mng separates three distinct concerns:
 1. **Command Results**: Structured data output (to stdout)
 2. **Console Logging**: Diagnostic information shown during execution (to stderr)
-3. **File Logging**: Persistent diagnostic logs in JSONL event envelope format (to `logs/<source>/events.jsonl`)
+3. **File Logging**: Persistent diagnostic logs in JSONL event envelope format (to `events/<source>/events.jsonl`)
 
 ## Command Results vs Logging
 
@@ -25,7 +25,7 @@ mng separates three distinct concerns:
 - Suppressed by `-q/--quiet`
 
 **File Logging** captures detailed diagnostic information:
-- Saved to `logs/<source>/events.jsonl` (e.g., `~/.mng/logs/mng/events.jsonl` for the mng CLI)
+- Saved to `events/<source>/events.jsonl` (e.g., `~/.mng/events/logs/mng/events.jsonl` for the mng CLI)
 - Uses the standard event envelope format (same as all other events in the system)
 - Level controlled by config (default: DEBUG)
 - Each log line is a self-describing JSON object with envelope fields
@@ -52,7 +52,7 @@ Shared (present in both Python and bash):
 - `timestamp`: ISO 8601 with nanosecond precision in UTC
 - `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
 - `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
-- `source`: Matches the folder under `logs/`
+- `source`: Matches the folder under `events/`
 - `level`: Log level string (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
 - `message`: The log message text
 - `pid`: Process ID
@@ -82,7 +82,7 @@ file_level = "DEBUG"
 console_level = "BUILD"
 
 # Where logs are stored (relative to data root if relative)
-log_dir = "logs"
+log_dir = "events"
 
 # Maximum size of each log file before rotation
 max_log_size_mb = 10
@@ -114,7 +114,7 @@ CLI flags override config settings:
 ### Location
 
 Logs are stored at:
-- `~/.mng/logs/<source>/events.jsonl` by default (e.g., `~/.mng/logs/mng/events.jsonl`)
+- `~/.mng/events/<source>/events.jsonl` by default (e.g., `~/.mng/events/logs/mng/events.jsonl`)
 - Configurable via `logging.log_dir` in config
 - If relative, resolved relative to data root (`default_host_dir` or `~/.mng`)
 

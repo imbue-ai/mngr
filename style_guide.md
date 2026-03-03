@@ -1403,10 +1403,10 @@ When persisting structured event data (conversations, agent actions, state trans
 
 ## Standard directory structure
 
-Store event files at `logs/<source>/events.jsonl` where `<source>` is a static, human-readable name describing the category of events:
+Store event files at `events/<source>/events.jsonl` where `<source>` is a static, human-readable name describing the category of events:
 - Source names should be lowercase, use underscores for multi-word names
 - Source names must NOT contain dates, IDs, or dynamically generated values
-- Source CAN be nested folders (e.g. `logs/foo/bar/events.jsonl`) with source field `"foo/bar"`, but prefer flat structure when possible
+- Source CAN be nested folders (e.g. `events/foo/bar/events.jsonl`) with source field `"foo/bar"`, but prefer flat structure when possible
 
 ## Standard event envelope
 

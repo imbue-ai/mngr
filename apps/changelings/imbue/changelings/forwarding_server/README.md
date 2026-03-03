@@ -34,7 +34,7 @@ The forwarding server uses `itsdangerous` for cookie signing. Auth works as foll
 
 `/agents/{agent_id}/` route lists all servers for a changeling:
     requires a valid auth cookie for that changeling
-    shows a page listing all known server names for the agent (discovered via `mng logs`)
+    shows a page listing all known server names for the agent (discovered via `mng events`)
     each server name links to `/agents/{agent_id}/{server_name}/`
 
 `/agents/{agent_id}/{server_name}/{path}` route serves individual server UIs:

@@ -1,5 +1,7 @@
 """Unit tests for gc API functions."""
 
+import os
+import time
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -9,7 +11,9 @@ import pytest
 
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.data_types import GcResult
+from imbue.mng.api.gc import _LOG_MAX_AGE_DAYS
 from imbue.mng.api.gc import _handle_error
+from imbue.mng.api.gc import _is_rotated_log_file
 from imbue.mng.api.gc import gc
 from imbue.mng.api.gc import gc_build_cache
 from imbue.mng.api.gc import gc_logs
@@ -234,14 +238,22 @@ def test_handle_error_continue_does_not_raise() -> None:
 # =========================================================================
 
 
-def test_gc_logs_finds_and_deletes_log_files(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
-    """gc_logs finds log files in the log directory and deletes them."""
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
+def _make_old(path: Path, days: int) -> None:
+    """Set a file's mtime to be `days` old by backdating atime/mtime."""
+    old_time = time.time() - (days * 86400)
+    os.utime(path, (old_time, old_time))
 
-    # Create some log files
-    (log_dir / "test1.log").write_text("log content 1")
-    (log_dir / "test2.json").write_text('{"msg": "log2"}')
+
+def test_gc_logs_deletes_old_rotated_files(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs deletes rotated log files older than 30 days under events/logs/."""
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a rotated log file and make it old
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text("old log content")
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 1)
 
     result = GcResult()
     gc_logs(
@@ -252,18 +264,69 @@ def test_gc_logs_finds_and_deletes_log_files(temp_mng_ctx: MngContext, local_pro
         result=result,
     )
 
-    assert len(result.logs_destroyed) == 2
-    # Files should be deleted
-    assert not (log_dir / "test1.log").exists()
-    assert not (log_dir / "test2.json").exists()
+    assert len(result.logs_destroyed) == 1
+    assert not rotated.exists()
+
+
+def test_gc_logs_preserves_current_log_file(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
+    """gc_logs never deletes the current log file (events.jsonl)."""
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create the current log file and make it old
+    current = logs_dir / "events.jsonl"
+    current.write_text("current log content")
+    _make_old(current, _LOG_MAX_AGE_DAYS + 10)
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 0
+    assert current.exists()
+
+
+def test_gc_logs_preserves_recent_rotated_files(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_logs preserves rotated files that are younger than 30 days."""
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a recent rotated file (should be preserved)
+    recent = logs_dir / "events.jsonl.1"
+    recent.write_text("recent rotated content")
+    # Don't backdate -- it's brand new
+
+    result = GcResult()
+    gc_logs(
+        mng_ctx=temp_mng_ctx,
+        providers=[local_provider],
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    assert len(result.logs_destroyed) == 0
+    assert recent.exists()
 
 
 def test_gc_logs_dry_run_does_not_delete(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
     """In dry_run mode, gc_logs identifies files but does not delete them."""
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-    (log_dir / "test.log").write_text("log content")
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text("log content")
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 1)
 
     result = GcResult()
     gc_logs(
@@ -275,12 +338,11 @@ def test_gc_logs_dry_run_does_not_delete(temp_mng_ctx: MngContext, local_provide
     )
 
     assert len(result.logs_destroyed) == 1
-    # File should still exist
-    assert (log_dir / "test.log").exists()
+    assert rotated.exists()
 
 
 def test_gc_logs_skips_nonexistent_directory(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
-    """gc_logs returns early when the log directory does not exist."""
+    """gc_logs returns early when the logs directory does not exist."""
     result = GcResult()
     gc_logs(
         mng_ctx=temp_mng_ctx,
@@ -293,14 +355,18 @@ def test_gc_logs_skips_nonexistent_directory(temp_mng_ctx: MngContext, local_pro
     assert len(result.logs_destroyed) == 0
 
 
-def test_gc_logs_skips_subdirectories(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
-    """gc_logs only processes files, not subdirectories."""
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
+def test_gc_logs_does_not_touch_event_files_outside_logs(
+    temp_mng_ctx: MngContext, local_provider: LocalProviderInstance
+) -> None:
+    """gc_logs only targets events/logs/, not other directories under events/."""
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
 
-    # Create a subdirectory (should be skipped) and a file
-    (log_dir / "subdir").mkdir()
-    (log_dir / "test.log").write_text("content")
+    # Create a non-log event file directly under events/
+    conversations_dir = events_dir / "conversations"
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    event_file = conversations_dir / "events.jsonl.1"
+    event_file.write_text("conversation event")
+    _make_old(event_file, _LOG_MAX_AGE_DAYS + 10)
 
     result = GcResult()
     gc_logs(
@@ -311,17 +377,20 @@ def test_gc_logs_skips_subdirectories(temp_mng_ctx: MngContext, local_provider: 
         result=result,
     )
 
-    assert len(result.logs_destroyed) == 1
-    assert result.logs_destroyed[0].path == log_dir / "test.log"
+    assert len(result.logs_destroyed) == 0
+    assert event_file.exists()
 
 
 def test_gc_logs_populates_log_file_info(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
     """gc_logs populates LogFileInfo with correct path, size, and creation time."""
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     content = "some log content here"
-    (log_dir / "test.log").write_text(content)
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text(content)
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 5)
 
     result = GcResult()
     gc_logs(
@@ -334,9 +403,31 @@ def test_gc_logs_populates_log_file_info(temp_mng_ctx: MngContext, local_provide
 
     assert len(result.logs_destroyed) == 1
     info = result.logs_destroyed[0]
-    assert info.path == log_dir / "test.log"
+    assert info.path == rotated
     assert info.size_bytes == len(content)
     assert info.created_at is not None
+
+
+# -- _is_rotated_log_file tests --
+
+
+def test_is_rotated_log_file_matches_numeric_suffix() -> None:
+    assert _is_rotated_log_file(Path("events.jsonl.1")) is True
+    assert _is_rotated_log_file(Path("events.jsonl.42")) is True
+
+
+def test_is_rotated_log_file_rejects_current_log() -> None:
+    assert _is_rotated_log_file(Path("events.jsonl")) is False
+
+
+def test_is_rotated_log_file_rejects_non_numeric_suffix() -> None:
+    assert _is_rotated_log_file(Path("events.jsonl.bak")) is False
+    assert _is_rotated_log_file(Path("events.jsonl.tmp")) is False
+
+
+def test_is_rotated_log_file_rejects_other_files() -> None:
+    assert _is_rotated_log_file(Path("data.json")) is False
+    assert _is_rotated_log_file(Path("noextension")) is False
 
 
 # =========================================================================
@@ -472,9 +563,12 @@ def test_gc_build_cache_populates_build_cache_info(
 
 def test_gc_with_only_logs_flag(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
     """gc() only collects logs when is_logs=True and other flags are False."""
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "test.log").write_text("content")
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text("content")
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 1)
 
     resource_types = GcResourceTypes(is_logs=True)
     result = gc(
@@ -535,9 +629,12 @@ def test_gc_with_no_flags_does_nothing(temp_mng_ctx: MngContext, local_provider:
 def test_gc_with_multiple_flags(temp_mng_ctx: MngContext, local_provider: LocalProviderInstance) -> None:
     """gc() collects both logs and build cache when both flags are set."""
     # Set up logs
-    log_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "test.log").write_text("content")
+    events_dir = temp_mng_ctx.config.default_host_dir.expanduser() / temp_mng_ctx.config.logging.log_dir
+    logs_dir = events_dir / "logs" / "mng"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    rotated = logs_dir / "events.jsonl.1"
+    rotated.write_text("content")
+    _make_old(rotated, _LOG_MAX_AGE_DAYS + 1)
 
     # Set up build cache
     cache_dir = temp_mng_ctx.profile_dir / "providers" / "prov" / "cache"

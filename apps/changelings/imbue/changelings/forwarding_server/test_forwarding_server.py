@@ -606,8 +606,8 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     assert api_response.json() == {"source": "api"}
 
 
-def test_mng_cli_resolver_returns_502_when_mng_logs_fails(tmp_path: Path) -> None:
-    """When mng logs fails (agent has no servers.jsonl), the proxy returns 502."""
+def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> None:
+    """When mng events fails (agent has no servers.jsonl), the proxy returns 502."""
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
@@ -651,7 +651,7 @@ def test_mng_cli_resolver_landing_page_shows_discovered_agents(tmp_path: Path) -
 
 
 def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None:
-    """The agent servers page lists servers discovered via mng logs."""
+    """The agent servers page lists servers discovered via mng events."""
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 

@@ -13,10 +13,10 @@ from imbue.mng.cli.connect import ConnectCliOptions
 from imbue.mng.cli.connect import connect
 from imbue.mng.cli.create import CreateCliOptions
 from imbue.mng.cli.destroy import destroy
+from imbue.mng.cli.events import events
 from imbue.mng.cli.exec import exec_command
 from imbue.mng.cli.gc import gc
 from imbue.mng.cli.limit import limit
-from imbue.mng.cli.logs import logs
 from imbue.mng.cli.message import message
 from imbue.mng.cli.migrate import migrate
 from imbue.mng.cli.provision import provision
@@ -239,7 +239,7 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (exec_command, ["--help"], "exec"),
     (gc, ["--help"], "gc"),
     (limit, ["--help"], "limit"),
-    (logs, ["--help"], "logs"),
+    (events, ["--help"], "events"),
     (message, ["--help"], "message"),
     (migrate, ["--help"], "migrate"),
     (provision, ["--help"], "provision"),
@@ -278,7 +278,7 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (destroy, ["nonexistent-agent-88421"], "destroy"),
     (exec_command, ["nonexistent-agent-99999", "echo hello"], "exec"),
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
-    (logs, ["nonexistent-agent-34892"], "logs"),
+    (events, ["nonexistent-agent-34892"], "events"),
     (provision, ["nonexistent-agent-77412"], "provision"),
     (pull, ["nonexistent-agent-66201"], "pull"),
     (push, ["nonexistent-agent-77312"], "push"),

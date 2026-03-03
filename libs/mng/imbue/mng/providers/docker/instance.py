@@ -460,7 +460,7 @@ class DockerProviderInstance(BaseProviderInstance):
 # Auto-generated shutdown script for mng Docker host
 # Kills PID 1 to stop the container
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{host_dir_str}/events/logs/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{

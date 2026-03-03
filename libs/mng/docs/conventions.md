@@ -7,7 +7,7 @@ Unless otherwise specified, `mng` assumes:
 - a host name is a unique identifier for the host (a host can contain multiple agents).
 - tmux sessions are named `mng-<agent_name>`
 - agent data exists at `$MNG_AGENT_STATE_DIR` (i.e., `$MNG_HOST_DIR/agents/$MNG_AGENT_ID/`)
-- there are `logs` subdirectories inside `$MNG_HOST_DIR` and each `$MNG_AGENT_STATE_DIR` for storing log data
+- there are `events` subdirectories inside `$MNG_HOST_DIR` and each `$MNG_AGENT_STATE_DIR` for storing event data (logs are stored under `events/logs/`)
 - environment variables for hosts and agents are stored in `$MNG_HOST_DIR/env` and `$MNG_AGENT_STATE_DIR/env` respectively
 - IDs are base16-encoded UUID4s
 - Names are human-readable strings that can contain letters, numbers, and hyphens (no underscores, spaces, etc because they are used for DNS)

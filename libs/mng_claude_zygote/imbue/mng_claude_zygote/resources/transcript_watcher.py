@@ -2,8 +2,8 @@
 """Transcript watcher for changeling agents.
 
 Converts raw Claude Code transcript events from
-logs/claude_transcript/events.jsonl into a common, agent-agnostic
-format at logs/common_transcript/events.jsonl.
+events/claude_transcript/events.jsonl into a common, agent-agnostic
+format at events/common_transcript/events.jsonl.
 
 The common format focuses on semantically important messages (user input,
 assistant output, tool calls, tool results) and drops noise like progress
@@ -20,8 +20,8 @@ full file) never produces duplicate output.
 Usage: python3 transcript_watcher.py
 
 Environment:
-  MNG_AGENT_STATE_DIR  - agent state directory (contains logs/)
-  MNG_HOST_DIR         - host data directory (contains logs/ for log output)
+  MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
+  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -299,11 +299,11 @@ def main() -> None:
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
     host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    input_file = agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
-    output_file = agent_state_dir / "logs" / "common_transcript" / "events.jsonl"
+    input_file = agent_state_dir / "events" / "claude_transcript" / "events.jsonl"
+    output_file = agent_state_dir / "events" / "common_transcript" / "events.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("transcript_watcher", host_dir / "logs")
+    setup_watcher_logging("transcript_watcher", host_dir / "events" / "logs")
 
     poll_interval = _load_poll_interval(agent_work_dir)
 
@@ -318,7 +318,7 @@ def main() -> None:
     def on_tick() -> None:
         converted_count = _convert_new_events(input_file, output_file)
         if converted_count > 0:
-            logger.info("Converted {} new event(s) -> logs/common_transcript/events.jsonl", converted_count)
+            logger.info("Converted {} new event(s) -> events/common_transcript/events.jsonl", converted_count)
         else:
             logger.debug("No new events to convert")
 

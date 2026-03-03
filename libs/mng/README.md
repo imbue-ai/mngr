@@ -212,7 +212,7 @@ mng <command> [options]
 ### For maintenance:
 
 - [`cleanup`](https://github.com/imbue-ai/mng/blob/main/libs/mng/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
-- [`logs`](https://github.com/imbue-ai/mng/blob/main/libs/mng/docs/commands/secondary/logs.md): View agent and host logs
+- [`events`](https://github.com/imbue-ai/mng/blob/main/libs/mng/docs/commands/secondary/events.md): View agent and host event files
 - [`gc`](https://github.com/imbue-ai/mng/blob/main/libs/mng/docs/commands/secondary/gc.md): Garbage collect unused resources
 
 ### For managing mng itself:
