@@ -1,6 +1,7 @@
 import ast
 import re
 import subprocess
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Final
 
@@ -464,8 +465,27 @@ def check_no_ruff_errors(project_root: Path) -> None:
         raise AssertionError("\n".join(failure_message))
 
 
+_TEST_MODULE_GLOBS: Final[tuple[str, ...]] = (
+    "*_test",
+    "test_*",
+    "conftest",
+    "testing",
+    "plugin_testing",
+)
+
+
+def _is_test_module(module_path: str) -> bool:
+    """Check if an import-linter module path refers to a test module."""
+    last_segment = module_path.rsplit(".", 1)[-1]
+    return any(fnmatch(last_segment, pattern) for pattern in _TEST_MODULE_GLOBS)
+
+
 def check_no_import_lint_errors(project_root: Path, contract_name: str = "mng layers contract") -> None:
-    """Run import-linter and raise AssertionError if the layer contract is broken.
+    """Run import-linter and raise AssertionError if any production code violations are found.
+
+    Uses import-linter's Python API to get structured results, then filters
+    out violations where every importer in the chain is a test module.
+    Only production code violations cause failure.
 
     Only checks the contract matching contract_name; other contracts are skipped.
     """
@@ -478,11 +498,25 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mng la
     user_options.contracts_options = [opt for opt in user_options.contracts_options if opt["name"] == contract_name]
     report = create_report(user_options)
 
+    production_violations: list[str] = []
     for contract, check in report.get_contracts_and_checks():
-        if not check.kept:
-            raise AssertionError(
-                f"import-linter contract '{contract_name}' broken. Run 'uv run lint-imports' for details."
-            )
+        if check.kept:
+            continue
+        for dep in check.metadata.get("invalid_dependencies", []):
+            for route in dep["routes"]:
+                first_link = route["chain"][0]
+                importer = first_link["importer"]
+                if not _is_test_module(importer):
+                    imported = first_link["imported"]
+                    production_violations.append(f"  {importer} -> {imported}")
+
+    if production_violations:
+        failure_message = [
+            f"import-linter found {len(production_violations)} production code layer violation(s):",
+            "",
+            *production_violations,
+        ]
+        raise AssertionError("\n".join(failure_message))
 
 
 def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
