@@ -16,6 +16,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from paramiko import SSHException
@@ -1405,17 +1406,17 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mng/worktrees/<agent-id>/ by default.
+        Worktrees are placed at ~/.mng/worktrees/<name>-<uuid>/ by default.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
 
-        agent_id = AgentId.generate()
-
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            work_dir_path = self.host_dir / "worktrees" / str(agent_id)
+            agent_name = options.name or AgentName("agent")
+            work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
+            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
         branch_name = self._determine_branch_name(options)
 
