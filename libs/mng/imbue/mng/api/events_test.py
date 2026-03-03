@@ -18,6 +18,7 @@ from imbue.mng.api.events import _check_for_new_archived_events
 from imbue.mng.api.events import _check_for_new_content
 from imbue.mng.api.events import _discover_event_sources_via_volume
 from imbue.mng.api.events import _extract_filename
+from imbue.mng.api.events import _handle_online_offline_transition
 from imbue.mng.api.events import _parse_discovered_files
 from imbue.mng.api.events import _parse_file_listing_output
 from imbue.mng.api.events import _sort_rotated_files_oldest_first
@@ -1267,3 +1268,98 @@ def test_refresh_events_target_returns_same_when_no_provider(tmp_path: Path) -> 
 
     refreshed = refresh_events_target(target)
     assert refreshed is target
+
+
+# =============================================================================
+# _handle_online_offline_transition tests
+# =============================================================================
+
+
+def test_handle_online_offline_transition_restarts_threads(
+    tmp_path: Path,
+    temp_mng_ctx: MngContext,
+    local_provider,
+) -> None:
+    """Verify _handle_online_offline_transition stops old threads and starts new ones."""
+    per_host_dir = local_provider.host_dir
+    agent_id = _create_agent_data_json(per_host_dir, "test-handle-transition-38291", "sleep 38291")
+    agent_events_subpath = Path("agents") / str(agent_id) / "events"
+
+    # Create events directory
+    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events" / "src"
+    agent_events_dir.mkdir(parents=True)
+    (agent_events_dir / "events.jsonl").write_text("")
+
+    # Create a target that appears offline (no online_host)
+    volume = LocalVolume(root_path=per_host_dir)
+    events_volume = volume.scoped(f"agents/{agent_id}/events")
+    target = EventsTarget(
+        volume=events_volume,
+        display_name="test",
+        provider=local_provider,
+        host_id=local_provider.get_host(HostName("localhost")).id,
+        events_subpath=agent_events_subpath,
+    )
+
+    state = _AllEventsStreamState(
+        is_online=False,
+        known_source_paths={"src"},
+    )
+    target_holder = [target]
+    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    stop_event = threading.Event()
+    tail_threads: list[threading.Thread] = []
+
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+
+    _handle_online_offline_transition(
+        target_holder=target_holder,
+        state=state,
+        event_queue=event_queue,
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        stop_event=stop_event,
+        tail_threads=tail_threads,
+        offset_dir_path=offset_dir,
+    )
+
+    # Local host is always online, so transition should have occurred
+    assert state.is_online is True
+    assert target_holder[0].online_host is not None
+    # New tail threads should have been started for known sources
+    assert len(tail_threads) >= 1
+
+    # Clean up
+    stop_event.set()
+    for thread in tail_threads:
+        thread.join(timeout=5.0)
+
+
+def test_handle_online_offline_transition_no_change_when_same_state(tmp_path: Path) -> None:
+    """Verify _handle_online_offline_transition is a no-op when state hasn't changed."""
+    volume = LocalVolume(root_path=tmp_path)
+    target = EventsTarget(volume=volume, display_name="test")
+
+    # No provider info means refresh returns the same target
+    state = _AllEventsStreamState(is_online=False)
+    target_holder = [target]
+    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    stop_event = threading.Event()
+    tail_threads: list[threading.Thread] = []
+
+    _handle_online_offline_transition(
+        target_holder=target_holder,
+        state=state,
+        event_queue=event_queue,
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        stop_event=stop_event,
+        tail_threads=tail_threads,
+        offset_dir_path=None,
+    )
+
+    # No transition should have occurred (no provider to refresh)
+    assert state.is_online is False
+    assert target_holder[0] is target
+    assert len(tail_threads) == 0

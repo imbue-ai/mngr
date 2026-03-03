@@ -856,6 +856,75 @@ def read_all_historical_events(
 _QUEUE_SENTINEL: Final[None] = None
 
 
+def _collect_historical_events(
+    target: EventsTarget,
+    state: _AllEventsStreamState,
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+) -> tuple[list[EventRecord], list[EventSourceInfo], dict[str, int]]:
+    """Discover sources and read all historical/archived events (Phases 1 and 3)."""
+    with log_span("Reading historical events for {}", target.display_name):
+        sources = discover_event_sources(target)
+        all_events, initial_byte_offsets = read_all_historical_events(
+            target, sources, cel_include_filters, cel_exclude_filters
+        )
+        for source in sources:
+            state.known_source_paths.add(source.source_path)
+            state.known_rotated_files[source.source_path] = set(source.rotated_files)
+
+    return all_events, sources, initial_byte_offsets
+
+
+def _start_tail_threads_for_sources(
+    target: EventsTarget,
+    sources: Sequence[EventSourceInfo],
+    initial_byte_offsets: dict[str, int],
+    event_queue: queue.Queue[EventRecord | None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    offset_dir_path: Path,
+) -> list[threading.Thread]:
+    """Start per-source tail threads for all current events.jsonl files."""
+    threads: list[threading.Thread] = []
+    for source in sources:
+        if source.is_current_file_present:
+            thread = _start_tail_thread(
+                target=target,
+                source_path=source.source_path,
+                event_queue=event_queue,
+                cel_include_filters=cel_include_filters,
+                cel_exclude_filters=cel_exclude_filters,
+                stop_event=stop_event,
+                offset_dir_path=offset_dir_path,
+                initial_byte_offset=initial_byte_offsets.get(source.source_path, 0),
+            )
+            threads.append(thread)
+    return threads
+
+
+def _emit_historical_events(
+    all_events: list[EventRecord],
+    state: _AllEventsStreamState,
+    on_event: Callable[[EventRecord], None],
+    head_count: int | None,
+    tail_count: int | None,
+) -> None:
+    """Apply head/tail truncation and emit historical events, deduplicating by event_id."""
+    if head_count is not None:
+        all_events = all_events[:head_count]
+    elif tail_count is not None:
+        all_events = all_events[-tail_count:]
+    else:
+        pass
+
+    for event in all_events:
+        if event.event_id in state.emitted_event_ids:
+            continue
+        state.emitted_event_ids.add(event.event_id)
+        on_event(event)
+
+
 def stream_all_events(
     target: EventsTarget,
     on_event: Callable[[EventRecord], None],
@@ -865,14 +934,7 @@ def stream_all_events(
     head_count: int | None,
     is_follow: bool,
 ) -> None:
-    """Stream all events from all sources.
-
-    Phase 1: Discover sources and read all historical/archived events.
-    Phase 2: Start per-source tail threads that push new events to a queue.
-    Phase 3: Re-check for newly rotated files (rotation guard).
-    Phase 4: Emit historical events.
-    Phase 5: Consume from queue (follow mode only).
-    """
+    """Stream all events from all sources."""
     state = _AllEventsStreamState(
         is_online=target.online_host is not None,
         last_source_scan_time=time.monotonic(),
@@ -883,35 +945,26 @@ def stream_all_events(
     offset_dir: tempfile.TemporaryDirectory[str] | None = None
 
     try:
-        # Phase 1: Discover sources and read all historical events
-        with log_span("Reading historical events for {}", target.display_name):
-            sources = discover_event_sources(target)
-            all_events, initial_byte_offsets = read_all_historical_events(
-                target, sources, cel_include_filters, cel_exclude_filters
-            )
-            # Record which rotated files we've already read
-            for source in sources:
-                state.known_source_paths.add(source.source_path)
-                state.known_rotated_files[source.source_path] = set(source.rotated_files)
+        # Discover sources and read all historical events
+        all_events, sources, initial_byte_offsets = _collect_historical_events(
+            target, state, cel_include_filters, cel_exclude_filters
+        )
 
-        # Phase 2: Start tail threads for each current events.jsonl
+        # Start tail threads for follow mode
         if is_follow:
             offset_dir = tempfile.TemporaryDirectory(prefix="mng-events-offsets-")
-            for source in sources:
-                if source.is_current_file_present:
-                    thread = _start_tail_thread(
-                        target=target,
-                        source_path=source.source_path,
-                        event_queue=event_queue,
-                        cel_include_filters=cel_include_filters,
-                        cel_exclude_filters=cel_exclude_filters,
-                        stop_event=stop_event,
-                        offset_dir_path=Path(offset_dir.name),
-                        initial_byte_offset=initial_byte_offsets.get(source.source_path, 0),
-                    )
-                    tail_threads.append(thread)
+            tail_threads = _start_tail_threads_for_sources(
+                target,
+                sources,
+                initial_byte_offsets,
+                event_queue,
+                cel_include_filters,
+                cel_exclude_filters,
+                stop_event,
+                Path(offset_dir.name),
+            )
 
-        # Phase 3: Rotation guard -- re-scan for newly rotated files
+        # Rotation guard: re-scan for newly rotated files that appeared during startup
         with log_span("Checking for newly rotated files"):
             rotation_guard_events = _check_for_new_archived_events(
                 target, state, cel_include_filters, cel_exclude_filters
@@ -919,30 +972,15 @@ def stream_all_events(
             all_events.extend(rotation_guard_events)
             all_events = sort_events_by_timestamp(all_events)
 
-        # Phase 4: Apply head/tail and emit historical events
-        if head_count is not None:
-            all_events = all_events[:head_count]
-        elif tail_count is not None:
-            all_events = all_events[-tail_count:]
-        else:
-            pass
+        # Emit historical events
+        _emit_historical_events(all_events, state, on_event, head_count, tail_count)
 
-        for event in all_events:
-            if event.event_id in state.emitted_event_ids:
-                continue
-            state.emitted_event_ids.add(event.event_id)
-            on_event(event)
-
-        if head_count is not None:
+        if head_count is not None or not is_follow:
             return
 
-        if not is_follow:
-            return
-
-        # Phase 5: Consume events from queue (follow mode)
-        target_holder: list[EventsTarget] = [target]
+        # Follow mode: consume events from queue
         _consume_event_queue(
-            target_holder=target_holder,
+            target_holder=[target],
             state=state,
             event_queue=event_queue,
             on_event=on_event,
@@ -954,7 +992,6 @@ def stream_all_events(
         )
 
     finally:
-        # Graceful shutdown of all tail threads
         stop_event.set()
         for thread in tail_threads:
             thread.join(timeout=5.0)
