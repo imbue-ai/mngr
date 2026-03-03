@@ -149,7 +149,7 @@ def query_claude_streaming(
 
         process.wait()
 
-        if is_error or (process.poll() is not None and process.poll() != 0):
+        if is_error or process.poll() != 0:
             stderr_content = process.read_stderr().strip()
             detail = stderr_content or "unknown error (no output captured)"
             raise MngError(f"claude failed (exit code {process.poll()}): {detail}")
