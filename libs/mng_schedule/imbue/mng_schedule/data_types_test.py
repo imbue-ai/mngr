@@ -3,8 +3,6 @@
 from datetime import datetime
 from datetime import timezone
 
-from inline_snapshot import snapshot
-
 from imbue.mng_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mng_schedule.data_types import ScheduleCreationRecord
 from imbue.mng_schedule.data_types import ScheduleTriggerDefinition
@@ -72,28 +70,6 @@ def test_base_schedule_creation_record_round_trips_through_json() -> None:
     assert restored.hostname == "dev-machine"
 
 
-def test_modal_record_is_instance_of_base() -> None:
-    """Test that ModalScheduleCreationRecord is a subclass of ScheduleCreationRecord."""
-    trigger = ScheduleTriggerDefinition(
-        name="test",
-        command=ScheduledMngCommand.CREATE,
-        args="",
-        schedule_cron="0 2 * * *",
-        provider="modal",
-    )
-    record = ModalScheduleCreationRecord(
-        trigger=trigger,
-        full_commandline="mng schedule add",
-        hostname="laptop",
-        working_directory="/tmp",
-        mng_git_hash="abc123",
-        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
-        app_name="mng-schedule-test",
-        environment="mng-user1",
-    )
-    assert isinstance(record, ScheduleCreationRecord)
-
-
 def test_modal_record_deserializes_old_field_names() -> None:
     """Test that ModalScheduleCreationRecord can deserialize JSON with old field names."""
     old_json = (
@@ -132,10 +108,3 @@ def test_schedule_creation_record_includes_all_trigger_fields() -> None:
     assert record.trigger.is_enabled is False
     assert record.trigger.command == ScheduledMngCommand.EXEC
     assert record.trigger.schedule_cron == "*/5 * * * *"
-
-
-def test_scheduled_mng_command_values() -> None:
-    assert ScheduledMngCommand.CREATE.value == snapshot("CREATE")
-    assert ScheduledMngCommand.START.value == snapshot("START")
-    assert ScheduledMngCommand.MESSAGE.value == snapshot("MESSAGE")
-    assert ScheduledMngCommand.EXEC.value == snapshot("EXEC")

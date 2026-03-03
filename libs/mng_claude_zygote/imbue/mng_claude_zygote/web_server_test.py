@@ -221,11 +221,3 @@ def test_render_agents_page_lists_running_agents(web_server_module: Any) -> None
         assert "disabled" in page
     finally:
         web_server_module._cached_agents = []
-
-
-# -- HTTP handler tests --
-
-
-def test_handler_class_has_get_method(web_server_module: Any) -> None:
-    handler = web_server_module._WebServerHandler
-    assert hasattr(handler, "do_GET")

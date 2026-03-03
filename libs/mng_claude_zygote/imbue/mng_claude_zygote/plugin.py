@@ -186,19 +186,6 @@ class ClaudeZygoteAgent(ClaudeAgent):
         link_memory_directory(host, self.work_dir, provisioning)
 
 
-def inject_agent_ttyd(params: dict[str, Any]) -> None:
-    """Inject an agent ttyd window into the create command parameters.
-
-    This adds a ttyd web terminal that attaches to the agent's tmux session,
-    allowing users to interact with the Claude agent via a web browser.
-
-    Intended to be called from override_command_options hooks by plugins
-    that register ClaudeZygoteAgent subtypes.
-    """
-    existing = params.get("add_command", ())
-    params["add_command"] = (*existing, f'{AGENT_TTYD_WINDOW_NAME}="{AGENT_TTYD_COMMAND}"')
-
-
 def inject_changeling_windows(params: dict[str, Any]) -> None:
     """Inject all changeling tmux windows into the create command parameters.
 
@@ -211,11 +198,10 @@ def inject_changeling_windows(params: dict[str, Any]) -> None:
     - Agent-tmux ttyd (--url-arg ttyd for connecting to other agents' tmux sessions)
     - Transcript watcher (converts claude_transcript to common_transcript)
     """
-    inject_agent_ttyd(params)
-
     existing = params.get("add_command", ())
     params["add_command"] = (
         *existing,
+        f'{AGENT_TTYD_WINDOW_NAME}="{AGENT_TTYD_COMMAND}"',
         f'{CONV_WATCHER_WINDOW_NAME}="{CONV_WATCHER_COMMAND}"',
         f'{EVENT_WATCHER_WINDOW_NAME}="{EVENT_WATCHER_COMMAND}"',
         f'{WEB_SERVER_WINDOW_NAME}="{WEB_SERVER_COMMAND}"',
