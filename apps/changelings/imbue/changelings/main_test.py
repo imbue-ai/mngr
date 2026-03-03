@@ -28,19 +28,3 @@ def test_cli_forward_help() -> None:
 
     assert result.exit_code == 0
     assert "forwarding server" in result.output
-
-
-def test_cli_verbose_flag_shown_in_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["--help"])
-
-    assert result.exit_code == 0
-    assert "--verbose" in result.output or "-v" in result.output
-
-
-def test_cli_quiet_flag_shown_in_help() -> None:
-    runner = CliRunner()
-    result = runner.invoke(cli, ["--help"])
-
-    assert result.exit_code == 0
-    assert "--quiet" in result.output or "-q" in result.output

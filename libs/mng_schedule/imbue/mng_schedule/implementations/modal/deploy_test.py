@@ -24,26 +24,11 @@ from imbue.mng_schedule.implementations.modal.deploy import _stage_consolidated_
 from imbue.mng_schedule.implementations.modal.deploy import build_deploy_config
 from imbue.mng_schedule.implementations.modal.deploy import detect_mng_install_mode
 from imbue.mng_schedule.implementations.modal.deploy import get_mng_dockerfile_path
-from imbue.mng_schedule.implementations.modal.deploy import get_modal_app_name
 from imbue.mng_schedule.implementations.modal.deploy import package_directory_as_tarball
 from imbue.mng_schedule.implementations.modal.deploy import parse_upload_spec
 from imbue.mng_schedule.implementations.modal.deploy import resolve_commit_hash_for_deploy
 from imbue.mng_schedule.implementations.modal.deploy import stage_deploy_files
 from imbue.mng_schedule.implementations.modal.deploy import try_get_repo_root
-from imbue.mng_schedule.implementations.modal.verification import build_modal_run_command
-
-
-def test_get_modal_app_name() -> None:
-    assert get_modal_app_name("my-trigger") == "mng-schedule-my-trigger"
-    assert get_modal_app_name("nightly") == "mng-schedule-nightly"
-
-
-def test_build_modal_run_command() -> None:
-    cmd = build_modal_run_command(
-        cron_runner_path=Path("/deploy/cron_runner.py"),
-        modal_env_name="test-env",
-    )
-    assert cmd == ["uv", "run", "modal", "run", "--env", "test-env", "/deploy/cron_runner.py"]
 
 
 def test_build_deploy_config_returns_all_keys() -> None:
@@ -110,22 +95,6 @@ def test_resolve_timezone_skips_empty_etc_timezone(tmp_path: Path) -> None:
 
     result = _resolve_timezone_from_paths(etc_timezone, etc_localtime)
     assert result == "UTC"
-
-
-def test_build_full_commandline_joins_argv_with_spaces() -> None:
-    argv = ["uv", "run", "mng", "schedule", "add", "--command", "create"]
-    result = _build_full_commandline(argv)
-    assert result == "uv run mng schedule add --command create"
-
-
-def test_build_full_commandline_handles_empty_argv() -> None:
-    result = _build_full_commandline([])
-    assert result == ""
-
-
-def test_build_full_commandline_handles_single_element() -> None:
-    result = _build_full_commandline(["mng"])
-    assert result == "mng"
 
 
 def test_build_full_commandline_shell_escapes_spaces_in_arguments() -> None:

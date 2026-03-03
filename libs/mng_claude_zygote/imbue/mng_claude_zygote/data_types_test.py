@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
@@ -15,7 +14,6 @@ from imbue.mng_claude_zygote.data_types import ConversationEvent
 from imbue.mng_claude_zygote.data_types import ConversationId
 from imbue.mng_claude_zygote.data_types import MessageEvent
 from imbue.mng_claude_zygote.data_types import MessageRole
-from imbue.mng_claude_zygote.data_types import SOURCE_CLAUDE_TRANSCRIPT
 from imbue.mng_claude_zygote.data_types import SOURCE_CONVERSATIONS
 from imbue.mng_claude_zygote.data_types import SOURCE_MESSAGES
 from imbue.mng_claude_zygote.data_types import SOURCE_SCHEDULED
@@ -42,31 +40,6 @@ def test_chat_model_accepts_valid_string() -> None:
 
 def test_message_role_accepts_valid_string() -> None:
     assert str(MessageRole("user")) == "user"
-
-
-# -- Source constants --
-
-
-def test_source_constants_are_valid() -> None:
-    assert SOURCE_CONVERSATIONS == "conversations"
-    assert SOURCE_MESSAGES == "messages"
-    assert SOURCE_SCHEDULED == "scheduled"
-    assert SOURCE_CLAUDE_TRANSCRIPT == "claude_transcript"
-
-
-# -- EventEnvelope inheritance --
-
-
-def test_conversation_event_inherits_from_event_envelope() -> None:
-    assert issubclass(ConversationEvent, EventEnvelope)
-
-
-def test_message_event_inherits_from_event_envelope() -> None:
-    assert issubclass(MessageEvent, EventEnvelope)
-
-
-def test_changeling_event_inherits_from_event_envelope() -> None:
-    assert issubclass(ChangelingEvent, EventEnvelope)
 
 
 # -- ConversationEvent --

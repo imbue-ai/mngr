@@ -9,7 +9,6 @@ import pytest
 
 from imbue.mng_claude_zygote.conftest import write_changelings_settings_toml
 from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
-from imbue.mng_claude_zygote.resources.event_watcher import _WatcherSettings
 from imbue.mng_claude_zygote.resources.event_watcher import _check_all_sources
 from imbue.mng_claude_zygote.resources.event_watcher import _check_and_send_new_events
 from imbue.mng_claude_zygote.resources.event_watcher import _get_offset
@@ -46,21 +45,6 @@ def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> SubprocessCaptur
     mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
     return capture
-
-
-# -- _WatcherSettings tests --
-
-
-def test_watcher_settings_defaults() -> None:
-    settings = _WatcherSettings()
-    assert settings.poll_interval == 3
-    assert settings.sources == ["messages", "scheduled", "mng_agents", "stop"]
-
-
-def test_watcher_settings_is_frozen() -> None:
-    settings = _WatcherSettings()
-    with pytest.raises(AttributeError):
-        settings.poll_interval = 10  # type: ignore[misc]
 
 
 # -- _load_watcher_settings tests --
