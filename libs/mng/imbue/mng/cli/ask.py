@@ -94,6 +94,10 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I watch agent status in real time?\n"
     "response: mng list --watch 5\n\n"
     #
+    "user: How do I list all agents that are running or waiting?\n"
+    'response: mng list --include \'state == "RUNNING" || state == "WAITING"\'\n'
+    "Note: the lifecycle field is `state` (not `status`), and values are uppercase.\n\n"
+    #
     "user: How do I message only agents with a specific tag?\n"
     "response: Use a CEL filter:\n"
     '    mng message --include \'tags.feature == "auth"\' -m "run the auth test suite"\n\n'
@@ -162,6 +166,9 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     #
     "user: list running agents as json\n"
     "response: mng list --running --format json\n\n"
+    #
+    "user: list all agents that are running or waiting\n"
+    'response: mng list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
     #
     "user: clone my-agent into a new agent called experiment\n"
     "response: mng clone my-agent experiment\n\n"
