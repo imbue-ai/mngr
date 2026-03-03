@@ -6,7 +6,7 @@ allowed-tools: Bash(uv run mng list *), Bash(while true; do*)
 
 The user's message contains an agent name and optional follow-up instructions. Extract the agent name (the first word) and treat everything after it as follow-up instructions.
 
-Note: the user may paste a git branch name like `mng/some-agent-local` or `mng/some-agent-docker` instead of the bare agent name. In that case, strip the `mng/` prefix and the `-local`/`-docker`/etc. provider suffix to get the actual agent name (e.g. `mng/better-tabcomplete-local` -> `better-tabcomplete`).
+Note: the user may paste a git branch name like `mng/some-agent` instead of the bare agent name. In that case, strip the `mng/` prefix to get the actual agent name (e.g. `mng/better-tabcomplete` -> `better-tabcomplete`).
 
 ## Polling Procedure
 

@@ -54,7 +54,7 @@ def _make_agent_info(
 
 def _make_pr_info(
     number: int = 1,
-    head_branch: str = "mng/test-local",
+    head_branch: str = "mng/test",
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
 ) -> PrInfo:
@@ -94,9 +94,9 @@ def test_build_pr_branch_index_empty() -> None:
 
 
 def test_build_pr_branch_index_single_pr() -> None:
-    pr = _make_pr_info(number=1, head_branch="mng/agent-local")
+    pr = _make_pr_info(number=1, head_branch="mng/agent")
     result = _build_pr_branch_index((pr,))
-    assert result == {"mng/agent-local": pr}
+    assert result == {"mng/agent": pr}
 
 
 def test_build_pr_branch_index_different_branches() -> None:

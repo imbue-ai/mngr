@@ -364,10 +364,10 @@ def test_get_created_branch_name_returns_value_from_data_json(
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     data = json.loads((agent_dir / "data.json").read_text())
-    data["created_branch_name"] = "mng/test-branch-local"
+    data["created_branch_name"] = "mng/test-branch"
     (agent_dir / "data.json").write_text(json.dumps(data))
 
-    assert agent.get_created_branch_name() == "mng/test-branch-local"
+    assert agent.get_created_branch_name() == "mng/test-branch"
 
 
 def test_get_created_branch_name_returns_none_when_absent(
@@ -396,9 +396,9 @@ def test_create_agent_state_stores_created_branch_name(
         command=CommandString("sleep 1"),
     )
 
-    agent = host.create_agent_state(temp_work_dir, options, created_branch_name="mng/my-branch-local")
+    agent = host.create_agent_state(temp_work_dir, options, created_branch_name="mng/my-branch")
 
-    assert agent.get_created_branch_name() == "mng/my-branch-local"
+    assert agent.get_created_branch_name() == "mng/my-branch"
 
 
 def test_create_agent_state_uses_explicit_agent_id(

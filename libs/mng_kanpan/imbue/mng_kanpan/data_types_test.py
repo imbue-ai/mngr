@@ -38,7 +38,7 @@ def test_pr_info_construction() -> None:
         title="Add feature X",
         state=PrState.OPEN,
         url="https://github.com/org/repo/pull/42",
-        head_branch="mng/my-agent-local",
+        head_branch="mng/my-agent",
         check_status=CheckStatus.PASSING,
         is_draft=False,
     )
@@ -46,7 +46,7 @@ def test_pr_info_construction() -> None:
     assert pr.title == "Add feature X"
     assert pr.state == PrState.OPEN
     assert pr.url == "https://github.com/org/repo/pull/42"
-    assert pr.head_branch == "mng/my-agent-local"
+    assert pr.head_branch == "mng/my-agent"
     assert pr.check_status == CheckStatus.PASSING
 
 
@@ -56,7 +56,7 @@ def test_pr_info_is_frozen() -> None:
         title="Add feature X",
         state=PrState.OPEN,
         url="https://github.com/org/repo/pull/42",
-        head_branch="mng/my-agent-local",
+        head_branch="mng/my-agent",
         check_status=CheckStatus.PASSING,
         is_draft=False,
     )
@@ -83,7 +83,7 @@ def test_agent_board_entry_with_pr() -> None:
         title="Fix bug",
         state=PrState.MERGED,
         url="https://github.com/org/repo/pull/10",
-        head_branch="mng/my-agent-local",
+        head_branch="mng/my-agent",
         check_status=CheckStatus.PASSING,
         is_draft=False,
     )
@@ -91,10 +91,10 @@ def test_agent_board_entry_with_pr() -> None:
         name=AgentName("my-agent"),
         state=AgentLifecycleState.DONE,
         provider_name=ProviderInstanceName("local"),
-        branch="mng/my-agent-local",
+        branch="mng/my-agent",
         pr=pr,
     )
-    assert entry.branch == "mng/my-agent-local"
+    assert entry.branch == "mng/my-agent"
     assert entry.pr is not None
     assert entry.pr.number == 10
 
