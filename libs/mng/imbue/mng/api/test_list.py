@@ -14,8 +14,8 @@ from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
-from imbue.mng.api.list import _agent_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import agent_to_cel_context
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
@@ -129,7 +129,7 @@ def test_agent_to_cel_context_basic_fields() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["resource_type"] == "agent"
     assert context["type"] == "claude"
@@ -159,7 +159,7 @@ def test_agent_to_cel_context_with_runtime() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["runtime"] == 123.45
 
@@ -185,7 +185,7 @@ def test_agent_to_cel_context_with_activity_time() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     # Idle should be computed and be very small (just computed)
     assert "idle" in context
@@ -211,7 +211,7 @@ def test_agent_to_cel_context_with_state() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["state"] == AgentLifecycleState.STOPPED.value
 
@@ -525,7 +525,7 @@ def test_agent_to_cel_context_with_host_state() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["host"]["state"] == HostState.RUNNING.value
 
@@ -551,7 +551,7 @@ def test_agent_to_cel_context_with_host_resources() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["host"]["resource"]["memory_gb"] == 16.0
     assert context["host"]["resource"]["disk_gb"] == 100.0
@@ -584,7 +584,7 @@ def test_agent_to_cel_context_with_host_ssh() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["host"]["ssh"]["user"] == "root"
     assert context["host"]["ssh"]["host"] == "example.com"
@@ -674,7 +674,7 @@ def test_agent_to_cel_context_with_host_lock_fields() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["host"]["is_locked"] is True
     assert context["host"]["locked_time"] is not None
@@ -701,7 +701,7 @@ def test_agent_to_cel_context_with_host_not_locked() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["host"]["is_locked"] is False
     assert context["host"]["locked_time"] is None
@@ -825,7 +825,7 @@ def test_agent_to_cel_context_with_idle_mode() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["idle_mode"] == IdleMode.AGENT.value
 
@@ -850,7 +850,7 @@ def test_agent_to_cel_context_with_idle_seconds() -> None:
         host=host_info,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_to_cel_context(agent_info)
 
     assert context["idle_seconds"] == 300.5
 

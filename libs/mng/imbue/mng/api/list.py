@@ -596,7 +596,7 @@ def _process_host_for_agent_listing(
 
 
 @pure
-def _agent_to_cel_context(agent: AgentInfo) -> dict[str, Any]:
+def agent_to_cel_context(agent: AgentInfo) -> dict[str, Any]:
     """Convert an AgentInfo object to a CEL-friendly dict.
 
     Converts the agent into a flat dictionary suitable for CEL evaluation,
@@ -650,7 +650,7 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    context = _agent_to_cel_context(agent)
+    context = agent_to_cel_context(agent)
     return apply_cel_filters_to_context(
         context=context,
         include_filters=include_filters,

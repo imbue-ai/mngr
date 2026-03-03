@@ -47,6 +47,7 @@ def make_test_agent_info(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    host_provider: str = "local",
 ) -> AgentInfo:
     """Create a real AgentInfo for testing.
 
@@ -56,7 +57,7 @@ def make_test_agent_info(
     host_info = HostInfo(
         id=HostId.generate(),
         name="test-host",
-        provider_name=ProviderInstanceName("local"),
+        provider_name=ProviderInstanceName(host_provider),
         snapshots=snapshots or [],
         state=HostState.RUNNING,
         plugin=host_plugin or {},
