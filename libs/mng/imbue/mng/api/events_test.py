@@ -1,4 +1,5 @@
 import json
+import queue as queue_mod
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -13,15 +14,15 @@ from imbue.mng.api.events import EventsTarget
 from imbue.mng.api.events import _AllEventsStreamState
 from imbue.mng.api.events import _FollowState
 from imbue.mng.api.events import _build_tail_args
+from imbue.mng.api.events import _check_for_new_archived_events
 from imbue.mng.api.events import _check_for_new_content
-from imbue.mng.api.events import _check_online_offline_transition
 from imbue.mng.api.events import _discover_event_sources_via_volume
 from imbue.mng.api.events import _extract_filename
 from imbue.mng.api.events import _parse_discovered_files
 from imbue.mng.api.events import _parse_file_listing_output
-from imbue.mng.api.events import _poll_source_for_new_events
-from imbue.mng.api.events import _rescan_for_new_sources
 from imbue.mng.api.events import _sort_rotated_files_oldest_first
+from imbue.mng.api.events import _start_tail_thread
+from imbue.mng.api.events import _tail_source_thread_local
 from imbue.mng.api.events import apply_head_or_tail
 from imbue.mng.api.events import follow_event_file
 from imbue.mng.api.events import list_event_files
@@ -40,6 +41,7 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.volume import LocalVolume
 from imbue.mng.utils.cel_utils import compile_cel_filters
+from imbue.mng.utils.polling import poll_for_value
 
 
 class _StopFollow(Exception):
@@ -1077,120 +1079,185 @@ def test_resolve_events_target_populates_provider_and_host_id(
 
 
 # =============================================================================
-# Follow mode polling function tests
+# Follow mode: pygtail tail thread tests
 # =============================================================================
 
 
-def test_poll_source_for_new_events_detects_appended_content(tmp_path: Path) -> None:
-    """Verify _poll_source_for_new_events detects new events appended to events.jsonl."""
+@pytest.mark.timeout(30)
+def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
+    """Verify the pygtail-based tail thread detects new content appended to events.jsonl."""
+    events_dir = tmp_path / "events" / "src"
+    events_dir.mkdir(parents=True)
+    events_file = events_dir / "events.jsonl"
+    # Start with an empty file
+    events_file.write_text("")
+
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    stop_event = threading.Event()
+
+    thread = threading.Thread(
+        target=_tail_source_thread_local,
+        args=(events_file, "src", event_queue, [], [], stop_event, offset_dir),
+        daemon=True,
+    )
+    thread.start()
+
+    try:
+        # Wait for the thread to initialize pygtail by polling until the offset file exists
+        offset_file = offset_dir / "src.offset"
+        poll_for_value(
+            producer=lambda: True if offset_file.exists() else None,
+            timeout=5.0,
+            poll_interval=0.2,
+        )
+
+        # Append an event
+        with events_file.open("a") as f:
+            f.write('{"timestamp":"2026-01-01T00:00:00Z","event_id":"t1","source":"src"}\n')
+            f.flush()
+
+        # Poll for the event to appear in the queue
+        result, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert result is not None
+        assert result.event_id == "t1"
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+
+
+@pytest.mark.timeout(30)
+def test_stream_all_events_follow_detects_new_content(tmp_path: Path) -> None:
+    """Verify that a tail thread started by _start_tail_thread picks up newly appended events."""
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
-
-    initial_content = '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
-    (events_dir / "src" / "events.jsonl").write_text(initial_content)
-
-    volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
-
-    state = _AllEventsStreamState(
-        source_byte_offsets={"src": len(initial_content.encode("utf-8"))},
-    )
-
-    captured: list[str] = []
-
-    # No new content yet
-    _poll_source_for_new_events(target, "src", state, lambda e: captured.append(e.event_id), [], [])
-    assert captured == []
-
-    # Append new content
-    with (events_dir / "src" / "events.jsonl").open("a") as f:
-        f.write('{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n')
-
-    _poll_source_for_new_events(target, "src", state, lambda e: captured.append(e.event_id), [], [])
-    assert captured == ["e2"]
-
-
-def test_poll_source_for_new_events_handles_rotation(tmp_path: Path) -> None:
-    """Verify _poll_source_for_new_events handles file rotation (shorter file than offset)."""
-    events_dir = tmp_path / "events"
-    (events_dir / "src").mkdir(parents=True)
-
-    # Write a large initial file so the offset is high
-    initial_content = (
-        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
-        '{"timestamp":"2026-01-01T01:00:00Z","event_id":"e1b","source":"src"}\n'
-        '{"timestamp":"2026-01-01T02:00:00Z","event_id":"e1c","source":"src"}\n'
-    )
-    (events_dir / "src" / "events.jsonl").write_text(initial_content)
+    events_file = events_dir / "src" / "events.jsonl"
+    events_file.write_text('{"timestamp":"2026-01-01T00:00:00Z","event_id":"h1","source":"src"}\n')
 
     volume = LocalVolume(root_path=events_dir)
-    target = EventsTarget(volume=volume, display_name="test")
+    host_target = EventsTarget(volume=volume, display_name="test")
 
-    state = _AllEventsStreamState(
-        emitted_event_ids={"e1", "e1b", "e1c"},
-        source_byte_offsets={"src": len(initial_content.encode("utf-8"))},
+    # Verify historical events are read in non-follow mode
+    captured_historical: list[str] = []
+    stream_all_events(
+        target=host_target,
+        on_event=lambda e: captured_historical.append(e.event_id),
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        tail_count=None,
+        head_count=None,
+        is_follow=False,
+    )
+    assert "h1" in captured_historical
+
+    # Start a tail thread and verify it picks up new content
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+    event_queue: queue_mod.Queue[EventRecord | None] = queue_mod.Queue()
+    stop_event = threading.Event()
+
+    thread = _start_tail_thread(
+        target=host_target,
+        source_path="src",
+        event_queue=event_queue,
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        stop_event=stop_event,
+        offset_dir_path=offset_dir,
+        initial_byte_offset=len(events_file.read_bytes()),
     )
 
-    # Simulate rotation: new file is shorter than old offset
-    new_content = '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
-    (events_dir / "src" / "events.jsonl").write_text(new_content)
+    try:
+        # Wait for the thread to initialize by polling for the offset file
+        offset_file = offset_dir / "src.offset"
+        poll_for_value(
+            producer=lambda: True if offset_file.exists() else None,
+            timeout=5.0,
+            poll_interval=0.2,
+        )
 
-    captured: list[str] = []
-    _poll_source_for_new_events(target, "src", state, lambda e: captured.append(e.event_id), [], [])
+        # Append new content
+        with events_file.open("a") as f:
+            f.write('{"timestamp":"2026-01-02T00:00:00Z","event_id":"new1","source":"src"}\n')
+            f.flush()
 
-    assert captured == ["e2"]
+        # Poll for the new event
+        result, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert result is not None
+        assert result.event_id == "new1"
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
 
 
-def test_poll_source_deduplicates_during_follow(tmp_path: Path) -> None:
-    """Verify _poll_source_for_new_events skips already-emitted event_ids."""
+# =============================================================================
+# Rotation guard tests
+# =============================================================================
+
+
+def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path) -> None:
+    """Verify _check_for_new_archived_events detects rotated files that appeared after initial scan."""
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
     (events_dir / "src" / "events.jsonl").write_text(
-        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"already_seen","source":"src"}\n'
-        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"new_one","source":"src"}\n'
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
     )
 
     volume = LocalVolume(root_path=events_dir)
     target = EventsTarget(volume=volume, display_name="test")
 
+    # State says we know about "src" but have seen no rotated files yet
     state = _AllEventsStreamState(
-        emitted_event_ids={"already_seen"},
-        source_byte_offsets={"src": 0},
+        known_source_paths={"src"},
+        known_rotated_files={"src": set()},
     )
 
-    captured: list[str] = []
-    _poll_source_for_new_events(target, "src", state, lambda e: captured.append(e.event_id), [], [])
+    # Simulate a new rotated file appearing
+    (events_dir / "src" / "events.jsonl.1").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"old1","source":"src"}\n'
+    )
 
-    assert captured == ["new_one"]
-    assert "already_seen" not in captured
+    new_events = _check_for_new_archived_events(target, state, [], [])
+
+    assert len(new_events) == 1
+    assert new_events[0].event_id == "old1"
+    assert "events.jsonl.1" in state.known_rotated_files["src"]
 
 
-def test_rescan_for_new_sources_discovers_new_source(tmp_path: Path) -> None:
-    """Verify _rescan_for_new_sources picks up new event source directories."""
+def test_check_for_new_archived_events_skips_already_known(tmp_path: Path) -> None:
+    """Verify _check_for_new_archived_events does not re-read already known rotated files."""
     events_dir = tmp_path / "events"
-    (events_dir / "existing").mkdir(parents=True)
-    (events_dir / "existing" / "events.jsonl").write_text(
-        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"existing"}\n'
+    (events_dir / "src").mkdir(parents=True)
+    (events_dir / "src" / "events.jsonl").write_text("")
+    (events_dir / "src" / "events.jsonl.1").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"old1","source":"src"}\n'
     )
 
     volume = LocalVolume(root_path=events_dir)
     target = EventsTarget(volume=volume, display_name="test")
 
+    # State already knows about the rotated file
     state = _AllEventsStreamState(
-        source_byte_offsets={"existing": 100},
+        known_source_paths={"src"},
+        known_rotated_files={"src": {"events.jsonl.1"}},
     )
 
-    # Add a new source directory
-    (events_dir / "new_source").mkdir()
-    (events_dir / "new_source" / "events.jsonl").write_text(
-        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"n1","source":"new_source"}\n'
-    )
+    new_events = _check_for_new_archived_events(target, state, [], [])
+    assert new_events == []
 
-    captured: list[str] = []
-    _rescan_for_new_sources(target, state, lambda e: captured.append(e.event_id), [], [])
 
-    assert "n1" in captured
-    assert "new_source" in state.source_byte_offsets
+# =============================================================================
+# refresh_events_target tests
+# =============================================================================
 
 
 def test_refresh_events_target_returns_same_when_no_provider(tmp_path: Path) -> None:
@@ -1200,35 +1267,3 @@ def test_refresh_events_target_returns_same_when_no_provider(tmp_path: Path) -> 
 
     refreshed = refresh_events_target(target)
     assert refreshed is target
-
-
-def test_check_online_offline_transition_updates_state(
-    temp_mng_ctx: MngContext,
-    local_provider,
-) -> None:
-    """Verify _check_online_offline_transition detects that a host is online."""
-    per_host_dir = local_provider.host_dir
-
-    # Create an agent to make the host appear
-    agent_id = _create_agent_data_json(per_host_dir, "test-transition-agent-71829", "sleep 71829")
-    agent_events_subpath = Path("agents") / str(agent_id) / "events"
-
-    # Create a target that appears offline (no online_host)
-    volume = LocalVolume(root_path=per_host_dir)
-    events_volume = volume.scoped(f"agents/{agent_id}/events")
-    target = EventsTarget(
-        volume=events_volume,
-        display_name="test",
-        provider=local_provider,
-        host_id=local_provider.get_host(HostName("localhost")).id,
-        events_subpath=agent_events_subpath,
-    )
-
-    state = _AllEventsStreamState(is_online=False)
-    target_holder = [target]
-
-    _check_online_offline_transition(target_holder, state)
-
-    # Local host is always online, so state should transition
-    assert state.is_online is True
-    assert target_holder[0].online_host is not None

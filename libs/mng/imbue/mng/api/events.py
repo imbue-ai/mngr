@@ -1,8 +1,10 @@
 import hashlib
 import json
+import queue
 import re
 import shlex
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +17,7 @@ from typing import IO
 from loguru import logger
 from pydantic import Field
 from pydantic import model_validator
+from pygtail import Pygtail
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -104,12 +107,14 @@ class _AllEventsStreamState(MutableModel):
     emitted_event_ids: set[str] = Field(
         default_factory=set, description="Event IDs already emitted, for deduplication"
     )
-    source_byte_offsets: dict[str, int] = Field(
-        default_factory=dict, description="Map from source_path to byte offset already read in current events.jsonl"
+    known_source_paths: set[str] = Field(
+        default_factory=set, description="Source paths for which tail threads have been started"
+    )
+    known_rotated_files: dict[str, set[str]] = Field(
+        default_factory=dict, description="Map from source_path to set of rotated file names already read"
     )
     is_online: bool = Field(default=False, description="Whether the target is currently considered online")
     last_source_scan_time: float = Field(default=0.0, description="Monotonic time of last directory scan")
-    last_online_check_time: float = Field(default=0.0, description="Monotonic time of last online/offline check")
 
 
 class EventFileEntry(FrozenModel):
@@ -847,6 +852,9 @@ def read_all_historical_events(
 # Streaming all events
 # =============================================================================
 
+# Sentinel value pushed to the event queue to signal shutdown
+_QUEUE_SENTINEL: Final[None] = None
+
 
 def stream_all_events(
     target: EventsTarget,
@@ -857,97 +865,354 @@ def stream_all_events(
     head_count: int | None,
     is_follow: bool,
 ) -> None:
-    """Stream all events from all sources, handling online/offline transitions.
+    """Stream all events from all sources.
 
-    Phase 1: Read all historical events (rotated files + current files)
-    Phase 2: Tail all current files for new events (if is_follow=True)
+    Phase 1: Discover sources and read all historical/archived events.
+    Phase 2: Start per-source tail threads that push new events to a queue.
+    Phase 3: Re-check for newly rotated files (rotation guard).
+    Phase 4: Emit historical events.
+    Phase 5: Consume from queue (follow mode only).
     """
     state = _AllEventsStreamState(
         is_online=target.online_host is not None,
         last_source_scan_time=time.monotonic(),
-        last_online_check_time=time.monotonic(),
     )
+    stop_event = threading.Event()
+    event_queue: queue.Queue[EventRecord | None] = queue.Queue()
+    tail_threads: list[threading.Thread] = []
+    offset_dir: tempfile.TemporaryDirectory[str] | None = None
 
-    # Phase 1: Read all historical events
-    with log_span("Reading historical events for {}", target.display_name):
-        sources = discover_event_sources(target)
-        all_events, byte_offsets = read_all_historical_events(
-            target, sources, cel_include_filters, cel_exclude_filters
+    try:
+        # Phase 1: Discover sources and read all historical events
+        with log_span("Reading historical events for {}", target.display_name):
+            sources = discover_event_sources(target)
+            all_events, initial_byte_offsets = read_all_historical_events(
+                target, sources, cel_include_filters, cel_exclude_filters
+            )
+            # Record which rotated files we've already read
+            for source in sources:
+                state.known_source_paths.add(source.source_path)
+                state.known_rotated_files[source.source_path] = set(source.rotated_files)
+
+        # Phase 2: Start tail threads for each current events.jsonl
+        if is_follow:
+            offset_dir = tempfile.TemporaryDirectory(prefix="mng-events-offsets-")
+            for source in sources:
+                if source.is_current_file_present:
+                    thread = _start_tail_thread(
+                        target=target,
+                        source_path=source.source_path,
+                        event_queue=event_queue,
+                        cel_include_filters=cel_include_filters,
+                        cel_exclude_filters=cel_exclude_filters,
+                        stop_event=stop_event,
+                        offset_dir_path=Path(offset_dir.name),
+                        initial_byte_offset=initial_byte_offsets.get(source.source_path, 0),
+                    )
+                    tail_threads.append(thread)
+
+        # Phase 3: Rotation guard -- re-scan for newly rotated files
+        with log_span("Checking for newly rotated files"):
+            rotation_guard_events = _check_for_new_archived_events(
+                target, state, cel_include_filters, cel_exclude_filters
+            )
+            all_events.extend(rotation_guard_events)
+            all_events = sort_events_by_timestamp(all_events)
+
+        # Phase 4: Apply head/tail and emit historical events
+        if head_count is not None:
+            all_events = all_events[:head_count]
+        elif tail_count is not None:
+            all_events = all_events[-tail_count:]
+        else:
+            pass
+
+        for event in all_events:
+            if event.event_id in state.emitted_event_ids:
+                continue
+            state.emitted_event_ids.add(event.event_id)
+            on_event(event)
+
+        if head_count is not None:
+            return
+
+        if not is_follow:
+            return
+
+        # Phase 5: Consume events from queue (follow mode)
+        _consume_event_queue(
+            target=target,
+            state=state,
+            event_queue=event_queue,
+            on_event=on_event,
+            cel_include_filters=cel_include_filters,
+            cel_exclude_filters=cel_exclude_filters,
+            stop_event=stop_event,
+            tail_threads=tail_threads,
+            offset_dir_path=Path(offset_dir.name) if offset_dir is not None else None,
         )
-        state.source_byte_offsets = byte_offsets
 
-    # Apply head/tail truncation
-    if head_count is not None:
-        all_events = all_events[:head_count]
-    elif tail_count is not None:
-        all_events = all_events[-tail_count:]
+    finally:
+        # Graceful shutdown of all tail threads
+        stop_event.set()
+        for thread in tail_threads:
+            thread.join(timeout=5.0)
+        if offset_dir is not None:
+            offset_dir.cleanup()
+
+
+def _check_for_new_archived_events(
+    target: EventsTarget,
+    state: _AllEventsStreamState,
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+) -> list[EventRecord]:
+    """Re-scan for rotated files that appeared since the initial scan.
+
+    This handles the case where rotation happens while we are reading
+    directories and starting tail threads. Any newly rotated files
+    are read and their events returned.
+    """
+    try:
+        current_sources = discover_event_sources(target)
+    except (MngError, OSError) as e:
+        logger.trace("Failed to re-scan for rotated files: {}", e)
+        return []
+
+    new_events: list[EventRecord] = []
+    for source in current_sources:
+        known_rotated = state.known_rotated_files.get(source.source_path, set())
+        for rotated_file in source.rotated_files:
+            if rotated_file not in known_rotated:
+                logger.debug("Found new rotated file during rotation guard: {}/{}", source.source_path, rotated_file)
+                relative_path = f"{source.source_path}/{rotated_file}" if source.source_path else rotated_file
+                events, _ = _read_events_from_file(target, relative_path, source.source_path)
+                new_events.extend(events)
+                # Record that we've now read this rotated file
+                if source.source_path not in state.known_rotated_files:
+                    state.known_rotated_files[source.source_path] = set()
+                state.known_rotated_files[source.source_path].add(rotated_file)
+
+    # Apply CEL filters
+    if cel_include_filters or cel_exclude_filters:
+        new_events = [
+            event
+            for event in new_events
+            if apply_cel_filters_to_context(
+                event.data,
+                cel_include_filters,
+                cel_exclude_filters,
+                error_context_description=f"event {event.event_id}",
+            )
+        ]
+
+    return new_events
+
+
+def _start_tail_thread(
+    target: EventsTarget,
+    source_path: str,
+    event_queue: queue.Queue[EventRecord | None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    offset_dir_path: Path,
+    initial_byte_offset: int,
+) -> threading.Thread:
+    """Start a daemon thread that tails a single events.jsonl and pushes events to the queue."""
+    is_local = target.online_host is not None and target.online_host.is_local
+    if is_local and target.events_path is not None:
+        # Use pygtail for local filesystem tailing
+        events_file_path = target.events_path / source_path / _EVENTS_JSONL_FILENAME
+        thread = threading.Thread(
+            target=_tail_source_thread_local,
+            args=(
+                events_file_path,
+                source_path,
+                event_queue,
+                cel_include_filters,
+                cel_exclude_filters,
+                stop_event,
+                offset_dir_path,
+            ),
+            daemon=True,
+        )
     else:
-        pass
+        # Use polling for remote hosts
+        thread = threading.Thread(
+            target=_tail_source_thread_remote,
+            args=(
+                target,
+                source_path,
+                event_queue,
+                cel_include_filters,
+                cel_exclude_filters,
+                stop_event,
+                initial_byte_offset,
+            ),
+            daemon=True,
+        )
+    thread.start()
+    return thread
 
-    # Emit historical events (deduplicating by event_id)
-    for event in all_events:
+
+def _tail_source_thread_local(
+    events_file_path: Path,
+    source_path: str,
+    event_queue: queue.Queue[EventRecord | None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    offset_dir_path: Path,
+) -> None:
+    """Thread function that tails a local events.jsonl via pygtail."""
+    # Use a sanitized source path for the offset file name
+    offset_file_name = source_path.replace("/", "_") if source_path else "root"
+    offset_file = str(offset_dir_path / f"{offset_file_name}.offset")
+
+    while not stop_event.is_set():
+        try:
+            # Create a new Pygtail instance each iteration. Pygtail reads from
+            # offset_file on construction, so subsequent iterations pick up where
+            # the previous one left off. On the first iteration, read_from_end=True
+            # skips already-processed historical content.
+            tail = Pygtail(
+                str(events_file_path),
+                offset_file=offset_file,
+                save_on_end=True,
+                read_from_end=True,
+                full_lines=True,
+                copytruncate=False,
+            )
+            for line in tail:
+                if stop_event.is_set():
+                    break
+                record = parse_event_line(line, source_path)
+                if record is None:
+                    continue
+                if cel_include_filters or cel_exclude_filters:
+                    if not apply_cel_filters_to_context(
+                        record.data,
+                        cel_include_filters,
+                        cel_exclude_filters,
+                        error_context_description=f"event {record.event_id}",
+                    ):
+                        continue
+                event_queue.put(record)
+        except (OSError, IOError) as e:
+            logger.trace("Pygtail error for source '{}': {}", source_path, e)
+
+        # Wait before checking for more lines
+        stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
+
+
+def _tail_source_thread_remote(
+    target: EventsTarget,
+    source_path: str,
+    event_queue: queue.Queue[EventRecord | None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    initial_byte_offset: int,
+) -> None:
+    """Thread function that polls a remote source for new events."""
+    byte_offset = initial_byte_offset
+    relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
+
+    while not stop_event.is_set():
+        try:
+            content = read_event_content(target, relative_file_path)
+        except (MngError, OSError) as e:
+            logger.trace("Failed to read remote source '{}' during follow: {}", source_path, e)
+            stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
+            continue
+
+        content_bytes = content.encode("utf-8")
+        current_length = len(content_bytes)
+
+        if current_length < byte_offset:
+            # File was rotated -- re-read from beginning, dedup via event_ids
+            logger.debug("Remote event file for source '{}' was rotated", source_path)
+            byte_offset = 0
+
+        if current_length > byte_offset:
+            new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")
+            for line in new_content.split("\n"):
+                record = parse_event_line(line, source_path)
+                if record is None:
+                    continue
+                if cel_include_filters or cel_exclude_filters:
+                    if not apply_cel_filters_to_context(
+                        record.data,
+                        cel_include_filters,
+                        cel_exclude_filters,
+                        error_context_description=f"event {record.event_id}",
+                    ):
+                        continue
+                event_queue.put(record)
+            byte_offset = current_length
+
+        stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
+
+
+_QUEUE_POLL_INTERVAL_SECONDS: Final[float] = 0.1
+
+
+def _consume_event_queue(
+    target: EventsTarget,
+    state: _AllEventsStreamState,
+    event_queue: queue.Queue[EventRecord | None],
+    on_event: Callable[[EventRecord], None],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    tail_threads: list[threading.Thread],
+    offset_dir_path: Path | None,
+) -> None:
+    """Consume events from the queue, periodically re-scanning for new sources."""
+    state.last_source_scan_time = time.monotonic()
+
+    while not stop_event.is_set():
+        # Drain available events from the queue
+        try:
+            event = event_queue.get(timeout=_QUEUE_POLL_INTERVAL_SECONDS)
+        except queue.Empty:
+            # Check if it's time to re-scan for new source directories
+            now = time.monotonic()
+            if now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
+                _rescan_and_start_new_tail_threads(
+                    target=target,
+                    state=state,
+                    event_queue=event_queue,
+                    cel_include_filters=cel_include_filters,
+                    cel_exclude_filters=cel_exclude_filters,
+                    stop_event=stop_event,
+                    tail_threads=tail_threads,
+                    offset_dir_path=offset_dir_path,
+                )
+                state.last_source_scan_time = now
+            continue
+
+        if event is _QUEUE_SENTINEL:
+            break
+
         if event.event_id in state.emitted_event_ids:
             continue
         state.emitted_event_ids.add(event.event_id)
         on_event(event)
 
-    if head_count is not None:
-        # Head mode: done after emitting
-        return
 
-    if not is_follow:
-        return
-
-    # Phase 2: Tailing (follow mode)
-    # Use a mutable container so the polling callback can update the target
-    target_holder: list[EventsTarget] = [target]
-
-    run_periodically(
-        fn=lambda: _poll_all_sources(
-            target_holder,
-            state,
-            on_event,
-            cel_include_filters,
-            cel_exclude_filters,
-        ),
-        interval=FOLLOW_POLL_INTERVAL_SECONDS,
-    )
-
-
-def _poll_all_sources(
-    target_holder: list[EventsTarget],
-    state: _AllEventsStreamState,
-    on_event: Callable[[EventRecord], None],
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
-) -> None:
-    """Single poll iteration for the follow loop."""
-    target = target_holder[0]
-    now = time.monotonic()
-
-    # Periodically re-scan for new event sources
-    if now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
-        _rescan_for_new_sources(target, state, on_event, cel_include_filters, cel_exclude_filters)
-        state.last_source_scan_time = now
-
-    # Check each known source for new content
-    for source_path in list(state.source_byte_offsets.keys()):
-        _poll_source_for_new_events(target, source_path, state, on_event, cel_include_filters, cel_exclude_filters)
-
-    # Periodically check online/offline transitions
-    if now - state.last_online_check_time > ONLINE_CHECK_INTERVAL_SECONDS:
-        _check_online_offline_transition(target_holder, state)
-        state.last_online_check_time = now
-
-
-def _rescan_for_new_sources(
+def _rescan_and_start_new_tail_threads(
     target: EventsTarget,
     state: _AllEventsStreamState,
-    on_event: Callable[[EventRecord], None],
+    event_queue: queue.Queue[EventRecord | None],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
+    stop_event: threading.Event,
+    tail_threads: list[threading.Thread],
+    offset_dir_path: Path | None,
 ) -> None:
-    """Re-scan for new event source directories and process any new ones found."""
+    """Re-scan for new event source directories and start tail threads for them."""
     try:
         current_sources = discover_event_sources(target)
     except (MngError, OSError) as e:
@@ -955,83 +1220,33 @@ def _rescan_for_new_sources(
         return
 
     for source in current_sources:
-        if source.source_path not in state.source_byte_offsets:
-            # New source found -- read all its historical events
-            logger.debug("Discovered new event source: {}", source.source_path)
-            _process_new_source(target, source, state, on_event, cel_include_filters, cel_exclude_filters)
-
-
-def _process_new_source(
-    target: EventsTarget,
-    source: EventSourceInfo,
-    state: _AllEventsStreamState,
-    on_event: Callable[[EventRecord], None],
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
-) -> None:
-    """Read all events from a newly discovered source and emit them."""
-    events, byte_offsets = read_all_historical_events(target, [source], cel_include_filters, cel_exclude_filters)
-
-    for event in events:
-        if event.event_id not in state.emitted_event_ids:
-            state.emitted_event_ids.add(event.event_id)
-            on_event(event)
-
-    # Record byte offset for the new source
-    state.source_byte_offsets[source.source_path] = byte_offsets.get(source.source_path, 0)
-
-
-def _poll_source_for_new_events(
-    target: EventsTarget,
-    source_path: str,
-    state: _AllEventsStreamState,
-    on_event: Callable[[EventRecord], None],
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
-) -> None:
-    """Check a single source for new events appended to its current events.jsonl."""
-    previous_offset = state.source_byte_offsets.get(source_path, 0)
-    relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
-
-    try:
-        content = read_event_content(target, relative_file_path)
-    except (MngError, OSError) as e:
-        logger.trace("Failed to read source '{}' during follow: {}", source_path, e)
-        return
-
-    content_bytes = content.encode("utf-8")
-    current_length = len(content_bytes)
-
-    if current_length < previous_offset:
-        # File was rotated/truncated -- re-read from beginning, dedup via event_ids
-        logger.debug("Event file for source '{}' was rotated, re-reading from start", source_path)
-        previous_offset = 0
-
-    if current_length <= previous_offset:
-        return
-
-    # Extract only the new bytes
-    new_content = content_bytes[previous_offset:].decode("utf-8", errors="replace")
-
-    # Parse and emit new events
-    for line in new_content.split("\n"):
-        record = parse_event_line(line, source_path)
-        if record is None:
+        if source.source_path in state.known_source_paths:
             continue
-        if record.event_id in state.emitted_event_ids:
-            continue
-        if cel_include_filters or cel_exclude_filters:
-            if not apply_cel_filters_to_context(
-                record.data,
-                cel_include_filters,
-                cel_exclude_filters,
-                error_context_description=f"event {record.event_id}",
-            ):
-                continue
-        state.emitted_event_ids.add(record.event_id)
-        on_event(record)
 
-    state.source_byte_offsets[source_path] = current_length
+        # New source discovered -- read its historical events and start tailing
+        logger.debug("Discovered new event source during follow: {}", source.source_path)
+        state.known_source_paths.add(source.source_path)
+        state.known_rotated_files[source.source_path] = set(source.rotated_files)
+
+        # Read historical events from this new source
+        events, byte_offsets = read_all_historical_events(target, [source], cel_include_filters, cel_exclude_filters)
+        for event in events:
+            if event.event_id not in state.emitted_event_ids:
+                event_queue.put(event)
+
+        # Start a tail thread for the new source
+        if source.is_current_file_present and offset_dir_path is not None:
+            thread = _start_tail_thread(
+                target=target,
+                source_path=source.source_path,
+                event_queue=event_queue,
+                cel_include_filters=cel_include_filters,
+                cel_exclude_filters=cel_exclude_filters,
+                stop_event=stop_event,
+                offset_dir_path=offset_dir_path,
+                initial_byte_offset=byte_offsets.get(source.source_path, 0),
+            )
+            tail_threads.append(thread)
 
 
 # =============================================================================
@@ -1057,31 +1272,3 @@ def refresh_events_target(
         host_id=target.host_id,
         events_subpath=target.events_subpath,
     )
-
-
-def _check_online_offline_transition(
-    target_holder: list[EventsTarget],
-    state: _AllEventsStreamState,
-) -> None:
-    """Check if the target's online/offline status has changed and update accordingly."""
-    target = target_holder[0]
-    if target.provider is None or target.host_id is None:
-        return
-
-    try:
-        new_target = refresh_events_target(target)
-    except (MngError, OSError) as e:
-        logger.trace("Failed to check online status: {}", e)
-        return
-
-    was_online = state.is_online
-    is_now_online = new_target.online_host is not None
-
-    if was_online != is_now_online:
-        logger.debug(
-            "Target {} {}",
-            target.display_name,
-            "came online" if is_now_online else "went offline",
-        )
-        state.is_online = is_now_online
-        target_holder[0] = new_target
