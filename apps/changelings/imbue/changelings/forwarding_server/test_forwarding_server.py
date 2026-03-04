@@ -15,8 +15,8 @@ from imbue.changelings.forwarding_server.backend_resolver import BackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import StaticBackendResolver
 from imbue.changelings.forwarding_server.conftest import DEFAULT_SERVER_NAME
-from imbue.changelings.forwarding_server.conftest import FakeMngCli
 from imbue.changelings.forwarding_server.conftest import make_agents_json
+from imbue.changelings.forwarding_server.conftest import make_resolver_with_data
 from imbue.changelings.forwarding_server.conftest import make_server_log
 from imbue.changelings.forwarding_server.cookie_manager import get_cookie_name_for_agent
 from imbue.changelings.forwarding_server.ssh_tunnel import RemoteSSHInfo
@@ -518,18 +518,16 @@ def test_mng_cli_resolver_proxies_to_backend_discovered_via_mng_cli(tmp_path: Pa
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(
-        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
-        agents_json=make_agents_json(agent_id),
-    )
-
     backend_app = _create_test_backend()
     test_http_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=backend_app),
         base_url="http://test-backend",
     )
 
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = make_resolver_with_data(
+        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
+        agents_json=make_agents_json(agent_id),
+    )
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -560,10 +558,6 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     data_dir = tmp_path / "changelings_data"
 
     log_content = make_server_log("web", "http://web-backend") + make_server_log("api", "http://api-backend")
-    fake_cli = FakeMngCli(
-        server_logs={str(agent_id): log_content},
-        agents_json=make_agents_json(agent_id),
-    )
 
     # Create distinct backends for web and api
     web_backend = FastAPI()
@@ -580,7 +574,10 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
 
     test_http_client = _create_multi_backend_http_client(web_app=web_backend, api_app=api_backend)
 
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = make_resolver_with_data(
+        server_logs={str(agent_id): log_content},
+        agents_json=make_agents_json(agent_id),
+    )
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -611,8 +608,7 @@ def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> N
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(server_logs={}, agents_json=None)
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = MngCliBackendResolver()
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -631,12 +627,10 @@ def test_mng_cli_resolver_landing_page_shows_discovered_agents(tmp_path: Path) -
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(
+    backend_resolver = make_resolver_with_data(
         server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
         agents_json=make_agents_json(agent_id),
     )
-
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -656,12 +650,11 @@ def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None
     data_dir = tmp_path / "changelings_data"
 
     log_content = make_server_log("web", "http://test:9100") + make_server_log("api", "http://test:9200")
-    fake_cli = FakeMngCli(
+
+    backend_resolver = make_resolver_with_data(
         server_logs={str(agent_id): log_content},
         agents_json=make_agents_json(agent_id),
     )
-
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
