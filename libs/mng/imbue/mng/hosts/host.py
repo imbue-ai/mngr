@@ -1962,6 +1962,12 @@ class Host(BaseHost, OnlineHostInterface):
                 command = self._get_agent_command(agent)
                 additional_commands = self._get_agent_additional_commands(agent)
 
+                # Write the full command to a run script so the tmux pane shows
+                # a short invocation instead of the full multi-part command.
+                agent_state_dir = self._get_agent_state_dir(agent)
+                run_script_path = agent_state_dir / "run.sh"
+                self.write_text_file(run_script_path, f"#!/bin/bash\n{command}\n", mode="0755")
+
                 onboarding_text: str | None = None
                 if is_onboarding_needed:
                     is_onboarding_needed = False
@@ -1977,7 +1983,7 @@ class Host(BaseHost, OnlineHostInterface):
                     combined_command = _build_start_agent_shell_command(
                         agent=agent,
                         session_name=session_name,
-                        command=command,
+                        command='bash "$MNG_AGENT_STATE_DIR/run.sh"',
                         additional_commands=additional_commands,
                         env_shell_cmd=self._build_env_shell_command(agent),
                         tmux_config_path=tmux_config_path,
