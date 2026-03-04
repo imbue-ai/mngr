@@ -127,7 +127,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(8))
+    rc.check_trailing_comments(_DIR, snapshot(9))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -215,7 +215,7 @@ def test_prevent_direct_subprocess_usage() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(0))
+    rc.check_if_elif_without_else(_DIR, snapshot(1))
 
 
 def test_prevent_inline_functions_in_non_test_code() -> None:

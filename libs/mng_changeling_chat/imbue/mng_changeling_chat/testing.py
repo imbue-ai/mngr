@@ -8,6 +8,7 @@ import json
 
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.hosts.host import Host
+from imbue.mng_changeling_chat.api import get_agent_state_dir
 
 
 class TestAgent(BaseAgent):
@@ -23,7 +24,7 @@ def create_conversation_events(
     conversations: list[dict[str, str]],
 ) -> None:
     """Create conversation event files on the host for testing."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    agent_state_dir = get_agent_state_dir(agent, host)
     conv_dir = agent_state_dir / "events" / "conversations"
     conv_dir.mkdir(parents=True, exist_ok=True)
 
@@ -39,7 +40,7 @@ def create_message_events(
     messages: list[dict[str, str]],
 ) -> None:
     """Create message event files on the host for testing."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    agent_state_dir = get_agent_state_dir(agent, host)
     msg_dir = agent_state_dir / "events" / "messages"
     msg_dir.mkdir(parents=True, exist_ok=True)
 

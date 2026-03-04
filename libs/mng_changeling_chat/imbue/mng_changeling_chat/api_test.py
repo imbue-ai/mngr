@@ -13,11 +13,13 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
+from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng_changeling_chat.api import ChatCommandError
 from imbue.mng_changeling_chat.api import _build_chat_env_vars
 from imbue.mng_changeling_chat.api import _build_chat_script_path
 from imbue.mng_changeling_chat.api import _build_conversation_event_paths
 from imbue.mng_changeling_chat.api import _build_remote_chat_script
+from imbue.mng_changeling_chat.api import _load_env_file_into_dict
 from imbue.mng_changeling_chat.api import get_latest_conversation_id
 from imbue.mng_changeling_chat.api import list_conversations_on_agent
 from imbue.mng_changeling_chat.testing import TestAgent
@@ -266,3 +268,83 @@ def test_get_latest_conversation_id_returns_none_when_no_conversations(
     result = get_latest_conversation_id(agent, host)
 
     assert result is None
+
+
+# =========================================================================
+# Tests for _load_env_file_into_dict
+# =========================================================================
+
+
+def test_load_env_file_parses_key_value_pairs(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-ant-123\nMODEL=opus\n")
+
+    env: dict[str, str] = {}
+    _load_env_file_into_dict(env_file, env)
+
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-123"
+    assert env["MODEL"] == "opus"
+
+
+def test_load_env_file_strips_quotes(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("KEY1=\"double-quoted\"\nKEY2='single-quoted'\n")
+
+    env: dict[str, str] = {}
+    _load_env_file_into_dict(env_file, env)
+
+    assert env["KEY1"] == "double-quoted"
+    assert env["KEY2"] == "single-quoted"
+
+
+def test_load_env_file_skips_comments_and_blanks(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("# comment\n\nKEY=value\n  # another comment\n")
+
+    env: dict[str, str] = {}
+    _load_env_file_into_dict(env_file, env)
+
+    assert env == {"KEY": "value"}
+
+
+def test_load_env_file_does_nothing_when_missing(tmp_path: Path) -> None:
+    env: dict[str, str] = {}
+    _load_env_file_into_dict(tmp_path / "nonexistent", env)
+
+    assert env == {}
+
+
+# =========================================================================
+# Tests for _build_source_env_prefix
+# =========================================================================
+
+
+def test_build_source_env_shell_commands_sources_host_then_agent_env() -> None:
+    commands = build_source_env_shell_commands(Path("/host/env"), Path("/agent/env"))
+
+    joined = " ".join(commands)
+    assert "set -a" in joined
+    assert "set +a" in joined
+    # Host env sourced before agent env
+    host_pos = joined.index("/host/env")
+    agent_pos = joined.index("/agent/env")
+    assert host_pos < agent_pos
+
+
+# =========================================================================
+# Tests for _build_remote_chat_script (env sourcing)
+# =========================================================================
+
+
+def test_build_remote_chat_script_sources_env_files(
+    local_host_and_agent: tuple[Host, TestAgent],
+) -> None:
+    host, agent = local_host_and_agent
+
+    script = _build_remote_chat_script(host.host_dir, agent, host, ["--new"])
+
+    # Should source env files before setting MNG_ vars
+    assert "set -a" in script
+    assert str(host.host_dir / "env") in script
+    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    assert str(agent_state_dir / "env") in script

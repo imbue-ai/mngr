@@ -14,6 +14,8 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NestedTmuxError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.utils.env_utils import build_source_env_shell_commands
+from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.interactive_subprocess import run_interactive_subprocess
 
 
@@ -33,12 +35,21 @@ class ConversationInfo(FrozenModel):
 
 
 @pure
+def get_agent_state_dir(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+) -> Path:
+    """Get the agent's state directory on the host."""
+    return host.host_dir / "agents" / str(agent.id)
+
+
+@pure
 def _build_chat_env_vars(
     agent: AgentInterface,
     host: OnlineHostInterface,
 ) -> dict[str, str]:
     """Build the environment variables needed by chat.sh."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    agent_state_dir = get_agent_state_dir(agent, host)
     return {
         "MNG_HOST_DIR": str(host.host_dir),
         "MNG_AGENT_STATE_DIR": str(agent_state_dir),
@@ -46,6 +57,28 @@ def _build_chat_env_vars(
         "MNG_AGENT_ID": str(agent.id),
         "MNG_AGENT_NAME": str(agent.name),
     }
+
+
+@pure
+def _build_env_file_paths(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+) -> tuple[Path, Path]:
+    """Build paths to the host and agent env files."""
+    host_env_path = host.host_dir / "env"
+    agent_env_path = host.get_agent_env_path(agent)
+    return host_env_path, agent_env_path
+
+
+def _load_env_file_into_dict(env_path: Path, env: dict[str, str]) -> None:
+    """Parse an env file and add its variables to the dict.
+
+    Uses the shared parse_env_file utility (backed by python-dotenv).
+    """
+    if not env_path.exists():
+        return
+    parsed = parse_env_file(env_path.read_text())
+    env.update(parsed)
 
 
 @pure
@@ -60,7 +93,7 @@ def _build_conversation_event_paths(
     host: OnlineHostInterface,
 ) -> tuple[Path, Path]:
     """Build paths to conversation and message event files for an agent."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    agent_state_dir = get_agent_state_dir(agent, host)
     conversations_path = agent_state_dir / "events" / "conversations" / "events.jsonl"
     messages_path = agent_state_dir / "events" / "messages" / "events.jsonl"
     return conversations_path, messages_path
@@ -140,16 +173,22 @@ def _build_remote_chat_script(
 ) -> str:
     """Build a shell script to run chat.sh on a remote host via SSH.
 
-    Sets the required environment variables and then execs chat.sh.
+    Sources the host and agent env files (for API keys etc.), sets the
+    required MNG_ environment variables, and then execs chat.sh.
     """
     chat_script = _build_chat_script_path(host_dir)
     env_vars = _build_chat_env_vars(agent, host)
+    host_env_path, agent_env_path = _build_env_file_paths(agent, host)
+
+    # Source env files first (for API keys, etc.), then set MNG_ vars
+    source_commands = build_source_env_shell_commands(host_env_path, agent_env_path)
+    source_prefix = "; ".join(source_commands) + "; "
 
     # Use shlex.quote for each value to prevent shell injection from
     # agent names or paths containing special characters
     export_statements = "; ".join(f"export {key}={shlex.quote(value)}" for key, value in env_vars.items())
     escaped_args = " ".join(shlex.quote(arg) for arg in chat_args)
-    return f"{export_statements}; exec {shlex.quote(chat_script)} {escaped_args}"
+    return f"{source_prefix}{export_statements}; exec {shlex.quote(chat_script)} {escaped_args}"
 
 
 def run_chat_on_agent(  # pragma: no cover
@@ -174,8 +213,12 @@ def run_chat_on_agent(  # pragma: no cover
                 f"Chat script not found at {chat_script}. Is this agent a changeling with chat support?"
             )
 
-        # Build environment with the required MNG_ variables
+        # Build environment: start with current env, source host/agent env files
+        # (for API keys etc.), then overlay the MNG_ variables
         env = dict(os.environ)
+        host_env_path, agent_env_path = _build_env_file_paths(agent, host)
+        _load_env_file_into_dict(host_env_path, env)
+        _load_env_file_into_dict(agent_env_path, env)
         env.update(_build_chat_env_vars(agent, host))
 
         # Handle nested tmux (chat.sh may call llm live-chat which is interactive)
@@ -189,7 +232,7 @@ def run_chat_on_agent(  # pragma: no cover
     else:
         ssh_args = build_ssh_base_args(host, is_unknown_host_allowed=is_unknown_host_allowed)
 
-        # Build the remote command script
+        # Build the remote command script (sources env files + runs chat.sh)
         remote_script = _build_remote_chat_script(host.host_dir, agent, host, chat_args)
         ssh_args.extend(["-t", "bash -c " + shlex.quote(remote_script)])
 

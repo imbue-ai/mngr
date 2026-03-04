@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.5",
     "click-option-group>=0.5.6",
+    "urwid>=2.2.0",
 ]
 
 [project.entry-points.mng]

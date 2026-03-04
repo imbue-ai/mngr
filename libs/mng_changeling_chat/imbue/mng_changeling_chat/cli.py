@@ -76,15 +76,15 @@ def _handle_conversation_selector_input(  # pragma: no cover
     if key == "ctrl c":
         raise ExitMainLoop()
 
-    if key == "n":
-        state.is_new_selected = True
-        raise ExitMainLoop()
-
     if key == "enter":
-        if state.list_walker and state.conversations:
+        if state.list_walker:
             _, focus_index = state.list_walker.get_focus()
-            if focus_index is not None and 0 <= focus_index < len(state.conversations):
-                state.result = state.conversations[focus_index]
+            if focus_index is not None:
+                # Index 0 is the "[New conversation]" entry
+                if focus_index == 0:
+                    state.is_new_selected = True
+                elif focus_index - 1 < len(state.conversations):
+                    state.result = state.conversations[focus_index - 1]
         raise ExitMainLoop()
 
     # Let arrow keys pass through to the ListBox for navigation
@@ -120,11 +120,16 @@ def _run_conversation_selector(  # pragma: no cover
     model_width = min(model_width, 25)
 
     list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker([])
+
+    # Add a "[New conversation]" option at the top
+    new_conv_text = "[New conversation]"
+    new_conv_item = SelectableIcon(new_conv_text, cursor_position=0)
+    list_walker.append(AttrMap(new_conv_item, None, focus_map="reversed"))
+
     for conversation in conversations:
         list_walker.append(_create_selectable_conversation_item(conversation, cid_width, model_width))
 
-    if list_walker:
-        list_walker.set_focus(0)
+    list_walker.set_focus(0)
 
     listbox = ListBox(list_walker)
 
@@ -133,13 +138,7 @@ def _run_conversation_selector(  # pragma: no cover
         list_walker=list_walker,
     )
 
-    instructions_text = (
-        "Instructions:\n"
-        "  Up/Down - Navigate the list\n"
-        "  Enter - Resume selected conversation\n"
-        "  n - Start a new conversation\n"
-        "  Ctrl+C - Cancel"
-    )
+    instructions_text = "Instructions:\n  Up/Down - Navigate the list\n  Enter - Select\n  Ctrl+C - Cancel"
     instructions = Text(instructions_text)
 
     header_text = f"{'CONVERSATION'.ljust(cid_width)}  {'MODEL'.ljust(model_width)}  UPDATED"
