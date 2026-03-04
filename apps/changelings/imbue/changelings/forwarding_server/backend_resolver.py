@@ -332,7 +332,9 @@ class MngStreamManager(MutableModel):
         try:
             raw = json.loads(stripped)
             record = ServerLogRecord.model_validate(raw)
-            servers = self._events_servers[aid_str]
+            servers = self._events_servers.get(aid_str)
+            if servers is None:
+                return
             servers[str(record.server)] = record.url
             self.resolver.update_servers(agent_id, dict(servers))
         except (json.JSONDecodeError, ValueError) as e:
