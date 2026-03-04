@@ -132,7 +132,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         raise UserInputError("Cannot specify both agent names and --all")
 
     # Get message content
-    message_content = _get_message_content(opts.message_content, ctx)
+    message_content = _get_message_content(opts.message_content, ctx, is_interactive=mng_ctx.is_interactive)
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -184,14 +184,18 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         ctx.exit(1)
 
 
-def _get_message_content(message_option: str | None, ctx: click.Context) -> str:
+def _get_message_content(message_option: str | None, ctx: click.Context, is_interactive: bool) -> str:
     """Get the message content from option, stdin, or editor."""
     if message_option is not None:
         return message_option
 
-    # Check if stdin has data (not a tty)
+    # Check if stdin has piped data (not a tty)
     if not sys.stdin.isatty():
         return sys.stdin.read()
+
+    # In headless mode, we cannot open an editor
+    if not is_interactive:
+        raise UserInputError("No message provided and running in headless mode (use --message to provide one)")
 
     # Interactive mode: open editor
     message_from_editor = click.edit()

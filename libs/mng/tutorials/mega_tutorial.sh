@@ -249,14 +249,14 @@ mng create my-task --label team=backend --tag env=staging
 ## CREATING AND USING AGENTS PROGRAMMATICALLY
 
 # mng is very much meant to be used for scripting and automation, so nothing requires interactivity.
-# if you want to be sure that interactivity is disabled, you can use the --headless flag: [future]
+# if you want to be sure that interactivity is disabled, you can use the --headless flag:
 mng create my-task --headless
 
-# or you can set that option in your config so that it always applies: [future]
-mng config set headless True
+# or you can set that option in your config so that it always applies:
+mng config set headless true
 
-# or you can set it as an environment variable: [future]
-export MNG_HEADLESS=True
+# or you can set it as an environment variable:
+export MNG_HEADLESS=true
 
 # *all* mng options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
 mng config set commands.create.in modal

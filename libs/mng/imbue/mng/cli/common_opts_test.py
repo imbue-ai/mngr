@@ -3,8 +3,10 @@
 from typing import Any
 
 import click
+import pluggy
 import pytest
 from click.core import ParameterSource
+from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.cli.common_opts import CommonCliOptions
@@ -13,9 +15,11 @@ from imbue.mng.cli.common_opts import _resolve_format_flags
 from imbue.mng.cli.common_opts import _run_pre_command_scripts
 from imbue.mng.cli.common_opts import _run_single_script
 from imbue.mng.cli.common_opts import _split_known_and_plugin_params
+from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import apply_config_defaults
 from imbue.mng.cli.common_opts import apply_create_template
 from imbue.mng.cli.common_opts import parse_output_options
+from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
@@ -655,3 +659,40 @@ def test_split_known_and_plugin_params_empty_params() -> None:
 
     assert known == {}
     assert plugin == {}
+
+
+# =============================================================================
+# Tests for --headless flag integration with setup_command_context
+# =============================================================================
+
+
+def test_headless_flag_sets_is_interactive_false_via_setup_command_context(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--headless CLI flag should result in is_interactive=False on MngContext.
+
+    This tests the full integration path: --headless flag -> CommonCliOptions.headless
+    -> setup_command_context -> mng_ctx.is_interactive=False.
+    """
+    captured_is_interactive: list[bool] = []
+
+    @click.command()
+    @add_common_options
+    @click.pass_context
+    def test_command(ctx: click.Context, **kwargs: Any) -> None:
+        mng_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="test",
+            command_class=CommonCliOptions,
+        )
+        captured_is_interactive.append(mng_ctx.is_interactive)
+
+    result = cli_runner.invoke(
+        test_command,
+        ["--headless"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert captured_is_interactive == [False]

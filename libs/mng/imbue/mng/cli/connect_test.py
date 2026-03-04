@@ -7,7 +7,7 @@ from imbue.mng.cli.connect import filter_agents
 from imbue.mng.cli.connect import handle_search_key
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.utils.testing import make_test_agent_info
+from imbue.mng.utils.testing import make_test_agent_details
 
 # =============================================================================
 # Helpers
@@ -83,8 +83,8 @@ def test_connect_cli_options_can_be_instantiated() -> None:
 def test_filter_agents_returns_all_when_no_filters() -> None:
     """filter_agents should return all agents when no filters applied."""
     agents = [
-        make_test_agent_info("agent-1", AgentLifecycleState.RUNNING),
-        make_test_agent_info("agent-2", AgentLifecycleState.STOPPED),
+        make_test_agent_details("agent-1", AgentLifecycleState.RUNNING),
+        make_test_agent_details("agent-2", AgentLifecycleState.STOPPED),
     ]
     result = filter_agents(agents, hide_stopped=False, search_query="")
     assert len(result) == 2
@@ -93,9 +93,9 @@ def test_filter_agents_returns_all_when_no_filters() -> None:
 def test_filter_agents_hides_stopped() -> None:
     """filter_agents should hide stopped agents when hide_stopped is True."""
     agents = [
-        make_test_agent_info("agent-1", AgentLifecycleState.RUNNING),
-        make_test_agent_info("agent-2", AgentLifecycleState.STOPPED),
-        make_test_agent_info("agent-3", AgentLifecycleState.RUNNING),
+        make_test_agent_details("agent-1", AgentLifecycleState.RUNNING),
+        make_test_agent_details("agent-2", AgentLifecycleState.STOPPED),
+        make_test_agent_details("agent-3", AgentLifecycleState.RUNNING),
     ]
     result = filter_agents(agents, hide_stopped=True, search_query="")
     assert len(result) == 2
@@ -105,9 +105,9 @@ def test_filter_agents_hides_stopped() -> None:
 def test_filter_agents_filters_by_search_query() -> None:
     """filter_agents should filter by search query (case insensitive)."""
     agents = [
-        make_test_agent_info("my-task-1"),
-        make_test_agent_info("other-agent"),
-        make_test_agent_info("MY-TASK-2"),
+        make_test_agent_details("my-task-1"),
+        make_test_agent_details("other-agent"),
+        make_test_agent_details("MY-TASK-2"),
     ]
     result = filter_agents(agents, hide_stopped=False, search_query="task")
     assert len(result) == 2
@@ -118,9 +118,9 @@ def test_filter_agents_filters_by_search_query() -> None:
 def test_filter_agents_combines_filters() -> None:
     """filter_agents should combine hide_stopped and search_query filters."""
     agents = [
-        make_test_agent_info("task-running", AgentLifecycleState.RUNNING),
-        make_test_agent_info("task-stopped", AgentLifecycleState.STOPPED),
-        make_test_agent_info("other-running", AgentLifecycleState.RUNNING),
+        make_test_agent_details("task-running", AgentLifecycleState.RUNNING),
+        make_test_agent_details("task-stopped", AgentLifecycleState.STOPPED),
+        make_test_agent_details("other-running", AgentLifecycleState.RUNNING),
     ]
     result = filter_agents(agents, hide_stopped=True, search_query="task")
     assert len(result) == 1
@@ -129,7 +129,7 @@ def test_filter_agents_combines_filters() -> None:
 
 def test_filter_agents_returns_empty_on_no_match() -> None:
     """filter_agents should return empty list when no agents match."""
-    agents = [make_test_agent_info("agent-1")]
+    agents = [make_test_agent_details("agent-1")]
     result = filter_agents(agents, hide_stopped=False, search_query="nonexistent")
     assert result == []
 

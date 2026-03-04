@@ -8,11 +8,11 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
@@ -90,7 +90,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
 
 def toggle_agent_mute(mng_ctx: MngContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
     agent, _host = find_and_maybe_start_agent_by_name_or_id(
         str(agent_name),
         agents_by_host,
@@ -109,7 +109,7 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
     """Load the set of muted agent names from plugin data."""
     muted: set[AgentName] = set()
     try:
-        agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+        agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
         for _host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
                 plugin_data: dict[str, Any] = agent_ref.certified_data.get("plugin", {}).get(PLUGIN_NAME, {})
@@ -120,7 +120,7 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
     return muted
 
 
-def _find_git_cwd(agents: list[AgentInfo]) -> Path | None:
+def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:
     """Find a local agent work_dir to use as cwd for gh commands.
 
     Returns the first accessible local agent work_dir, or None if no local
@@ -132,7 +132,7 @@ def _find_git_cwd(agents: list[AgentInfo]) -> Path | None:
     return None
 
 
-def _resolve_agent_branch(agent: AgentInfo, cg: ConcurrencyGroup) -> str | None:
+def _resolve_agent_branch(agent: AgentDetails, cg: ConcurrencyGroup) -> str | None:
     """Determine the git branch associated with an agent.
 
     For local agents with an accessible work_dir, reads the branch via git.

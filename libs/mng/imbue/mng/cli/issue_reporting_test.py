@@ -12,6 +12,7 @@ from imbue.mng.cli.issue_reporting import build_issue_body
 from imbue.mng.cli.issue_reporting import build_issue_title
 from imbue.mng.cli.issue_reporting import build_new_issue_url
 from imbue.mng.cli.issue_reporting import handle_not_implemented_error
+from imbue.mng.cli.issue_reporting import handle_unexpected_error
 from imbue.mng.cli.issue_reporting import search_for_existing_issue
 
 
@@ -285,6 +286,37 @@ def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypat
     assert len(opened_urls) == 1
     assert opened_urls[0].startswith(f"{GITHUB_BASE_URL}/issues/new?")
     assert "NotImplemented" in opened_urls[0]
+
+
+# =============================================================================
+# Tests for is_interactive parameter on error handlers
+# =============================================================================
+
+
+def test_handle_not_implemented_error_is_interactive_false_exits_without_prompting() -> None:
+    """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
+
+    This verifies that the is_interactive parameter takes precedence over the fallback
+    sys.stdin.isatty() check. The is_interactive=True path is already tested by the existing
+    tests above that monkeypatch sys.stdin.isatty to return True.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        handle_not_implemented_error(NotImplementedError("some feature"), is_interactive=False)
+
+    assert exc_info.value.code == 1
+
+
+def test_handle_unexpected_error_is_interactive_false_exits_without_prompting() -> None:
+    """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
+
+    This verifies that the is_interactive parameter takes precedence over the fallback
+    sys.stdin.isatty() check. The is_interactive=True path is already tested by the existing
+    tests for handle_not_implemented_error.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        handle_unexpected_error(RuntimeError("boom"), is_interactive=False)
+
+    assert exc_info.value.code == 1
 
 
 # =============================================================================

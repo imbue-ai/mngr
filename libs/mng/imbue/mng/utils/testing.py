@@ -31,8 +31,8 @@ from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.hosts.tmux import build_tmux_capture_pane_command
-from imbue.mng.interfaces.data_types import AgentInfo
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
@@ -460,7 +460,7 @@ def make_mng_ctx(
     )
 
 
-def make_test_agent_info(
+def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
     create_time: datetime | None = None,
@@ -468,13 +468,13 @@ def make_test_agent_info(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
-) -> AgentInfo:
-    """Create a real AgentInfo for testing.
+) -> AgentDetails:
+    """Create a real AgentDetails for testing.
 
-    Shared helper used across test files to avoid duplicating AgentInfo
+    Shared helper used across test files to avoid duplicating AgentDetails
     construction logic. Accepts optional overrides for commonly varied fields.
     """
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
@@ -483,7 +483,7 @@ def make_test_agent_info(
         plugin=host_plugin or {},
         tags=host_tags or {},
     )
-    return AgentInfo(
+    return AgentDetails(
         id=AgentId.generate(),
         name=AgentName(name),
         type="generic",
@@ -493,7 +493,7 @@ def make_test_agent_info(
         start_on_boot=False,
         state=state,
         labels=labels or {},
-        host=host_info,
+        host=host_details,
     )
 
 

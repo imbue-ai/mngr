@@ -24,9 +24,9 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.connect import build_ssh_base_args
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import resolve_agent_reference
 from imbue.mng.api.find import resolve_host_reference
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
@@ -131,7 +131,7 @@ def resolve_events_target(
     online host and events path for direct command execution (e.g., tail -f).
     """
     with log_span("Loading agents and hosts"):
-        agents_by_host, _providers = load_all_agents_grouped_by_host(mng_ctx, include_destroyed=False)
+        agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
 
     all_hosts = list(agents_by_host.keys())
 

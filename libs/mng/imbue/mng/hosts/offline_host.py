@@ -19,19 +19,19 @@ from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
+from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 
 
-def validate_and_create_agent_reference(
+def validate_and_create_discovered_agent(
     agent_data: dict[str, Any],
     host_id: HostId,
     provider_name: ProviderInstanceName,
-) -> AgentReference | None:
-    """Validate agent data and create an AgentReference if valid.
+) -> DiscoveredAgent | None:
+    """Validate agent data and create a DiscoveredAgent if valid.
 
     Returns None if the agent data is malformed (missing or invalid id/name).
     Logs warnings for malformed records.
@@ -60,7 +60,7 @@ def validate_and_create_agent_reference(
         )
         return None
 
-    return AgentReference(
+    return DiscoveredAgent(
         host_id=host_id,
         agent_id=agent_id,
         agent_name=agent_name,
@@ -148,15 +148,15 @@ class BaseHost(HostInterface):
     # Agent Information
     # =========================================================================
 
-    def _validate_and_create_agent_reference(self, agent_data: dict[str, Any]) -> AgentReference | None:
-        """Validate agent data and create an AgentReference if valid.
+    def _validate_and_create_discovered_agent(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
+        """Validate agent data and create a DiscoveredAgent if valid.
 
         Returns None if the agent data is malformed (missing or invalid id/name).
         Logs warnings for malformed records.
         """
-        return validate_and_create_agent_reference(agent_data, self.id, self.provider_instance.name)
+        return validate_and_create_discovered_agent(agent_data, self.id, self.provider_instance.name)
 
-    def get_agent_references(self) -> list[AgentReference]:
+    def discover_agents(self) -> list[DiscoveredAgent]:
         """Return a list of all agent references for this host.
 
         For offline hosts, get agent information from the provider's persisted data.
@@ -165,9 +165,9 @@ class BaseHost(HostInterface):
         """
         agent_records = self.provider_instance.list_persisted_agent_data_for_host(self.id)
 
-        agent_refs: list[AgentReference] = []
+        agent_refs: list[DiscoveredAgent] = []
         for agent_data in agent_records:
-            ref = self._validate_and_create_agent_reference(agent_data)
+            ref = self._validate_and_create_discovered_agent(agent_data)
             if ref is not None:
                 agent_refs.append(ref)
 
@@ -229,7 +229,7 @@ class BaseHost(HostInterface):
         requiring the host to be online.
         """
         permissions: set[str] = set()
-        for agent_ref in self.get_agent_references():
+        for agent_ref in self.discover_agents():
             permissions.update(str(p) for p in agent_ref.permissions)
         return list(permissions)
 

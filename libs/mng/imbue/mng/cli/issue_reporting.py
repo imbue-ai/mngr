@@ -199,15 +199,18 @@ def _prompt_and_report_issue(title: str, body: str, search_text: str) -> None:
         webbrowser.open(url)
 
 
-def handle_not_implemented_error(error: NotImplementedError) -> NoReturn:
+def handle_not_implemented_error(error: NotImplementedError, is_interactive: bool | None = None) -> NoReturn:
     """Handle a NotImplementedError by showing the error and optionally reporting it."""
     error_message = str(error) if str(error) else "Feature not implemented"
 
     # Always show the error message
     logger.error("Error: {}", error_message)
 
+    # Resolve interactivity: explicit parameter takes priority, then fall back to TTY check
+    is_interactive_resolved = is_interactive if is_interactive is not None else sys.stdin.isatty()
+
     # In non-interactive mode, just exit
-    if not sys.stdin.isatty():
+    if not is_interactive_resolved:
         raise SystemExit(1)
 
     # In interactive mode, offer to report
@@ -248,15 +251,18 @@ def build_unexpected_error_issue_body(error: Exception, traceback_str: str) -> s
     )
 
 
-def handle_unexpected_error(error: Exception) -> NoReturn:
+def handle_unexpected_error(error: Exception, is_interactive: bool | None = None) -> NoReturn:
     """Handle an unexpected error by showing the traceback and optionally reporting it."""
     tb_str = "".join(traceback.format_exception(type(error), error, error.__traceback__))
 
     # Show the full traceback
     logger.error("Unexpected error:\n{}", tb_str)
 
+    # Resolve interactivity: explicit parameter takes priority, then fall back to TTY check
+    is_interactive_resolved = is_interactive if is_interactive is not None else sys.stdin.isatty()
+
     # In non-interactive mode, just exit
-    if not sys.stdin.isatty():
+    if not is_interactive_resolved:
         raise SystemExit(1)
 
     # In interactive mode, offer to report

@@ -9,30 +9,30 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
+from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.list import AgentErrorInfo
 from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
-from imbue.mng.api.list import _agent_to_cel_context
+from imbue.mng.api.list import _agent_details_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
-from imbue.mng.api.list import _warn_on_duplicate_host_names
 from imbue.mng.api.list import list_agents
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import Host
-from imbue.mng.interfaces.data_types import AgentInfo
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.utils.cel_utils import compile_cel_filters
 
@@ -41,16 +41,16 @@ from imbue.mng.utils.cel_utils import compile_cel_filters
 # =============================================================================
 
 
-def _make_host_info() -> HostInfo:
-    return HostInfo(
+def _make_host_details() -> HostDetails:
+    return HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
 
 
-def _make_agent_info(name: str, host_info: HostInfo) -> AgentInfo:
-    return AgentInfo(
+def _make_agent_details(name: str, host_details: HostDetails) -> AgentDetails:
+    return AgentDetails(
         id=AgentId.generate(),
         name=AgentName(name),
         type="claude",
@@ -59,7 +59,7 @@ def _make_agent_info(name: str, host_info: HostInfo) -> AgentInfo:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
 
@@ -68,19 +68,19 @@ def _make_agent_info(name: str, host_info: HostInfo) -> AgentInfo:
 # =============================================================================
 
 
-def _make_host_ref(
+def _make_discovered_host(
     host_name: str,
     provider_name: str = "modal",
-) -> HostReference:
-    return HostReference(
+) -> DiscoveredHost:
+    return DiscoveredHost(
         host_id=HostId.generate(),
         host_name=HostName(host_name),
         provider_name=ProviderInstanceName(provider_name),
     )
 
 
-def _make_agent_ref(host_id: HostId, provider_name: str = "modal") -> AgentReference:
-    return AgentReference(
+def _make_discovered_agent(host_id: HostId, provider_name: str = "modal") -> DiscoveredAgent:
+    return DiscoveredAgent(
         host_id=host_id,
         agent_id=AgentId.generate(),
         agent_name=AgentName("test-agent"),
@@ -100,35 +100,35 @@ def _capture_loguru_warnings() -> Iterator[StringIO]:
 
 
 def test_warn_on_duplicate_host_names_no_warning_for_unique_names() -> None:
-    """_warn_on_duplicate_host_names should not warn when all host names are unique."""
-    ref_alpha = _make_host_ref("host-alpha")
-    ref_beta = _make_host_ref("host-beta")
-    ref_gamma = _make_host_ref("host-gamma")
+    """warn_on_duplicate_host_names should not warn when all host names are unique."""
+    ref_alpha = _make_discovered_host("host-alpha")
+    ref_beta = _make_discovered_host("host-beta")
+    ref_gamma = _make_discovered_host("host-gamma")
     agents_by_host = {
-        ref_alpha: [_make_agent_ref(ref_alpha.host_id)],
-        ref_beta: [_make_agent_ref(ref_beta.host_id)],
-        ref_gamma: [_make_agent_ref(ref_gamma.host_id)],
+        ref_alpha: [_make_discovered_agent(ref_alpha.host_id)],
+        ref_beta: [_make_discovered_agent(ref_beta.host_id)],
+        ref_gamma: [_make_discovered_agent(ref_gamma.host_id)],
     }
 
     with _capture_loguru_warnings() as log_output:
-        _warn_on_duplicate_host_names(agents_by_host)
+        warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
 
 
 def test_warn_on_duplicate_host_names_warns_on_duplicate_within_same_provider() -> None:
-    """_warn_on_duplicate_host_names should warn when the same name appears twice on the same provider."""
-    ref_dup_1 = _make_host_ref("duplicated-name", "modal")
-    ref_dup_2 = _make_host_ref("duplicated-name", "modal")
-    ref_unique = _make_host_ref("unique-name", "modal")
+    """warn_on_duplicate_host_names should warn when the same name appears twice on the same provider."""
+    ref_dup_1 = _make_discovered_host("duplicated-name", "modal")
+    ref_dup_2 = _make_discovered_host("duplicated-name", "modal")
+    ref_unique = _make_discovered_host("unique-name", "modal")
     agents_by_host = {
-        ref_dup_1: [_make_agent_ref(ref_dup_1.host_id)],
-        ref_dup_2: [_make_agent_ref(ref_dup_2.host_id)],
-        ref_unique: [_make_agent_ref(ref_unique.host_id)],
+        ref_dup_1: [_make_discovered_agent(ref_dup_1.host_id)],
+        ref_dup_2: [_make_discovered_agent(ref_dup_2.host_id)],
+        ref_unique: [_make_discovered_agent(ref_unique.host_id)],
     }
 
     with _capture_loguru_warnings() as log_output:
-        _warn_on_duplicate_host_names(agents_by_host)
+        warn_on_duplicate_host_names(agents_by_host)
 
     output = log_output.getvalue()
     assert "Duplicate host name" in output
@@ -137,39 +137,39 @@ def test_warn_on_duplicate_host_names_warns_on_duplicate_within_same_provider() 
 
 
 def test_warn_on_duplicate_host_names_no_warning_for_same_name_on_different_providers() -> None:
-    """_warn_on_duplicate_host_names should not warn when the same name exists on different providers."""
-    ref_modal = _make_host_ref("shared-name", "modal")
-    ref_docker = _make_host_ref("shared-name", "docker")
+    """warn_on_duplicate_host_names should not warn when the same name exists on different providers."""
+    ref_modal = _make_discovered_host("shared-name", "modal")
+    ref_docker = _make_discovered_host("shared-name", "docker")
     agents_by_host = {
-        ref_modal: [_make_agent_ref(ref_modal.host_id, "modal")],
-        ref_docker: [_make_agent_ref(ref_docker.host_id, "docker")],
+        ref_modal: [_make_discovered_agent(ref_modal.host_id, "modal")],
+        ref_docker: [_make_discovered_agent(ref_docker.host_id, "docker")],
     }
 
     with _capture_loguru_warnings() as log_output:
-        _warn_on_duplicate_host_names(agents_by_host)
+        warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
 
 
 def test_warn_on_duplicate_host_names_empty_input() -> None:
-    """_warn_on_duplicate_host_names should not warn with an empty input."""
+    """warn_on_duplicate_host_names should not warn with an empty input."""
     with _capture_loguru_warnings() as log_output:
-        _warn_on_duplicate_host_names({})
+        warn_on_duplicate_host_names({})
 
     assert "Duplicate host name" not in log_output.getvalue()
 
 
 def test_warn_on_duplicate_host_names_no_warning_when_destroyed_host_shares_name() -> None:
-    """_warn_on_duplicate_host_names should not warn when a destroyed host (no agents) shares a name with an active host."""
-    ref_destroyed = _make_host_ref("reused-name", "modal")
-    ref_active = _make_host_ref("reused-name", "modal")
-    agents_by_host: dict[HostReference, list[AgentReference]] = {
+    """warn_on_duplicate_host_names should not warn when a destroyed host (no agents) shares a name with an active host."""
+    ref_destroyed = _make_discovered_host("reused-name", "modal")
+    ref_active = _make_discovered_host("reused-name", "modal")
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {
         ref_destroyed: [],
-        ref_active: [_make_agent_ref(ref_active.host_id)],
+        ref_active: [_make_discovered_agent(ref_active.host_id)],
     }
 
     with _capture_loguru_warnings() as log_output:
-        _warn_on_duplicate_host_names(agents_by_host)
+        warn_on_duplicate_host_names(agents_by_host)
 
     assert "Duplicate host name" not in log_output.getvalue()
 
@@ -255,8 +255,8 @@ def test_list_result_initializes_with_empty_lists() -> None:
 def test_list_result_allows_appending() -> None:
     """ListResult agents and errors lists should be mutable."""
     result = ListResult()
-    host_info = _make_host_info()
-    agent = _make_agent_info("test-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("test-agent", host_details)
     result.agents.append(agent)
     assert len(result.agents) == 1
     assert result.agents[0].name == AgentName("test-agent")
@@ -267,15 +267,15 @@ def test_list_result_allows_appending() -> None:
 
 
 # =============================================================================
-# _agent_to_cel_context Tests
+# _agent_details_to_cel_context Tests
 # =============================================================================
 
 
-def test_agent_to_cel_context_basic_fields() -> None:
-    """_agent_to_cel_context should convert AgentInfo to a dict with basic fields."""
-    host_info = _make_host_info()
-    agent = _make_agent_info("my-agent", host_info)
-    context = _agent_to_cel_context(agent)
+def test_agent_details_to_cel_context_basic_fields() -> None:
+    """_agent_details_to_cel_context should convert AgentDetails to a dict with basic fields."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("my-agent", host_details)
+    context = _agent_details_to_cel_context(agent)
 
     assert context["name"] == "my-agent"
     assert context["type"] == "claude"
@@ -283,11 +283,11 @@ def test_agent_to_cel_context_basic_fields() -> None:
     assert context["command"] == "sleep 100"
 
 
-def test_agent_to_cel_context_computes_age() -> None:
-    """_agent_to_cel_context should compute 'age' from create_time."""
-    host_info = _make_host_info()
+def test_agent_details_to_cel_context_computes_age() -> None:
+    """_agent_details_to_cel_context should compute 'age' from create_time."""
+    host_details = _make_host_details()
     create_time = datetime.now(timezone.utc) - timedelta(hours=2)
-    agent = AgentInfo(
+    agent = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("aging-agent"),
         type="claude",
@@ -296,9 +296,9 @@ def test_agent_to_cel_context_computes_age() -> None:
         create_time=create_time,
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
-    context = _agent_to_cel_context(agent)
+    context = _agent_details_to_cel_context(agent)
 
     assert "age" in context
     # Age should be approximately 7200 seconds (2 hours), with some tolerance
@@ -306,10 +306,10 @@ def test_agent_to_cel_context_computes_age() -> None:
     assert context["age"] < 7400
 
 
-def test_agent_to_cel_context_computes_runtime() -> None:
-    """_agent_to_cel_context should set 'runtime' from runtime_seconds."""
-    host_info = _make_host_info()
-    agent = AgentInfo(
+def test_agent_details_to_cel_context_computes_runtime() -> None:
+    """_agent_details_to_cel_context should set 'runtime' from runtime_seconds."""
+    host_details = _make_host_details()
+    agent = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("running-agent"),
         type="claude",
@@ -319,18 +319,18 @@ def test_agent_to_cel_context_computes_runtime() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         runtime_seconds=3600.0,
-        host=host_info,
+        host=host_details,
     )
-    context = _agent_to_cel_context(agent)
+    context = _agent_details_to_cel_context(agent)
 
     assert context["runtime"] == 3600.0
 
 
-def test_agent_to_cel_context_computes_idle() -> None:
-    """_agent_to_cel_context should compute 'idle' from activity times."""
-    host_info = _make_host_info()
+def test_agent_details_to_cel_context_computes_idle() -> None:
+    """_agent_details_to_cel_context should compute 'idle' from activity times."""
+    host_details = _make_host_details()
     activity_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-    agent = AgentInfo(
+    agent = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("idle-agent"),
         type="claude",
@@ -340,9 +340,9 @@ def test_agent_to_cel_context_computes_idle() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         user_activity_time=activity_time,
-        host=host_info,
+        host=host_details,
     )
-    context = _agent_to_cel_context(agent)
+    context = _agent_details_to_cel_context(agent)
 
     assert "idle" in context
     # Idle should be approximately 300 seconds (5 minutes)
@@ -350,15 +350,15 @@ def test_agent_to_cel_context_computes_idle() -> None:
     assert context["idle"] < 320
 
 
-def test_agent_to_cel_context_normalizes_host_provider() -> None:
-    """_agent_to_cel_context should rename host.provider_name to host.provider."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
+    """_agent_details_to_cel_context should rename host.provider_name to host.provider."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
     )
-    agent = _make_agent_info("test-agent", host_info)
-    context = _agent_to_cel_context(agent)
+    agent = _make_agent_details("test-agent", host_details)
+    context = _agent_details_to_cel_context(agent)
 
     assert "host" in context
     host = context["host"]
@@ -374,8 +374,8 @@ def test_agent_to_cel_context_normalizes_host_provider() -> None:
 
 def test_apply_cel_filters_includes_matching_agent() -> None:
     """_apply_cel_filters should return True when agent matches include filter."""
-    host_info = _make_host_info()
-    agent = _make_agent_info("target-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("target-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=('name == "target-agent"',),
         exclude_filters=(),
@@ -385,8 +385,8 @@ def test_apply_cel_filters_includes_matching_agent() -> None:
 
 def test_apply_cel_filters_excludes_non_matching_agent() -> None:
     """_apply_cel_filters should return False when agent does not match include filter."""
-    host_info = _make_host_info()
-    agent = _make_agent_info("other-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("other-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=('name == "target-agent"',),
         exclude_filters=(),
@@ -396,8 +396,8 @@ def test_apply_cel_filters_excludes_non_matching_agent() -> None:
 
 def test_apply_cel_filters_exclude_filter_removes_agent() -> None:
     """_apply_cel_filters should return False when agent matches exclude filter."""
-    host_info = _make_host_info()
-    agent = _make_agent_info("unwanted-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("unwanted-agent", host_details)
     include_filters, exclude_filters = compile_cel_filters(
         include_filters=(),
         exclude_filters=('name == "unwanted-agent"',),
@@ -407,8 +407,8 @@ def test_apply_cel_filters_exclude_filter_removes_agent() -> None:
 
 def test_apply_cel_filters_no_filters_includes_all() -> None:
     """_apply_cel_filters should return True when no filters are provided."""
-    host_info = _make_host_info()
-    agent = _make_agent_info("any-agent", host_info)
+    host_details = _make_host_details()
+    agent = _make_agent_details("any-agent", host_details)
     assert _apply_cel_filters(agent, [], []) is True
 
 
@@ -459,7 +459,7 @@ def test_list_agents_batch_mode_on_agent_callback_is_called(
 
     local_host.start_agents([agent.id])
 
-    found_agents: list[AgentInfo] = []
+    found_agents: list[AgentDetails] = []
     result = list_agents(
         mng_ctx=temp_mng_ctx,
         is_streaming=False,
@@ -492,7 +492,7 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
 
     local_host.start_agents([agent.id])
 
-    found_agents: list[AgentInfo] = []
+    found_agents: list[AgentDetails] = []
     result = list_agents(
         mng_ctx=temp_mng_ctx,
         is_streaming=True,
@@ -548,15 +548,15 @@ def test_list_agents_with_include_filter_excludes_non_matching(
 
 
 # =============================================================================
-# load_all_agents_grouped_by_host Tests
+# discover_all_hosts_and_agents Tests
 # =============================================================================
 
 
-def test_load_all_agents_grouped_by_host_returns_empty_for_no_agents(
+def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
     temp_mng_ctx: MngContext,
 ) -> None:
-    """load_all_agents_grouped_by_host should return empty dict when no agents exist."""
-    agents_by_host, providers = load_all_agents_grouped_by_host(temp_mng_ctx)
+    """discover_all_hosts_and_agents should return empty dict when no agents exist."""
+    agents_by_host, providers = discover_all_hosts_and_agents(temp_mng_ctx)
     assert isinstance(agents_by_host, dict)
     assert isinstance(providers, list)
     # At least the local provider should be present
@@ -564,12 +564,12 @@ def test_load_all_agents_grouped_by_host_returns_empty_for_no_agents(
 
 
 @pytest.mark.tmux
-def test_load_all_agents_grouped_by_host_groups_agents_by_host(
+def test_discover_all_hosts_and_agents_groups_agents_by_host(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
 ) -> None:
-    """load_all_agents_grouped_by_host should return agents grouped by their host reference."""
+    """discover_all_hosts_and_agents should return agents grouped by their host reference."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -579,7 +579,7 @@ def test_load_all_agents_grouped_by_host_groups_agents_by_host(
         ),
     )
 
-    agents_by_host, providers = load_all_agents_grouped_by_host(temp_mng_ctx)
+    agents_by_host, providers = discover_all_hosts_and_agents(temp_mng_ctx)
 
     local_host.destroy_agent(agent)
 
