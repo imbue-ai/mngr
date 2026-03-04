@@ -12,6 +12,8 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discovery_events import build_discovered_agent
+from imbue.mng.api.discovery_events import emit_agent_discovered
 from imbue.mng.api.gc import gc as api_gc
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
@@ -31,6 +33,7 @@ from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
+from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -39,6 +42,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.git_utils import find_source_repo_of_worktree
 from imbue.mng.utils.git_utils import remove_worktree
@@ -305,6 +309,21 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             mng_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
             destroyed_agents.append(agent.name)
             _output(f"Destroyed agent: {agent.name}", output_opts)
+
+            # Emit discovery event for destroyed agent
+            try:
+                provider_name = (
+                    host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
+                )
+                discovered = build_discovered_agent(
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    host_id=host.id,
+                    provider_name=provider_name,
+                )
+                emit_agent_discovered(mng_ctx.config, discovered)
+            except Exception:
+                logger.trace("Failed to emit destroy discovery event")
 
         except MngError as e:
             _output(f"Error destroying agent {agent.name}: {e}", output_opts)

@@ -23,6 +23,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
+from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
+from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.completion_writer import write_agent_names_cache
@@ -205,6 +207,13 @@ def list_agents(
 
     agent_names = [str(agent.name) for agent in result.agents]
     write_agent_names_cache(get_completion_cache_dir(), agent_names)
+
+    # Write a full discovery snapshot event
+    try:
+        discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(result.agents)
+        write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
+    except Exception:
+        logger.trace("Failed to write full discovery snapshot event")
 
     return result
 

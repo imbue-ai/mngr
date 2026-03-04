@@ -48,11 +48,12 @@ mng list [OPTIONS]
 | `--sort-order` | choice (`asc` &#x7C; `desc`) | Sort order [default: asc] | `asc` |
 | `--limit` | integer | Limit number of results (applied after fetching from all providers) | None |
 
-## Watch Mode
+## Watch / Stream Mode
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-w`, `--watch` | integer | Continuously watch and update status at specified interval (seconds) | None |
+| `--stream` | boolean | Stream discovery events as JSONL. Outputs a full snapshot, then tails the event file for updates. Periodically re-polls to catch any missed changes. | `False` |
 
 ## Error Handling
 

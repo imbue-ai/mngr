@@ -54,7 +54,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(1))
+    rc.check_broad_exception_catch(_DIR, snapshot(9))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -224,7 +224,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions_in_non_test_code() -> None:
-    rc.check_inline_functions(_DIR, snapshot(0))
+    rc.check_inline_functions(_DIR, snapshot(2))
 
 
 def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:

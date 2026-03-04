@@ -1,7 +1,9 @@
+import json
 import re
 import shutil
 import string
 import sys
+import threading
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
@@ -18,6 +20,7 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import list_agents as api_list_agents
 from imbue.mng.cli.common_opts import CommonCliOptions
@@ -122,6 +125,7 @@ class ListCliOptions(CommonCliOptions):
     limit: int | None
     watch: int | None
     on_error: str
+    stream: bool
 
 
 @click.command(name="list")
@@ -202,12 +206,18 @@ class ListCliOptions(CommonCliOptions):
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
 )
-@optgroup.group("Watch Mode")
+@optgroup.group("Watch / Stream Mode")
 @optgroup.option(
     "-w",
     "--watch",
     type=int,
     help="Continuously watch and update status at specified interval (seconds)",
+)
+@optgroup.option(
+    "--stream",
+    is_flag=True,
+    help="Stream discovery events as JSONL. Outputs a full snapshot, then tails the event file for updates. "
+    "Periodically re-polls to catch any missed changes.",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -326,6 +336,16 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
+    if opts.stream:
+        _list_stream(
+            mng_ctx=mng_ctx,
+            include_filters=include_filters_tuple,
+            exclude_filters=exclude_filters_tuple,
+            provider_names=provider_names,
+            error_behavior=error_behavior,
+        )
+        return
+
     if output_opts.output_format == OutputFormat.JSONL:
         _list_jsonl(
             ctx,
@@ -1174,3 +1194,114 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
+
+
+# === Stream Mode ===
+
+_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+
+
+def _list_stream(
+    mng_ctx: MngContext,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    provider_names: tuple[str, ...] | None,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """Stream discovery events to stdout as JSONL.
+
+    1. Run list_agents() to get the current state, write a full snapshot, and emit it
+    2. Tail the events file for new events written by other mng processes
+    3. Periodically re-poll list_agents() and write new full snapshots
+    """
+    events_path = get_discovery_events_path(mng_ctx.config)
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+
+    def _emit_line(line: str) -> None:
+        """Parse and emit a single JSONL line, deduplicating by event_id."""
+        stripped = line.strip()
+        if not stripped:
+            return
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return
+        event_id = data.get("event_id")
+        with emit_lock:
+            if event_id and event_id in emitted_event_ids:
+                return
+            if event_id:
+                emitted_event_ids.add(event_id)
+        sys.stdout.write(stripped + "\n")
+        sys.stdout.flush()
+
+    # Phase 1: initial list, write full snapshot, emit it
+    api_list_agents(
+        mng_ctx=mng_ctx,
+        is_streaming=False,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+        provider_names=provider_names,
+        error_behavior=error_behavior,
+    )
+    # list_agents already writes a full snapshot (via our modification).
+    # Read existing events from the file and emit them all
+    if events_path.exists():
+        with open(events_path) as f:
+            for line in f:
+                _emit_line(line)
+
+    # Record the current file position for tailing
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
+
+    # Phase 2: tail the events file for new events from other processes
+    stop_event = threading.Event()
+
+    def _tail_thread() -> None:
+        """Poll the events file for new content written by other mng processes."""
+        current_offset = initial_offset
+        while not stop_event.is_set():
+            try:
+                if events_path.exists():
+                    file_size = events_path.stat().st_size
+                    if file_size > current_offset:
+                        with open(events_path) as f:
+                            f.seek(current_offset)
+                            new_content = f.read()
+                            current_offset = f.tell()
+                        for line in new_content.splitlines():
+                            if stop_event.is_set():
+                                break
+                            _emit_line(line)
+            except OSError:
+                pass
+            stop_event.wait(timeout=1.0)
+
+    tail = threading.Thread(target=_tail_thread, daemon=True)
+    tail.start()
+
+    # Phase 3: periodically re-poll and write full snapshots
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
+            if stop_event.is_set():
+                break
+            try:
+                api_list_agents(
+                    mng_ctx=mng_ctx,
+                    is_streaming=False,
+                    include_filters=include_filters,
+                    exclude_filters=exclude_filters,
+                    provider_names=provider_names,
+                    error_behavior=error_behavior,
+                )
+                # list_agents already writes a full snapshot event to the file.
+                # The tail thread will pick it up and emit it.
+            except Exception:
+                logger.trace("Stream poll failed")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)

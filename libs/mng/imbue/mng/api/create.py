@@ -5,14 +5,18 @@ from loguru import logger
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mng.api.data_types import CreateAgentResult
+from imbue.mng.api.discovery_events import build_discovered_agent
+from imbue.mng.api.discovery_events import emit_agent_discovered
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import HostEnvironmentOptions
 from imbue.mng.interfaces.host import NewHostOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.utils.env_utils import parse_env_file
 
 
@@ -150,6 +154,19 @@ def create(
         # Call on_agent_created hooks to notify plugins about the new agent
         with log_span("Calling on_agent_created hooks"):
             mng_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
+
+        # Emit discovery event for the newly created agent
+        try:
+            provider_name = host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
+            discovered = build_discovered_agent(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                host_id=host.id,
+                provider_name=provider_name,
+            )
+            emit_agent_discovered(mng_ctx.config, discovered)
+        except Exception:
+            logger.trace("Failed to emit create discovery event")
 
     return result
 
