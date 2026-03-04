@@ -640,16 +640,16 @@ def _classify_entry(entry: AgentBoardEntry) -> BoardSection:
     return BoardSection.PR_BEING_REVIEWED
 
 
-def _get_state_attr(entry: AgentBoardEntry, section: BoardSection) -> str:
+def _get_state_attr(entry: AgentBoardEntry) -> str:
     """Determine the color attribute for an agent's lifecycle state.
 
-    Magenta is used for WAITING agents in the "still cooking" section
-    (they need the user to respond). RUNNING gets green. Everything
-    else is default (no color).
+    RUNNING gets green, WAITING gets magenta (needs user response).
+    Everything else is default (no color). Muted override is handled
+    separately in _format_agent_line.
     """
     if entry.state == AgentLifecycleState.RUNNING:
         return "state_running"
-    if entry.state == AgentLifecycleState.WAITING and section == BoardSection.STILL_COOKING:
+    if entry.state == AgentLifecycleState.WAITING:
         return "state_attention"
     return ""
 
@@ -684,7 +684,7 @@ def _format_agent_line(entry: AgentBoardEntry, section: BoardSection) -> list[st
     Shows: name, agent state, push status, PR info or create-PR link.
     Muted agents show the same information but rendered entirely in gray.
     """
-    state_attr = _get_state_attr(entry, section)
+    state_attr = _get_state_attr(entry)
     state_text = str(entry.state)
     parts: list[str | tuple[Hashable, str]] = [
         f"  {entry.name:<24}",
