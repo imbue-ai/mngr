@@ -46,10 +46,10 @@ def make_docker_provider_with_cleanup(
 
     try:
         cg = mng_ctx.concurrency_group
-        hosts = provider.list_hosts(cg, include_destroyed=True)
-        for host in hosts:
+        discovered = provider.discover_hosts(cg, include_destroyed=True)
+        for host in discovered:
             try:
-                provider.destroy_host(host, delete_snapshots=True)
+                provider.destroy_host(host.host_id, delete_snapshots=True)
             except (MngError, docker.errors.DockerException, OSError):
                 pass
     except (MngError, docker.errors.DockerException, OSError):

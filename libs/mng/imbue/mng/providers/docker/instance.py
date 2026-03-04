@@ -43,6 +43,7 @@ from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
@@ -1191,12 +1192,12 @@ kill -TERM 1
 
         raise HostNotFoundError(host)
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all Docker container hosts."""
+    ) -> list[DiscoveredHost]:
+        """Discover all Docker container hosts."""
         hosts: list[HostInterface] = []
         processed_host_ids: set[HostId] = set()
 
@@ -1264,7 +1265,7 @@ kill -TERM 1
         for h in hosts:
             self._host_by_id_cache[h.id] = h
 
-        return hosts
+        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Docker container.

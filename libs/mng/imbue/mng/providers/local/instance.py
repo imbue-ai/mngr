@@ -34,6 +34,7 @@ from imbue.mng.interfaces.data_types import VolumeInfo
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import ActivitySource
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostNameStyle
@@ -278,19 +279,23 @@ class LocalProviderInstance(BaseProviderInstance):
 
         return self._create_host(HostName("localhost"))
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all hosts managed by this provider.
+    ) -> list[DiscoveredHost]:
+        """Discover all hosts managed by this provider.
 
         For the local provider, this always returns a single-element list
         containing the local host.
         """
-        hosts = [self._create_host(HostName("localhost"))]
-        logger.trace("Listed hosts for local provider {}", self.name)
-        return hosts
+        host_ref = DiscoveredHost(
+            host_id=self.host_id,
+            host_name=HostName("localhost"),
+            provider_name=self.name,
+        )
+        logger.trace("Discovered hosts for local provider {}", self.name)
+        return [host_ref]
 
     # =========================================================================
     # Snapshot Methods

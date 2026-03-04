@@ -172,12 +172,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all hosts managed by this provider instance."""
+    ) -> list[DiscoveredHost]:
+        """Discover all hosts managed by this provider instance."""
         ...
 
     def discover_hosts_and_agents(
@@ -192,22 +192,19 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host and agent data in parallel from a shared volume instead of SSH-ing into
         each host individually).
 
-        The default implementation calls list_hosts() and then discover_agents()
+        The default implementation calls discover_hosts() and then discover_agents()
         on each host in parallel.
         """
         logger.trace("Loading hosts from provider {}", self.name)
-        hosts = self.list_hosts(cg=cg, include_destroyed=include_destroyed)
-        logger.trace("Loaded {} host(s) from provider {}", len(hosts), self.name)
+        host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
+        logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
         future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
         with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
-            for host in hosts:
-                host_ref = DiscoveredHost(
-                    host_id=host.id,
-                    host_name=host.get_name(),
-                    provider_name=self.name,
+            for host_ref in host_refs:
+                future_by_host_ref[host_ref] = executor.submit(
+                    self.get_host(host_ref.host_id).discover_agents,
                 )
-                future_by_host_ref[host_ref] = executor.submit(host.discover_agents)
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
 
