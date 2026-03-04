@@ -9,7 +9,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import BuildCacheInfo
-from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import VolumeInfo
@@ -17,6 +16,7 @@ from imbue.mng.interfaces.data_types import WorkDirInfo
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 
@@ -114,11 +114,11 @@ class GcResult(MutableModel):
         default_factory=list,
         description="Work directories that were destroyed",
     )
-    machines_deleted: list[HostInfo] = Field(
+    machines_deleted: list[DiscoveredHost] = Field(
         default_factory=list,
         description="Machines that were deleted (removing records of old destroyed hosts)",
     )
-    machines_destroyed: list[HostInfo] = Field(
+    machines_destroyed: list[DiscoveredHost] = Field(
         default_factory=list,
         description="Machines that were destroyed",
     )

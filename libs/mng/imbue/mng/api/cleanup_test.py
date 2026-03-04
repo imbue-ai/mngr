@@ -1,7 +1,5 @@
 """Unit tests for cleanup API functions."""
 
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -12,36 +10,13 @@ from imbue.mng.api.create import CreateAgentOptions
 from imbue.mng.api.data_types import CleanupResult
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import Host
-from imbue.mng.interfaces.data_types import AgentInfo
-from imbue.mng.interfaces.data_types import HostInfo
-from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CleanupAction
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import ErrorBehavior
-from imbue.mng.primitives import HostId
-from imbue.mng.primitives import ProviderInstanceName
-
-
-def _make_test_agent_info(name: str = "test-agent") -> AgentInfo:
-    """Create a minimal AgentInfo for testing cleanup API functions."""
-    return AgentInfo(
-        id=AgentId.generate(),
-        name=AgentName(name),
-        type="generic",
-        command=CommandString("sleep 100"),
-        work_dir=Path("/tmp/test"),
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        host=HostInfo(
-            id=HostId.generate(),
-            name="test-host",
-            provider_name=ProviderInstanceName("local"),
-        ),
-    )
+from imbue.mng.utils.testing import make_test_agent_details
 
 
 def test_execute_cleanup_dry_run_destroy_populates_destroyed_agents(
@@ -49,9 +24,9 @@ def test_execute_cleanup_dry_run_destroy_populates_destroyed_agents(
 ) -> None:
     """Dry-run destroy should list all agent names in destroyed_agents."""
     agents = [
-        _make_test_agent_info("agent-alpha"),
-        _make_test_agent_info("agent-beta"),
-        _make_test_agent_info("agent-gamma"),
+        make_test_agent_details("agent-alpha"),
+        make_test_agent_details("agent-beta"),
+        make_test_agent_details("agent-gamma"),
     ]
 
     result = execute_cleanup(
@@ -76,8 +51,8 @@ def test_execute_cleanup_dry_run_stop_populates_stopped_agents(
 ) -> None:
     """Dry-run stop should list all agent names in stopped_agents."""
     agents = [
-        _make_test_agent_info("agent-one"),
-        _make_test_agent_info("agent-two"),
+        make_test_agent_details("agent-one"),
+        make_test_agent_details("agent-two"),
     ]
 
     result = execute_cleanup(
@@ -119,7 +94,7 @@ def test_execute_cleanup_dry_run_returns_cleanup_result_type(
     """Dry-run should return a CleanupResult instance."""
     result = execute_cleanup(
         mng_ctx=temp_mng_ctx,
-        agents=[_make_test_agent_info("test-agent")],
+        agents=[make_test_agent_details("test-agent")],
         action=CleanupAction.DESTROY,
         is_dry_run=True,
         error_behavior=ErrorBehavior.ABORT,

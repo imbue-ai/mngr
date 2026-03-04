@@ -37,7 +37,7 @@ from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import CleanupAction
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
@@ -267,9 +267,9 @@ def _build_cel_filters_from_options(
 
 
 def _run_interactive_selection(
-    agents: list[AgentInfo],
+    agents: list[AgentDetails],
     action: CleanupAction,
-) -> list[AgentInfo]:
+) -> list[AgentDetails]:
     """Show a urwid-based multi-select TUI for choosing agents to clean up."""
     if not agents:
         return []
@@ -286,12 +286,12 @@ class _CleanupSelectorState(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    agents: list[AgentInfo]
-    filtered_agents: list[AgentInfo] = []
+    agents: list[AgentDetails]
+    filtered_agents: list[AgentDetails] = []
     selected_ids: set[str] = set()
     list_walker: Any
     status_text: Any
-    result: list[AgentInfo] | None = None
+    result: list[AgentDetails] | None = None
     hide_stopped: bool = False
     search_query: str = ""
     last_ctrl_c_time: float = 0.0
@@ -308,7 +308,7 @@ def _selected_marker(is_selected: bool) -> str:
 
 
 def _create_cleanup_list_item(
-    agent: AgentInfo,
+    agent: AgentDetails,
     is_selected: bool,
     name_width: int,
     state_width: int,
@@ -460,7 +460,7 @@ class _CleanupInputHandler(MutableModel):
         return True if handled else None
 
 
-def _run_cleanup_selector(agents: list[AgentInfo], action: CleanupAction) -> list[AgentInfo]:
+def _run_cleanup_selector(agents: list[AgentDetails], action: CleanupAction) -> list[AgentDetails]:
     """Run the multi-select cleanup TUI and return selected agents."""
     # Calculate column widths
     name_width = min(max((len(str(a.name)) for a in agents), default=10), 40)
@@ -575,7 +575,7 @@ def _emit_no_agents_found(output_opts: OutputOptions) -> None:
 
 
 def _emit_dry_run_output(
-    agents: list[AgentInfo],
+    agents: list[AgentDetails],
     action: CleanupAction,
     output_opts: OutputOptions,
 ) -> None:

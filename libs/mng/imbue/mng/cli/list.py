@@ -33,7 +33,7 @@ from imbue.mng.cli.watch_mode import run_watch_loop
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
@@ -517,7 +517,7 @@ class _LimitedJsonlEmitter(MutableModel):
     count: int = 0
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         with self._lock:
             if self.limit is not None and self.count >= self.limit:
                 return
@@ -534,7 +534,7 @@ class _StreamingTemplateEmitter(MutableModel):
     _lock: Lock = PrivateAttr(default_factory=Lock)
     _count: int = PrivateAttr(default=0)
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         line = _render_format_template(self.format_template, agent)
         with self._lock:
             if self.limit is not None and self._count >= self.limit:
@@ -621,7 +621,7 @@ class _StreamingHumanRenderer(MutableModel):
 
             self.output.flush()
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         """Handle a single agent result (on_agent callback)."""
         with self._lock:
             if self.limit is not None and self._count >= self.limit:
@@ -728,7 +728,7 @@ def _format_streaming_header_row(fields: Sequence[str], column_widths: dict[str,
 
 
 @pure
-def _format_streaming_agent_row(agent: AgentInfo, fields: Sequence[str], column_widths: dict[str, int]) -> str:
+def _format_streaming_agent_row(agent: AgentDetails, fields: Sequence[str], column_widths: dict[str, int]) -> str:
     """Format a single agent as a streaming output row."""
     parts: list[str] = []
     for field in fields:
@@ -812,7 +812,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         ctx.exit(1)
 
 
-def _emit_json_output(agents: list[AgentInfo], errors: list[ErrorInfo]) -> None:
+def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:
     """Emit JSON output with all agents."""
     agents_data = [agent.model_dump(mode="json") for agent in agents]
     errors_data = [error.model_dump(mode="json") for error in errors]
@@ -823,7 +823,7 @@ def _emit_json_output(agents: list[AgentInfo], errors: list[ErrorInfo]) -> None:
     emit_final_json(output_data)
 
 
-def _emit_jsonl_agent(agent: AgentInfo) -> None:
+def _emit_jsonl_agent(agent: AgentDetails) -> None:
     """Emit a single agent as a JSONL line (streaming callback)."""
     agent_data = agent.model_dump(mode="json")
     emit_final_json(agent_data)
@@ -835,7 +835,7 @@ def _emit_jsonl_error(error: ErrorInfo) -> None:
     emit_final_json(error_data)
 
 
-def _emit_human_output(agents: list[AgentInfo], fields: list[str] | None = None) -> None:
+def _emit_human_output(agents: list[AgentDetails], fields: list[str] | None = None) -> None:
     """Emit human-readable table output with optional field selection."""
     if not agents:
         return
@@ -865,7 +865,7 @@ def _emit_human_output(agents: list[AgentInfo], fields: list[str] | None = None)
     write_human_line("\n" + table)
 
 
-def _emit_template_output(agents: list[AgentInfo], template: str, output: Any) -> None:
+def _emit_template_output(agents: list[AgentDetails], template: str, output: Any) -> None:
     """Emit template-formatted output, one line per agent."""
     for agent in agents:
         line = _render_format_template(template, agent)
@@ -932,8 +932,8 @@ def _format_value_as_string(value: Any) -> str:
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
-def _get_sortable_value(agent: AgentInfo, field: str) -> Any:
-    """Extract a field value from an AgentInfo object for sorting.
+def _get_sortable_value(agent: AgentDetails, field: str) -> Any:
+    """Extract a field value from an AgentDetails object for sorting.
 
     Returns the raw value (not string-formatted) for proper sorting behavior.
     Supports nested fields like "host.name".
@@ -963,7 +963,7 @@ class _AgentSortKey:
 
     sort_field: str
 
-    def __call__(self, agent: AgentInfo) -> tuple[int, Any]:
+    def __call__(self, agent: AgentDetails) -> tuple[int, Any]:
         value = _get_sortable_value(agent, self.sort_field)
         if value is None:
             return (1, "")
@@ -972,15 +972,15 @@ class _AgentSortKey:
         return (0, str(value))
 
 
-def _sort_agents(agents: list[AgentInfo], sort_field: str, reverse: bool) -> list[AgentInfo]:
+def _sort_agents(agents: list[AgentDetails], sort_field: str, reverse: bool) -> list[AgentDetails]:
     """Sort a list of agents by the specified field."""
     key = _AgentSortKey()
     key.sort_field = sort_field
     return sorted(agents, key=key, reverse=reverse)
 
 
-def _get_field_value(agent: AgentInfo, field: str) -> str:
-    """Extract a field value from an AgentInfo object and return as string.
+def _get_field_value(agent: AgentDetails, field: str) -> str:
+    """Extract a field value from an AgentDetails object and return as string.
 
     Supports nested fields like "host.name" and list slicing syntax like
     "host.snapshots[0]" or "host.snapshots[:3]".
@@ -1035,11 +1035,11 @@ def _get_field_value(agent: AgentInfo, field: str) -> str:
 
 
 @pure
-def _render_format_template(template: str, agent: AgentInfo) -> str:
+def _render_format_template(template: str, agent: AgentDetails) -> str:
     """Expand a str.format()-style template using agent field values.
 
     Pre-resolves field names via _get_field_value() (which supports nested
-    attribute access and bracket notation on AgentInfo), then delegates
+    attribute access and bracket notation on AgentDetails), then delegates
     template expansion to the shared render_format_template helper.
     """
     # Pre-resolve all referenced field names using the agent-specific field resolver

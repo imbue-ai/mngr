@@ -95,9 +95,9 @@ jobs:
       - name: Combine coverage
         run: |
           uv run coverage combine coverage-*/.coverage
-          uv run coverage report --fail-under=80
-          uv run coverage xml
-          uv run coverage html
+          uv run coverage report --rcfile=libs/mng/pyproject.toml --fail-under=80
+          uv run coverage xml --rcfile=libs/mng/pyproject.toml
+          uv run coverage html --rcfile=libs/mng/pyproject.toml
 
       - name: Upload coverage reports
         if: always()
@@ -141,7 +141,7 @@ jobs:
       - name: Check coverage threshold (81% warning)
         run: |
           uv run coverage combine coverage-*/.coverage
-          uv run coverage report --fail-under=81
+          uv run coverage report --rcfile=libs/mng/pyproject.toml --fail-under=81
 
   # Clean up old Modal test environments - runs on all branches including release,
   # since both acceptance tests (non-release) and release tests (release) create environments.

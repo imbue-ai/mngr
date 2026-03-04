@@ -5,9 +5,9 @@ from typing import cast
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.api.test_fixtures import FakeAgent
-from imbue.mng.api.test_fixtures import FakeHost
-from imbue.mng.api.test_fixtures import SyncTestContext
+from imbue.mng.api.testing import FakeAgent
+from imbue.mng.api.testing import FakeHost
+from imbue.mng.api.testing import SyncTestContext
 from imbue.mng.errors import BinaryNotInstalledError
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.agent import AgentInterface

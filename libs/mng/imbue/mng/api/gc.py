@@ -21,7 +21,6 @@ from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import BuildCacheInfo
-from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SizeBytes
 from imbue.mng.interfaces.data_types import WorkDirInfo
@@ -127,7 +126,8 @@ def gc_work_dirs(
 ) -> None:
     """Garbage collect orphaned work directories."""
     for provider_instance in providers:
-        for host in provider_instance.list_hosts(cg=mng_ctx.concurrency_group):
+        for host_ref in provider_instance.discover_hosts(cg=mng_ctx.concurrency_group):
+            host = provider_instance.get_host(host_ref.host_id)
             if not isinstance(host, OnlineHostInterface):
                 # Skip offline hosts - can't query them
                 logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
@@ -163,15 +163,11 @@ def gc_machines(
     """Garbage collect idle machines and delete old offline host records."""
     for provider in providers:
         try:
-            hosts = provider.list_hosts(include_destroyed=True, cg=provider.mng_ctx.concurrency_group)
+            host_refs = provider.discover_hosts(include_destroyed=True, cg=provider.mng_ctx.concurrency_group)
 
-            for host in hosts:
+            for host_ref in host_refs:
                 try:
-                    host_info = HostInfo(
-                        id=host.id,
-                        name=str(host.id),
-                        provider_name=provider.name,
-                    )
+                    host = provider.get_host(host_ref.host_id)
 
                     # Handle offline hosts
                     # all we care about is that they have no agents (or is failed/crashed/destroyed),
@@ -183,7 +179,7 @@ def gc_machines(
                             seconds_since_stopped is not None
                             and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
                         ):
-                            if len(host.get_agent_references()) == 0 or host.get_state() in (
+                            if len(host.discover_agents()) == 0 or host.get_state() in (
                                 HostState.FAILED,
                                 HostState.CRASHED,
                                 HostState.DESTROYED,
@@ -195,7 +191,7 @@ def gc_machines(
                                     #  someone else starts it, you might have a host that is running but is untracked
                                     #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
                                     provider.delete_host(host)
-                                result.machines_deleted.append(host_info)
+                                result.machines_deleted.append(host_ref)
                         # no matter what we're done--the rest of the logic only applies to online hosts
                         continue
 
@@ -205,7 +201,7 @@ def gc_machines(
 
                     try:
                         # Only consider online hosts with no agents
-                        agent_refs = host.get_agent_references()
+                        agent_refs = host.discover_agents()
                         if len(agent_refs) > 0:
                             continue
                         host_to_destroy: HostInterface = host
@@ -223,15 +219,15 @@ def gc_machines(
                         provider.destroy_host(host_to_destroy)
                         mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
 
-                    result.machines_destroyed.append(host_info)
+                    result.machines_destroyed.append(host_ref)
 
                 except MngError as e:
-                    error_msg = f"Failed to check/destroy host {host.id}: {e}"
+                    error_msg = f"Failed to check/destroy host {host_ref.host_id}: {e}"
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
 
         except MngError as e:
-            error_msg = f"Failed to list hosts for provider {provider.name}: {e}"
+            error_msg = f"Failed to discover hosts for provider {provider.name}: {e}"
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
 
@@ -249,20 +245,20 @@ def gc_snapshots(
             continue
 
         try:
-            hosts = provider.list_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group)
+            host_refs = provider.discover_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group)
 
-            for host in hosts:
+            for host_ref in host_refs:
                 try:
-                    snapshots = provider.list_snapshots(host)
+                    snapshots = provider.list_snapshots(host_ref.host_id)
 
                     for snapshot in snapshots:
                         if not dry_run:
-                            provider.delete_snapshot(host, snapshot.id)
+                            provider.delete_snapshot(host_ref.host_id, snapshot.id)
 
                         result.snapshots_destroyed.append(snapshot)
 
                 except MngError as e:
-                    error_msg = f"Failed to cleanup snapshots for host {host.id}: {e}"
+                    error_msg = f"Failed to cleanup snapshots for host {host_ref.host_id}: {e}"
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
 
@@ -290,9 +286,9 @@ def gc_volumes(
 
             # Get volumes that are currently attached to hosts
             active_volume_ids = set()
-            for host in provider.list_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group):
+            for host_ref in provider.discover_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group):
                 for volume in all_volumes:
-                    if volume.host_id == host.id:
+                    if volume.host_id == host_ref.host_id:
                         active_volume_ids.add(volume.volume_id)
 
             # Identify orphaned volumes

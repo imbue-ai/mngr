@@ -6,7 +6,7 @@ from loguru import logger
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import BaseMngError
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import ErrorBehavior
@@ -18,7 +18,7 @@ from imbue.mng_tutor.data_types import StepCheck
 from imbue.mng_tutor.data_types import TmuxSessionHasClientsCheck
 
 
-def _find_agent_by_name(agent_name: AgentName, mng_ctx: MngContext) -> AgentInfo | None:
+def _find_agent_by_name(agent_name: AgentName, mng_ctx: MngContext) -> AgentDetails | None:
     """Find an agent by name, returning None if not found."""
     result = list_agents(mng_ctx, is_streaming=False, error_behavior=ErrorBehavior.CONTINUE)
     for agent in result.agents:

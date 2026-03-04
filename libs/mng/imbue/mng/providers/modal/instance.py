@@ -48,13 +48,13 @@ from imbue.mng.hosts.common import resolve_expected_process_name
 from imbue.mng.hosts.common import timestamp_to_datetime
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.offline_host import OfflineHost
-from imbue.mng.hosts.offline_host import validate_and_create_agent_reference
+from imbue.mng.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mng.interfaces.agent import AgentInterface
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CpuResources
 from imbue.mng.interfaces.data_types import HostConfig
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
@@ -68,11 +68,11 @@ from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ImageReference
@@ -2165,12 +2165,12 @@ log "=== Shutdown script completed ==="
             raise HostNotFoundError(host)
 
     @handle_modal_auth_error
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all Modal sandbox hosts, including stopped ones.
+    ) -> list[DiscoveredHost]:
+        """Discover all Modal sandbox hosts, including stopped ones.
 
         Returns hosts in three states:
         - RUNNING: has an active sandbox
@@ -2185,10 +2185,10 @@ log "=== Shutdown script completed ==="
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
-        # This reduces list_hosts latency by ~1.5s by overlapping the network calls.
+        # This reduces discover_hosts latency by ~1.5s by overlapping the network calls.
         try:
             with ConcurrencyGroupExecutor(
-                parent_cg=cg, name=f"modal_list_hosts_{self.name}", max_workers=2
+                parent_cg=cg, name=f"modal_discover_hosts_{self.name}", max_workers=2
             ) as executor:
                 sandboxes_future = executor.submit(self._list_sandboxes)
                 host_records_future = executor.submit(self._list_all_host_records, cg)
@@ -2275,7 +2275,7 @@ log "=== Shutdown script completed ==="
         for host in hosts:
             self._host_by_id_cache[host.id] = host
 
-        return hosts
+        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
 
     def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.
@@ -2309,11 +2309,11 @@ log "=== Shutdown script completed ==="
             return running_host_ids
 
     @handle_modal_auth_error
-    def load_agent_refs(
+    def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> dict[HostReference, list[AgentReference]]:
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references entirely from the state volume and sandbox list.
 
         Optimized implementation that avoids SSH connections by reading all data
@@ -2327,7 +2327,7 @@ log "=== Shutdown script completed ==="
         with trace_span("Loading data for refs", _is_trace_span_enabled=False):
             try:
                 with ConcurrencyGroupExecutor(
-                    parent_cg=cg, name=f"modal_load_agent_refs_{self.name}", max_workers=3
+                    parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
                 ) as executor:
                     running_ids_future = executor.submit(self._list_running_host_ids, cg)
                     host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
@@ -2337,8 +2337,8 @@ log "=== Shutdown script completed ==="
             except modal.exception.AuthError as e:
                 raise ModalAuthError() from e
 
-        # Build HostReference -> [AgentReference] mapping from host records
-        result: dict[HostReference, list[AgentReference]] = {}
+        # Build DiscoveredHost -> [DiscoveredAgent] mapping from host records
+        result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
 
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
@@ -2351,15 +2351,15 @@ log "=== Shutdown script completed ==="
             if not is_running and not is_failed and not has_snapshots and not include_destroyed:
                 continue
 
-            host_ref = HostReference(
+            host_ref = DiscoveredHost(
                 host_id=host_id,
                 host_name=host_name,
                 provider_name=self.name,
             )
 
-            agent_refs: list[AgentReference] = []
+            agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_data_by_host_id.get(host_id, []):
-                ref = validate_and_create_agent_reference(agent_data, host_id, self.name)
+                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
                 if ref is not None:
                     agent_refs.append(ref)
 
@@ -2396,12 +2396,12 @@ log "=== Shutdown script completed ==="
     # Optimized Listing
     # =========================================================================
 
-    def build_host_listing_data(
+    def get_host_and_agent_details(
         self,
-        host_ref: HostReference,
-        agent_refs: Sequence[AgentReference],
-    ) -> tuple[HostInfo, list[AgentInfo]] | None:
-        """Build HostInfo and AgentInfo via a single SSH command."""
+        host_ref: DiscoveredHost,
+        agent_refs: Sequence[DiscoveredAgent],
+    ) -> tuple[HostDetails, list[AgentDetails]] | None:
+        """Build HostDetails and AgentDetails via a single SSH command."""
         with trace_span("Building host listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
             with trace_span("Reading host record for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_record = self._read_host_record(host_ref.host_id)
@@ -2419,16 +2419,16 @@ log "=== Shutdown script completed ==="
                 if raw is None:
                     return None
 
-            # Build HostInfo from cached host record + SSH-collected data
-            with trace_span("Assembling host info for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                host_info = self._build_host_info_from_raw(host, host_ref, host_record, raw)
+            # Build HostDetails from cached host record + SSH-collected data
+            with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):
+                host_details = self._build_host_details_from_raw(host, host_ref, host_record, raw)
 
-            # Build AgentInfo for each agent
-            with trace_span("Assembling agent info for {}", host_ref.host_id, _is_trace_span_enabled=False):
+            # Build AgentDetails for each agent
+            with trace_span("Assembling agent details for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 certified_data = host_record.certified_host_data if host_record is not None else None
-                agent_infos = self._build_agent_infos_from_raw(host_info, certified_data, raw)
+                agent_details_list = self._build_agent_details_from_raw(host_details, certified_data, raw)
 
-            return host_info, agent_infos
+            return host_details, agent_details_list
 
     def _collect_all_listing_data_via_ssh(self, host: Host) -> dict[str, Any] | None:
         """Execute a single SSH command to collect all data needed for listing."""
@@ -2447,14 +2447,14 @@ log "=== Shutdown script completed ==="
 
         return _parse_listing_collection_output(result.stdout)
 
-    def _build_host_info_from_raw(
+    def _build_host_details_from_raw(
         self,
         host: Host,
-        host_ref: HostReference,
+        host_ref: DiscoveredHost,
         host_record: HostRecord | None,
         raw: dict[str, Any],
-    ) -> HostInfo:
-        """Construct HostInfo from cached host record and SSH-collected data."""
+    ) -> HostDetails:
+        """Construct HostDetails from cached host record and SSH-collected data."""
         # SSH info from host connector (local data, no SSH needed)
         ssh_info: SSHInfo | None = None
         ssh_connection = host._get_ssh_connection_info()
@@ -2516,7 +2516,7 @@ log "=== Shutdown script completed ==="
         # Snapshots from cached host record
         snapshots = self.list_snapshots(host)
 
-        return HostInfo(
+        return HostDetails(
             id=host.id,
             name=host_name,
             provider_name=host_ref.provider_name,
@@ -2535,13 +2535,13 @@ log "=== Shutdown script completed ==="
             failure_reason=certified_data.failure_reason,
         )
 
-    def _build_agent_infos_from_raw(
+    def _build_agent_details_from_raw(
         self,
-        host_info: HostInfo,
+        host_details: HostDetails,
         certified_host_data: CertifiedHostData | None,
         raw: dict[str, Any],
-    ) -> list[AgentInfo]:
-        """Build AgentInfo objects from SSH-collected agent data."""
+    ) -> list[AgentDetails]:
+        """Build AgentDetails objects from SSH-collected agent data."""
         # Activity config from certified data
         if certified_host_data is not None:
             idle_timeout_seconds = certified_host_data.idle_timeout_seconds
@@ -2555,37 +2555,37 @@ log "=== Shutdown script completed ==="
         ssh_activity = timestamp_to_datetime(raw.get("ssh_activity_mtime"))
         ps_output = raw.get("ps_output", "")
 
-        agent_infos: list[AgentInfo] = []
+        agent_details_list: list[AgentDetails] = []
         for agent_raw in raw.get("agents", []):
             try:
-                agent_info = self._build_single_agent_info(
+                agent_details = self._build_single_agent_details(
                     agent_raw=agent_raw,
-                    host_info=host_info,
+                    host_details=host_details,
                     ssh_activity=ssh_activity,
                     ps_output=ps_output,
                     idle_timeout_seconds=idle_timeout_seconds,
                     activity_sources=activity_sources,
                     idle_mode=idle_mode,
                 )
-                if agent_info is not None:
-                    agent_infos.append(agent_info)
+                if agent_details is not None:
+                    agent_details_list.append(agent_details)
             except (ValueError, KeyError, TypeError) as e:
                 agent_id = agent_raw.get("data", {}).get("id", "unknown")
                 logger.warning("Failed to build listing info for agent {}: {}", agent_id, e)
 
-        return agent_infos
+        return agent_details_list
 
-    def _build_single_agent_info(
+    def _build_single_agent_details(
         self,
         agent_raw: dict[str, Any],
-        host_info: HostInfo,
+        host_details: HostDetails,
         ssh_activity: datetime | None,
         ps_output: str,
         idle_timeout_seconds: int,
         activity_sources: tuple[ActivitySource, ...],
         idle_mode: IdleMode,
-    ) -> AgentInfo | None:
-        """Build a single AgentInfo from raw SSH-collected data."""
+    ) -> AgentDetails | None:
+        """Build a single AgentDetails from raw SSH-collected data."""
         agent_data = agent_raw.get("data", {})
         agent_id_str = agent_data.get("id")
         agent_name_str = agent_data.get("name")
@@ -2623,7 +2623,7 @@ log "=== Shutdown script completed ==="
             ps_output=ps_output,
         )
 
-        return AgentInfo(
+        return AgentDetails(
             id=AgentId(agent_id_str),
             name=AgentName(agent_name_str),
             type=agent_type,
@@ -2642,7 +2642,7 @@ log "=== Shutdown script completed ==="
             idle_timeout_seconds=idle_timeout_seconds,
             activity_sources=tuple(s.value for s in activity_sources),
             labels=agent_data.get("labels", {}),
-            host=host_info,
+            host=host_details,
             plugin={},
         )
 

@@ -419,8 +419,8 @@ class SSHInfo(FrozenModel):
     command: str = Field(description="Full SSH command to connect")
 
 
-class HostInfo(FrozenModel):
-    """Information about a host/machine."""
+class HostDetails(FrozenModel):
+    """Full host information collected by connecting to the host."""
 
     id: HostId = Field(description="Host ID")
     name: str = Field(description="Host name")
@@ -451,8 +451,8 @@ class HostInfo(FrozenModel):
     )
 
 
-class AgentInfo(FrozenModel):
-    """Complete information about an agent for listing purposes.
+class AgentDetails(FrozenModel):
+    """Full agent information collected by connecting to the host.
 
     This combines certified and reported data from the agent with host information.
     """
@@ -481,7 +481,7 @@ class AgentInfo(FrozenModel):
 
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels (key-value pairs)")
 
-    host: HostInfo = Field(description="Host information")
+    host: HostDetails = Field(description="Host information")
 
     plugin: dict[str, Any] = Field(default_factory=dict, description="Plugin-specific fields")
 

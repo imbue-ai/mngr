@@ -13,8 +13,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.interfaces.data_types import AgentInfo
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import SnapshotInfo
@@ -23,11 +23,11 @@ from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import AgentReference
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostNameStyle
-from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import ImageReference
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotId
@@ -172,42 +172,39 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all hosts managed by this provider instance."""
+    ) -> list[DiscoveredHost]:
+        """Discover all hosts managed by this provider instance."""
         ...
 
-    def load_agent_refs(
+    def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> dict[HostReference, list[AgentReference]]:
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts from this provider and fetch agent references for each host.
 
-        Returns a mapping from HostReference to the list of AgentReferences on that host.
+        Returns a mapping from DiscoveredHost to the list of DiscoveredAgents on that host.
         Providers may override this to optimize data fetching (e.g. by reading all
         host and agent data in parallel from a shared volume instead of SSH-ing into
         each host individually).
 
-        The default implementation calls list_hosts() and then get_agent_references()
+        The default implementation calls discover_hosts() and then discover_agents()
         on each host in parallel.
         """
         logger.trace("Loading hosts from provider {}", self.name)
-        hosts = self.list_hosts(cg=cg, include_destroyed=include_destroyed)
-        logger.trace("Loaded {} host(s) from provider {}", len(hosts), self.name)
+        host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
+        logger.trace("Loaded {} host(s) from provider {}", len(host_refs), self.name)
 
-        future_by_host_ref: dict[HostReference, Future[list[AgentReference]]] = {}
+        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
         with ConcurrencyGroupExecutor(parent_cg=cg, name=f"load_agents_{self.name}", max_workers=32) as executor:
-            for host in hosts:
-                host_ref = HostReference(
-                    host_id=host.id,
-                    host_name=host.get_name(),
-                    provider_name=self.name,
+            for host_ref in host_refs:
+                future_by_host_ref[host_ref] = executor.submit(
+                    self.get_host(host_ref.host_id).discover_agents,
                 )
-                future_by_host_ref[host_ref] = executor.submit(host.get_agent_references)
 
         return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
 
@@ -216,12 +213,12 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Get CPU, memory, disk, and GPU resource information for a host."""
         ...
 
-    def build_host_listing_data(
+    def get_host_and_agent_details(
         self,
-        host_ref: HostReference,
-        agent_refs: Sequence[AgentReference],
-    ) -> tuple[HostInfo, list[AgentInfo]] | None:
-        """Build HostInfo and AgentInfo for a host in an optimized way for listing.
+        host_ref: DiscoveredHost,
+        agent_refs: Sequence[DiscoveredAgent],
+    ) -> tuple[HostDetails, list[AgentDetails]] | None:
+        """Build HostDetails and AgentDetails for a host in an optimized way for listing.
 
         Providers can override this to collect all needed data in a single
         operation (e.g., one SSH command) instead of making many individual calls.

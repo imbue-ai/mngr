@@ -1,6 +1,5 @@
 """Integration tests for the migrate CLI command."""
 
-from pathlib import Path
 from uuid import uuid4
 
 import pluggy
@@ -9,7 +8,6 @@ from click.testing import CliRunner
 
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.migrate import migrate
-from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
@@ -17,19 +15,18 @@ from imbue.mng.utils.testing import tmux_session_exists
 @pytest.mark.tmux
 def test_migrate_clones_and_destroys_source(
     cli_runner: CliRunner,
-    temp_work_dir: Path,
+    create_test_agent,
     mng_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that migrate creates a new agent and destroys the source."""
     source_name = f"test-migrate-source-{uuid4().hex}"
     target_name = f"test-migrate-target-{uuid4().hex}"
-    source_session = f"{mng_test_prefix}{source_name}"
+    source_session = create_test_agent(source_name)
     target_session = f"{mng_test_prefix}{target_name}"
 
-    with tmux_session_cleanup(source_session), tmux_session_cleanup(target_session):
-        create_test_agent_via_cli(cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, source_name)
-
+    # Target session is created by migrate, not by create_test_agent, so clean it up separately
+    with tmux_session_cleanup(target_session):
         # Migrate the source agent to a new name
         migrate_result = cli_runner.invoke(
             migrate,

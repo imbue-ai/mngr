@@ -68,11 +68,11 @@ def test_ssh_provider_get_host_by_id(ssh_provider: SSHProviderInstance) -> None:
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(60)
-def test_ssh_provider_list_hosts(ssh_provider: SSHProviderInstance) -> None:
-    """Test listing hosts from SSH provider."""
-    hosts = ssh_provider.list_hosts(cg=ssh_provider.mng_ctx.concurrency_group)
+def test_ssh_provider_discover_hosts(ssh_provider: SSHProviderInstance) -> None:
+    """Test discovering hosts from SSH provider."""
+    hosts = ssh_provider.discover_hosts(cg=ssh_provider.mng_ctx.concurrency_group)
     assert len(hosts) == 1
-    assert hosts[0].id == ssh_provider.get_host(HostName("localhost")).id
+    assert hosts[0].host_id == ssh_provider.get_host(HostName("localhost")).id
 
 
 @pytest.mark.acceptance

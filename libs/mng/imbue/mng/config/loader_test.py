@@ -1150,3 +1150,108 @@ def test_load_config_applies_env_command_overrides(
 
     assert "create" in mng_ctx.config.commands
     assert mng_ctx.config.commands["create"].defaults.get("connect") == "false"
+
+
+def test_load_config_headless_default_is_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """By default, config.headless is False."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNG_HEADLESS", raising=False)
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False
+
+
+def test_load_config_mng_headless_env_var_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS=true sets config.headless to True."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_HEADLESS", "true")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is True
+
+
+def test_load_config_mng_headless_env_var_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS=false sets config.headless to False."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_HEADLESS", "false")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False
+
+
+def test_load_config_headless_from_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """headless = true in settings.toml sets config.headless to True."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNG_HEADLESS", raising=False)
+
+    # Write a project settings file with headless = true
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(exist_ok=True)
+    (mng_dir / "settings.toml").write_text("headless = true\n")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is True
+
+
+def test_load_config_mng_headless_env_overrides_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS env var overrides headless setting from config file."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    # Config file says headless = true, but env var says false
+    monkeypatch.setenv("MNG_HEADLESS", "false")
+
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(exist_ok=True)
+    (mng_dir / "settings.toml").write_text("headless = true\n")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False

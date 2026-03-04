@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1819,6 +1819,7 @@ dependencies = [
     { name = "pluggy" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "pygtail" },
     { name = "pyinfra" },
     { name = "python-dotenv" },
     { name = "setproctitle" },
@@ -1844,6 +1845,7 @@ requires-dist = [
     { name = "pluggy", specifier = ">=1.5.0" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "setproctitle", specifier = ">=1.3" },
@@ -2520,6 +2522,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b0/77/a5b8c569bf593b0140bde72ea885a803b82086995367bf2037de0159d924/pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887", size = 4968631, upload-time = "2025-06-21T13:39:12.283Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b", size = 1225217, upload-time = "2025-06-21T13:39:07.939Z" },
+]
+
+[[package]]
+name = "pygtail"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/89/437120e303d5d2c81107ed3415d5f3c9975f7dfdeef9e4440cef364e3bf9/pygtail-0.14.0.tar.gz", hash = "sha256:55616d31a081eaaeb069d0946f2bc7e530ebf505d4c3c050f8e941786a3449d3", size = 13509, upload-time = "2022-11-06T14:54:28.816Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/77/5558c3904229d2e320722ec58d38b82f9ff3063b7eeda49a8821b5595de1/pygtail-0.14.0-py3-none-any.whl", hash = "sha256:3d8e847d4d5c56e3cece1f65577562e63f8b75af7b93bf21b71c3213d369c2a9", size = 14319, upload-time = "2022-11-06T14:54:26.714Z" },
 ]
 
 [[package]]

@@ -111,7 +111,7 @@ def test_gc_machines_deletes_old_offline_host_with_no_agents(
     result = _run_gc_machines(gc_mock_provider)
 
     assert len(result.machines_deleted) == 1
-    assert result.machines_deleted[0].id == host.id
+    assert result.machines_deleted[0].host_id == host.id
     assert gc_mock_provider.deleted_hosts == [host.id]
 
 

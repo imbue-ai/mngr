@@ -5,8 +5,8 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -95,7 +95,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         raise UserInputError(f"Invalid new name: {e}") from None
 
     # Resolve the agent (without requiring the agent process to be running)
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
     agent, host = find_and_maybe_start_agent_by_name_or_id(
         opts.current,
         agents_by_host,

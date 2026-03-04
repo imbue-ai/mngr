@@ -6,24 +6,24 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mng.api.events import EventFileEntry
+from imbue.mng.api.events import EventRecord
+from imbue.mng.api.events import EventsTarget
 from imbue.mng.api.events import apply_head_or_tail
 from imbue.mng.api.events import follow_event_file
-from imbue.mng.api.events import list_event_files
 from imbue.mng.api.events import read_event_content
 from imbue.mng.api.events import resolve_events_target
+from imbue.mng.api.events import stream_all_events
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_final_json
-from imbue.mng.cli.output_helpers import emit_format_template_lines
-from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.cel_utils import compile_cel_filters
 
 
 class EventsCliOptions(CommonCliOptions):
@@ -34,6 +34,7 @@ class EventsCliOptions(CommonCliOptions):
 
     target: str
     event_filename: str | None
+    filter: str | None
     follow: bool
     tail: int | None
     head: int | None
@@ -53,19 +54,26 @@ def _write_and_flush_stdout(content: str) -> None:
     "--follow/--no-follow",
     default=False,
     show_default=True,
-    help="Continue running and print new messages as they appear",
+    help="Continue running and print new events as they appear",
 )
 @optgroup.option(
     "--tail",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the last N lines of the event file",
+    help="Print the last N events (or lines when viewing a specific file)",
 )
 @optgroup.option(
     "--head",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the first N lines of the event file",
+    help="Print the first N events (or lines when viewing a specific file)",
+)
+@optgroup.group("Filtering")
+@optgroup.option(
+    "--filter",
+    "filter",
+    default=None,
+    help="CEL expression to filter which events to include (e.g. 'source == \"messages\"')",
 )
 @add_common_options
 @click.pass_context
@@ -74,7 +82,7 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
         ctx=ctx,
         command_name="events",
         command_class=EventsCliOptions,
-        is_format_template_supported=True,
+        is_format_template_supported=False,
     )
 
     # Validate mutually exclusive options
@@ -84,24 +92,39 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
     if opts.follow and opts.head is not None:
         raise UserInputError("Cannot use --head with --follow")
 
+    if opts.filter is not None and opts.event_filename is not None:
+        raise UserInputError("Cannot use --filter with a specific event file name")
+
     # Resolve the target (agent or host)
     target = resolve_events_target(
         identifier=opts.target,
         mng_ctx=mng_ctx,
     )
 
-    # If no event file specified, list available event files
-    if opts.event_filename is None:
-        event_files = list_event_files(target)
-        _emit_event_file_list(event_files, target.display_name, output_opts)
+    # If a specific event file is given, view that file directly
+    if opts.event_filename is not None:
+        _handle_specific_file(target, opts, output_opts)
         return
 
-    # Format templates only apply to file listing, not to viewing file content
-    if output_opts.format_template is not None:
-        raise UserInputError(
-            "Format template strings are only supported when listing event files (without a filename argument). "
-            "Use --format human, --format json, or --format jsonl when viewing event content."
+    # Stream all events from all sources
+    cel_include_filters: list[Any] = []
+    cel_exclude_filters: list[Any] = []
+    if opts.filter is not None:
+        cel_include_filters, cel_exclude_filters = compile_cel_filters(
+            include_filters=[opts.filter],
+            exclude_filters=[],
         )
+
+    _stream_all_events_cli(target, opts, cel_include_filters, cel_exclude_filters)
+
+
+def _handle_specific_file(
+    target: EventsTarget,
+    opts: EventsCliOptions,
+    output_opts: OutputOptions,
+) -> None:
+    """View a specific event file by name."""
+    assert opts.event_filename is not None
 
     if opts.follow:
         # Follow mode: poll and print new content
@@ -129,33 +152,33 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
     _emit_event_content(filtered_content, opts.event_filename, output_opts)
 
 
-def _emit_event_file_list(
-    event_files: list[EventFileEntry],
-    display_name: str,
-    output_opts: OutputOptions,
+def _emit_event_record(event: EventRecord) -> None:
+    """Emit a single event record to stdout as a JSONL line."""
+    _write_and_flush_stdout(event.raw_line)
+    if not event.raw_line.endswith("\n"):
+        _write_and_flush_stdout("\n")
+
+
+def _stream_all_events_cli(
+    target: EventsTarget,
+    opts: EventsCliOptions,
+    cel_include_filters: list[Any],
+    cel_exclude_filters: list[Any],
 ) -> None:
-    """Emit the list of available event files."""
-    if output_opts.format_template is not None:
-        items = [{"name": ef.name, "size": str(ef.size)} for ef in event_files]
-        emit_format_template_lines(output_opts.format_template, items)
-        return
-    match output_opts.output_format:
-        case OutputFormat.HUMAN:
-            if not event_files:
-                write_human_line("No event files found for {}", display_name)
-            else:
-                write_human_line("Event files for {}:", display_name)
-                for event_file in event_files:
-                    write_human_line("  {} ({} bytes)", event_file.name, event_file.size)
-        case OutputFormat.JSON | OutputFormat.JSONL:
-            emit_final_json(
-                {
-                    "target": display_name,
-                    "event_files": [{"name": ef.name, "size": ef.size} for ef in event_files],
-                }
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
+    """Stream all events from all sources as JSONL lines."""
+    try:
+        stream_all_events(
+            target=target,
+            on_event=_emit_event_record,
+            cel_include_filters=cel_include_filters,
+            cel_exclude_filters=cel_exclude_filters,
+            tail_count=opts.tail,
+            head_count=opts.head,
+            is_follow=opts.follow,
+        )
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 
 def _emit_event_content(
@@ -184,30 +207,32 @@ def _emit_event_content(
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="events",
-    one_line_description="View event files from an agent or host [experimental]",
-    synopsis="mng events TARGET [EVENT_FILE] [--follow] [--tail N] [--head N]",
+    one_line_description="View events from an agent or host [experimental]",
+    synopsis="mng events TARGET [EVENT_FILE] [--filter CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host name/ID whose events to view\n"
-        "- `EVENT_FILE`: Name of the event file to view (optional; lists files if omitted)"
+        "- `EVENT_FILE`: Name of a specific event file to view (optional; streams all events if omitted)"
     ),
     description="""TARGET identifies an agent (by name or ID) or a host (by name or ID).
 The command first tries to match TARGET as an agent, then as a host.
 
-If EVENT_FILE is not specified, lists all available event files.
-If EVENT_FILE is specified, prints its contents.
+If EVENT_FILE is not specified, streams all events from all sources in
+date-sorted order. Use --filter to restrict which events are included
+via a CEL expression. Use --follow to continuously stream new events.
 
-In follow mode (--follow), the command uses tail -f for real-time
-streaming when the host is online (locally or via SSH). When the host
-is offline, it falls back to polling the volume for new content.
-Press Ctrl+C to stop.
+If EVENT_FILE is specified, prints its contents directly.
 
-When listing files, supports custom format templates via --format. Available fields: name, size.""",
+In follow mode (--follow), the command polls for new events. When the host
+is online, it reads files directly. When offline, it falls back to polling
+the volume. The command handles online/offline transitions automatically.
+Press Ctrl+C to stop.""",
     examples=(
-        ("List available event files for an agent", "mng events my-agent"),
-        ("View a specific event file", "mng events my-agent output.log"),
-        ("View the last 50 lines", "mng events my-agent output.log --tail 50"),
-        ("Follow an event file", "mng events my-agent output.log --follow"),
-        ("List files with custom format template", "mng events my-agent --format '{name}\\t{size}'"),
+        ("Stream all events for an agent", "mng events my-agent"),
+        ("Stream only message events", "mng events my-agent --filter 'source == \"messages\"'"),
+        ("View last 100 events", "mng events my-agent --tail 100"),
+        ("Follow all events in real-time", "mng events my-agent --follow"),
+        ("View a specific event file", "mng events my-agent messages/events.jsonl"),
+        ("Follow a specific event file", "mng events my-agent messages/events.jsonl --follow"),
     ),
     see_also=(
         ("list", "List available agents"),

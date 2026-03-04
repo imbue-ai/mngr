@@ -12,8 +12,7 @@ mng [connect|conn] [OPTIONS] [AGENT]
 Connect to an existing agent via the terminal.
 
 Attaches to the agent's tmux session, roughly equivalent to SSH'ing into
-the agent's machine and attaching to the tmux session. Use `mng open` to
-open an agent's URLs in a web browser instead.
+the agent's machine and attaching to the tmux session.
 
 If no agent is specified, shows an interactive selector to choose from
 available agents. The selector allows typeahead search to filter agents
@@ -69,6 +68,7 @@ mng connect [OPTIONS] [AGENT]
 | `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
 | `--log-command-output`, `--no-log-command-output` | boolean | Log stdout/stderr from commands | None |
 | `--log-env-vars`, `--no-log-env-vars` | boolean | Log environment variables (security risk) | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNG_HEADLESS env var or 'headless' config key. | `False` |
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |

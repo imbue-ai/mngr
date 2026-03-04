@@ -13,9 +13,7 @@ from click.testing import CliRunner
 from imbue.imbue_common.logging import log_span
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.utils.testing import ModalSubprocessTestEnv
-from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import get_short_random_string
-from imbue.mng.utils.testing import tmux_session_cleanup
 
 # =============================================================================
 # Tests with real local agents
@@ -25,52 +23,44 @@ from imbue.mng.utils.testing import tmux_session_cleanup
 @pytest.mark.tmux
 def test_snapshot_create_local_agent_rejects_unsupported_provider(
     cli_runner: CliRunner,
-    temp_work_dir: Path,
-    mng_test_prefix: str,
+    create_test_agent,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that snapshot create fails for a local agent (unsupported provider)."""
     agent_name = f"test-snap-create-{int(time.time())}"
-    session_name = f"{mng_test_prefix}{agent_name}"
+    create_test_agent(agent_name)
 
-    with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name)
+    result = cli_runner.invoke(
+        snapshot,
+        ["create", agent_name],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
 
-        result = cli_runner.invoke(
-            snapshot,
-            ["create", agent_name],
-            obj=plugin_manager,
-            catch_exceptions=True,
-        )
-
-        assert result.exit_code != 0
-        assert "does not support snapshots" in result.output
+    assert result.exit_code != 0
+    assert "does not support snapshots" in result.output
 
 
 @pytest.mark.tmux
 def test_snapshot_create_dry_run_jsonl_resolves_local_agent(
     cli_runner: CliRunner,
-    temp_work_dir: Path,
-    mng_test_prefix: str,
+    create_test_agent,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --dry-run with --format jsonl outputs structured data on stdout."""
     agent_name = f"test-snap-dryrun-jsonl-{int(time.time())}"
-    session_name = f"{mng_test_prefix}{agent_name}"
+    create_test_agent(agent_name)
 
-    with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name)
+    result = cli_runner.invoke(
+        snapshot,
+        ["create", agent_name, "--dry-run", "--format", "jsonl"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
 
-        result = cli_runner.invoke(
-            snapshot,
-            ["create", agent_name, "--dry-run", "--format", "jsonl"],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 0
-        assert "dry_run" in result.output
-        assert agent_name in result.output
+    assert result.exit_code == 0
+    assert "dry_run" in result.output
+    assert agent_name in result.output
 
 
 # =============================================================================
@@ -123,51 +113,43 @@ def test_snapshot_create_nonexistent_agent_errors(
 @pytest.mark.tmux
 def test_snapshot_create_on_error_continue_reports_failure(
     cli_runner: CliRunner,
-    temp_work_dir: Path,
-    mng_test_prefix: str,
+    create_test_agent,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --on-error continue reports the error and exits 1 (doesn't crash)."""
     agent_name = f"test-snap-onerror-cont-{int(time.time())}"
-    session_name = f"{mng_test_prefix}{agent_name}"
+    create_test_agent(agent_name)
 
-    with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name)
+    result = cli_runner.invoke(
+        snapshot,
+        ["create", agent_name, "--on-error", "continue"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
 
-        result = cli_runner.invoke(
-            snapshot,
-            ["create", agent_name, "--on-error", "continue"],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 1
-        assert "does not support snapshots" in result.output or "Failed to create" in result.output
+    assert result.exit_code == 1
+    assert "does not support snapshots" in result.output or "Failed to create" in result.output
 
 
 @pytest.mark.tmux
 def test_snapshot_create_on_error_abort_reports_failure(
     cli_runner: CliRunner,
-    temp_work_dir: Path,
-    mng_test_prefix: str,
+    create_test_agent,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --on-error abort also fails (with abort message)."""
     agent_name = f"test-snap-onerror-abort-{int(time.time())}"
-    session_name = f"{mng_test_prefix}{agent_name}"
+    create_test_agent(agent_name)
 
-    with tmux_session_cleanup(session_name):
-        create_test_agent_via_cli(cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name)
+    result = cli_runner.invoke(
+        snapshot,
+        ["create", agent_name, "--on-error", "abort"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
 
-        result = cli_runner.invoke(
-            snapshot,
-            ["create", agent_name, "--on-error", "abort"],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert result.exit_code == 1
-        assert "Aborted" in result.output or "does not support" in result.output
+    assert result.exit_code == 1
+    assert "Aborted" in result.output or "does not support" in result.output
 
 
 def test_snapshot_create_mixed_identifier_classified_as_host(

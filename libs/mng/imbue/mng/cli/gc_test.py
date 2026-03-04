@@ -20,13 +20,14 @@ from imbue.mng.cli.gc import _emit_jsonl_summary
 from imbue.mng.cli.gc import _format_destroyed_message
 from imbue.mng.cli.gc import gc
 from imbue.mng.interfaces.data_types import BuildCacheInfo
-from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SizeBytes
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import VolumeInfo
 from imbue.mng.interfaces.data_types import WorkDirInfo
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotId
@@ -54,11 +55,11 @@ def _create_work_dir_info(
     )
 
 
-def _create_host_info(name: str = "test-host") -> HostInfo:
-    """Create a HostInfo for testing."""
-    return HostInfo(
-        id=HostId.generate(),
-        name=name,
+def _create_discovered_host(name: str = "test-host") -> DiscoveredHost:
+    """Create a DiscoveredHost for testing."""
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName(name),
         provider_name=ProviderInstanceName("docker"),
     )
 
@@ -119,7 +120,7 @@ def test_format_destroyed_message_work_dir() -> None:
 
 def test_format_destroyed_message_machine() -> None:
     """_format_destroyed_message should format machine messages with provider."""
-    host = _create_host_info(name="my-machine")
+    host = _create_discovered_host(name="my-machine")
 
     msg_destroy = _format_destroyed_message("machine", host, dry_run=False)
     assert msg_destroy == "Destroyed machine: my-machine (docker)"
@@ -229,7 +230,7 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[s
     """_emit_jsonl_summary should aggregate counts and sizes from all resource types."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info(size_bytes=1000)]
-    result.machines_destroyed = [_create_host_info(), _create_host_info()]
+    result.machines_destroyed = [_create_discovered_host(), _create_discovered_host()]
     result.snapshots_destroyed = [_create_snapshot_info(size_bytes=500)]
     result.volumes_destroyed = [_create_volume_info(size_bytes=200)]
     result.logs_destroyed = [_create_log_file_info(size_bytes=100)]
@@ -342,7 +343,7 @@ def test_emit_destroyed_human_format(capsys: pytest.CaptureFixture[str]) -> None
 
 def test_emit_destroyed_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroyed should output JSONL event."""
-    host = _create_host_info(name="my-machine")
+    host = _create_discovered_host(name="my-machine")
     _emit_destroyed("machine", host, OutputFormat.JSONL, dry_run=False)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
@@ -436,7 +437,7 @@ def test_emit_json_summary_with_resources(capsys: pytest.CaptureFixture[str]) ->
     """_emit_json_summary should serialize resource data."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info()]
-    result.machines_destroyed = [_create_host_info()]
+    result.machines_destroyed = [_create_discovered_host()]
     result.logs_destroyed = [_create_log_file_info()]
 
     _emit_json_summary(result, dry_run=True)
@@ -474,7 +475,7 @@ def test_emit_human_summary_dry_run_header(capsys: pytest.CaptureFixture[str]) -
 def test_emit_human_summary_shows_total_count(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show the total count of destroyed resources."""
     result = GcResult()
-    result.machines_destroyed = [_create_host_info(), _create_host_info()]
+    result.machines_destroyed = [_create_discovered_host(), _create_discovered_host()]
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()
     assert "Destroyed 2 resource(s) total" in captured.out
@@ -483,7 +484,7 @@ def test_emit_human_summary_shows_total_count(capsys: pytest.CaptureFixture[str]
 def test_emit_human_summary_shows_machine_records_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should show machine records deleted count."""
     result = GcResult()
-    result.machines_deleted = [_create_host_info()]
+    result.machines_deleted = [_create_discovered_host()]
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()
     assert "Machine records deleted: 1" in captured.out
@@ -504,7 +505,7 @@ def test_emit_human_summary_with_all_resource_types(capsys: pytest.CaptureFixtur
     """_emit_human_summary should report all resource types in a combined result."""
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info(is_local=True, size_bytes=1000)]
-    result.machines_destroyed = [_create_host_info()]
+    result.machines_destroyed = [_create_discovered_host()]
     result.snapshots_destroyed = [_create_snapshot_info()]
     result.volumes_destroyed = [_create_volume_info()]
     result.logs_destroyed = [_create_log_file_info()]

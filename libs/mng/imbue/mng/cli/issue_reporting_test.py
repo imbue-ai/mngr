@@ -1,10 +1,10 @@
 import json
+from uuid import uuid4
 
 import pytest
 from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mng.cli.issue_reporting import ExistingIssue
 from imbue.mng.cli.issue_reporting import GITHUB_BASE_URL
@@ -12,6 +12,7 @@ from imbue.mng.cli.issue_reporting import build_issue_body
 from imbue.mng.cli.issue_reporting import build_issue_title
 from imbue.mng.cli.issue_reporting import build_new_issue_url
 from imbue.mng.cli.issue_reporting import handle_not_implemented_error
+from imbue.mng.cli.issue_reporting import handle_unexpected_error
 from imbue.mng.cli.issue_reporting import search_for_existing_issue
 
 
@@ -100,12 +101,13 @@ def test_build_new_issue_url_truncates_long_body() -> None:
 def test_search_for_existing_issue_returns_none_when_both_fail(
     cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When both GitHub API and gh CLI fail, search returns None."""
+    """When both GitHub API and gh CLI fail, search returns None.
 
-    def failing_run(*args, **kwargs):
-        raise ProcessSetupError(command=("curl",), stdout="", stderr="curl not found")
-
-    monkeypatch.setattr(ConcurrencyGroup, "run_process_to_completion", failing_run)
+    Points at a nonexistent GitHub repo so both curl and gh CLI fail
+    with real errors rather than mocking the failure.
+    """
+    fake_repo = f"nonexistent-org/nonexistent-repo-{uuid4().hex}"
+    monkeypatch.setattr("imbue.mng.cli.issue_reporting.GITHUB_REPO", fake_repo)
 
     result = search_for_existing_issue("some error", cg)
     assert result is None
@@ -284,6 +286,37 @@ def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypat
     assert len(opened_urls) == 1
     assert opened_urls[0].startswith(f"{GITHUB_BASE_URL}/issues/new?")
     assert "NotImplemented" in opened_urls[0]
+
+
+# =============================================================================
+# Tests for is_interactive parameter on error handlers
+# =============================================================================
+
+
+def test_handle_not_implemented_error_is_interactive_false_exits_without_prompting() -> None:
+    """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
+
+    This verifies that the is_interactive parameter takes precedence over the fallback
+    sys.stdin.isatty() check. The is_interactive=True path is already tested by the existing
+    tests above that monkeypatch sys.stdin.isatty to return True.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        handle_not_implemented_error(NotImplementedError("some feature"), is_interactive=False)
+
+    assert exc_info.value.code == 1
+
+
+def test_handle_unexpected_error_is_interactive_false_exits_without_prompting() -> None:
+    """When is_interactive=False is explicitly passed, exits without prompting regardless of TTY state.
+
+    This verifies that the is_interactive parameter takes precedence over the fallback
+    sys.stdin.isatty() check. The is_interactive=True path is already tested by the existing
+    tests for handle_not_implemented_error.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        handle_unexpected_error(RuntimeError("boom"), is_interactive=False)
+
+    assert exc_info.value.code == 1
 
 
 # =============================================================================

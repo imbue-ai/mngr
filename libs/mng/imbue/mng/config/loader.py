@@ -182,6 +182,12 @@ def load_config(
         config_dict["logging"] = config.logging
 
     config_dict["is_nested_tmux_allowed"] = config.is_nested_tmux_allowed
+    # Apply MNG_HEADLESS env var override (env var > config file > default)
+    headless_env = os.environ.get("MNG_HEADLESS")
+    if headless_env is not None:
+        config_dict["headless"] = parse_bool_env(headless_env)
+    else:
+        config_dict["headless"] = config.headless
     config_dict["is_error_reporting_enabled"] = config.is_error_reporting_enabled
     config_dict["is_allowed_in_pytest"] = config.is_allowed_in_pytest
     config_dict["pre_command_scripts"] = config.pre_command_scripts
@@ -518,6 +524,7 @@ def parse_config(
     kwargs["is_nested_tmux_allowed"] = (
         raw.pop("is_nested_tmux_allowed", None) if "is_nested_tmux_allowed" in raw else None
     )
+    kwargs["headless"] = raw.pop("headless", None) if "headless" in raw else None
     kwargs["is_error_reporting_enabled"] = (
         raw.pop("is_error_reporting_enabled", None) if "is_error_reporting_enabled" in raw else None
     )

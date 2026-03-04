@@ -18,11 +18,11 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.main import cli
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
 
@@ -131,7 +131,7 @@ def test_pull_command_sync_mode_choices() -> None:
 
 def test_find_agent_by_name_or_id_raises_for_empty_agents(temp_mng_ctx: MngContext) -> None:
     """Test that find_agent_by_name_or_id raises UserInputError for unknown agent."""
-    agents_by_host: dict[HostReference, list[AgentReference]] = {}
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
 
     with pytest.raises(UserInputError, match="No agent found with name or ID"):
         find_and_maybe_start_agent_by_name_or_id("nonexistent-agent", agents_by_host, temp_mng_ctx, "test")
@@ -139,7 +139,7 @@ def test_find_agent_by_name_or_id_raises_for_empty_agents(temp_mng_ctx: MngConte
 
 def test_find_agent_by_name_or_id_raises_agent_not_found_for_valid_id(temp_mng_ctx: MngContext) -> None:
     """Test that find_agent_by_name_or_id raises AgentNotFoundError for valid but nonexistent ID."""
-    agents_by_host: dict[HostReference, list[AgentReference]] = {}
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
 
     # Generate a valid agent ID that doesn't exist in the empty agents_by_host
     nonexistent_id = AgentId.generate()
@@ -178,18 +178,18 @@ def test_find_agent_by_name_or_id_raises_for_multiple_matches(
     )
 
     # Build references matching the real host and agents
-    host_ref = HostReference(
+    host_ref = DiscoveredHost(
         provider_name=ProviderInstanceName("local"),
         host_id=local_host.id,
         host_name=local_host.get_name(),
     )
-    agent_ref1 = AgentReference(
+    agent_ref1 = DiscoveredAgent(
         agent_id=agent1.id,
         agent_name=agent1.name,
         host_id=local_host.id,
         provider_name=ProviderInstanceName("local"),
     )
-    agent_ref2 = AgentReference(
+    agent_ref2 = DiscoveredAgent(
         agent_id=agent2.id,
         agent_name=agent2.name,
         host_id=local_host.id,
@@ -210,7 +210,7 @@ def _create_stopped_agent_with_references(
     temp_work_dir: Path,
     agent_name: AgentName,
     command: CommandString,
-) -> tuple[OnlineHostInterface, AgentReference, dict[HostReference, list[AgentReference]]]:
+) -> tuple[OnlineHostInterface, DiscoveredAgent, dict[DiscoveredHost, list[DiscoveredAgent]]]:
     """Create an agent, stop it, and return the host, agent ref, and agents_by_host mapping."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
 
@@ -226,12 +226,12 @@ def _create_stopped_agent_with_references(
     # Stop the agent so it's in STOPPED state
     local_host.stop_agents([agent.id])
 
-    host_ref = HostReference(
+    host_ref = DiscoveredHost(
         provider_name=ProviderInstanceName("local"),
         host_id=local_host.id,
         host_name=local_host.get_name(),
     )
-    agent_ref = AgentReference(
+    agent_ref = DiscoveredAgent(
         agent_id=agent.id,
         agent_name=agent.name,
         host_id=local_host.id,
