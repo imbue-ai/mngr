@@ -16,6 +16,7 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
+from imbue.mng.utils.interactive_subprocess import run_interactive_subprocess
 
 
 class ChatCommandError(MngError):
@@ -199,9 +200,8 @@ def run_chat_on_agent(  # pragma: no cover
 ) -> None:
     """Run the chat command on an agent, either locally or via SSH.
 
-    Replaces the current process with either the chat script directly (local)
-    or SSH (remote), so that signals like Ctrl+C go directly to the target
-    process without Python's signal handler intercepting them.
+    For local agents, replaces the current process with the chat script.
+    For remote agents, runs SSH interactively with the chat script.
     """
     logger.info("Starting chat session...")
 
@@ -236,11 +236,10 @@ def run_chat_on_agent(  # pragma: no cover
         remote_script = _build_remote_chat_script(host.host_dir, agent, host, chat_args)
         ssh_args.extend(["-t", "bash -c " + shlex.quote(remote_script)])
 
-        # Replace the current process with SSH so that signals (including
-        # Ctrl+C / SIGINT) go directly to the SSH process rather than being
-        # intercepted by Python's signal handler.
-        logger.debug("Exec SSH chat command: {}", ssh_args)
-        os.execvpe(ssh_args[0], ssh_args, dict(os.environ))
+        logger.debug("Running SSH chat command: {}", ssh_args)
+        completed = run_interactive_subprocess(ssh_args)
+        if completed.returncode != 0:
+            logger.debug("SSH chat session ended with exit code {}", completed.returncode)
 
 
 def list_conversations_on_agent(

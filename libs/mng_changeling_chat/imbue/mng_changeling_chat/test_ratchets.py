@@ -127,7 +127,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(10))
+    rc.check_trailing_comments(_DIR, snapshot(9))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -208,7 +208,7 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess_usage() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(2))
+    rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
 # --- AST-based ratchets ---
