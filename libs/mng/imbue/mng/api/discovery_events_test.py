@@ -30,28 +30,11 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CommandString
-from imbue.mng.primitives import DiscoveredAgent
-from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
-
-
-def _make_discovered_agent() -> DiscoveredAgent:
-    return DiscoveredAgent(
-        host_id=HostId.generate(),
-        agent_id=AgentId.generate(),
-        agent_name=AgentName(f"test-agent-{uuid4().hex}"),
-        provider_name=ProviderInstanceName("local"),
-    )
-
-
-def _make_discovered_host() -> DiscoveredHost:
-    return DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName(f"test-host-{uuid4().hex}"),
-        provider_name=ProviderInstanceName("local"),
-    )
+from imbue.mng.utils.testing import make_test_discovered_agent
+from imbue.mng.utils.testing import make_test_discovered_host
 
 
 def _make_agent_details(host_id: HostId, provider_name: ProviderInstanceName) -> AgentDetails:
@@ -92,7 +75,7 @@ def test_get_discovery_events_path_returns_jsonl_file(temp_config: MngConfig) ->
 
 
 def test_make_agent_discovery_event_has_correct_fields() -> None:
-    agent = _make_discovered_agent()
+    agent = make_test_discovered_agent()
     event = make_agent_discovery_event(agent)
     assert event.type == DiscoveryEventType.AGENT_DISCOVERED
     assert event.source == "mng/discovery"
@@ -101,7 +84,7 @@ def test_make_agent_discovery_event_has_correct_fields() -> None:
 
 
 def test_make_host_discovery_event_has_correct_fields() -> None:
-    host = _make_discovered_host()
+    host = make_test_discovered_host()
     event = make_host_discovery_event(host)
     assert event.type == DiscoveryEventType.HOST_DISCOVERED
     assert event.source == "mng/discovery"
@@ -110,8 +93,8 @@ def test_make_host_discovery_event_has_correct_fields() -> None:
 
 
 def test_make_full_discovery_snapshot_event_has_correct_fields() -> None:
-    agents = (_make_discovered_agent(), _make_discovered_agent())
-    hosts = (_make_discovered_host(),)
+    agents = (make_test_discovered_agent(), make_test_discovered_agent())
+    hosts = (make_test_discovered_host(),)
     event = make_full_discovery_snapshot_event(agents, hosts)
     assert event.type == DiscoveryEventType.DISCOVERY_FULL
     assert event.source == "mng/discovery"
@@ -174,7 +157,7 @@ def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
 
 
 def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngConfig) -> None:
-    agent = _make_discovered_agent()
+    agent = make_test_discovered_agent()
     event = make_agent_discovery_event(agent)
     append_discovery_event(temp_config, event)
 
@@ -188,7 +171,7 @@ def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngConfig) 
 
 def test_append_discovery_event_appends_multiple_events(temp_config: MngConfig) -> None:
     for _ in range(3):
-        event = make_agent_discovery_event(_make_discovered_agent())
+        event = make_agent_discovery_event(make_test_discovered_agent())
         append_discovery_event(temp_config, event)
 
     events_path = get_discovery_events_path(temp_config)
@@ -197,7 +180,7 @@ def test_append_discovery_event_appends_multiple_events(temp_config: MngConfig) 
 
 
 def test_emit_agent_discovered_writes_to_file(temp_config: MngConfig) -> None:
-    agent = _make_discovered_agent()
+    agent = make_test_discovered_agent()
     emit_agent_discovered(temp_config, agent)
 
     events_path = get_discovery_events_path(temp_config)
@@ -208,7 +191,7 @@ def test_emit_agent_discovered_writes_to_file(temp_config: MngConfig) -> None:
 
 
 def test_emit_host_discovered_writes_to_file(temp_config: MngConfig) -> None:
-    host = _make_discovered_host()
+    host = make_test_discovered_host()
     emit_host_discovered(temp_config, host)
 
     events_path = get_discovery_events_path(temp_config)
@@ -219,8 +202,8 @@ def test_emit_host_discovered_writes_to_file(temp_config: MngConfig) -> None:
 
 
 def test_write_full_discovery_snapshot_writes_to_file(temp_config: MngConfig) -> None:
-    agents = (_make_discovered_agent(), _make_discovered_agent())
-    hosts = (_make_discovered_host(),)
+    agents = (make_test_discovered_agent(), make_test_discovered_agent())
+    hosts = (make_test_discovered_host(),)
     returned_event = write_full_discovery_snapshot(temp_config, agents, hosts)
 
     events_path = get_discovery_events_path(temp_config)
@@ -237,7 +220,7 @@ def test_write_full_discovery_snapshot_writes_to_file(temp_config: MngConfig) ->
 
 
 def test_parse_agent_discovery_event_round_trips() -> None:
-    agent = _make_discovered_agent()
+    agent = make_test_discovered_agent()
     event = make_agent_discovery_event(agent)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
     parsed = parse_discovery_event_line(line)
@@ -246,7 +229,7 @@ def test_parse_agent_discovery_event_round_trips() -> None:
 
 
 def test_parse_host_discovery_event_round_trips() -> None:
-    host = _make_discovered_host()
+    host = make_test_discovered_host()
     event = make_host_discovery_event(host)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
     parsed = parse_discovery_event_line(line)
@@ -255,8 +238,8 @@ def test_parse_host_discovery_event_round_trips() -> None:
 
 
 def test_parse_full_snapshot_event_round_trips() -> None:
-    agents = (_make_discovered_agent(),)
-    hosts = (_make_discovered_host(),)
+    agents = (make_test_discovered_agent(),)
+    hosts = (make_test_discovered_host(),)
     event = make_full_discovery_snapshot_event(agents, hosts)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
     parsed = parse_discovery_event_line(line)
@@ -287,8 +270,8 @@ def test_find_latest_full_snapshot_offset_returns_zero_when_no_file(tmp_path: Pa
 
 def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_config: MngConfig) -> None:
     # Write only agent events
-    emit_agent_discovered(temp_config, _make_discovered_agent())
-    emit_agent_discovered(temp_config, _make_discovered_agent())
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
 
     events_path = get_discovery_events_path(temp_config)
     assert find_latest_full_snapshot_offset(events_path) == 0
@@ -296,11 +279,11 @@ def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_
 
 def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: MngConfig) -> None:
     # Write: agent, full, agent, full, agent
-    emit_agent_discovered(temp_config, _make_discovered_agent())
-    write_full_discovery_snapshot(temp_config, (_make_discovered_agent(),), (_make_discovered_host(),))
-    emit_agent_discovered(temp_config, _make_discovered_agent())
-    write_full_discovery_snapshot(temp_config, (_make_discovered_agent(),), (_make_discovered_host(),))
-    emit_agent_discovered(temp_config, _make_discovered_agent())
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
+    write_full_discovery_snapshot(temp_config, (make_test_discovered_agent(),), (make_test_discovered_host(),))
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
+    write_full_discovery_snapshot(temp_config, (make_test_discovered_agent(),), (make_test_discovered_host(),))
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
 
     events_path = get_discovery_events_path(temp_config)
     offset = find_latest_full_snapshot_offset(events_path)

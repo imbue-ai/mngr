@@ -38,7 +38,10 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -967,3 +970,27 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+# =============================================================================
+# Discovery event test factories
+# =============================================================================
+
+
+def make_test_discovered_agent() -> DiscoveredAgent:
+    """Create a DiscoveredAgent with random IDs for testing."""
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(f"test-agent-{uuid4().hex}"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def make_test_discovered_host() -> DiscoveredHost:
+    """Create a DiscoveredHost with random IDs for testing."""
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName(f"test-host-{uuid4().hex}"),
+        provider_name=ProviderInstanceName("local"),
+    )
