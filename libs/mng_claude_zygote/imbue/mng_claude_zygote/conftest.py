@@ -289,24 +289,15 @@ def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, 
     """Create a minimal llm-compatible SQLite database with responses.
 
     Each row is (id, prompt, response, model, datetime_utc, conversation_id).
-    Also creates a conversations table with entries for each unique conversation_id.
     """
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(LLM_RESPONSES_SCHEMA)
-        conn.execute("CREATE TABLE IF NOT EXISTS conversations (  id TEXT PRIMARY KEY,  name TEXT,  model TEXT)")
-        seen_cids: set[str] = set()
         for row_id, prompt, response, model, dt, cid in rows:
             conn.execute(
                 "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (row_id, prompt, response, model, dt, cid),
             )
-            if cid and cid not in seen_cids:
-                conn.execute(
-                    "INSERT OR IGNORE INTO conversations (id, name, model) VALUES (?, ?, ?)",
-                    (cid, "", model),
-                )
-                seen_cids.add(cid)
         conn.commit()
 
 
