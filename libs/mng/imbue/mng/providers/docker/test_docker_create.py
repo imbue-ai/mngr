@@ -53,7 +53,7 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
                         timeout=30,
                         env=env,
                     )
-    except (subprocess.TimeoutExpired, Exception):
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, json.JSONDecodeError, OSError):
         pass
 
     # Remove the state container and its backing volume.
@@ -61,6 +61,10 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
     # Since we cannot easily determine user_id, we find the container by labels.
     try:
         client = docker.from_env()
+    except (docker.errors.DockerException, OSError):
+        return
+
+    try:
         containers = client.containers.list(
             all=True,
             filters={
@@ -73,15 +77,22 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         for container in containers:
             name = container.name or ""
             if name.startswith(prefix):
-                # Remove the backing volume (same name as the container).
+                # Remove the container first (must happen before volume removal,
+                # since Docker refuses to remove in-use volumes).
                 try:
-                    client.volumes.get(name).remove(force=True)
-                except (docker.errors.NotFound, docker.errors.DockerException):
+                    container.remove(force=True)
+                except docker.errors.DockerException:
                     pass
-                container.remove(force=True)
-        client.close()
+                # Then remove the backing volume (same name as the container).
+                if name:
+                    try:
+                        client.volumes.get(name).remove(force=True)
+                    except (docker.errors.NotFound, docker.errors.DockerException):
+                        pass
     except (docker.errors.DockerException, OSError):
         pass
+    finally:
+        client.close()
 
 
 @pytest.fixture
