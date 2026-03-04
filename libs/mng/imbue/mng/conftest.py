@@ -190,7 +190,7 @@ def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
 
 
 @pytest.fixture
-def disable_modal_for_subprocesses(
+def disable_remote_providers_for_subprocesses(
     project_config_dir: Path, monkeypatch: pytest.MonkeyPatch, temp_git_repo: Path
 ) -> Path:
     """Disable the Modal and Docker providers for subprocesses spawned during a test.

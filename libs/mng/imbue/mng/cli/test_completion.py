@@ -34,7 +34,7 @@ def _is_completion_refresh_process(proc: psutil.Process) -> bool:
 def test_trigger_background_refresh_throttles_spawning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    disable_modal_for_subprocesses: Path,
+    disable_remote_providers_for_subprocesses: Path,
 ) -> None:
     """Stale cache triggers a refresh that updates the file; fresh cache does not."""
     # Point the completion cache at a temp directory we control.
