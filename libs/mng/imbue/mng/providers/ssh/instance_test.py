@@ -89,19 +89,19 @@ def test_get_host_tags_returns_empty_dict(temp_mng_ctx: MngContext) -> None:
     assert tags == {}
 
 
-def test_list_hosts_returns_all_configured_hosts(temp_mng_ctx: MngContext) -> None:
+def test_discover_hosts_returns_all_configured_hosts(temp_mng_ctx: MngContext) -> None:
     hosts = {
         "host1": SSHHostConfig(address="localhost", port=22),
         "host2": SSHHostConfig(address="localhost", port=2222),
     }
     provider = make_ssh_provider(temp_mng_ctx, hosts=hosts)
-    listed_hosts = provider.list_hosts(cg=provider.mng_ctx.concurrency_group)
+    listed_hosts = provider.discover_hosts(cg=provider.mng_ctx.concurrency_group)
     assert len(listed_hosts) == 2
 
 
-def test_list_hosts_returns_empty_when_no_hosts_configured(temp_mng_ctx: MngContext) -> None:
+def test_discover_hosts_returns_empty_when_no_hosts_configured(temp_mng_ctx: MngContext) -> None:
     provider = make_ssh_provider(temp_mng_ctx, hosts={})
-    hosts = provider.list_hosts(cg=provider.mng_ctx.concurrency_group)
+    hosts = provider.discover_hosts(cg=provider.mng_ctx.concurrency_group)
     assert hosts == []
 
 

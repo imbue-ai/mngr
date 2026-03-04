@@ -133,14 +133,14 @@ def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
-def test_list_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
-    """Created host should appear in list_hosts."""
+def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
+    """Created host should appear in discover_hosts."""
     host = None
     try:
         host = real_modal_provider.create_host(HostName("test-host"))
 
-        hosts = real_modal_provider.list_hosts(cg=real_modal_provider.mng_ctx.concurrency_group)
-        host_ids = [h.id for h in hosts]
+        hosts = real_modal_provider.discover_hosts(cg=real_modal_provider.mng_ctx.concurrency_group)
+        host_ids = [h.host_id for h in hosts]
         assert host.id in host_ids
 
     finally:

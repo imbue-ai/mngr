@@ -163,10 +163,12 @@ def test_get_host_not_found_raises_error(docker_provider: DockerProviderInstance
 
 @pytest.mark.docker
 @pytest.mark.docker_sdk
-def test_list_hosts_includes_created_host(docker_provider: DockerProviderInstance, temp_mng_ctx: MngContext) -> None:
+def test_discover_hosts_includes_created_host(
+    docker_provider: DockerProviderInstance, temp_mng_ctx: MngContext
+) -> None:
     host = docker_provider.create_host(HostName("test-list"))
-    hosts = docker_provider.list_hosts(temp_mng_ctx.concurrency_group)
-    host_ids = {h.id for h in hosts}
+    hosts = docker_provider.discover_hosts(temp_mng_ctx.concurrency_group)
+    host_ids = {h.host_id for h in hosts}
     assert host.id in host_ids
 
 
@@ -429,17 +431,17 @@ def test_destroy_with_snapshots_cleans_up_images(docker_provider: DockerProvider
 @pytest.mark.release
 @pytest.mark.docker
 @pytest.mark.docker_sdk
-def test_list_hosts_excludes_destroyed_by_default(
+def test_discover_hosts_excludes_destroyed_by_default(
     docker_provider: DockerProviderInstance,
     temp_mng_ctx: MngContext,
 ) -> None:
-    """Verify destroyed hosts are excluded from list_hosts by default."""
+    """Verify destroyed hosts are excluded from discover_hosts by default."""
     host = docker_provider.create_host(HostName("test-destroyed-list"))
     host_id = host.id
     docker_provider.destroy_host(host, delete_snapshots=True)
 
-    hosts = docker_provider.list_hosts(temp_mng_ctx.concurrency_group)
-    host_ids = {h.id for h in hosts}
+    hosts = docker_provider.discover_hosts(temp_mng_ctx.concurrency_group)
+    host_ids = {h.host_id for h in hosts}
     assert host_id not in host_ids
 
 
@@ -474,8 +476,8 @@ def test_multiple_hosts_isolated(
     assert "from-a" in result_a.stdout
     assert "from-b" in result_b.stdout
 
-    hosts = docker_provider.list_hosts(temp_mng_ctx.concurrency_group)
-    host_ids = {h.id for h in hosts}
+    hosts = docker_provider.discover_hosts(temp_mng_ctx.concurrency_group)
+    host_ids = {h.host_id for h in hosts}
     assert host_a.id in host_ids
     assert host_b.id in host_ids
 
