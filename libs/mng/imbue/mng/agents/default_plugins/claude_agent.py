@@ -873,10 +873,16 @@ class ClaudeAgent(BaseAgent):
         """Set up the per-agent config dir on a local host."""
         # 1. Generate per-agent .claude.json
         claude_json_data = self._build_per_agent_claude_json(options, config)
+        # If no primaryApiKey from the global config, try the macOS keychain
+        if not claude_json_data.get("primaryApiKey") and config.convert_macos_credentials and is_macos():
+            keychain_api_key = _read_macos_keychain_credential("Claude Code", self.mng_ctx.concurrency_group)
+            if keychain_api_key is not None:
+                logger.info("Copying macOS keychain API key into per-agent .claude.json")
+                claude_json_data["primaryApiKey"] = keychain_api_key
         config_json_path = config_dir / ".claude.json"
         host.write_text_file(config_json_path, json.dumps(claude_json_data, indent=2) + "\n")
 
-        # 2. Symlink .credentials.json -> ~/.claude/.credentials.json
+        # 2. Symlink .credentials.json -> ~/.claude/.credentials.json (or extract from keychain)
         credentials_source = Path.home() / ".claude" / ".credentials.json"
         credentials_dest = config_dir / ".credentials.json"
         if credentials_source.exists():
@@ -884,6 +890,15 @@ class ClaudeAgent(BaseAgent):
                 f"ln -sf {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
                 timeout_seconds=5.0,
             )
+        elif config.convert_macos_credentials and is_macos():
+            keychain_credentials = _read_macos_keychain_credential(
+                "Claude Code-credentials", self.mng_ctx.concurrency_group
+            )
+            if keychain_credentials is not None:
+                logger.info("Writing macOS keychain OAuth credentials to per-agent config dir")
+                host.write_text_file(credentials_dest, keychain_credentials)
+        else:
+            logger.debug("No .credentials.json found and keychain conversion not available")
 
         # 3. Copy settings and other items from ~/.claude/ if sync_home_settings
         if config.sync_home_settings:
