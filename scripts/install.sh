@@ -208,6 +208,12 @@ if ! command -v mng &>/dev/null; then
     printf '  export PATH="$HOME/.local/bin:$PATH"\n'
 fi
 
+# ── Plugin install wizard ─────────────────────────────────────────────────────
+
+if command -v mng &>/dev/null; then
+    mng plugin install-wizard || warn "Plugin install wizard failed. You can run 'mng plugin install-wizard' later."
+fi
+
 # ── Shell completion ───────────────────────────────────────────────────────────
 
 if [ "$OS" = "macos" ]; then
