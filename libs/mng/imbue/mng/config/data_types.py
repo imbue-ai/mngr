@@ -281,11 +281,6 @@ class CommandDefaults(FrozenModel):
         default_factory=dict,
         description="Map of parameter name to default value",
     )
-    default_subcommand: str | None = Field(
-        default=None,
-        description="Default subcommand when this group is invoked with no recognized command. "
-        "Empty string disables defaulting (shows help instead).",
-    )
 
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
@@ -293,13 +288,9 @@ class CommandDefaults(FrozenModel):
         Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
 
         For command defaults, later configs completely override earlier ones.
-        default_subcommand: scalar, override wins if not None.
         """
         merged_defaults = {**self.defaults, **override.defaults}
-        merged_default_subcommand = (
-            override.default_subcommand if override.default_subcommand is not None else self.default_subcommand
-        )
-        return self.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
+        return self.__class__(defaults=merged_defaults)
 
 
 class CreateTemplateName(str):

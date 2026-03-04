@@ -451,21 +451,16 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
              new_host = "docker"
              connect = false
 
-    The special key `default_subcommand` is extracted separately from the
-    parameter defaults dict so it can be stored on CommandDefaults as a
-    first-class field.
-
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     commands: dict[str, CommandDefaults] = {}
 
     for command_name, raw_defaults in raw_commands.items():
-        # Make a mutable copy so we don't mutate the caller's dict
         defaults_copy = dict(raw_defaults)
-        default_subcommand = defaults_copy.pop("default_subcommand", None)
+        # Silently ignore the removed default_subcommand key for backwards compatibility
+        defaults_copy.pop("default_subcommand", None)
         commands[command_name] = CommandDefaults.model_construct(
             defaults=defaults_copy,
-            default_subcommand=default_subcommand,
         )
 
     return commands

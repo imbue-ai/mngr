@@ -18,7 +18,6 @@ from imbue.mng.cli.common_opts import find_option_group
 from imbue.mng.cli.config import config
 from imbue.mng.cli.connect import connect
 from imbue.mng.cli.create import create
-from imbue.mng.cli.default_command_group import DefaultCommandGroup
 from imbue.mng.cli.destroy import destroy
 from imbue.mng.cli.events import events
 from imbue.mng.cli.exec import exec_command
@@ -68,15 +67,8 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
         )
 
 
-class AliasAwareGroup(DefaultCommandGroup):
-    """Custom click.Group that shows aliases inline with commands in --help.
-
-    When no subcommand is given, defaults to 'create'. When an unrecognized
-    subcommand is given, it is treated as arguments to 'create' (e.g.
-    ``mng my-task`` is equivalent to ``mng create my-task``).
-    """
-
-    _config_key = "mng"
+class AliasAwareGroup(click.Group):
+    """Custom click.Group that shows aliases inline with commands in --help."""
 
     def invoke(self, ctx: click.Context) -> Any:
         try:

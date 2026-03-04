@@ -973,34 +973,12 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     assert mng_ctx.config.default_destroyed_host_persisted_seconds == 86400.0
 
 
-# =============================================================================
-# Tests for _parse_commands with default_subcommand
-# =============================================================================
-
-
-def test_parse_commands_extracts_default_subcommand() -> None:
-    """_parse_commands should extract default_subcommand from raw defaults."""
+def test_parse_commands_strips_default_subcommand() -> None:
+    """_parse_commands should strip the removed default_subcommand key from defaults."""
     raw = {"mng": {"default_subcommand": "list", "connect": False}}
     result = _parse_commands(raw)
-    assert result["mng"].default_subcommand == "list"
-    # default_subcommand should NOT appear in the defaults dict
     assert "default_subcommand" not in result["mng"].defaults
     assert result["mng"].defaults["connect"] is False
-
-
-def test_parse_commands_handles_missing_default_subcommand() -> None:
-    """_parse_commands should set default_subcommand to None when absent."""
-    raw = {"create": {"new_host": "docker"}}
-    result = _parse_commands(raw)
-    assert result["create"].default_subcommand is None
-    assert result["create"].defaults["new_host"] == "docker"
-
-
-def test_parse_commands_empty_string_default_subcommand() -> None:
-    """_parse_commands should preserve empty string default_subcommand."""
-    raw = {"mng": {"default_subcommand": ""}}
-    result = _parse_commands(raw)
-    assert result["mng"].default_subcommand == ""
 
 
 # =============================================================================

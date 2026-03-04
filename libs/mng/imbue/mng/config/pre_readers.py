@@ -133,30 +133,6 @@ def _resolve_config_files(
     return configs
 
 
-# --- Default subcommand pre-reader ---
-
-
-def read_default_command(command_name: str) -> str:
-    """Return the configured default subcommand for command_name.
-
-    If no config files set default_subcommand for the given command
-    group, falls back to "create".  An empty string means "disabled"
-    (the caller should show help instead of defaulting).
-    """
-    merged: dict[str, str] = {}
-    for raw in _resolve_config_files():
-        raw_commands = raw.get("commands")
-        if not isinstance(raw_commands, dict):
-            continue
-        for cmd_name, cmd_section in raw_commands.items():
-            if not isinstance(cmd_section, dict):
-                continue
-            value = cmd_section.get("default_subcommand")
-            if value is not None:
-                merged[cmd_name] = str(value)
-    return merged.get(command_name, "create")
-
-
 # --- Disabled plugins pre-reader ---
 
 

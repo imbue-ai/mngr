@@ -505,39 +505,6 @@ def test_command_defaults_merge_with_combines_defaults() -> None:
     assert merged.defaults["other"] == "base_value"
 
 
-def test_command_defaults_merge_with_override_wins_for_default_subcommand() -> None:
-    """CommandDefaults.merge_with should let override win for default_subcommand."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults(default_subcommand="list")
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == "list"
-
-
-def test_command_defaults_merge_with_keeps_base_default_subcommand_when_override_none() -> None:
-    """CommandDefaults.merge_with should keep base default_subcommand when override is None."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults()
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == "create"
-
-
-def test_command_defaults_merge_with_empty_string_default_subcommand() -> None:
-    """CommandDefaults.merge_with should allow empty string to disable defaulting."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults(default_subcommand="")
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == ""
-
-
-def test_command_defaults_merge_with_default_subcommand_independent_of_defaults() -> None:
-    """CommandDefaults.merge_with should merge default_subcommand and defaults independently."""
-    base = CommandDefaults(defaults={"host": "local"}, default_subcommand="create")
-    override = CommandDefaults(defaults={"host": "docker"}, default_subcommand="list")
-    merged = base.merge_with(override)
-    assert merged.defaults["host"] == "docker"
-    assert merged.default_subcommand == "list"
-
-
 # =============================================================================
 # Tests for CreateTemplate.merge_with
 # =============================================================================

@@ -3,8 +3,6 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mng.cli.default_command_group import DefaultCommandGroup
-
 # =============================================================================
 # Shared option decorator
 # =============================================================================
@@ -181,13 +179,7 @@ def resolve_positional_name(ctx: click.Context) -> None:
 # =============================================================================
 
 
-class _ScheduleGroup(DefaultCommandGroup):
-    """Schedule group that defaults to 'add' when no subcommand is given."""
-
-    _default_command: str = "add"
-
-
-@click.group(name="schedule", cls=_ScheduleGroup)
+@click.group(name="schedule")
 @click.pass_context
 def schedule(ctx: click.Context, **kwargs: Any) -> None:
     """Schedule invocations of mng commands.

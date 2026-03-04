@@ -19,9 +19,6 @@ Positional arguments to 'create' can be agent names/IDs or host names/IDs.
 Each identifier is automatically resolved: if it matches a known agent, that
 agent's host is used; otherwise it is treated as a host identifier.
 
-When no subcommand is given, defaults to 'create'. For example,
-``mng snapshot my-agent`` is equivalent to ``mng snapshot create my-agent``.
-
 Useful for checkpointing work, creating restore points, or managing disk space.
 
 Alias: snap
@@ -325,13 +322,7 @@ $ mng snapshot destroy my-agent --all-snapshots --dry-run
 
 ## Examples
 
-**Snapshot an agent's host (short form)**
-
-```bash
-$ mng snapshot my-agent
-```
-
-**Snapshot an agent's host (explicit)**
+**Snapshot an agent's host**
 
 ```bash
 $ mng snapshot create my-agent

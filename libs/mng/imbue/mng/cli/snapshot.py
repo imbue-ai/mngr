@@ -13,7 +13,6 @@ from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
-from imbue.mng.cli.default_command_group import DefaultCommandGroup
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import AbortError
@@ -392,18 +391,7 @@ def _emit_destroy_result(
 # =============================================================================
 
 
-class _SnapshotGroup(DefaultCommandGroup):
-    """Snapshot group that defaults to 'create' when no subcommand is given.
-
-    This is safe because the next argument must be a valid agent name,
-    so typos like ``mng snapshot destory`` will fail with
-    "Agent or host not found" rather than silently doing something wrong.
-    """
-
-    _config_key = "snapshot"
-
-
-@click.group(name="snapshot", cls=_SnapshotGroup)
+@click.group(name="snapshot")
 @add_common_options
 @click.pass_context
 def snapshot(ctx: click.Context, **kwargs: Any) -> None:
@@ -885,14 +873,10 @@ Positional arguments to 'create' can be agent names/IDs or host names/IDs.
 Each identifier is automatically resolved: if it matches a known agent, that
 agent's host is used; otherwise it is treated as a host identifier.
 
-When no subcommand is given, defaults to 'create'. For example,
-``mng snapshot my-agent`` is equivalent to ``mng snapshot create my-agent``.
-
 Useful for checkpointing work, creating restore points, or managing disk space.""",
     aliases=("snap",),
     examples=(
-        ("Snapshot an agent's host (short form)", "mng snapshot my-agent"),
-        ("Snapshot an agent's host (explicit)", "mng snapshot create my-agent"),
+        ("Snapshot an agent's host", "mng snapshot create my-agent"),
         ("Create a named snapshot", "mng snapshot create my-agent --name before-refactor"),
         ("Snapshot by host ID", "mng snapshot create my-host-id"),
         ("Snapshot all running agents", "mng snapshot create --all --dry-run"),

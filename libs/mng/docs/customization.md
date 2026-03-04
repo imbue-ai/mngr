@@ -12,39 +12,6 @@
 4. Environment variables: `MNG_PREFIX`, `MNG_HOST_DIR`, `MNG_ROOT_NAME`
 5. CLI arguments (highest precedence)
 
-### Default Subcommands
-
-You can configure which subcommand runs when a command group is invoked with no recognized subcommand. By default, both `mng` and `mng snapshot` default to `create` when no subcommand is given (e.g., `mng my-task` is equivalent to `mng create my-task`).
-
-**Example:**
-
-```toml
-# .mng/settings.toml
-
-# Running bare `mng` defaults to `mng list` instead of `mng create`
-[commands.mng]
-default_subcommand = "list"
-
-# Running bare `mng snapshot` defaults to `mng snapshot create` (unchanged)
-[commands.snapshot]
-default_subcommand = "create"
-```
-
-**Disabling the default:**
-
-Set `default_subcommand` to an empty string to disable defaulting entirely. When disabled, running the group with no subcommand shows help, and unrecognized arguments produce an error instead of being forwarded.
-
-```toml
-[commands.mng]
-default_subcommand = ""   # `mng` with no args shows help
-```
-
-**Notes:**
-
-- If `default_subcommand` is absent from config, the groups default to `"create"`.
-- The `default_subcommand` key can coexist with parameter defaults in the same `[commands.<name>]` section.
-- Config file precedence applies as usual: local config overrides project config, which overrides user config.
-
 ### Default Command Parameters
 
 You can override default values for CLI command parameters in your config files. This is particularly useful for setting project-specific or user-specific defaults.
