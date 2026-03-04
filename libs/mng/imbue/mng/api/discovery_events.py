@@ -20,7 +20,9 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredAgent
@@ -201,27 +203,35 @@ def emit_agent_discovered(config: MngConfig, agent: DiscoveredAgent) -> None:
     logger.trace("Emitted agent_discovered event for {}", agent.agent_name)
 
 
+@pure
+def _get_provider_name_from_host(host: OnlineHostInterface) -> ProviderInstanceName:
+    """Extract the provider instance name from a host object."""
+    if isinstance(host, Host):
+        return host.provider_instance.name
+    return ProviderInstanceName("unknown")
+
+
 def safe_emit_agent_discovered(
     config: MngConfig,
     agent_id: AgentId,
     agent_name: AgentName,
-    host_id: HostId,
-    provider_name: ProviderInstanceName,
+    host: OnlineHostInterface,
 ) -> None:
     """Build and emit an agent discovery event, logging and swallowing any errors.
 
     This is the standard integration point for commands that modify agents.
+    Extracts provider_name from the host automatically.
     It never raises -- failures are logged at trace level.
     """
     try:
         discovered = build_discovered_agent(
             agent_id=agent_id,
             agent_name=agent_name,
-            host_id=host_id,
-            provider_name=provider_name,
+            host_id=host.id,
+            provider_name=_get_provider_name_from_host(host),
         )
         emit_agent_discovered(config, discovered)
-    except Exception as e:
+    except OSError as e:
         logger.trace("Failed to emit agent discovery event: {}", e)
 
 

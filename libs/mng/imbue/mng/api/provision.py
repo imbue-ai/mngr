@@ -6,13 +6,11 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mng.api.discovery_events import safe_emit_agent_discovered
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
 from imbue.mng.interfaces.host import AgentProvisioningOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.primitives import ProviderInstanceName
 
 
 def _read_existing_env_content(host: OnlineHostInterface, agent: AgentInterface) -> str | None:
@@ -104,5 +102,4 @@ def provision_agent(
     logger.info("Provisioned agent: {}", agent.name)
 
     # Emit discovery event for re-provisioned agent
-    provider_name = host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
-    safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host.id, provider_name)
+    safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host)

@@ -32,7 +32,6 @@ from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
-from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -41,7 +40,6 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
-from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.git_utils import find_source_repo_of_worktree
 from imbue.mng.utils.git_utils import remove_worktree
@@ -310,10 +308,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             _output(f"Destroyed agent: {agent.name}", output_opts)
 
             # Emit discovery event for destroyed agent
-            destroy_provider_name = (
-                host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
-            )
-            safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host.id, destroy_provider_name)
+            safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host)
 
         except MngError as e:
             _output(f"Error destroying agent {agent.name}: {e}", output_opts)

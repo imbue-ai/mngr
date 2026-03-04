@@ -40,6 +40,7 @@ from imbue.mng.cli.watch_mode import run_watch_loop
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
@@ -1289,10 +1290,10 @@ def _list_stream(
     # Phase 1: write an unfiltered full snapshot, then emit from the latest snapshot
     try:
         _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
-    except Exception as e:
-        logger.trace("Failed to write initial full snapshot: {}", e)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write initial discovery snapshot: {}", e)
 
-    # Reverse-scan to find the latest full snapshot, read from there
+    # Find the latest full snapshot offset, read from there
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
         with open(events_path) as f:
@@ -1321,7 +1322,7 @@ def _list_stream(
             try:
                 _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
                 # The tail thread will pick up the new snapshot and emit it
-            except Exception as e:
+            except (MngError, OSError) as e:
                 logger.trace("Stream poll failed: {}", e)
     except KeyboardInterrupt:
         pass
