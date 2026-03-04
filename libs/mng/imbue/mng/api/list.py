@@ -24,8 +24,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.providers import get_all_provider_instances
-from imbue.mng.config.completion_writer import get_completion_cache_dir
-from imbue.mng.config.completion_writer import write_agent_names_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import HostAuthenticationError
@@ -202,9 +200,6 @@ def list_agents(
         result.errors.append(error_info)
         if on_error:
             on_error(error_info)
-
-    agent_names = [str(agent.name) for agent in result.agents]
-    write_agent_names_cache(get_completion_cache_dir(), agent_names)
 
     return result
 

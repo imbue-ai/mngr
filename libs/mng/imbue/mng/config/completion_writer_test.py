@@ -6,11 +6,8 @@ from pathlib import Path
 import click
 import pytest
 
-from imbue.mng.config.completion_writer import AGENT_COMPLETIONS_CACHE_FILENAME
 from imbue.mng.config.completion_writer import COMMAND_COMPLETIONS_CACHE_FILENAME
-from imbue.mng.config.completion_writer import add_agent_name_to_cache
 from imbue.mng.config.completion_writer import get_completion_cache_dir
-from imbue.mng.config.completion_writer import write_agent_names_cache
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 
 
@@ -32,32 +29,6 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     result = get_completion_cache_dir()
     assert result == tmp_path / "default_host"
     assert result.exists()
-
-
-def test_write_agent_names_cache_writes_json(tmp_path: Path) -> None:
-    """write_agent_names_cache should write a JSON file with sorted unique names."""
-    write_agent_names_cache(tmp_path, ["beta", "alpha", "alpha"])
-    cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
-    assert cache_path.exists()
-    data = json.loads(cache_path.read_text())
-    assert data["names"] == ["alpha", "beta"]
-    assert "updated_at" in data
-
-
-def test_write_agent_names_cache_handles_oserror(tmp_path: Path) -> None:
-    """write_agent_names_cache should silently handle OSError (read-only dir)."""
-    # Create a read-only directory path that doesn't exist (will fail to write)
-    read_only_dir = tmp_path / "readonly"
-    read_only_dir.mkdir()
-    read_only_dir.chmod(0o444)
-    try:
-        # This should not raise -- OSError is caught internally
-        write_agent_names_cache(read_only_dir, ["agent1"])
-    finally:
-        read_only_dir.chmod(0o755)
-    # Verify the cache file was NOT created (write failed silently).
-    # Check after restoring permissions so Path.exists() doesn't raise PermissionError.
-    assert not (read_only_dir / AGENT_COMPLETIONS_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -100,48 +71,3 @@ def test_write_cli_completions_cache_writes_valid_json(monkeypatch: pytest.Monke
     assert "commands" in data
     assert "create" in data["commands"]
     assert "list" in data["commands"]
-
-
-def test_add_agent_name_to_cache_appends_to_existing(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """add_agent_name_to_cache should append a new name to the existing cache."""
-    monkeypatch.setenv("MNG_COMPLETION_CACHE_DIR", str(tmp_path))
-    write_agent_names_cache(tmp_path, ["alpha-agent", "beta-agent"])
-
-    add_agent_name_to_cache("gamma-agent")
-
-    cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
-    cache_data = json.loads(cache_path.read_text())
-    assert cache_data["names"] == ["alpha-agent", "beta-agent", "gamma-agent"]
-
-
-def test_add_agent_name_to_cache_creates_cache_when_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """add_agent_name_to_cache should create the cache file if it does not exist."""
-    monkeypatch.setenv("MNG_COMPLETION_CACHE_DIR", str(tmp_path))
-
-    add_agent_name_to_cache("new-agent")
-
-    cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
-    assert cache_path.is_file()
-    cache_data = json.loads(cache_path.read_text())
-    assert cache_data["names"] == ["new-agent"]
-
-
-def test_add_agent_name_to_cache_skips_duplicate(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """add_agent_name_to_cache should not duplicate a name already in the cache."""
-    monkeypatch.setenv("MNG_COMPLETION_CACHE_DIR", str(tmp_path))
-    write_agent_names_cache(tmp_path, ["existing-agent"])
-
-    add_agent_name_to_cache("existing-agent")
-
-    cache_path = tmp_path / AGENT_COMPLETIONS_CACHE_FILENAME
-    cache_data = json.loads(cache_path.read_text())
-    assert cache_data["names"] == ["existing-agent"]

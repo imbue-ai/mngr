@@ -36,7 +36,6 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import render_format_template
 from imbue.mng.cli.output_helpers import write_human_line
-from imbue.mng.cli.watch_mode import run_watch_loop
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
@@ -433,10 +432,12 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     if opts.watch:
         try:
-            run_watch_loop(
-                iteration_fn=lambda: _run_list_iteration(iteration_params, ctx),
-                interval_seconds=opts.watch,
-                on_error_continue=True,
+            _list_watch_with_stream(
+                iteration_params=iteration_params,
+                ctx=ctx,
+                mng_ctx=mng_ctx,
+                max_interval_seconds=opts.watch,
+                error_behavior=error_behavior,
             )
         except KeyboardInterrupt:
             logger.info("\nWatch mode stopped")
@@ -1207,6 +1208,119 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
+
+
+# === Watch Mode (stream-backed) ===
+
+
+def _list_watch_with_stream(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    mng_ctx: MngContext,
+    max_interval_seconds: int,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """Watch mode backed by the discovery event stream.
+
+    Does an initial full list and display, then monitors the discovery events
+    file for changes. When a change is detected (from create, destroy, etc.),
+    re-polls immediately. Also re-polls at max_interval_seconds as a safety net.
+    """
+    logger.info("Starting watch mode (stream-backed): refreshing on changes or every {} seconds", max_interval_seconds)
+    logger.info("Press Ctrl+C to stop")
+
+    events_path = get_discovery_events_path(mng_ctx.config)
+
+    # Initial display
+    _run_list_iteration(iteration_params, ctx)
+
+    # Tail the events file and re-render when changes arrive.
+    # Use a stop_event to allow clean shutdown on KeyboardInterrupt.
+    stop_event = threading.Event()
+    try:
+        _run_watch_loop_with_event_tailing(
+            iteration_params=iteration_params,
+            ctx=ctx,
+            events_path=events_path,
+            max_interval_seconds=max_interval_seconds,
+            stop_event=stop_event,
+        )
+    finally:
+        stop_event.set()
+
+
+def _run_watch_loop_with_event_tailing(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+) -> None:
+    """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
+    for _ in _wait_for_events_or_timeout(events_path, max_interval_seconds, stop_event):
+        logger.info("\nRefreshing...")
+        try:
+            _run_list_iteration(iteration_params, ctx)
+        except MngError as e:
+            logger.error("Error in watch iteration (continuing): {}", e)
+
+
+def _poll_events_file_for_changes(
+    events_path: Path,
+    watched_size: int,
+    changed_flag: threading.Event,
+    stop_event: threading.Event,
+    max_polls: int,
+) -> None:
+    """Poll the events file until its size changes or stop_event is set."""
+    current_size = watched_size
+    for _ in range(max_polls):
+        if stop_event.is_set() or changed_flag.is_set():
+            return
+        try:
+            if events_path.exists():
+                new_size = events_path.stat().st_size
+                if new_size != current_size:
+                    changed_flag.set()
+                    return
+        except OSError:
+            pass
+        stop_event.wait(timeout=0.1)
+
+
+def _wait_for_events_or_timeout(
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+) -> list[None]:
+    """Block until the events file changes or the max interval elapses.
+
+    Returns a single-element list if a refresh should occur, or empty if stopped.
+    """
+    iterations: list[None] = []
+    for _ in range(100_000):
+        if stop_event.is_set():
+            break
+
+        last_size = events_path.stat().st_size if events_path.exists() else 0
+        is_changed = threading.Event()
+
+        watcher = threading.Thread(
+            target=_poll_events_file_for_changes,
+            args=(events_path, last_size, is_changed, stop_event, max_interval_seconds * 10),
+            daemon=True,
+        )
+        watcher.start()
+
+        is_changed.wait(timeout=float(max_interval_seconds))
+        stop_event_was_set = stop_event.is_set()
+        watcher.join(timeout=2.0)
+
+        if stop_event_was_set:
+            break
+        iterations.append(None)
+
+    return iterations
 
 
 # === Stream Mode ===

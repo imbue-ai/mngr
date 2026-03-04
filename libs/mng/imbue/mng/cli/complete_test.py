@@ -16,11 +16,25 @@ def _write_command_cache(cache_dir: Path, data: dict[str, object]) -> None:
     (cache_dir / ".command_completions.json").write_text(json.dumps(data))
 
 
-def _write_agent_cache(cache_dir: Path, names: list[str]) -> None:
-    """Write an agent completions cache file for testing."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    data = {"names": names, "updated_at": "2025-01-01T00:00:00+00:00"}
-    (cache_dir / ".agent_completions.json").write_text(json.dumps(data))
+def _write_discovery_events(host_dir: Path, agent_names: list[str]) -> None:
+    """Write a DISCOVERY_FULL event to the discovery events file for testing."""
+    events_dir = host_dir / "events" / "mng" / "discovery"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+    agents = [
+        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
+        for i, name in enumerate(agent_names)
+    ]
+    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    event = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-1",
+        "source": "mng/discovery",
+        "agents": agents,
+        "hosts": hosts,
+    }
+    events_path.write_text(json.dumps(event) + "\n")
 
 
 def _make_cache_data(
@@ -48,6 +62,8 @@ def _make_cache_data(
 def completion_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Set up a temporary completion cache directory via MNG_COMPLETION_CACHE_DIR."""
     monkeypatch.setenv("MNG_COMPLETION_CACHE_DIR", str(tmp_path))
+    # Also set MNG_HOST_DIR so discovery events are read from the same tmp dir
+    monkeypatch.setenv("MNG_HOST_DIR", str(tmp_path))
     return tmp_path
 
 
@@ -96,7 +112,7 @@ def test_read_cache_returns_empty_dict_for_malformed_json(completion_cache_dir: 
 
 
 def test_read_agent_names_returns_names(completion_cache_dir: Path) -> None:
-    _write_agent_cache(completion_cache_dir, ["beta", "alpha"])
+    _write_discovery_events(completion_cache_dir, ["beta", "alpha"])
 
     result = _read_agent_names()
 
@@ -336,7 +352,7 @@ def test_get_completions_agent_names(
         agent_name_arguments=["connect"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng connect ", "2")
 
     result = _get_completions()
@@ -354,7 +370,7 @@ def test_get_completions_agent_names_with_prefix(
         agent_name_arguments=["connect"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng connect my", "2")
 
     result = _get_completions()
@@ -372,7 +388,7 @@ def test_get_completions_no_agent_names_for_non_agent_command(
         agent_name_arguments=["connect"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
     set_comp_env("mng list ", "2")
 
     result = _get_completions()
@@ -391,7 +407,7 @@ def test_get_completions_subcommand_agent_names(
         agent_name_arguments=["snapshot.create", "snapshot.destroy", "snapshot.list"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng snapshot create ", "3")
 
     result = _get_completions()
@@ -410,7 +426,7 @@ def test_get_completions_subcommand_agent_names_with_prefix(
         agent_name_arguments=["snapshot.create"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng snapshot create my", "3")
 
     result = _get_completions()
@@ -429,7 +445,7 @@ def test_get_completions_subcommand_no_agent_names_for_non_agent_subcommand(
         agent_name_arguments=["snapshot.create"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
     set_comp_env("mng config get ", "3")
 
     result = _get_completions()
@@ -498,7 +514,7 @@ def test_get_completions_value_taking_option_suppresses_completions(
         agent_name_arguments=["snapshot.create"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
     set_comp_env("mng snapshot create --name ", "4")
 
     result = _get_completions()
@@ -518,7 +534,7 @@ def test_get_completions_long_flag_allows_positional(
         agent_name_arguments=["destroy"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng destroy --force ", "3")
 
     result = _get_completions()
@@ -538,7 +554,7 @@ def test_get_completions_short_flag_allows_positional(
         agent_name_arguments=["destroy"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng destroy -f ", "3")
 
     result = _get_completions()
@@ -559,7 +575,7 @@ def test_get_completions_subcommand_flag_allows_positional(
         agent_name_arguments=["snapshot.create"],
     )
     _write_command_cache(completion_cache_dir, data)
-    _write_agent_cache(completion_cache_dir, ["my-agent", "other-agent"])
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
     set_comp_env("mng snapshot create --dry-run ", "4")
 
     result = _get_completions()
