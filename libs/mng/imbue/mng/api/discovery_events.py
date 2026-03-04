@@ -85,7 +85,7 @@ def get_discovery_events_path(config: MngConfig) -> Path:
 def discovered_agent_from_agent_details(agent_details: AgentDetails) -> DiscoveredAgent:
     """Convert an AgentDetails to a lightweight DiscoveredAgent."""
     return DiscoveredAgent(
-        host_id=HostId(str(agent_details.host.id)),
+        host_id=agent_details.host.id,
         agent_id=agent_details.id,
         agent_name=agent_details.name,
         provider_name=agent_details.host.provider_name,
@@ -199,6 +199,30 @@ def emit_agent_discovered(config: MngConfig, agent: DiscoveredAgent) -> None:
     event = make_agent_discovery_event(agent)
     append_discovery_event(config, event)
     logger.trace("Emitted agent_discovered event for {}", agent.agent_name)
+
+
+def safe_emit_agent_discovered(
+    config: MngConfig,
+    agent_id: AgentId,
+    agent_name: AgentName,
+    host_id: HostId,
+    provider_name: ProviderInstanceName,
+) -> None:
+    """Build and emit an agent discovery event, logging and swallowing any errors.
+
+    This is the standard integration point for commands that modify agents.
+    It never raises -- failures are logged at trace level.
+    """
+    try:
+        discovered = build_discovered_agent(
+            agent_id=agent_id,
+            agent_name=agent_name,
+            host_id=host_id,
+            provider_name=provider_name,
+        )
+        emit_agent_discovered(config, discovered)
+    except Exception:
+        logger.trace("Failed to emit agent discovery event")
 
 
 def emit_host_discovered(config: MngConfig, host: DiscoveredHost) -> None:

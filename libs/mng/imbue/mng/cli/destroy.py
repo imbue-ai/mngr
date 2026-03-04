@@ -12,8 +12,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.discover import discover_all_hosts_and_agents
-from imbue.mng.api.discovery_events import build_discovered_agent
-from imbue.mng.api.discovery_events import emit_agent_discovered
+from imbue.mng.api.discovery_events import safe_emit_agent_discovered
 from imbue.mng.api.gc import gc as api_gc
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
@@ -311,19 +310,10 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             _output(f"Destroyed agent: {agent.name}", output_opts)
 
             # Emit discovery event for destroyed agent
-            try:
-                provider_name = (
-                    host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
-                )
-                discovered = build_discovered_agent(
-                    agent_id=agent.id,
-                    agent_name=agent.name,
-                    host_id=host.id,
-                    provider_name=provider_name,
-                )
-                emit_agent_discovered(mng_ctx.config, discovered)
-            except Exception:
-                logger.trace("Failed to emit destroy discovery event")
+            destroy_provider_name = (
+                host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
+            )
+            safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host.id, destroy_provider_name)
 
         except MngError as e:
             _output(f"Error destroying agent {agent.name}: {e}", output_opts)

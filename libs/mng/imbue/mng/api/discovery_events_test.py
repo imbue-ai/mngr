@@ -36,12 +36,6 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 
 
-def _make_test_config(tmp_path: Path) -> MngConfig:
-    host_dir = tmp_path / ".mng"
-    host_dir.mkdir(parents=True, exist_ok=True)
-    return MngConfig(default_host_dir=host_dir, is_error_reporting_enabled=False)
-
-
 def _make_discovered_agent() -> DiscoveredAgent:
     return DiscoveredAgent(
         host_id=HostId.generate(),
@@ -82,16 +76,13 @@ def _make_agent_details(host_id: HostId, provider_name: ProviderInstanceName) ->
 # === Path Helper Tests ===
 
 
-def test_get_discovery_events_dir_returns_correct_path(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
-    events_dir = get_discovery_events_dir(config)
-    expected = tmp_path / ".mng" / "events" / "mng" / "discovery"
-    assert events_dir == expected
+def test_get_discovery_events_dir_returns_correct_path(temp_config: MngConfig) -> None:
+    events_dir = get_discovery_events_dir(temp_config)
+    assert events_dir == temp_config.default_host_dir / "events" / "mng" / "discovery"
 
 
-def test_get_discovery_events_path_returns_jsonl_file(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
-    events_path = get_discovery_events_path(config)
+def test_get_discovery_events_path_returns_jsonl_file(temp_config: MngConfig) -> None:
+    events_path = get_discovery_events_path(temp_config)
     assert events_path.name == "events.jsonl"
     assert events_path.parent.name == "discovery"
 
@@ -181,13 +172,12 @@ def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
 # === File I/O Tests ===
 
 
-def test_append_discovery_event_creates_dirs_and_writes(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
+def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngConfig) -> None:
     agent = _make_discovered_agent()
     event = make_agent_discovery_event(agent)
-    append_discovery_event(config, event)
+    append_discovery_event(temp_config, event)
 
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(temp_config)
     assert events_path.exists()
     lines = events_path.read_text().splitlines()
     assert len(lines) == 1
@@ -195,48 +185,44 @@ def test_append_discovery_event_creates_dirs_and_writes(tmp_path: Path) -> None:
     assert data["type"] == DiscoveryEventType.AGENT_DISCOVERED
 
 
-def test_append_discovery_event_appends_multiple_events(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
+def test_append_discovery_event_appends_multiple_events(temp_config: MngConfig) -> None:
     for _ in range(3):
         event = make_agent_discovery_event(_make_discovered_agent())
-        append_discovery_event(config, event)
+        append_discovery_event(temp_config, event)
 
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(temp_config)
     lines = events_path.read_text().splitlines()
     assert len(lines) == 3
 
 
-def test_emit_agent_discovered_writes_to_file(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
+def test_emit_agent_discovered_writes_to_file(temp_config: MngConfig) -> None:
     agent = _make_discovered_agent()
-    emit_agent_discovered(config, agent)
+    emit_agent_discovered(temp_config, agent)
 
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(temp_config)
     lines = events_path.read_text().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])
     assert data["agent"]["agent_name"] == str(agent.agent_name)
 
 
-def test_emit_host_discovered_writes_to_file(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
+def test_emit_host_discovered_writes_to_file(temp_config: MngConfig) -> None:
     host = _make_discovered_host()
-    emit_host_discovered(config, host)
+    emit_host_discovered(temp_config, host)
 
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(temp_config)
     lines = events_path.read_text().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])
     assert data["host"]["host_name"] == str(host.host_name)
 
 
-def test_write_full_discovery_snapshot_writes_to_file(tmp_path: Path) -> None:
-    config = _make_test_config(tmp_path)
+def test_write_full_discovery_snapshot_writes_to_file(temp_config: MngConfig) -> None:
     agents = (_make_discovered_agent(), _make_discovered_agent())
     hosts = (_make_discovered_host(),)
-    returned_event = write_full_discovery_snapshot(config, agents, hosts)
+    returned_event = write_full_discovery_snapshot(temp_config, agents, hosts)
 
-    events_path = get_discovery_events_path(config)
+    events_path = get_discovery_events_path(temp_config)
     lines = events_path.read_text().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])

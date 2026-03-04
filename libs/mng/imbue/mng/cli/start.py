@@ -11,8 +11,7 @@ from imbue.mng.api.connect import connect_to_agent
 from imbue.mng.api.connect import resolve_connect_command
 from imbue.mng.api.connect import run_connect_command
 from imbue.mng.api.data_types import ConnectionOptions
-from imbue.mng.api.discovery_events import build_discovered_agent
-from imbue.mng.api.discovery_events import emit_agent_discovered
+from imbue.mng.api.discovery_events import safe_emit_agent_discovered
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
@@ -248,17 +247,10 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         online_host.start_agents(agent_ids_to_start)
 
         # Emit discovery events for started agents
-        try:
-            for match in agent_list:
-                discovered = build_discovered_agent(
-                    agent_id=match.agent_id,
-                    agent_name=match.agent_name,
-                    host_id=HostId(host_id_str),
-                    provider_name=provider_name,
-                )
-                emit_agent_discovered(mng_ctx.config, discovered)
-        except Exception:
-            logger.trace("Failed to emit start discovery events")
+        for match in agent_list:
+            safe_emit_agent_discovered(
+                mng_ctx.config, match.agent_id, match.agent_name, HostId(host_id_str), provider_name
+            )
 
         for match in agent_list:
             started_agents.append(str(match.agent_name))

@@ -4,8 +4,7 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mng.api.discovery_events import build_discovered_agent
-from imbue.mng.api.discovery_events import emit_agent_discovered
+from imbue.mng.api.discovery_events import safe_emit_agent_discovered
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
@@ -105,14 +104,5 @@ def provision_agent(
     logger.info("Provisioned agent: {}", agent.name)
 
     # Emit discovery event for re-provisioned agent
-    try:
-        provider_name = host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
-        discovered = build_discovered_agent(
-            agent_id=agent.id,
-            agent_name=agent.name,
-            host_id=host.id,
-            provider_name=provider_name,
-        )
-        emit_agent_discovered(mng_ctx.config, discovered)
-    except Exception:
-        logger.trace("Failed to emit provision discovery event")
+    provider_name = host.provider_instance.name if isinstance(host, Host) else ProviderInstanceName("unknown")
+    safe_emit_agent_discovered(mng_ctx.config, agent.id, agent.name, host.id, provider_name)

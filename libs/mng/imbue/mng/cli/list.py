@@ -7,6 +7,7 @@ import threading
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -1201,6 +1202,57 @@ add_pager_help_option(list_command)
 _STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 
 
+def _stream_emit_line(
+    line: str,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Parse and emit a single JSONL line to stdout, deduplicating by event_id."""
+    stripped = line.strip()
+    if not stripped:
+        return
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.trace("Skipped malformed JSONL line in discovery event stream")
+        return
+    event_id = data.get("event_id")
+    with emit_lock:
+        if event_id and event_id in emitted_event_ids:
+            return
+        if event_id:
+            emitted_event_ids.add(event_id)
+    sys.stdout.write(stripped + "\n")
+    sys.stdout.flush()
+
+
+def _stream_tail_events_file(
+    events_path: Path,
+    initial_offset: int,
+    stop_event: threading.Event,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Poll the events file for new content written by other mng processes."""
+    current_offset = initial_offset
+    while not stop_event.is_set():
+        try:
+            if events_path.exists():
+                file_size = events_path.stat().st_size
+                if file_size > current_offset:
+                    with open(events_path) as f:
+                        f.seek(current_offset)
+                        new_content = f.read()
+                        current_offset = f.tell()
+                    for line in new_content.splitlines():
+                        if stop_event.is_set():
+                            break
+                        _stream_emit_line(line, emitted_event_ids, emit_lock)
+        except OSError:
+            logger.trace("OSError while tailing discovery events file")
+        stop_event.wait(timeout=1.0)
+
+
 def _list_stream(
     mng_ctx: MngContext,
     include_filters: tuple[str, ...],
@@ -1218,24 +1270,6 @@ def _list_stream(
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
 
-    def _emit_line(line: str) -> None:
-        """Parse and emit a single JSONL line, deduplicating by event_id."""
-        stripped = line.strip()
-        if not stripped:
-            return
-        try:
-            data = json.loads(stripped)
-        except json.JSONDecodeError:
-            return
-        event_id = data.get("event_id")
-        with emit_lock:
-            if event_id and event_id in emitted_event_ids:
-                return
-            if event_id:
-                emitted_event_ids.add(event_id)
-        sys.stdout.write(stripped + "\n")
-        sys.stdout.flush()
-
     # Phase 1: initial list, write full snapshot, emit it
     api_list_agents(
         mng_ctx=mng_ctx,
@@ -1245,40 +1279,23 @@ def _list_stream(
         provider_names=provider_names,
         error_behavior=error_behavior,
     )
-    # list_agents already writes a full snapshot (via our modification).
+    # list_agents writes a full snapshot to the events file.
     # Read existing events from the file and emit them all
     if events_path.exists():
         with open(events_path) as f:
             for line in f:
-                _emit_line(line)
+                _stream_emit_line(line, emitted_event_ids, emit_lock)
 
     # Record the current file position for tailing
     initial_offset = events_path.stat().st_size if events_path.exists() else 0
 
     # Phase 2: tail the events file for new events from other processes
     stop_event = threading.Event()
-
-    def _tail_thread() -> None:
-        """Poll the events file for new content written by other mng processes."""
-        current_offset = initial_offset
-        while not stop_event.is_set():
-            try:
-                if events_path.exists():
-                    file_size = events_path.stat().st_size
-                    if file_size > current_offset:
-                        with open(events_path) as f:
-                            f.seek(current_offset)
-                            new_content = f.read()
-                            current_offset = f.tell()
-                        for line in new_content.splitlines():
-                            if stop_event.is_set():
-                                break
-                            _emit_line(line)
-            except OSError:
-                pass
-            stop_event.wait(timeout=1.0)
-
-    tail = threading.Thread(target=_tail_thread, daemon=True)
+    tail = threading.Thread(
+        target=_stream_tail_events_file,
+        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock),
+        daemon=True,
+    )
     tail.start()
 
     # Phase 3: periodically re-poll and write full snapshots
@@ -1296,7 +1313,7 @@ def _list_stream(
                     provider_names=provider_names,
                     error_behavior=error_behavior,
                 )
-                # list_agents already writes a full snapshot event to the file.
+                # list_agents writes a full snapshot event to the file.
                 # The tail thread will pick it up and emit it.
             except Exception:
                 logger.trace("Stream poll failed")
