@@ -19,8 +19,8 @@ from imbue.mng.api.sync import _build_rsync_command
 from imbue.mng.api.sync import _build_ssh_git_url
 from imbue.mng.api.sync import _build_ssh_transport_args
 from imbue.mng.api.sync import sync_git
-from imbue.mng.api.test_fixtures import FakeAgent
-from imbue.mng.api.test_fixtures import FakeHost
+from imbue.mng.api.testing import FakeAgent
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface

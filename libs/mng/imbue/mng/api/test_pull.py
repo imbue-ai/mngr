@@ -9,10 +9,10 @@ from imbue.mng.api.pull import pull_files
 from imbue.mng.api.pull import pull_git
 from imbue.mng.api.sync import GitSyncError
 from imbue.mng.api.sync import UncommittedChangesError
-from imbue.mng.api.test_fixtures import FakeAgent
-from imbue.mng.api.test_fixtures import FakeHost
-from imbue.mng.api.test_fixtures import SyncTestContext
-from imbue.mng.api.test_fixtures import has_uncommitted_changes
+from imbue.mng.api.testing import FakeAgent
+from imbue.mng.api.testing import FakeHost
+from imbue.mng.api.testing import SyncTestContext
+from imbue.mng.api.testing import has_uncommitted_changes
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface

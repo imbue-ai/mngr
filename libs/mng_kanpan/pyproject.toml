@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "All-seeing agent tracker"
 requires-python = ">=3.11"
 dependencies = [
-    "mng==0.1.4",
+    "mng==0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
 ]

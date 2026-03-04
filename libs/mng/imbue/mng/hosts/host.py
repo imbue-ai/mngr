@@ -66,8 +66,8 @@ from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
 from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
@@ -849,7 +849,7 @@ class Host(BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def get_agent_references(self) -> list[AgentReference]:
+    def discover_agents(self) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -869,7 +869,7 @@ class Host(BaseHost, OnlineHostInterface):
                 dir_listing = self._list_directory(agents_dir)
 
             with log_span("Listing agent files from dir for host {}", self.id):
-                agent_refs: list[AgentReference] = []
+                agent_refs: list[DiscoveredAgent] = []
                 for dir_name in dir_listing:
                     agent_dir = agents_dir / dir_name
                     if self._is_directory(agent_dir):
@@ -886,7 +886,7 @@ class Host(BaseHost, OnlineHostInterface):
                                 "Could not load agent reference from {} because json was invalid: {}", data_path, e
                             )
                             continue
-                        ref = self._validate_and_create_agent_reference(data)
+                        ref = self._validate_and_create_discovered_agent(data)
                         if ref is not None:
                             agent_refs.append(ref)
 

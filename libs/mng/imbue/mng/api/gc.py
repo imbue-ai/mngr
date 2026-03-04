@@ -21,7 +21,7 @@ from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import BuildCacheInfo
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SizeBytes
 from imbue.mng.interfaces.data_types import WorkDirInfo
@@ -167,7 +167,7 @@ def gc_machines(
 
             for host in hosts:
                 try:
-                    host_info = HostInfo(
+                    host_details = HostDetails(
                         id=host.id,
                         name=str(host.id),
                         provider_name=provider.name,
@@ -183,7 +183,7 @@ def gc_machines(
                             seconds_since_stopped is not None
                             and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
                         ):
-                            if len(host.get_agent_references()) == 0 or host.get_state() in (
+                            if len(host.discover_agents()) == 0 or host.get_state() in (
                                 HostState.FAILED,
                                 HostState.CRASHED,
                                 HostState.DESTROYED,
@@ -195,7 +195,7 @@ def gc_machines(
                                     #  someone else starts it, you might have a host that is running but is untracked
                                     #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
                                     provider.delete_host(host)
-                                result.machines_deleted.append(host_info)
+                                result.machines_deleted.append(host_details)
                         # no matter what we're done--the rest of the logic only applies to online hosts
                         continue
 
@@ -205,7 +205,7 @@ def gc_machines(
 
                     try:
                         # Only consider online hosts with no agents
-                        agent_refs = host.get_agent_references()
+                        agent_refs = host.discover_agents()
                         if len(agent_refs) > 0:
                             continue
                         host_to_destroy: HostInterface = host
@@ -223,7 +223,7 @@ def gc_machines(
                         provider.destroy_host(host_to_destroy)
                         mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
 
-                    result.machines_destroyed.append(host_info)
+                    result.machines_destroyed.append(host_details)
 
                 except MngError as e:
                     error_msg = f"Failed to check/destroy host {host.id}: {e}"

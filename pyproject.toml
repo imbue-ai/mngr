@@ -196,7 +196,6 @@ layers = [
     "imbue.changelings.interfaces",
     "imbue.changelings.config",
     "imbue.changelings.errors",
-    "imbue.changelings.data_types",
     "imbue.changelings.utils",
     "imbue.changelings.primitives",
 ]

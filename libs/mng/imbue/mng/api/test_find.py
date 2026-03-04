@@ -14,9 +14,9 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.primitives import AgentReference
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import HostReference
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -70,13 +70,13 @@ def test_resolve_source_location_resolves_host_and_path(
     with a valid HostLocation.
     """
     host_id = local_provider.host_id
-    host_ref = HostReference(
+    host_ref = DiscoveredHost(
         host_id=host_id,
         host_name=HostName("localhost"),
         provider_name=ProviderInstanceName(LOCAL_PROVIDER_NAME),
     )
 
-    agents_by_host: dict[HostReference, list[AgentReference]] = {host_ref: []}
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host_ref: []}
 
     result = resolve_source_location(
         source=None,

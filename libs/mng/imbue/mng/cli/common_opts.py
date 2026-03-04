@@ -19,6 +19,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
@@ -54,6 +55,7 @@ class CommonCliOptions(FrozenModel):
     For that information, see the @add_common_options decorator and its click.option() decorators.
     """
 
+    headless: bool = False
     output_format: str
     json_flag: bool = False
     jsonl_flag: bool = False
@@ -81,6 +83,7 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --log-commands: Log executed commands
     - --log-command-output: Log command output
     - --log-env-vars: Log environment variables
+    - --headless: Disable all interactive behavior
     - --context: Project context directory
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
@@ -96,6 +99,12 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "project_context_path",
         type=click.Path(exists=True),
         help="Project context directory (for build context and loading project-specific config) [default: local .git root]",
+    )(command)
+    command = optgroup.option(
+        "--headless",
+        is_flag=True,
+        default=False,
+        help="Disable all interactive behavior (prompts, TUI, editor). Also settable via MNG_HEADLESS env var or 'headless' config key.",
     )(command)
     command = optgroup.option(
         "--log-env-vars/--no-log-env-vars", default=None, help="Log environment variables (security risk)"
@@ -178,22 +187,32 @@ def setup_command_context(
     # wrapped in ConcurrencyExceptionGroup, which would break Click's error handling.
     ctx.call_on_close(lambda: cg.__exit__(None, None, None))
 
-    # Load config
+    # Load config (is_interactive will be resolved below)
     context_dir = Path(initial_opts.project_context_path) if initial_opts.project_context_path else None
     pm = ctx.obj
-    # Determine if we're running interactively (stdout is a TTY)
-    try:
-        is_interactive = sys.stdout.isatty()
-    except (ValueError, AttributeError):
-        # Handle cases where stdout is uninitialized (e.g., xdist workers)
-        is_interactive = False
     mng_ctx = load_config(
         pm,
         cg,
         context_dir=context_dir,
         enabled_plugins=initial_opts.plugin,
         disabled_plugins=initial_opts.disable_plugin,
-        is_interactive=is_interactive,
+        is_interactive=False,
+    )
+
+    # Resolve is_interactive from all sources.
+    # Precedence: --headless CLI flag > config/env headless > TTY auto-detect
+    if initial_opts.headless or mng_ctx.config.headless:
+        is_interactive = False
+    else:
+        try:
+            is_interactive = sys.stdout.isatty()
+        except (ValueError, AttributeError):
+            # Handle cases where stdout is uninitialized (e.g., xdist workers)
+            is_interactive = False
+
+    # Update MngContext with the resolved is_interactive
+    mng_ctx = mng_ctx.model_copy_update(
+        to_update(mng_ctx.field_ref().is_interactive, is_interactive),
     )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
@@ -247,10 +266,12 @@ def setup_command_context(
     span = log_span("Started {} command", command_name)
     ctx.with_resource(span)
 
-    # Register error reporting state on the group context so AliasAwareGroup.invoke()
-    # can check it when catching unexpected exceptions
-    if ctx.parent is not None and mng_ctx.config.is_error_reporting_enabled and is_interactive:
-        ctx.parent.meta["is_error_reporting_enabled"] = True
+    # Register interactive state and error reporting state on the group context
+    # so AliasAwareGroup.invoke() can check them when catching exceptions
+    if ctx.parent is not None:
+        ctx.parent.meta["is_interactive"] = is_interactive
+        if mng_ctx.config.is_error_reporting_enabled and is_interactive:
+            ctx.parent.meta["is_error_reporting_enabled"] = True
 
     # Run pre-command scripts if configured for this command
     _run_pre_command_scripts(mng_ctx.config, command_name, cg)

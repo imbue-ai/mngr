@@ -12,10 +12,6 @@ from modal.environments import delete_environment
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.conftest import make_mng_ctx
-from imbue.mng.conftest import register_modal_test_app
-from imbue.mng.conftest import register_modal_test_environment
-from imbue.mng.conftest import register_modal_test_volume
 from imbue.mng.errors import ConfigStructureError
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.modal.backend import ModalProviderBackend
@@ -24,6 +20,10 @@ from imbue.mng.providers.modal.config import ModalProviderConfig
 from imbue.mng.providers.modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mng.providers.modal.instance import ModalProviderInstance
 from imbue.mng.utils.testing import TEST_ENV_PREFIX
+from imbue.mng.utils.testing import make_mng_ctx
+from imbue.mng.utils.testing import register_modal_test_app
+from imbue.mng.utils.testing import register_modal_test_environment
+from imbue.mng.utils.testing import register_modal_test_volume
 
 
 def make_modal_provider_real(

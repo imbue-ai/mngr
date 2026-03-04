@@ -29,6 +29,7 @@ from imbue.mng.errors import LockNotHeldError
 from imbue.mng.errors import MngError
 from imbue.mng.hosts.common import is_macos
 from imbue.mng.hosts.host import Host
+from imbue.mng.hosts.tmux import capture_tmux_pane_content
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.interfaces.host import AgentDataOptions
@@ -52,6 +53,7 @@ from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
 from imbue.mng.utils.polling import poll_until
 from imbue.mng.utils.polling import wait_for
+from imbue.mng.utils.testing import capture_tmux_pane_contents
 from imbue.mng.utils.testing import generate_ssh_keypair
 from imbue.mng.utils.testing import local_sshd
 
@@ -680,8 +682,8 @@ def test_unset_vars_applied_during_agent_start(
         result = host.execute_command(f"tmux has-session -t '{session_name}'")
         if not result.success:
             return False
-        capture_result = host.execute_command(f"tmux capture-pane -t '{session_name}' -p")
-        return capture_result.success and ("sleep 736249" in capture_result.stdout)
+        pane_content = capture_tmux_pane_content(host, session_name)
+        return pane_content is not None and "sleep 736249" in pane_content
 
     wait_for(session_ready, timeout=30.0, poll_interval=0.5, error_message="tmux session not ready")
 
@@ -701,10 +703,9 @@ def test_unset_vars_applied_during_agent_start(
     host.execute_command(f"tmux send-keys -t '{session_name}' 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter")
 
     def check_output() -> bool:
-        capture_result = host.execute_command(f"tmux capture-pane -t '{session_name}' -p")
-        if not capture_result.success:
+        output = capture_tmux_pane_content(host, session_name)
+        if output is None:
             return False
-        output = capture_result.stdout
         has_histfile = "HISTFILE_VALUE=UNSET" in output or "HISTFILE_VALUE=" in output
         has_profile = "PROFILE_VALUE=UNSET" in output or "PROFILE_VALUE=" in output
         return has_histfile and has_profile
@@ -2218,16 +2219,12 @@ def test_new_tmux_window_inherits_env_vars(
             return "NEW_WINDOW_VAR=new_window_value_123456" in content
 
         if not poll_until(check_marker_file, timeout=10.0):
-            pane_content = subprocess.run(
-                ["tmux", "capture-pane", "-t", window_target, "-p"],
-                capture_output=True,
-                text=True,
-            )
+            pane_stdout = capture_tmux_pane_contents(window_target)
             marker_content = marker_file.read_text() if marker_file.exists() else "<file does not exist>"
             raise AssertionError(
                 f"New tmux window did not inherit environment variables.\n"
                 f"Marker file content: {marker_content!r}\n"
-                f"Pane content:\n{pane_content.stdout}"
+                f"Pane content:\n{pane_stdout}"
             )
 
     finally:

@@ -9,9 +9,9 @@ from imbue.mng.api.push import push_files
 from imbue.mng.api.push import push_git
 from imbue.mng.api.sync import RemoteGitContext
 from imbue.mng.api.sync import UncommittedChangesError
-from imbue.mng.api.test_fixtures import FakeAgent
-from imbue.mng.api.test_fixtures import FakeHost
-from imbue.mng.api.test_fixtures import SyncTestContext
+from imbue.mng.api.testing import FakeAgent
+from imbue.mng.api.testing import FakeHost
+from imbue.mng.api.testing import SyncTestContext
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import UncommittedChangesMode

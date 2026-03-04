@@ -307,16 +307,16 @@ class SnapshotName(str):
         )
 
 
-class HostReference(FrozenModel):
-    """Lightweight reference to a host for display and identification purposes."""
+class DiscoveredHost(FrozenModel):
+    """Lightweight host data collected during discovery (without connecting to the host)."""
 
     host_id: HostId = Field(description="Unique identifier for the host")
     host_name: HostName = Field(description="Human-readable name of the host")
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
 
 
-class AgentReference(FrozenModel):
-    """Lightweight reference to an agent with certified data from data.json.
+class DiscoveredAgent(FrozenModel):
+    """Lightweight agent data collected during discovery (without connecting to the host).
 
     This class provides access to agent data that can be retrieved without requiring
     the host to be online. The certified_data field contains the raw data.json contents,

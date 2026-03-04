@@ -129,10 +129,22 @@ install_uv() {
 
 info "Detected OS: ${OS}"
 
+# macOS ships /bin/bash 3.2 which lacks features mng scripts need.
+# `command -v bash` always succeeds, so find_missing won't detect this. We check
+# the version explicitly and force-add bash to the missing arrays if too old.
+_NEED_MODERN_BASH=false
+_PATH_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
+if [ "$_PATH_BASH_VER" -lt 4 ] 2>/dev/null; then
+    _NEED_MODERN_BASH=true
+fi
+
 SHOULD_INSTALL_DEPS=true
 
 # shellcheck disable=SC2207
 missing_all=($(find_missing "${ALL_DEPS[@]}"))
+if [ "$_NEED_MODERN_BASH" = true ]; then
+    missing_all+=("bash(4+)")
+fi
 
 if [ ${#missing_all[@]} -eq 0 ]; then
     info "All system dependencies already installed"
@@ -144,6 +156,9 @@ else
     printf "  [a] Install all (%s)\n" "${missing_all[*]}"
     # shellcheck disable=SC2207
     missing_core=($(find_missing "${CORE_DEPS[@]}"))
+    if [ "$_NEED_MODERN_BASH" = true ]; then
+        missing_core+=("bash(4+)")
+    fi
     if [ ${#missing_core[@]} -gt 0 ]; then
         printf "  [c] Install core only (%s)\n" "${missing_core[*]}"
     fi
@@ -158,6 +173,11 @@ else
     brew_apt_missing_all=($(find_missing "${BREW_APT_CORE_DEPS[@]}" "${BREW_APT_OPTIONAL_DEPS[@]}"))
     # shellcheck disable=SC2207
     brew_apt_missing_core=($(find_missing "${BREW_APT_CORE_DEPS[@]}"))
+    # Force-add bash if the PATH-resolved version is too old (find_missing can't detect this)
+    if [ "$_NEED_MODERN_BASH" = true ]; then
+        brew_apt_missing_all+=("bash")
+        brew_apt_missing_core+=("bash")
+    fi
 
     case "$choice" in
         a|A|y|Y|"")
@@ -184,6 +204,22 @@ else
             info "Skipping system dependency installation"
             ;;
     esac
+fi
+
+# ── Verify bash 4+ is on PATH (post-install) ─────────────────────────────────
+# Re-check after deps were installed. Warn if still too old.
+
+if [ "$_NEED_MODERN_BASH" = true ]; then
+    _POST_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
+    if [ "$_POST_BASH_VER" -lt 4 ] 2>/dev/null; then
+        if [ "$OS" = "macos" ]; then
+            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
+            warn "Ensure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH."
+        else
+            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
+            warn "Ensure the newly installed bash is before the old one in your PATH."
+        fi
+    fi
 fi
 
 # ── Verify uv is available ─────────────────────────────────────────────────────

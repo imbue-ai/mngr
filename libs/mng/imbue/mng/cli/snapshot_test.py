@@ -229,8 +229,7 @@ def test_emit_create_result_format_template(capsys: pytest.CaptureFixture[str]) 
         {"snapshot_id": "snap-def", "host_id": "host-2", "provider": "local", "agent_names": ["agent2", "agent3"]},
     ]
     _emit_create_result(created, errors=[], output_opts=output_opts)
-    captured = capsys.readouterr()
-    lines = captured.out.strip().split("\n")
+    lines = capsys.readouterr().out.strip().split("\n")
     assert lines == ["snap-abc", "snap-def"]
 
 
@@ -241,8 +240,7 @@ def test_emit_create_result_format_template_agent_names(capsys: pytest.CaptureFi
         {"snapshot_id": "snap-abc", "host_id": "host-1", "provider": "local", "agent_names": ["a1", "a2"]},
     ]
     _emit_create_result(created, errors=[], output_opts=output_opts)
-    captured = capsys.readouterr()
-    assert captured.out.strip() == "a1, a2"
+    assert capsys.readouterr().out.strip() == "a1, a2"
 
 
 # =============================================================================
@@ -257,8 +255,7 @@ def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str])
         {"snapshot_id": "snap-abc", "host_id": "host-1", "provider": "local"},
     ]
     _emit_destroy_result(destroyed, output_opts=output_opts)
-    captured = capsys.readouterr()
-    assert captured.out.strip() == "snap-abc\thost-1"
+    assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
 
 
 # =============================================================================

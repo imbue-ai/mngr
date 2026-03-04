@@ -4,8 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-from imbue.mng.interfaces.data_types import AgentInfo
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -23,39 +23,40 @@ from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
 
 
-def _make_host_info(provider_name: str = "local") -> HostInfo:
-    """Create a minimal HostInfo for testing."""
-    return HostInfo(
+def _make_host_details(provider_name: str = "local") -> HostDetails:
+    """Create a minimal HostDetails for testing."""
+    return HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName(provider_name),
     )
 
 
-def _make_agent_info(
+def _make_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
     work_dir: Path = Path("/tmp/test-work-dir"),
     provider_name: str = "local",
-) -> AgentInfo:
-    """Create a minimal AgentInfo for testing."""
-    return AgentInfo(
+    branch: str | None = None,
+) -> AgentDetails:
+    """Create a minimal AgentDetails for testing."""
+    return AgentDetails(
         id=AgentId.generate(),
         name=AgentName(name),
         type="claude",
         command=CommandString("claude"),
         work_dir=work_dir,
-        branch=f"mng/{name}",
+        branch=branch,
         create_time=datetime.now(tz=timezone.utc),
         start_on_boot=False,
         state=state,
-        host=_make_host_info(provider_name),
+        host=_make_host_details(provider_name),
     )
 
 
 def _make_pr_info(
     number: int = 1,
-    head_branch: str = "mng/test-local",
+    head_branch: str = "mng/test",
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
 ) -> PrInfo:
@@ -95,9 +96,9 @@ def test_build_pr_branch_index_empty() -> None:
 
 
 def test_build_pr_branch_index_single_pr() -> None:
-    pr = _make_pr_info(number=1, head_branch="mng/agent-local")
+    pr = _make_pr_info(number=1, head_branch="mng/agent")
     result = _build_pr_branch_index((pr,))
-    assert result == {"mng/agent-local": pr}
+    assert result == {"mng/agent": pr}
 
 
 def test_build_pr_branch_index_different_branches() -> None:
@@ -133,44 +134,36 @@ def test_build_pr_branch_index_merged_wins_over_closed() -> None:
 # === _resolve_agent_branch ===
 
 
-def test_resolve_agent_branch_local_with_git(tmp_path: Path) -> None:
-    agent = _make_agent_info(name="my-agent", work_dir=tmp_path, provider_name="local")
-    cg = MagicMock()
-    with patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value="mng/my-agent"):
-        branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
+def test_resolve_agent_branch_returns_branch_from_agent_details() -> None:
+    agent = _make_agent_details(name="my-agent", branch="mng/my-agent")
+    assert _resolve_agent_branch(agent) == "mng/my-agent"
 
 
-def test_resolve_agent_branch_local_nonexistent_dir() -> None:
-    agent = _make_agent_info(name="my-agent", work_dir=Path("/nonexistent/path"), provider_name="local")
-    cg = MagicMock()
-    branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
+def test_resolve_agent_branch_returns_custom_branch_name() -> None:
+    agent = _make_agent_details(name="my-agent", branch="feature/custom-branch")
+    assert _resolve_agent_branch(agent) == "feature/custom-branch"
 
 
-def test_resolve_agent_branch_local_git_fails(tmp_path: Path) -> None:
-    agent = _make_agent_info(name="my-agent", work_dir=tmp_path, provider_name="local")
-    cg = MagicMock()
-    with patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value=None):
-        branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
+def test_resolve_agent_branch_returns_none_when_no_branch() -> None:
+    agent = _make_agent_details(name="my-agent", branch=None)
+    assert _resolve_agent_branch(agent) is None
 
 
 # === fetch_board_snapshot ===
 
 
 def test_find_git_cwd_returns_first_local_work_dir(tmp_path: Path) -> None:
-    agent = _make_agent_info(name="a", work_dir=tmp_path, provider_name="local")
+    agent = _make_agent_details(name="a", work_dir=tmp_path, provider_name="local")
     assert _find_git_cwd([agent]) == tmp_path
 
 
 def test_find_git_cwd_skips_remote_agents() -> None:
-    agent = _make_agent_info(name="a", work_dir=Path("/remote"), provider_name="modal")
+    agent = _make_agent_details(name="a", work_dir=Path("/remote"), provider_name="modal")
     assert _find_git_cwd([agent]) is None
 
 
 def test_find_git_cwd_skips_nonexistent_dirs() -> None:
-    agent = _make_agent_info(name="a", work_dir=Path("/nonexistent"), provider_name="local")
+    agent = _make_agent_details(name="a", work_dir=Path("/nonexistent"), provider_name="local")
     assert _find_git_cwd([agent]) is None
 
 
@@ -182,8 +175,10 @@ def test_find_git_cwd_empty_agents() -> None:
 
 
 def test_fetch_board_snapshot_integrates_agents_and_prs() -> None:
-    agent1 = _make_agent_info(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-    agent2 = _make_agent_info(name="agent-2", state=AgentLifecycleState.DONE, provider_name="modal")
+    agent1 = _make_agent_details(
+        name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal", branch="mng/agent-1"
+    )
+    agent2 = _make_agent_details(name="agent-2", state=AgentLifecycleState.DONE, provider_name="modal")
 
     pr1 = _make_pr_info(number=42, head_branch="mng/agent-1", state=PrState.OPEN)
     pr_result = FetchPrsResult(prs=(pr1,), error=None)

@@ -11,9 +11,9 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import BaseMngError
@@ -23,9 +23,9 @@ from imbue.mng.errors import ProviderInstanceNotFoundError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import AgentReference
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
-from imbue.mng.primitives import HostReference
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mng.utils.cel_utils import compile_cel_filters
@@ -78,7 +78,7 @@ def send_message_to_agents(
 
     # Load all agents grouped by host
     with log_span("Loading agents from all providers"):
-        agents_by_host, providers = load_all_agents_grouped_by_host(mng_ctx)
+        agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx)
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -125,8 +125,8 @@ def send_message_to_agents(
 
 
 def _process_host_for_messaging(
-    host_ref: HostReference,
-    agent_refs: list[AgentReference],
+    host_ref: DiscoveredHost,
+    agent_refs: list[DiscoveredAgent],
     provider: BaseProviderInstance,
     message_content: str,
     compiled_include_filters: list[Any],

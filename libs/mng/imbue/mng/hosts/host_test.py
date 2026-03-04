@@ -106,10 +106,10 @@ def host_with_agents_dir(
     return host, agents_dir
 
 
-def test_get_agent_references_returns_refs_with_certified_data(
+def test_discover_agents_returns_refs_with_certified_data(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references returns refs with certified_data populated."""
+    """Test that discover_agents returns refs with certified_data populated."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent data
@@ -125,7 +125,7 @@ def test_get_agent_references_returns_refs_with_certified_data(
     }
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert len(refs) == 1
     assert refs[0].agent_id == agent_id
@@ -137,23 +137,23 @@ def test_get_agent_references_returns_refs_with_certified_data(
     assert refs[0].work_dir == Path("/tmp/work")
 
 
-def test_get_agent_references_returns_empty_when_no_agents_dir(
+def test_discover_agents_returns_empty_when_no_agents_dir(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """Test that get_agent_references returns empty list when no agents directory exists."""
+    """Test that discover_agents returns empty list when no agents directory exists."""
     host = local_provider.create_host(HostName("localhost"))
     assert isinstance(host, Host)
 
     # Don't create agents directory
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_missing_data_json(
+def test_discover_agents_skips_missing_data_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips agent dirs without data.json."""
+    """Test that discover_agents skips agent dirs without data.json."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent directory without data.json
@@ -162,15 +162,15 @@ def test_get_agent_references_skips_missing_data_json(
     agent_dir.mkdir()
     # Don't create data.json
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_invalid_json(
+def test_discover_agents_skips_invalid_json(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips agent dirs with invalid JSON."""
+    """Test that discover_agents skips agent dirs with invalid JSON."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent with invalid JSON
@@ -179,15 +179,15 @@ def test_get_agent_references_skips_invalid_json(
     agent_dir.mkdir()
     (agent_dir / "data.json").write_text("not valid json {{{")
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_missing_id(
+def test_discover_agents_skips_missing_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips records with missing id."""
+    """Test that discover_agents skips records with missing id."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent data without id
@@ -197,15 +197,15 @@ def test_get_agent_references_skips_missing_id(
     agent_data = {"name": "test-agent"}
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_missing_name(
+def test_discover_agents_skips_missing_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips records with missing name."""
+    """Test that discover_agents skips records with missing name."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent data without name
@@ -215,15 +215,15 @@ def test_get_agent_references_skips_missing_name(
     agent_data = {"id": str(agent_id)}
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_invalid_id(
+def test_discover_agents_skips_invalid_id(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips records with invalid id format."""
+    """Test that discover_agents skips records with invalid id format."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent data with invalid id
@@ -233,15 +233,15 @@ def test_get_agent_references_skips_invalid_id(
     agent_data = {"id": "", "name": "test-agent"}
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_skips_invalid_name(
+def test_discover_agents_skips_invalid_name(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips records with invalid name format."""
+    """Test that discover_agents skips records with invalid name format."""
     host, agents_dir = host_with_agents_dir
 
     # Create agent data with invalid name
@@ -251,15 +251,15 @@ def test_get_agent_references_skips_invalid_name(
     agent_data = {"id": str(agent_id), "name": ""}
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert refs == []
 
 
-def test_get_agent_references_loads_multiple_agents(
+def test_discover_agents_loads_multiple_agents(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references loads all valid agents."""
+    """Test that discover_agents loads all valid agents."""
     host, agents_dir = host_with_agents_dir
 
     # Create multiple agents
@@ -270,17 +270,17 @@ def test_get_agent_references_loads_multiple_agents(
         agent_data = {"id": str(agent_id), "name": f"agent-{i}"}
         (agent_dir / "data.json").write_text(json.dumps(agent_data))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     assert len(refs) == 3
     ref_ids = {ref.agent_id for ref in refs}
     assert ref_ids == set(agent_ids)
 
 
-def test_get_agent_references_skips_bad_records_but_loads_good_ones(
+def test_discover_agents_skips_bad_records_but_loads_good_ones(
     host_with_agents_dir: tuple[Host, Path],
 ) -> None:
-    """Test that get_agent_references skips bad records but still loads good ones."""
+    """Test that discover_agents skips bad records but still loads good ones."""
     host, agents_dir = host_with_agents_dir
 
     # Create a good agent
@@ -301,7 +301,7 @@ def test_get_agent_references_skips_bad_records_but_loads_good_ones(
     good_dir_2.mkdir()
     (good_dir_2 / "data.json").write_text(json.dumps({"id": str(good_id_2), "name": "good-agent-2"}))
 
-    refs = host.get_agent_references()
+    refs = host.discover_agents()
 
     # Should have 2 good agents, bad one skipped
     assert len(refs) == 2
@@ -364,10 +364,10 @@ def test_get_created_branch_name_returns_value_from_data_json(
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     data = json.loads((agent_dir / "data.json").read_text())
-    data["created_branch_name"] = "mng/test-branch-local"
+    data["created_branch_name"] = "mng/test-branch"
     (agent_dir / "data.json").write_text(json.dumps(data))
 
-    assert agent.get_created_branch_name() == "mng/test-branch-local"
+    assert agent.get_created_branch_name() == "mng/test-branch"
 
 
 def test_get_created_branch_name_returns_none_when_absent(
@@ -396,9 +396,9 @@ def test_create_agent_state_stores_created_branch_name(
         command=CommandString("sleep 1"),
     )
 
-    agent = host.create_agent_state(temp_work_dir, options, created_branch_name="mng/my-branch-local")
+    agent = host.create_agent_state(temp_work_dir, options, created_branch_name="mng/my-branch")
 
-    assert agent.get_created_branch_name() == "mng/my-branch-local"
+    assert agent.get_created_branch_name() == "mng/my-branch"
 
 
 def test_create_agent_state_uses_explicit_agent_id(

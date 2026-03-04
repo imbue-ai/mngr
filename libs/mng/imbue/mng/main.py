@@ -96,14 +96,14 @@ class AliasAwareGroup(DefaultCommandGroup):
             return result
         except NotImplementedError as e:
             _call_on_error_hook(ctx, e)
-            handle_not_implemented_error(e)
+            handle_not_implemented_error(e, is_interactive=ctx.meta.get("is_interactive"))
         except (click.ClickException, click.Abort, click.exceptions.Exit, BaseMngError, bdb.BdbQuit) as e:
             _call_on_error_hook(ctx, e)
             raise
         except Exception as e:
             _call_on_error_hook(ctx, e)
             if ctx.meta.get("is_error_reporting_enabled", False):
-                handle_unexpected_error(e)
+                handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"))
             raise
 
     def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
