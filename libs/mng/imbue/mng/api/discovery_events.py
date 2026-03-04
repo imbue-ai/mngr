@@ -280,7 +280,7 @@ def parse_discovery_event_line(
 
 
 def find_latest_full_snapshot_offset(events_path: Path) -> int:
-    """Reverse-scan the events file to find the byte offset of the latest DISCOVERY_FULL event.
+    """Scan the events file to find the byte offset of the latest DISCOVERY_FULL event.
 
     Returns 0 if no full snapshot event is found (meaning the entire file should be read).
     """

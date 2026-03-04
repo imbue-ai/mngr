@@ -343,9 +343,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if opts.stream:
         _list_stream(
             mng_ctx=mng_ctx,
-            include_filters=include_filters_tuple,
-            exclude_filters=exclude_filters_tuple,
-            provider_names=provider_names,
             error_behavior=error_behavior,
         )
         return
@@ -1275,14 +1272,13 @@ def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBe
 
 def _list_stream(
     mng_ctx: MngContext,
-    include_filters: tuple[str, ...],
-    exclude_filters: tuple[str, ...],
-    provider_names: tuple[str, ...] | None,
     error_behavior: ErrorBehavior,
 ) -> None:
     """Stream discovery events to stdout as JSONL.
 
-    1. Run an unfiltered list_agents(), write a full snapshot, emit from the latest snapshot
+    Snapshots are always unfiltered so they can be used for state reconstruction.
+
+    1. Write an unfiltered full snapshot, emit from the latest snapshot in the file
     2. Tail the events file for new events written by other mng processes
     3. Periodically re-poll (unfiltered) and write new full snapshots
     """

@@ -21,6 +21,7 @@ from imbue.mng.api.discovery_events import discovered_host_from_agent_details
 from imbue.mng.api.discovery_events import emit_agent_discovered
 from imbue.mng.api.discovery_events import emit_host_discovered
 from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
+from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_dir
 from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.discovery_events import make_agent_discovery_event
@@ -290,14 +291,10 @@ def test_parse_unknown_event_type_returns_none() -> None:
 
 
 def test_find_latest_full_snapshot_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
-    from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
-
     assert find_latest_full_snapshot_offset(tmp_path / "nonexistent.jsonl") == 0
 
 
 def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_config: MngConfig) -> None:
-    from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
-
     # Write only agent events
     emit_agent_discovered(temp_config, _make_discovered_agent())
     emit_agent_discovered(temp_config, _make_discovered_agent())
@@ -307,8 +304,6 @@ def test_find_latest_full_snapshot_offset_returns_zero_when_no_full_events(temp_
 
 
 def test_find_latest_full_snapshot_offset_finds_last_full_event(temp_config: MngConfig) -> None:
-    from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
-
     # Write: agent, full, agent, full, agent
     emit_agent_discovered(temp_config, _make_discovered_agent())
     write_full_discovery_snapshot(temp_config, (_make_discovered_agent(),), (_make_discovered_host(),))
