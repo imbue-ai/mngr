@@ -20,9 +20,9 @@ from imbue.mng_changeling_chat.api import _build_conversation_event_paths
 from imbue.mng_changeling_chat.api import _build_remote_chat_script
 from imbue.mng_changeling_chat.api import get_latest_conversation_id
 from imbue.mng_changeling_chat.api import list_conversations_on_agent
-from imbue.mng_changeling_chat.conftest import _TestAgent
-from imbue.mng_changeling_chat.conftest import create_conversation_events
-from imbue.mng_changeling_chat.conftest import create_message_events
+from imbue.mng_changeling_chat.testing import TestAgent
+from imbue.mng_changeling_chat.testing import create_conversation_events
+from imbue.mng_changeling_chat.testing import create_message_events
 
 # =========================================================================
 # Tests for _build_chat_script_path
@@ -40,7 +40,7 @@ def test_build_chat_script_path() -> None:
 
 
 def test_build_chat_env_vars_contains_all_required_keys(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -59,7 +59,7 @@ def test_build_chat_env_vars_contains_all_required_keys(
 
 
 def test_build_remote_chat_script_uses_shlex_quote_for_env_values(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -71,7 +71,7 @@ def test_build_remote_chat_script_uses_shlex_quote_for_env_values(
 
 
 def test_build_remote_chat_script_execs_chat_sh(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -82,7 +82,7 @@ def test_build_remote_chat_script_execs_chat_sh(
 
 
 def test_build_remote_chat_script_quotes_conversation_id_with_special_chars(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     """Verify that conversation IDs with special characters are safely quoted."""
     host, agent = local_host_and_agent
@@ -100,7 +100,7 @@ def test_build_remote_chat_script_quotes_conversation_id_with_special_chars(
 
 
 def test_build_conversation_event_paths(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -117,7 +117,7 @@ def test_build_conversation_event_paths(
 
 
 def test_list_conversations_returns_empty_when_no_event_files(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -127,7 +127,7 @@ def test_list_conversations_returns_empty_when_no_event_files(
 
 
 def test_list_conversations_returns_conversations_sorted_by_updated_at(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -160,7 +160,7 @@ def test_list_conversations_returns_conversations_sorted_by_updated_at(
 
 
 def test_list_conversations_uses_message_timestamps_for_updated_at(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -204,11 +204,11 @@ def test_list_conversations_uses_message_timestamps_for_updated_at(
 
 
 def test_list_conversations_raises_on_command_failure(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
-    bad_agent = _TestAgent(
+    bad_agent = TestAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName("bad-agent"),
         agent_type=AgentTypeName("test"),
@@ -230,7 +230,7 @@ def test_list_conversations_raises_on_command_failure(
 
 
 def test_get_latest_conversation_id_returns_most_recent(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -259,7 +259,7 @@ def test_get_latest_conversation_id_returns_most_recent(
 
 
 def test_get_latest_conversation_id_returns_none_when_no_conversations(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 

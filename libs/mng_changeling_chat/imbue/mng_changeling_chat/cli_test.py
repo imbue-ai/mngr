@@ -9,8 +9,8 @@ from imbue.mng_changeling_chat.cli import ChatCliOptions
 from imbue.mng_changeling_chat.cli import _resolve_latest_conversation_args
 from imbue.mng_changeling_chat.cli import chat
 from imbue.mng_changeling_chat.cli import resolve_chat_args
-from imbue.mng_changeling_chat.conftest import _TestAgent
-from imbue.mng_changeling_chat.conftest import create_conversation_events
+from imbue.mng_changeling_chat.testing import TestAgent
+from imbue.mng_changeling_chat.testing import create_conversation_events
 
 
 def test_chat_command_help_shows_all_options() -> None:
@@ -73,7 +73,7 @@ def _make_opts(
 
 
 def test_resolve_chat_args_new_flag(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts(new=True)
@@ -84,7 +84,7 @@ def test_resolve_chat_args_new_flag(
 
 
 def test_resolve_chat_args_conversation_flag(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts(conversation="conv-12345")
@@ -95,7 +95,7 @@ def test_resolve_chat_args_conversation_flag(
 
 
 def test_resolve_chat_args_last_flag_with_conversations(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -120,7 +120,7 @@ def test_resolve_chat_args_last_flag_with_conversations(
 
 
 def test_resolve_chat_args_last_flag_without_conversations(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts(last=True)
@@ -131,7 +131,7 @@ def test_resolve_chat_args_last_flag_without_conversations(
 
 
 def test_resolve_chat_args_non_interactive_defaults_to_latest(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -156,7 +156,7 @@ def test_resolve_chat_args_non_interactive_defaults_to_latest(
 
 
 def test_resolve_chat_args_non_interactive_falls_back_to_new(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts()
@@ -167,7 +167,7 @@ def test_resolve_chat_args_non_interactive_falls_back_to_new(
 
 
 def test_resolve_chat_args_rejects_mutually_exclusive_new_and_last(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts(new=True, last=True)
@@ -177,7 +177,7 @@ def test_resolve_chat_args_rejects_mutually_exclusive_new_and_last(
 
 
 def test_resolve_chat_args_rejects_mutually_exclusive_new_and_conversation(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
     opts = _make_opts(new=True, conversation="conv-123")
@@ -192,7 +192,7 @@ def test_resolve_chat_args_rejects_mutually_exclusive_new_and_conversation(
 
 
 def test_resolve_latest_conversation_args_returns_new_when_no_conversations(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
@@ -202,7 +202,7 @@ def test_resolve_latest_conversation_args_returns_new_when_no_conversations(
 
 
 def test_resolve_latest_conversation_args_resumes_latest(
-    local_host_and_agent: tuple[Host, _TestAgent],
+    local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
