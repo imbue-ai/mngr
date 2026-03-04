@@ -72,12 +72,39 @@ def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
     return tracked_cids
 
 
+def _get_db_conversation_ids(db_path: Path) -> set[str]:
+    """Read all conversation IDs from the llm database's conversations table.
+
+    Each agent has its own llm database, so all conversations in it belong
+    to this agent. This supplements the tracked set from
+    events/conversations/events.jsonl to handle cases where the conversation
+    event was not written (e.g. race in the background subshell in chat.sh).
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return set()
+    try:
+        rows = conn.execute("SELECT id FROM conversations").fetchall()
+        return {row[0] for row in rows}
+    except sqlite3.Error as exc:
+        logger.debug("Failed to query conversations table: {}", exc)
+        return set()
+    finally:
+        conn.close()
+
+
 def _sync_messages(
     db_path: Path,
     conversations_file: Path,
     messages_file: Path,
 ) -> int:
     """Sync missing messages from the llm DB to events/messages/events.jsonl.
+
+    Discovers conversations from both the tracked events file and the llm
+    database's conversations table. This ensures messages are synced even if
+    the conversation event was not written to events/conversations/events.jsonl
+    (e.g. due to a race condition in the background registration subshell).
 
     Uses an adaptive window: starts by fetching the most recent 200 responses
     from the DB and checks which event IDs are missing from the output file.
@@ -92,6 +119,8 @@ def _sync_messages(
         return 0
 
     tracked_cids = _get_tracked_conversation_ids(conversations_file)
+    db_cids = _get_db_conversation_ids(db_path)
+    tracked_cids = tracked_cids | db_cids
     if not tracked_cids:
         return 0
 

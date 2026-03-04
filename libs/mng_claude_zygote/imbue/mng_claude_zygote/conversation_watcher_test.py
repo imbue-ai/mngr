@@ -163,11 +163,13 @@ def test_sync_messages_returns_zero_with_no_tracked_conversations(tmp_path: Path
     assert result == 0
 
 
-def test_sync_messages_only_syncs_tracked_conversations(tmp_path: Path) -> None:
+def test_sync_messages_discovers_conversations_from_db(tmp_path: Path) -> None:
+    """Conversations in the llm DB are synced even without a tracking event."""
     conversations_file = tmp_path / "conversations" / "events.jsonl"
     messages_file = tmp_path / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True)
 
+    # Only track conv-tracked in the events file, but conv-from-db is in the DB
     write_conversation_event(conversations_file, "conv-tracked")
 
     db_path = tmp_path / "logs.db"
@@ -175,17 +177,17 @@ def test_sync_messages_only_syncs_tracked_conversations(tmp_path: Path) -> None:
         db_path,
         [
             ("resp-1", "Hi", "Hello!", "model", "2025-01-15T10:01:00", "conv-tracked"),
-            ("resp-2", "Yo", "Hey!", "model", "2025-01-15T10:02:00", "conv-untracked"),
+            ("resp-2", "Yo", "Hey!", "model", "2025-01-15T10:02:00", "conv-from-db"),
         ],
     )
 
     synced = _sync_messages(db_path, conversations_file, messages_file)
-    assert synced == 2  # Only the tracked conversation
+    assert synced == 4  # Both conversations synced
 
     lines = messages_file.read_text().strip().split("\n")
     events = [json.loads(line) for line in lines]
-    for event in events:
-        assert event["conversation_id"] == "conv-tracked"
+    cids = {e["conversation_id"] for e in events}
+    assert cids == {"conv-tracked", "conv-from-db"}
 
 
 def test_sync_messages_handles_prompt_only_response(tmp_path: Path) -> None:
