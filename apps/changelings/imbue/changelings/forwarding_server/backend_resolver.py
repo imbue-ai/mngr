@@ -227,12 +227,10 @@ class MngStreamManager(MutableModel):
 
     Runs two types of long-lived subprocesses via ConcurrencyGroup:
     1. `mng list --stream --quiet` to discover agents and hosts.
-       Parses DISCOVERY_FULL events to maintain the agent list and SSH info.
+       Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
+       and HOST_SSH_INFO events for SSH connection details per host.
     2. `mng events <agent-id> servers.jsonl --follow --quiet` (one per agent)
        to discover each agent's servers.
-
-    SSH info is extracted directly from the DiscoveredHost entries in
-    DISCOVERY_FULL events, so no separate `mng list --json` call is needed.
     """
 
     resolver: MngCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
