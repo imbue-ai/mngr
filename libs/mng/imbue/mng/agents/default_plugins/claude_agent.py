@@ -1027,7 +1027,13 @@ class ClaudeAgent(BaseAgent):
                 host.write_text_file(config_dir / relative_path, source_path.read_text())
 
         # 3. Always ship .claude.json
-        claude_json_data = _build_claude_json_for_agent(config.sync_claude_json, self.work_dir, config.version)
+        # Resolve the work_dir on the remote host so the trust entry matches
+        # the path Claude Code sees (e.g., Modal symlinks /mng/... to /__modal/volumes/...)
+        resolved_work_dir = self.work_dir
+        realpath_result = host.execute_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
+        if realpath_result.success and realpath_result.stdout.strip():
+            resolved_work_dir = Path(realpath_result.stdout.strip())
+        claude_json_data = _build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
         # If the local file lacks primaryApiKey, try the macOS keychain
         if not claude_json_data.get("primaryApiKey") and config.convert_macos_credentials and is_macos():
             keychain_api_key = _read_macos_keychain_credential("Claude Code", mng_ctx.concurrency_group)
