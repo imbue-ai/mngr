@@ -2,11 +2,15 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Generator
 from typing import cast
 from uuid import uuid4
 
+import docker
+import docker.errors
 import pluggy
 import psutil
 import pytest
@@ -26,6 +30,9 @@ from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
+from imbue.mng.providers.docker.volume import LABEL_PROVIDER
+from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.modal.backend import ModalProviderBackend
 from imbue.mng.providers.registry import load_local_backend_only
@@ -818,6 +825,87 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
             pass
 
 
+def _get_stale_docker_state_containers(max_age_seconds: int = 3600) -> list[tuple[str, str]]:
+    """Get Docker state containers from tests that are older than max_age_seconds.
+
+    Returns a list of (container_id, container_name) tuples for state containers
+    whose provider label starts with "docker-test-" (the prefix used by
+    make_docker_provider_with_cleanup) and that are older than the threshold.
+    This catches containers leaked by crashed or interrupted test runs.
+    """
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return []
+
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}",
+                ]
+            },
+        )
+    except docker.errors.DockerException:
+        client.close()
+        return []
+
+    now = datetime.now(timezone.utc)
+    stale: list[tuple[str, str]] = []
+
+    for container in containers:
+        # Only consider containers that look like test containers.
+        # Test providers use names like "docker-test-<random>" which produce state
+        # container names like "mng_<test_id>-docker-state-<user_id>".
+        # We use the presence of "docker-test-" in the provider label as the signal.
+        labels = container.labels or {}
+        provider_name = labels.get(LABEL_PROVIDER, "")
+        if not provider_name.startswith("docker-test-"):
+            continue
+
+        # Check age via container creation time
+        try:
+            container.reload()
+            created_str = container.attrs.get("Created", "")
+            if not created_str:
+                continue
+            # Docker returns ISO format with nanosecond precision
+            created_str = created_str.split(".")[0] + "+00:00"
+            created = datetime.fromisoformat(created_str)
+            age_seconds = (now - created).total_seconds()
+            if age_seconds > max_age_seconds:
+                stale.append((container.id, container.name or ""))
+        except (ValueError, KeyError, docker.errors.DockerException):
+            continue
+
+    client.close()
+    return stale
+
+
+def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
+    """Force-remove the specified Docker containers.
+
+    Takes a list of (container_id, container_name) tuples.
+    """
+    if not containers:
+        return
+
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return
+
+    for container_id, _name in containers:
+        try:
+            container = client.containers.get(container_id)
+            container.remove(force=True)
+        except (docker.errors.DockerException, docker.errors.NotFound):
+            pass
+
+    client.close()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def session_cleanup() -> Generator[None, None, None]:
     """Session-scoped fixture to detect and clean up leaked test resources.
@@ -829,9 +917,12 @@ def session_cleanup() -> Generator[None, None, None]:
     3. Leftover Modal apps created by this worker's tests
     4. Leftover Modal volumes created by this worker's tests
     5. Leftover Modal environments created by this worker's tests
+    6. Stale Docker state containers from tests (older than 1 hour)
 
     If any leaked resources are found:
-    - An error is raised to fail the test suite
+    - An error is raised to fail the test suite (except for stale Docker
+      containers, which are silently cleaned up since they may be from
+      other sessions)
     - The resources are killed as a last-ditch cleanup measure
 
     Tests should always clean up after themselves! This is just a safety net.
@@ -914,7 +1005,13 @@ def session_cleanup() -> Generator[None, None, None]:
             "Tests should delete their Modal environments before completing.\n" + "\n".join(env_info)
         )
 
-    # 6. Clean up leaked resources (last-ditch safety measure)
+    # 6. Check for stale Docker state containers from tests (older than 1 hour).
+    # These are containers that were leaked by crashed or interrupted test runs.
+    # We don't fail the test suite for these (they may be from other sessions),
+    # but we do clean them up.
+    stale_docker_containers = _get_stale_docker_state_containers(max_age_seconds=3600)
+
+    # 7. Clean up leaked resources (last-ditch safety measure)
     for proc in leftover_processes:
         try:
             proc.kill()
@@ -925,8 +1022,9 @@ def session_cleanup() -> Generator[None, None, None]:
     _stop_modal_apps(leftover_apps)
     _delete_modal_volumes(leftover_volumes)
     _delete_modal_environments(leftover_environments)
+    _remove_docker_containers(stale_docker_containers)
 
-    # 7. Fail the test suite if any issues were found
+    # 8. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"
