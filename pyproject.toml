@@ -69,6 +69,7 @@ addopts = [
   "--cov=imbue.mng_elena_code",
   "--cov=imbue.mng_kanpan",
   "--cov=imbue.mng_recursive",
+  "--cov=imbue.mng_changeling_chat",
   "--cov=imbue.changelings",
   "--cov-report=term-missing",
   "--cov-report=html",
