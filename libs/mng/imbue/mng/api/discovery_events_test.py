@@ -4,14 +4,14 @@ from typing import cast
 
 from imbue.imbue_common.event_envelope import EventType
 from imbue.mng.api.discovery_events import AgentDestroyedEvent
-from imbue.mng.api.discovery_events import _build_ssh_info_from_host
-from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.api.discovery_events import AgentDiscoveryEvent
 from imbue.mng.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mng.api.discovery_events import DiscoveryEventType
 from imbue.mng.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mng.api.discovery_events import HostDestroyedEvent
 from imbue.mng.api.discovery_events import HostDiscoveryEvent
+from imbue.mng.api.discovery_events import HostSSHInfoEvent
+from imbue.mng.api.discovery_events import _build_ssh_info_from_host
 from imbue.mng.api.discovery_events import _make_envelope_fields
 from imbue.mng.api.discovery_events import append_discovery_event
 from imbue.mng.api.discovery_events import discovered_agent_from_agent_details
@@ -20,6 +20,7 @@ from imbue.mng.api.discovery_events import emit_agent_destroyed
 from imbue.mng.api.discovery_events import emit_agent_discovered
 from imbue.mng.api.discovery_events import emit_host_destroyed
 from imbue.mng.api.discovery_events import emit_host_discovered
+from imbue.mng.api.discovery_events import emit_host_ssh_info
 from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_dir
@@ -30,8 +31,8 @@ from imbue.mng.api.discovery_events import make_host_discovery_event
 from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
@@ -109,7 +110,7 @@ def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
     assert host.provider_name == provider_name
 
 
-def test_discovered_host_from_agent_details_includes_ssh_info() -> None:
+def test_extract_agents_and_hosts_returns_ssh_info() -> None:
     ssh = SSHInfo(
         user="root",
         host="remote.example.com",
@@ -117,44 +118,18 @@ def test_discovered_host_from_agent_details_includes_ssh_info() -> None:
         key_path=Path("/tmp/key"),
         command="ssh -i /tmp/key -p 2222 root@remote.example.com",
     )
-    details = make_test_agent_details(provider_name=ProviderInstanceName("modal"), ssh=ssh)
-    host = discovered_host_from_agent_details(details)
-    assert host.ssh is not None
-    assert host.ssh.user == "root"
-    assert host.ssh.host == "remote.example.com"
-    assert host.ssh.port == 2222
+    host_id = HostId.generate()
+    details = make_test_agent_details(host_id=host_id, provider_name=ProviderInstanceName("modal"), ssh=ssh)
+    _, _, host_ssh_infos = extract_agents_and_hosts_from_full_listing([details])
+    assert len(host_ssh_infos) == 1
+    assert host_ssh_infos[0][0] == host_id
+    assert host_ssh_infos[0][1].host == "remote.example.com"
 
 
-def test_discovered_host_from_agent_details_ssh_is_none_for_local() -> None:
+def test_extract_agents_and_hosts_returns_empty_ssh_for_local() -> None:
     details = make_test_agent_details(provider_name=ProviderInstanceName("local"))
-    host = discovered_host_from_agent_details(details)
-    assert host.ssh is None
-
-
-def test_full_snapshot_round_trips_with_ssh_info() -> None:
-    ssh = SSHInfo(
-        user="root",
-        host="remote.example.com",
-        port=2222,
-        key_path=Path("/tmp/key"),
-        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
-    )
-    host = DiscoveredHost(
-        host_id=HostId.generate(),
-        host_name=HostName("test-host"),
-        provider_name=ProviderInstanceName("modal"),
-        ssh=ssh,
-    )
-    agents = (make_test_discovered_agent(),)
-    event = make_full_discovery_snapshot_event(agents, (host,))
-    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
-    parsed = parse_discovery_event_line(line)
-    assert isinstance(parsed, FullDiscoverySnapshotEvent)
-    assert len(parsed.hosts) == 1
-    assert parsed.hosts[0].ssh is not None
-    assert parsed.hosts[0].ssh.host == "remote.example.com"
-    assert parsed.hosts[0].ssh.port == 2222
-    assert parsed.hosts[0].ssh.key_path == Path("/tmp/key")
+    _, _, host_ssh_infos = extract_agents_and_hosts_from_full_listing([details])
+    assert len(host_ssh_infos) == 0
 
 
 class _FakeHostWithSSH:
@@ -191,7 +166,7 @@ def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
     provider_name = ProviderInstanceName("local")
     details1 = make_test_agent_details(host_id=host_id, provider_name=provider_name)
     details2 = make_test_agent_details(host_id=host_id, provider_name=provider_name)
-    agents, hosts = extract_agents_and_hosts_from_full_listing([details1, details2])
+    agents, hosts, _ = extract_agents_and_hosts_from_full_listing([details1, details2])
     assert len(agents) == 2
     assert len(hosts) == 1
 
@@ -406,3 +381,54 @@ def test_parse_host_destroyed_event_round_trips() -> None:
     assert isinstance(parsed, HostDestroyedEvent)
     assert parsed.host_id == host_id
     assert len(parsed.agent_ids) == 1
+
+
+# === HOST_SSH_INFO Event Tests ===
+
+
+def test_emit_host_ssh_info_writes_to_file(temp_config: MngConfig) -> None:
+    host_id = HostId.generate()
+    ssh = SSHInfo(
+        user="root",
+        host="remote.example.com",
+        port=2222,
+        key_path=Path("/tmp/key"),
+        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+    )
+    emit_host_ssh_info(temp_config, host_id, ssh)
+
+    events_path = get_discovery_events_path(temp_config)
+    lines = events_path.read_text().splitlines()
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["type"] == DiscoveryEventType.HOST_SSH_INFO
+    assert data["host_id"] == str(host_id)
+    assert data["ssh"]["host"] == "remote.example.com"
+    assert data["ssh"]["port"] == 2222
+
+
+def test_parse_host_ssh_info_event_round_trips() -> None:
+    host_id = HostId.generate()
+    ssh = SSHInfo(
+        user="root",
+        host="remote.example.com",
+        port=2222,
+        key_path=Path("/tmp/key"),
+        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+    )
+    timestamp, event_id = _make_envelope_fields()
+    event = HostSSHInfoEvent(
+        timestamp=timestamp,
+        type=EventType(DiscoveryEventType.HOST_SSH_INFO),
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        host_id=host_id,
+        ssh=ssh,
+    )
+    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    parsed = parse_discovery_event_line(line)
+    assert isinstance(parsed, HostSSHInfoEvent)
+    assert parsed.host_id == host_id
+    assert parsed.ssh.host == "remote.example.com"
+    assert parsed.ssh.port == 2222
+    assert parsed.ssh.key_path == Path("/tmp/key")

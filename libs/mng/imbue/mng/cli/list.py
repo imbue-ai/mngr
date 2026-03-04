@@ -22,6 +22,7 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discovery_events import emit_host_ssh_info
 from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_path
@@ -1399,8 +1400,10 @@ def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBe
         is_streaming=False,
         error_behavior=error_behavior,
     )
-    discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(result.agents)
+    discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
     write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
+    for host_id, ssh_info in host_ssh_infos:
+        emit_host_ssh_info(mng_ctx.config, host_id, ssh_info)
 
 
 def _list_stream(

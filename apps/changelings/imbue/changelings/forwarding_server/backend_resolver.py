@@ -18,6 +18,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mng.api.discovery_events import HostSSHInfoEvent
 from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
 
@@ -239,6 +240,8 @@ class MngStreamManager(MutableModel):
 
     _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mng-stream-manager"))
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
+    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -267,42 +270,66 @@ class MngStreamManager(MutableModel):
     def _handle_discovery_line(self, line: str) -> None:
         """Parse a discovery event line and update state.
 
-        Extracts both agent IDs and SSH info from the DISCOVERY_FULL event,
-        building the SSH info mapping from host data carried in the event.
+        Handles two event types:
+        - DISCOVERY_FULL: updates agent list and agent-to-host mapping
+        - HOST_SSH_INFO: updates SSH info for a specific host
+
+        Both event types trigger a resolver update with the current SSH mappings.
         """
         event = parse_discovery_event_line(line)
-        if not isinstance(event, FullDiscoverySnapshotEvent):
+
+        if isinstance(event, FullDiscoverySnapshotEvent):
+            self._handle_full_snapshot(event)
+        elif isinstance(event, HostSSHInfoEvent):
+            self._handle_host_ssh_info(event)
+        else:
             return
 
-        # Build SSH info by host_id from the event's hosts
-        ssh_by_host_id: dict[str, RemoteSSHInfo] = {}
-        for host in event.hosts:
-            if host.ssh is not None:
-                ssh_by_host_id[str(host.host_id)] = RemoteSSHInfo(
-                    user=host.ssh.user,
-                    host=host.ssh.host,
-                    port=host.ssh.port,
-                    key_path=host.ssh.key_path,
-                )
-
-        # Map each agent to its host's SSH info
+    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
+        """Update agent list and agent-to-host mapping from a full snapshot."""
         agent_ids: list[AgentId] = []
-        ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
+        agent_host_map: dict[str, str] = {}
         for agent in event.agents:
             agent_ids.append(agent.agent_id)
-            host_ssh = ssh_by_host_id.get(str(agent.host_id))
-            if host_ssh is not None:
-                ssh_info_by_agent_id[str(agent.agent_id)] = host_ssh
+            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
 
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=tuple(agent_ids),
-                ssh_info_by_agent_id=ssh_info_by_agent_id,
-            )
-        )
+        with self._lock:
+            self._agent_host_map = agent_host_map
+
+        self._update_resolver(tuple(agent_ids))
 
         new_ids = {str(aid) for aid in agent_ids}
         self._sync_events_streams(new_ids)
+
+    def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+        """Update SSH info for a host and refresh the resolver."""
+        ssh_info = RemoteSSHInfo(
+            user=event.ssh.user,
+            host=event.ssh.host,
+            port=event.ssh.port,
+            key_path=event.ssh.key_path,
+        )
+        with self._lock:
+            self._ssh_by_host_id[str(event.host_id)] = ssh_info
+            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+
+        self._update_resolver(agent_ids)
+
+    def _update_resolver(self, agent_ids: tuple[AgentId, ...]) -> None:
+        """Rebuild and push the ParsedAgentsResult to the resolver."""
+        with self._lock:
+            ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
+            for aid_str, host_id_str in self._agent_host_map.items():
+                ssh = self._ssh_by_host_id.get(host_id_str)
+                if ssh is not None:
+                    ssh_info_by_agent_id[aid_str] = ssh
+
+        self.resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=agent_ids,
+                ssh_info_by_agent_id=ssh_info_by_agent_id,
+            )
+        )
 
     def _sync_events_streams(self, new_agent_ids: set[str]) -> None:
         """Start events streams for new agents and stop streams for removed agents."""

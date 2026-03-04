@@ -323,7 +323,6 @@ class DiscoveredHost(FrozenModel):
     host_id: HostId = Field(description="Unique identifier for the host")
     host_name: HostName = Field(description="Human-readable name of the host")
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
-    ssh: SSHInfo | None = Field(default=None, description="SSH connection info, present for remote hosts")
 
 
 class DiscoveredAgent(FrozenModel):
