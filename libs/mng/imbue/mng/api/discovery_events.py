@@ -19,6 +19,7 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
@@ -270,9 +271,11 @@ def emit_discovery_events_for_host(
     never causes the parent command to fail.
     """
     try:
+        # Read agent data once and reuse for both provider_name inference and event emission
+        discovered_agents = host.discover_agents()
+
         # Infer provider_name from the host's agents if not provided
         if provider_name is None:
-            discovered_agents = host.discover_agents()
             if discovered_agents:
                 provider_name = discovered_agents[0].provider_name
             else:
@@ -284,9 +287,9 @@ def emit_discovery_events_for_host(
         emit_host_discovered(config, discovered_host)
 
         # Emit agent events with full certified_data from the host's filesystem
-        for discovered_agent in host.discover_agents():
+        for discovered_agent in discovered_agents:
             emit_agent_discovered(config, discovered_agent)
-    except (OSError, ValueError) as e:
+    except (MngError, OSError, ValueError) as e:
         logger.warning("Failed to emit discovery events: {}", e)
 
 
@@ -373,27 +376,16 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
 
 def extract_agents_and_hosts_from_full_listing(
     agent_details_list: Sequence[AgentDetails],
-    additional_hosts: Sequence[DiscoveredHost] = (),
 ) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...]]:
-    """Extract deduplicated DiscoveredAgent and DiscoveredHost tuples from AgentDetails.
-
-    Hosts are collected from both the agent details (each agent references its host)
-    and the additional_hosts parameter (to include hosts that have no agents).
-    """
+    """Extract deduplicated DiscoveredAgent and DiscoveredHost tuples from AgentDetails."""
     discovered_agents = tuple(discovered_agent_from_agent_details(a) for a in agent_details_list)
 
-    # Deduplicate hosts by host_id, starting with hosts from agent details
+    # Deduplicate hosts by host_id
     seen_host_ids: set[HostId] = set()
     discovered_hosts: list[DiscoveredHost] = []
     for agent_details in agent_details_list:
         if agent_details.host.id not in seen_host_ids:
             seen_host_ids.add(agent_details.host.id)
             discovered_hosts.append(discovered_host_from_agent_details(agent_details))
-
-    # Include additional hosts (e.g. hosts with no agents)
-    for host in additional_hosts:
-        if host.host_id not in seen_host_ids:
-            seen_host_ids.add(host.host_id)
-            discovered_hosts.append(host)
 
     return discovered_agents, tuple(discovered_hosts)

@@ -22,7 +22,6 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_path
@@ -44,7 +43,6 @@ from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.terminal import ANSI_DIM_GRAY
@@ -1395,29 +1393,13 @@ def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBe
     """Run an unfiltered list and write a full discovery snapshot event.
 
     Full snapshots must be unfiltered so they can be used for state reconstruction.
-    Includes all discovered hosts (even those without agents) by running
-    a lightweight host discovery alongside the agent listing.
     """
-    # Run the agent listing (which also discovers hosts internally)
     result = api_list_agents(
         mng_ctx=mng_ctx,
         is_streaming=False,
         error_behavior=error_behavior,
     )
-
-    # Also discover all hosts (including those with no agents) so the snapshot
-    # is complete. This reuses cached provider results when possible.
-    all_discovered_hosts: list[DiscoveredHost] = []
-    try:
-        agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
-        all_discovered_hosts = list(agents_by_host.keys())
-    except MngError as e:
-        logger.debug("Failed to discover additional hosts for snapshot: {}", e)
-
-    discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(
-        result.agents,
-        additional_hosts=all_discovered_hosts,
-    )
+    discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(result.agents)
     write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
 
 

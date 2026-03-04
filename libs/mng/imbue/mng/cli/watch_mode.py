@@ -30,7 +30,7 @@ def run_watch_loop(
 ) -> None:
     """Run a function repeatedly at a specified interval.
 
-    This is used for watch mode in CLI commands like `mng list --watch` and
+    This is used for polling-based watch mode in CLI commands like
     `mng gc --watch`. The iteration function is called, then we wait for the
     specified interval before calling it again. This continues until a
     KeyboardInterrupt is raised.
