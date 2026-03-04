@@ -7,6 +7,7 @@ from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ImageReference
@@ -51,11 +52,11 @@ class BaseProviderInstance(ProviderInstanceInterface):
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         raise NotImplementedError("Offline hosts not supported for this provider")
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
+    ) -> list[DiscoveredHost]:
         raise NotImplementedError()
 
     def rename_host(

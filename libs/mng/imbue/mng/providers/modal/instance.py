@@ -2165,12 +2165,12 @@ log "=== Shutdown script completed ==="
             raise HostNotFoundError(host)
 
     @handle_modal_auth_error
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all Modal sandbox hosts, including stopped ones.
+    ) -> list[DiscoveredHost]:
+        """Discover all Modal sandbox hosts, including stopped ones.
 
         Returns hosts in three states:
         - RUNNING: has an active sandbox
@@ -2185,10 +2185,10 @@ log "=== Shutdown script completed ==="
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
-        # This reduces list_hosts latency by ~1.5s by overlapping the network calls.
+        # This reduces discover_hosts latency by ~1.5s by overlapping the network calls.
         try:
             with ConcurrencyGroupExecutor(
-                parent_cg=cg, name=f"modal_list_hosts_{self.name}", max_workers=2
+                parent_cg=cg, name=f"modal_discover_hosts_{self.name}", max_workers=2
             ) as executor:
                 sandboxes_future = executor.submit(self._list_sandboxes)
                 host_records_future = executor.submit(self._list_all_host_records, cg)
@@ -2275,7 +2275,7 @@ log "=== Shutdown script completed ==="
         for host in hosts:
             self._host_by_id_cache[host.id] = host
 
-        return hosts
+        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
 
     def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.

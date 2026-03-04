@@ -22,6 +22,7 @@ from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import VolumeInfo
 from imbue.mng.interfaces.host import HostInterface
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ImageReference
@@ -176,17 +177,22 @@ class SSHProviderInstance(BaseProviderInstance):
 
         return self._create_host_object(name_str, self.hosts[name_str])
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all configured hosts."""
-        hosts: list[HostInterface] = []
-        for host_name, host_config in self.hosts.items():
-            host = self._create_host_object(host_name, host_config)
-            hosts.append(host)
-        return hosts
+    ) -> list[DiscoveredHost]:
+        """Discover all configured hosts."""
+        host_refs: list[DiscoveredHost] = []
+        for host_name in self.hosts:
+            host_refs.append(
+                DiscoveredHost(
+                    host_id=self._host_id_for_name(host_name),
+                    host_name=HostName(host_name),
+                    provider_name=self.name,
+                )
+            )
+        return host_refs
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a host."""
