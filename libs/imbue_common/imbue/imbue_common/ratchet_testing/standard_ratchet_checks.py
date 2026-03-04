@@ -59,7 +59,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_init_methods_in_non
 from imbue.imbue_common.ratchet_testing.ratchets import find_inline_functions
 from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 
-_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py",)
+_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
 
 
 def assert_ratchet(rule: RegexRatchetRule, source_dir: Path, max_count: int) -> None:

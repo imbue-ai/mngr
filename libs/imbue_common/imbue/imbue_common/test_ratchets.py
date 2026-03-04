@@ -223,7 +223,7 @@ def test_prevent_inline_functions_in_non_test_code() -> None:
 
 
 def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(6))
+    rc.check_underscore_imports(_DIR, snapshot(7))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
