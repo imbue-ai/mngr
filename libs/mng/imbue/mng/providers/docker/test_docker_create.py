@@ -7,6 +7,7 @@ import docker
 import docker.errors
 import pytest
 
+from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mng.providers.docker.volume import LABEL_PROVIDER
 from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
@@ -77,18 +78,7 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         for container in containers:
             name = container.name or ""
             if name.startswith(prefix):
-                # Remove the container first (must happen before volume removal,
-                # since Docker refuses to remove in-use volumes).
-                try:
-                    container.remove(force=True)
-                except docker.errors.DockerException:
-                    pass
-                # Then remove the backing volume (same name as the container).
-                if name:
-                    try:
-                        client.volumes.get(name).remove(force=True)
-                    except (docker.errors.NotFound, docker.errors.DockerException):
-                        pass
+                remove_docker_container_and_volume(client, container)
     except (docker.errors.DockerException, OSError):
         pass
     finally:
