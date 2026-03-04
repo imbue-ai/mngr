@@ -499,7 +499,7 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mng la
     report = create_report(user_options)
 
     production_violations: list[str] = []
-    for contract, check in report.get_contracts_and_checks():
+    for _contract, check in report.get_contracts_and_checks():
         if check.kept:
             continue
         for dep in check.metadata.get("invalid_dependencies", []):

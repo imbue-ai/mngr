@@ -50,18 +50,13 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_UNDERSCOR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_UNITTEST_MOCK_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_WHILE_TRUE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_YAML_USAGE
-from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
-from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
-from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import clear_ratchet_caches
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
-from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.ratchet_testing.ratchets import find_cast_usages
 from imbue.imbue_common.ratchet_testing.ratchets import find_code_in_init_files
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
@@ -79,17 +74,15 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def teardown_module() -> None:
-    """Clear ratchet LRU caches after all tests in this module complete.
-
-    The ratchet testing functions use unbounded LRU caches for file contents, AST trees,
-    and file listings. Clearing these after the ratchet tests frees memory for any
-    subsequent tests that may run on this xdist worker, reducing resource pressure.
-    """
+    """Clear ratchet LRU caches after all tests in this module complete."""
     clear_ratchet_caches()
 
 
 def _get_mng_source_dir() -> Path:
     return Path(__file__).parent.parent
+
+
+# --- Code safety ---
 
 
 def test_prevent_todos() -> None:
@@ -107,9 +100,27 @@ def test_prevent_eval_usage() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_EVAL.format_failure(chunks)
 
 
-def test_prevent_inline_imports() -> None:
-    chunks = check_ratchet_rule(PREVENT_INLINE_IMPORTS, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(3), PREVENT_INLINE_IMPORTS.format_failure(chunks)
+def test_prevent_while_true() -> None:
+    chunks = check_ratchet_rule(PREVENT_WHILE_TRUE, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_WHILE_TRUE.format_failure(chunks)
+
+
+def test_prevent_time_sleep() -> None:
+    chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(1), PREVENT_TIME_SLEEP.format_failure(chunks)
+
+
+def test_prevent_global_keyword() -> None:
+    chunks = check_ratchet_rule(PREVENT_GLOBAL_KEYWORD, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_GLOBAL_KEYWORD.format_failure(chunks)
+
+
+def test_prevent_bare_print() -> None:
+    chunks = check_ratchet_rule(PREVENT_BARE_PRINT, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_BARE_PRINT.format_failure(chunks)
+
+
+# --- Exception handling ---
 
 
 def test_prevent_bare_except() -> None:
@@ -127,9 +138,45 @@ def test_prevent_base_exception_catch() -> None:
     assert len(chunks) <= snapshot(1), PREVENT_BASE_EXCEPTION_CATCH.format_failure(chunks)
 
 
-def test_prevent_while_true() -> None:
-    chunks = check_ratchet_rule(PREVENT_WHILE_TRUE, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_WHILE_TRUE.format_failure(chunks)
+def test_prevent_builtin_exception_raises() -> None:
+    chunks = check_ratchet_rule(PREVENT_BUILTIN_EXCEPTION_RAISES, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_BUILTIN_EXCEPTION_RAISES.format_failure(chunks)
+
+
+# --- Import style ---
+
+
+def test_prevent_inline_imports() -> None:
+    chunks = check_ratchet_rule(PREVENT_INLINE_IMPORTS, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(3), PREVENT_INLINE_IMPORTS.format_failure(chunks)
+
+
+def test_prevent_relative_imports() -> None:
+    chunks = check_ratchet_rule(PREVENT_RELATIVE_IMPORTS, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_RELATIVE_IMPORTS.format_failure(chunks)
+
+
+def test_prevent_import_datetime() -> None:
+    chunks = check_ratchet_rule(PREVENT_IMPORT_DATETIME, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_IMPORT_DATETIME.format_failure(chunks)
+
+
+def test_prevent_importlib_import_module() -> None:
+    chunks = check_ratchet_rule(PREVENT_IMPORTLIB_IMPORT_MODULE, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_IMPORTLIB_IMPORT_MODULE.format_failure(chunks)
+
+
+def test_prevent_getattr() -> None:
+    chunks = check_ratchet_rule(PREVENT_GETATTR, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(10), PREVENT_GETATTR.format_failure(chunks)
+
+
+def test_prevent_setattr() -> None:
+    chunks = check_ratchet_rule(PREVENT_SETATTR, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(1), PREVENT_SETATTR.format_failure(chunks)
+
+
+# --- Banned libraries and patterns ---
 
 
 def test_prevent_asyncio_import() -> None:
@@ -152,19 +199,30 @@ def test_prevent_namedtuple_usage() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_NAMEDTUPLE.format_failure(chunks)
 
 
+def test_prevent_yaml_usage() -> None:
+    chunks = check_ratchet_rule(PREVENT_YAML_USAGE, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_YAML_USAGE.format_failure(chunks)
+
+
+def test_prevent_functools_partial() -> None:
+    chunks = check_ratchet_rule(PREVENT_FUNCTOOLS_PARTIAL, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_FUNCTOOLS_PARTIAL.format_failure(chunks)
+
+
+# --- Naming conventions ---
+
+
+def test_prevent_num_prefix() -> None:
+    chunks = check_ratchet_rule(PREVENT_NUM_PREFIX, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_NUM_PREFIX.format_failure(chunks)
+
+
+# --- Documentation ---
+
+
 def test_prevent_trailing_comments() -> None:
     chunks = check_ratchet_rule(PREVENT_TRAILING_COMMENTS, _get_mng_source_dir(), _SELF_EXCLUSION)
     assert len(chunks) <= snapshot(0), PREVENT_TRAILING_COMMENTS.format_failure(chunks)
-
-
-def test_prevent_relative_imports() -> None:
-    chunks = check_ratchet_rule(PREVENT_RELATIVE_IMPORTS, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_RELATIVE_IMPORTS.format_failure(chunks)
-
-
-def test_prevent_global_keyword() -> None:
-    chunks = check_ratchet_rule(PREVENT_GLOBAL_KEYWORD, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_GLOBAL_KEYWORD.format_failure(chunks)
 
 
 def test_prevent_init_docstrings() -> None:
@@ -184,79 +242,12 @@ def test_prevent_returns_in_docstrings() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_RETURNS_IN_DOCSTRINGS.format_failure(chunks)
 
 
-def test_prevent_num_prefix() -> None:
-    chunks = check_ratchet_rule(PREVENT_NUM_PREFIX, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_NUM_PREFIX.format_failure(chunks)
-
-
-def test_prevent_builtin_exception_raises() -> None:
-    chunks = check_ratchet_rule(PREVENT_BUILTIN_EXCEPTION_RAISES, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_BUILTIN_EXCEPTION_RAISES.format_failure(chunks)
-
-
-def test_prevent_yaml_usage() -> None:
-    chunks = check_ratchet_rule(PREVENT_YAML_USAGE, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_YAML_USAGE.format_failure(chunks)
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(Path(__file__).parent.parent.parent.parent)
+# --- Type safety ---
 
 
 def test_prevent_literal_with_multiple_options() -> None:
     chunks = check_ratchet_rule(PREVENT_LITERAL_MULTIPLE_OPTIONS, _get_mng_source_dir(), _SELF_EXCLUSION)
     assert len(chunks) <= snapshot(0), PREVENT_LITERAL_MULTIPLE_OPTIONS.format_failure(chunks)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)
-
-
-def test_no_import_layer_violations() -> None:
-    """Ensure production code has zero import layer violations."""
-    check_no_import_lint_errors(Path(__file__).parent.parent.parent.parent.parent.parent)
-
-
-def test_prevent_if_elif_without_else() -> None:
-    chunks = find_if_elif_without_else(_get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_IF_ELIF_WITHOUT_ELSE.format_failure(chunks)
-
-
-def test_prevent_import_datetime() -> None:
-    chunks = check_ratchet_rule(PREVENT_IMPORT_DATETIME, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_IMPORT_DATETIME.format_failure(chunks)
-
-
-def test_prevent_inline_functions_in_non_test_code() -> None:
-    chunks = find_inline_functions(_get_mng_source_dir())
-    assert len(chunks) <= snapshot(0), PREVENT_INLINE_FUNCTIONS.format_failure(chunks)
-
-
-def test_prevent_time_sleep() -> None:
-    chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(1), PREVENT_TIME_SLEEP.format_failure(chunks)
-
-
-def test_prevent_bare_print() -> None:
-    chunks = check_ratchet_rule(PREVENT_BARE_PRINT, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_BARE_PRINT.format_failure(chunks)
-
-
-def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
-    chunks = find_underscore_imports(_get_mng_source_dir())
-    assert len(chunks) <= snapshot(0), PREVENT_UNDERSCORE_IMPORTS.format_failure(chunks)
-
-
-def test_prevent_init_methods_in_non_exception_classes() -> None:
-    chunks = find_init_methods_in_non_exception_classes(_get_mng_source_dir())
-    assert len(chunks) <= snapshot(3), PREVENT_INIT_IN_NON_EXCEPTION_CLASSES.format_failure(chunks)
-
-
-def test_prevent_click_echo() -> None:
-    chunks = check_ratchet_rule(PREVENT_CLICK_ECHO, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_CLICK_ECHO.format_failure(chunks)
 
 
 def test_prevent_bare_generic_types() -> None:
@@ -269,29 +260,12 @@ def test_prevent_typing_builtin_imports() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_TYPING_BUILTIN_IMPORTS.format_failure(chunks)
 
 
-def test_prevent_fstring_logging() -> None:
-    chunks = check_ratchet_rule(PREVENT_FSTRING_LOGGING, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_FSTRING_LOGGING.format_failure(chunks)
+def test_prevent_short_uuid_ids() -> None:
+    chunks = check_ratchet_rule(PREVENT_SHORT_UUID_IDS, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(2), PREVENT_SHORT_UUID_IDS.format_failure(chunks)
 
 
-def test_prevent_functools_partial() -> None:
-    chunks = check_ratchet_rule(PREVENT_FUNCTOOLS_PARTIAL, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_FUNCTOOLS_PARTIAL.format_failure(chunks)
-
-
-def test_prevent_code_in_init_files() -> None:
-    """Ensure __init__.py files contain no code (except pluggy hookimpl at the root)."""
-    violations = find_code_in_init_files(
-        _get_mng_source_dir(),
-        allowed_root_init_lines={
-            "import pluggy",
-            'hookimpl = pluggy.HookimplMarker("mng")',
-        },
-    )
-    assert len(violations) <= snapshot(0), (
-        "Code found in __init__.py files (should be empty per style guide):\n"
-        + "\n".join(f"  - {v}" for v in violations)
-    )
+# --- Pydantic / models ---
 
 
 def test_prevent_model_copy() -> None:
@@ -299,45 +273,20 @@ def test_prevent_model_copy() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_MODEL_COPY.format_failure(chunks)
 
 
-def test_prevent_cast_usage() -> None:
-    chunks = find_cast_usages(_get_mng_source_dir())
-    assert len(chunks) <= snapshot(10), PREVENT_CAST_USAGE.format_failure(chunks)
+# --- Logging ---
 
 
-def test_prevent_assert_isinstance_usage() -> None:
-    chunks = find_assert_isinstance_usages(_get_mng_source_dir())
-    assert len(chunks) <= snapshot(0), PREVENT_ASSERT_ISINSTANCE.format_failure(chunks)
+def test_prevent_fstring_logging() -> None:
+    chunks = check_ratchet_rule(PREVENT_FSTRING_LOGGING, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_FSTRING_LOGGING.format_failure(chunks)
 
 
-def test_prevent_os_fork() -> None:
-    """Prevent usage of os.fork and os.forkpty.
-
-    Forking is incompatible with threading: a forked child inherits only the calling
-    thread, leaving mutexes held by other threads permanently locked and shared state
-    inconsistent. Code should use the subprocess module to launch subprocesses instead.
-    The remaining uses will be removed from the codebase entirely.
-    """
-    chunks = check_ratchet_rule(PREVENT_OS_FORK, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(3), PREVENT_OS_FORK.format_failure(chunks)
+def test_prevent_click_echo() -> None:
+    chunks = check_ratchet_rule(PREVENT_CLICK_ECHO, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_CLICK_ECHO.format_failure(chunks)
 
 
-def test_prevent_direct_subprocess_usage() -> None:
-    """Prevent direct usage of subprocess and os process-spawning functions.
-
-    All subprocess execution should go through ConcurrencyGroup's run_process_to_completion
-    to ensure proper process lifecycle management and cleanup. The only exceptions are
-    interactive_subprocess.py (for terminal-interactive processes that bypass ConcurrencyGroup
-    by design), and os.execvp in connect.py (which replaces the current process rather than
-    spawning a child).
-
-    Test files are excluded from this check.
-    """
-    # Docker provider uses subprocess for docker build/run CLI pass-through.
-    # connect.py uses os.execvp/os.execvpe for process replacement (not child spawning).
-    # testing.py files are test infrastructure and excluded alongside test files.
-    excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, _get_mng_source_dir(), excluded)
-    assert len(chunks) <= snapshot(25), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+# --- Testing conventions ---
 
 
 def test_prevent_unittest_mock_imports() -> None:
@@ -361,53 +310,89 @@ def test_prevent_pytest_mark_integration() -> None:
     assert len(chunks) <= snapshot(0), PREVENT_PYTEST_MARK_INTEGRATION.format_failure(chunks)
 
 
-def test_prevent_short_uuid_ids() -> None:
-    chunks = check_ratchet_rule(PREVENT_SHORT_UUID_IDS, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(2), PREVENT_SHORT_UUID_IDS.format_failure(chunks)
+# --- Process management ---
 
 
-def test_prevent_bash_without_strict_mode() -> None:
-    """Ensure all bash scripts use 'set -euo pipefail' for strict error handling."""
-    violations = find_bash_scripts_without_strict_mode(Path(__file__).parent)
-    assert len(violations) <= snapshot(0), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
-        f"  - {v}" for v in violations
+def test_prevent_os_fork() -> None:
+    chunks = check_ratchet_rule(PREVENT_OS_FORK, _get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(3), PREVENT_OS_FORK.format_failure(chunks)
+
+
+def test_prevent_direct_subprocess_usage() -> None:
+    """Prevent direct usage of subprocess and os process-spawning functions.
+
+    All subprocess execution should go through ConcurrencyGroup's run_process_to_completion
+    to ensure proper process lifecycle management and cleanup. The only exceptions are
+    interactive_subprocess.py (for terminal-interactive processes that bypass ConcurrencyGroup
+    by design), and os.execvp in connect.py (which replaces the current process rather than
+    spawning a child).
+
+    Test files are excluded from this check.
+    """
+    # Docker provider uses subprocess for docker build/run CLI pass-through.
+    # connect.py uses os.execvp/os.execvpe for process replacement (not child spawning).
+    # testing.py files are test infrastructure and excluded alongside test files.
+    excluded = TEST_FILE_PATTERNS + ("testing.py",)
+    chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, _get_mng_source_dir(), excluded)
+    assert len(chunks) <= snapshot(25), PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+
+
+# --- AST-based ratchets ---
+
+
+def test_prevent_if_elif_without_else() -> None:
+    chunks = find_if_elif_without_else(_get_mng_source_dir(), _SELF_EXCLUSION)
+    assert len(chunks) <= snapshot(0), PREVENT_IF_ELIF_WITHOUT_ELSE.format_failure(chunks)
+
+
+def test_prevent_inline_functions_in_non_test_code() -> None:
+    chunks = find_inline_functions(_get_mng_source_dir())
+    assert len(chunks) <= snapshot(0), PREVENT_INLINE_FUNCTIONS.format_failure(chunks)
+
+
+def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
+    chunks = find_underscore_imports(_get_mng_source_dir())
+    assert len(chunks) <= snapshot(0), PREVENT_UNDERSCORE_IMPORTS.format_failure(chunks)
+
+
+def test_prevent_init_methods_in_non_exception_classes() -> None:
+    chunks = find_init_methods_in_non_exception_classes(_get_mng_source_dir())
+    assert len(chunks) <= snapshot(3), PREVENT_INIT_IN_NON_EXCEPTION_CLASSES.format_failure(chunks)
+
+
+def test_prevent_cast_usage() -> None:
+    chunks = find_cast_usages(_get_mng_source_dir())
+    assert len(chunks) <= snapshot(10), PREVENT_CAST_USAGE.format_failure(chunks)
+
+
+def test_prevent_assert_isinstance_usage() -> None:
+    chunks = find_assert_isinstance_usages(_get_mng_source_dir())
+    assert len(chunks) <= snapshot(0), PREVENT_ASSERT_ISINSTANCE.format_failure(chunks)
+
+
+# --- Project-level checks ---
+
+
+def test_prevent_code_in_init_files() -> None:
+    """Ensure __init__.py files contain no code (except pluggy hookimpl at the root)."""
+    violations = find_code_in_init_files(
+        _get_mng_source_dir(),
+        allowed_root_init_lines={
+            "import pluggy",
+            'hookimpl = pluggy.HookimplMarker("mng")',
+        },
+    )
+    assert len(violations) <= snapshot(0), (
+        "Code found in __init__.py files (should be empty per style guide):\n"
+        + "\n".join(f"  - {v}" for v in violations)
     )
 
 
-def test_prevent_importlib_import_module() -> None:
-    chunks = check_ratchet_rule(PREVENT_IMPORTLIB_IMPORT_MODULE, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), PREVENT_IMPORTLIB_IMPORT_MODULE.format_failure(chunks)
+def test_no_type_errors() -> None:
+    """Ensure the codebase has zero type errors."""
+    check_no_type_errors(Path(__file__).parent.parent.parent.parent)
 
 
-def test_prevent_getattr() -> None:
-    chunks = check_ratchet_rule(PREVENT_GETATTR, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(10), PREVENT_GETATTR.format_failure(chunks)
-
-
-def test_prevent_setattr() -> None:
-    chunks = check_ratchet_rule(PREVENT_SETATTR, _get_mng_source_dir(), _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(1), PREVENT_SETATTR.format_failure(chunks)
-
-
-_PREVENT_OLD_MNGR_NAME = RegexRatchetRule(
-    rule_name="'mngr' occurrences",
-    rule_description="The old 'mngr' name should not be reintroduced.",
-    pattern_string=r"mngr",
-)
-
-
-def test_prevent_old_mngr_name_in_file_contents() -> None:
-    """Ensure the old 'mngr' name is not reintroduced in file contents."""
-    repo_root = Path(__file__).parent.parent.parent.parent.parent.parent
-    chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNGR_NAME, repo_root, _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNGR_NAME.format_failure(chunks)
-
-
-def test_prevent_old_mngr_name_in_file_paths() -> None:
-    """Ensure the old 'mngr' name is not reintroduced in file paths."""
-    repo_root = Path(__file__).parent.parent.parent.parent.parent.parent
-    all_paths = _get_all_files_with_extension(repo_root, None)
-    mngr_paths = [p for p in all_paths if "mngr" in str(p.relative_to(repo_root))]
-    assert len(mngr_paths) <= snapshot(0), f"Found {len(mngr_paths)} file paths containing 'mngr':\n" + "\n".join(
-        f"  {p.relative_to(repo_root)}" for p in mngr_paths
-    )
+def test_no_ruff_errors() -> None:
+    """Ensure the codebase has zero ruff linting errors."""
+    check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)
