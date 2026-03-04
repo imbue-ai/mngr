@@ -14,6 +14,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/stop_hook_common.sh"
 
 _log_to_file "INFO" "pr_and_ci started (pid=$$, ppid=$PPID)"
 
+# Allow disabling PR creation/CI polling via environment variable
+if [[ "${MNG_SKIP_PR:-0}" == "1" ]]; then
+    log_info "MNG_SKIP_PR=1, skipping PR creation and CI polling"
+    _log_to_file "INFO" "pr_and_ci skipped (MNG_SKIP_PR=1), exiting with 0"
+    exit 0
+fi
+
 # Helper function to create a new PR
 # Returns the PR number on success, exits with error on failure
 create_new_pr() {

@@ -119,9 +119,9 @@ if git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1; then
     fi
 fi
 
-# Push merge commits (if any were created)
+# Push merge commits (if any were created), setting upstream tracking if needed
 log_info "Pushing any merge commits..."
-if ! retry_command 3 git push origin HEAD; then
+if ! retry_command 3 git push -u origin HEAD; then
     log_error "Failed to push merge commits after retries. Perhaps you forgot to commit something? Or pre-commit hooks changed something? Or you made a mistake and modified a previous commit?"
     exit 2
 fi
