@@ -1844,14 +1844,22 @@ class Host(BaseHost, OnlineHostInterface):
             return f"tmux -L {shlex.quote(self.mng_ctx.config.local_tmux_server_socket_name)}"
         return "tmux"
 
-    def _build_env_shell_command(self, agent: AgentInterface) -> str:
-        """Build a shell command that sources env files and then execs into a shell.
+    def _build_initial_window_shell_command(self, agent: AgentInterface) -> str:
+        """Build the shell command for the initial (agent) tmux window.
 
-        Uses MNG_SAVED_DEFAULT_TMUX_COMMAND if set (the user's original
-        default-command, saved via tmux set-environment during session creation),
-        falling back to bash otherwise. This means agent windows created before
-        the variable is set get bash, while user-created windows (via
-        default-command) get the user's shell.
+        Sources env files and execs into bash unconditionally. This is used
+        for agent windows where we want a predictable shell.
+        """
+        commands = self._build_source_env_commands(agent)
+        commands.append("exec bash")
+        return "bash -c " + shlex.quote("; ".join(commands))
+
+    def _build_default_shell_command(self, agent: AgentInterface) -> str:
+        """Build the shell command used as tmux default-command for user-created windows.
+
+        Sources env files and execs into the user's original shell (saved in
+        MNG_SAVED_DEFAULT_TMUX_COMMAND during session creation), falling back
+        to bash if not set.
         """
         commands = self._build_source_env_commands(agent)
         # Note: no quotes, because the saved command may have multiple words
@@ -1994,7 +2002,8 @@ class Host(BaseHost, OnlineHostInterface):
                         session_name=session_name,
                         command=command,
                         additional_commands=additional_commands,
-                        env_shell_cmd=self._build_env_shell_command(agent),
+                        initial_shell_cmd=self._build_initial_window_shell_command(agent),
+                        default_shell_cmd=self._build_default_shell_command(agent),
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mng_ctx.config.unset_vars,
                         host_dir=self.host_dir,
@@ -2225,7 +2234,8 @@ def _build_start_agent_shell_command(
     session_name: str,
     command: str,
     additional_commands: Sequence[NamedCommand],
-    env_shell_cmd: str,
+    initial_shell_cmd: str,
+    default_shell_cmd: str,
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
@@ -2273,14 +2283,14 @@ def _build_start_agent_shell_command(
         f" -s {shlex.quote(session_name)}"
         f" -x 200 -y 50"
         f" -c {shlex.quote(str(agent.work_dir))}"
-        f" {shlex.quote(env_shell_cmd)}"
+        f" {shlex.quote(initial_shell_cmd)}"
     )
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
-    # the tmux session environment, then set default-command to env_shell_cmd.
-    # Because env_shell_cmd uses ${MNG_SAVED_DEFAULT_TMUX_COMMAND:-bash}, the
-    # initial agent window (created above, before this variable exists) gets
-    # bash, while user-created windows get the user's shell.
+    # the tmux session environment, then set default-command to default_shell_cmd.
+    # The initial window uses initial_shell_cmd (hardcoded bash), while
+    # user-created windows use default_shell_cmd (which execs into the saved
+    # user shell via MNG_SAVED_DEFAULT_TMUX_COMMAND).
     quoted_session = shlex.quote(session_name)
     save_user_shell_script = (
         f"U=$({tmux} show-option -t {quoted_session} -Aqv default-command 2>/dev/null); "
@@ -2289,7 +2299,7 @@ def _build_start_agent_shell_command(
         f'{tmux} set-environment -t {quoted_session} MNG_SAVED_DEFAULT_TMUX_COMMAND "$U"'
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
-    steps.append(f"{tmux} set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
+    steps.append(f"{tmux} set-option -t {quoted_session} default-command {shlex.quote(default_shell_cmd)}")
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
@@ -2325,7 +2335,7 @@ def _build_start_agent_shell_command(
             f"{tmux} new-window -t {shlex.quote(session_name)}"
             f" -n {shlex.quote(window_name)}"
             f" -c {shlex.quote(str(agent.work_dir))}"
-            f" {shlex.quote(env_shell_cmd)}"
+            f" {shlex.quote(initial_shell_cmd)}"
         )
         steps.append(f"{tmux} send-keys -t {shlex.quote(window_target)} -l {shlex.quote(str(named_cmd.command))}")
         steps.append(f"{tmux} send-keys -t {shlex.quote(window_target)} Enter")
