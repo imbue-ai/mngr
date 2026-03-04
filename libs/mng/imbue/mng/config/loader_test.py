@@ -973,14 +973,6 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     assert mng_ctx.config.default_destroyed_host_persisted_seconds == 86400.0
 
 
-def test_parse_commands_strips_default_subcommand() -> None:
-    """_parse_commands should strip the removed default_subcommand key from defaults."""
-    raw = {"mng": {"default_subcommand": "list", "connect": False}}
-    result = _parse_commands(raw)
-    assert "default_subcommand" not in result["mng"].defaults
-    assert result["mng"].defaults["connect"] is False
-
-
 # =============================================================================
 # Tests for block_disabled_plugins
 # =============================================================================
