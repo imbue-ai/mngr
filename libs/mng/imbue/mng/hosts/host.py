@@ -1966,7 +1966,7 @@ class Host(BaseHost, OnlineHostInterface):
                 # a short invocation instead of the full multi-part command.
                 agent_state_dir = self._get_agent_state_dir(agent)
                 run_script_path = agent_state_dir / "run.sh"
-                self.write_text_file(run_script_path, f"#!/bin/bash\n{command}\n", mode="0755")
+                self.write_text_file(run_script_path, f"{command}\n", mode="0755")
 
                 onboarding_text: str | None = None
                 if is_onboarding_needed:
