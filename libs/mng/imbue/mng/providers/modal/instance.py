@@ -58,7 +58,6 @@ from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
-from imbue.mng.interfaces.data_types import SSHInfo
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import SnapshotRecord
 from imbue.mng.interfaces.data_types import VolumeInfo
@@ -76,6 +75,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ImageReference
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId

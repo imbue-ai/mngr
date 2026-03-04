@@ -1,8 +1,11 @@
 import json
 from pathlib import Path
+from typing import cast
 
 from imbue.imbue_common.event_envelope import EventType
 from imbue.mng.api.discovery_events import AgentDestroyedEvent
+from imbue.mng.api.discovery_events import _build_ssh_info_from_host
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.api.discovery_events import AgentDiscoveryEvent
 from imbue.mng.api.discovery_events import DISCOVERY_EVENT_SOURCE
 from imbue.mng.api.discovery_events import DiscoveryEventType
@@ -28,9 +31,11 @@ from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.utils.testing import make_test_agent_details
 from imbue.mng.utils.testing import make_test_discovered_agent
 from imbue.mng.utils.testing import make_test_discovered_host
@@ -102,6 +107,83 @@ def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
     assert host.host_id == host_id
     assert host.host_name == HostName("test-host")
     assert host.provider_name == provider_name
+
+
+def test_discovered_host_from_agent_details_includes_ssh_info() -> None:
+    ssh = SSHInfo(
+        user="root",
+        host="remote.example.com",
+        port=2222,
+        key_path=Path("/tmp/key"),
+        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+    )
+    details = make_test_agent_details(provider_name=ProviderInstanceName("modal"), ssh=ssh)
+    host = discovered_host_from_agent_details(details)
+    assert host.ssh is not None
+    assert host.ssh.user == "root"
+    assert host.ssh.host == "remote.example.com"
+    assert host.ssh.port == 2222
+
+
+def test_discovered_host_from_agent_details_ssh_is_none_for_local() -> None:
+    details = make_test_agent_details(provider_name=ProviderInstanceName("local"))
+    host = discovered_host_from_agent_details(details)
+    assert host.ssh is None
+
+
+def test_full_snapshot_round_trips_with_ssh_info() -> None:
+    ssh = SSHInfo(
+        user="root",
+        host="remote.example.com",
+        port=2222,
+        key_path=Path("/tmp/key"),
+        command="ssh -i /tmp/key -p 2222 root@remote.example.com",
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("test-host"),
+        provider_name=ProviderInstanceName("modal"),
+        ssh=ssh,
+    )
+    agents = (make_test_discovered_agent(),)
+    event = make_full_discovery_snapshot_event(agents, (host,))
+    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    parsed = parse_discovery_event_line(line)
+    assert isinstance(parsed, FullDiscoverySnapshotEvent)
+    assert len(parsed.hosts) == 1
+    assert parsed.hosts[0].ssh is not None
+    assert parsed.hosts[0].ssh.host == "remote.example.com"
+    assert parsed.hosts[0].ssh.port == 2222
+    assert parsed.hosts[0].ssh.key_path == Path("/tmp/key")
+
+
+class _FakeHostWithSSH:
+    """Minimal stub for testing _build_ssh_info_from_host with SSH info."""
+
+    def _get_ssh_connection_info(self) -> tuple[str, str, int, Path]:
+        return ("root", "remote.example.com", 2222, Path("/tmp/key"))
+
+
+class _FakeLocalHost:
+    """Minimal stub for testing _build_ssh_info_from_host without SSH info."""
+
+    def _get_ssh_connection_info(self) -> None:
+        return None
+
+
+def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
+    result = _build_ssh_info_from_host(cast(OnlineHostInterface, _FakeHostWithSSH()))
+    assert result is not None
+    assert result.user == "root"
+    assert result.host == "remote.example.com"
+    assert result.port == 2222
+    assert result.key_path == Path("/tmp/key")
+    assert result.command == "ssh -i /tmp/key -p 2222 root@remote.example.com"
+
+
+def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:
+    result = _build_ssh_info_from_host(cast(OnlineHostInterface, _FakeLocalHost()))
+    assert result is None
 
 
 def test_extract_agents_and_hosts_deduplicates_hosts() -> None:

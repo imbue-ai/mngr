@@ -307,12 +307,23 @@ class SnapshotName(str):
         )
 
 
+class SSHInfo(FrozenModel):
+    """SSH connection information for a remote host."""
+
+    user: str = Field(description="SSH username")
+    host: str = Field(description="SSH hostname")
+    port: int = Field(description="SSH port")
+    key_path: Path = Field(description="Path to SSH private key")
+    command: str = Field(description="Full SSH command to connect")
+
+
 class DiscoveredHost(FrozenModel):
     """Lightweight host data collected during discovery (without connecting to the host)."""
 
     host_id: HostId = Field(description="Unique identifier for the host")
     host_name: HostName = Field(description="Human-readable name of the host")
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
+    ssh: SSHInfo | None = Field(default=None, description="SSH connection info, present for remote hosts")
 
 
 class DiscoveredAgent(FrozenModel):

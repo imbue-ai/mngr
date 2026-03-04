@@ -477,3 +477,121 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
     manager._on_events_stream_output(line2, is_stderr=False, agent_id=_AGENT_A)
 
     assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
+
+
+def _make_discovery_full_line(
+    agents: list[tuple[str, str]],
+    hosts: list[tuple[str, dict[str, object] | None]],
+) -> str:
+    """Build a DISCOVERY_FULL event JSON line.
+
+    agents: list of (agent_id, host_id) tuples.
+    hosts: list of (host_id, ssh_dict_or_None) tuples.
+    """
+    return json.dumps({
+        "type": "DISCOVERY_FULL",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "event_id": "evt-test-full-001",
+        "source": "mng/discovery",
+        "agents": [
+            {
+                "host_id": host_id,
+                "agent_id": agent_id,
+                "agent_name": f"agent-{agent_id[-4:]}",
+                "provider_name": "modal",
+                "certified_data": {},
+            }
+            for agent_id, host_id in agents
+        ],
+        "hosts": [
+            {
+                "host_id": host_id,
+                "host_name": f"host-{host_id[-4:]}",
+                "provider_name": "modal",
+                **({"ssh": ssh} if ssh is not None else {}),
+            }
+            for host_id, ssh in hosts
+        ],
+    })
+
+
+def test_stream_manager_handle_discovery_line_extracts_ssh_info() -> None:
+    """DISCOVERY_FULL events with SSH info populate the resolver's SSH mappings."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 2222,
+        "key_path": "/tmp/test_key",
+        "command": "ssh -i /tmp/test_key -p 2222 root@remote.example.com",
+    }
+    line = _make_discovery_full_line(
+        agents=[(str(_AGENT_A), host_id)],
+        hosts=[(host_id, ssh_data)],
+    )
+    with manager._cg:
+        manager._handle_discovery_line(line)
+
+    assert manager.resolver.list_known_agent_ids() == (_AGENT_A,)
+    ssh_info = manager.resolver.get_ssh_info(_AGENT_A)
+    assert ssh_info is not None
+    assert ssh_info.host == "remote.example.com"
+    assert ssh_info.port == 2222
+    assert ssh_info.key_path == Path("/tmp/test_key")
+
+
+def test_stream_manager_handle_discovery_line_no_ssh_for_local_hosts() -> None:
+    """DISCOVERY_FULL events without SSH info result in None SSH for agents."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+    line = _make_discovery_full_line(
+        agents=[(str(_AGENT_A), host_id)],
+        hosts=[(host_id, None)],
+    )
+    with manager._cg:
+        manager._handle_discovery_line(line)
+
+    assert manager.resolver.list_known_agent_ids() == (_AGENT_A,)
+    assert manager.resolver.get_ssh_info(_AGENT_A) is None
+
+
+def test_stream_manager_handle_discovery_line_updates_agent_ids() -> None:
+    """DISCOVERY_FULL events update the agent list in the resolver."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+    line = _make_discovery_full_line(
+        agents=[(str(_AGENT_A), host_id), (str(_AGENT_B), host_id)],
+        hosts=[(host_id, None)],
+    )
+    with manager._cg:
+        manager._handle_discovery_line(line)
+
+    ids = manager.resolver.list_known_agent_ids()
+    assert _AGENT_A in ids
+    assert _AGENT_B in ids
+
+
+def test_stream_manager_handle_discovery_line_mixed_local_and_remote() -> None:
+    """Agents on different hosts get the correct SSH info (or None for local)."""
+    manager = _make_stream_manager()
+    local_host_id = "host-00000000000000000000000000000001"
+    remote_host_id = "host-00000000000000000000000000000002"
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 2222,
+        "key_path": "/tmp/key",
+        "command": "ssh -i /tmp/key -p 2222 root@remote.example.com",
+    }
+    line = _make_discovery_full_line(
+        agents=[(str(_AGENT_A), local_host_id), (str(_AGENT_B), remote_host_id)],
+        hosts=[(local_host_id, None), (remote_host_id, ssh_data)],
+    )
+    with manager._cg:
+        manager._handle_discovery_line(line)
+
+    assert manager.resolver.get_ssh_info(_AGENT_A) is None
+    ssh_info = manager.resolver.get_ssh_info(_AGENT_B)
+    assert ssh_info is not None
+    assert ssh_info.host == "remote.example.com"

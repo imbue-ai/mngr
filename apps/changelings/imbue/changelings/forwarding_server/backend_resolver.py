@@ -13,7 +13,6 @@ from pydantic import PrivateAttr
 from imbue.changelings.config.data_types import MNG_BINARY
 from imbue.changelings.forwarding_server.ssh_tunnel import RemoteSSHInfo
 from imbue.changelings.primitives import ServerName
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -22,8 +21,6 @@ from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
 
 SERVERS_LOG_FILENAME: Final[str] = "servers.jsonl"
-
-_SUBPROCESS_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 class ServerLogRecord(FrozenModel):
@@ -96,7 +93,7 @@ class StaticBackendResolver(BackendResolverInterface):
 
 
 class ParsedAgentsResult(FrozenModel):
-    """Result of parsing mng list --json output."""
+    """Result of parsing agent and SSH info from discovery events or mng list --json output."""
 
     agent_ids: tuple[AgentId, ...] = Field(default=(), description="All discovered agent IDs")
     ssh_info_by_agent_id: Mapping[str, RemoteSSHInfo] = Field(
@@ -219,11 +216,6 @@ class MngCliBackendResolver(BackendResolverInterface):
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
 
-    def get_all_ssh_info(self) -> Mapping[str, RemoteSSHInfo]:
-        """Return a snapshot of all known SSH info, keyed by agent ID string. Thread-safe."""
-        with self._lock:
-            return dict(self._agents_result.ssh_info_by_agent_id)
-
 
 # -- MngStreamManager --
 
@@ -233,12 +225,12 @@ class MngStreamManager(MutableModel):
 
     Runs two types of long-lived subprocesses via ConcurrencyGroup:
     1. `mng list --stream --quiet` to discover agents and hosts.
-       Parses DISCOVERY_FULL events to maintain the agent list.
+       Parses DISCOVERY_FULL events to maintain the agent list and SSH info.
     2. `mng events <agent-id> servers.jsonl --follow --quiet` (one per agent)
        to discover each agent's servers.
 
-    SSH info is fetched via an initial `mng list --json` call, and refreshed
-    whenever new agents appear in the stream.
+    SSH info is extracted directly from the DiscoveredHost entries in
+    DISCOVERY_FULL events, so no separate `mng list --json` call is needed.
     """
 
     resolver: MngCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
@@ -250,13 +242,8 @@ class MngStreamManager(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def start(self) -> None:
-        """Start streaming subprocesses.
-
-        Fetches initial agent data via `mng list --json`, then starts
-        `mng list --stream` for continuous updates.
-        """
+        """Start the streaming subprocess for continuous agent discovery."""
         self._cg.__enter__()
-        self._fetch_and_update_agents()
         self._cg.run_process_in_background(
             command=[self.mng_binary, "list", "--stream", "--quiet"],
             on_output=self._on_list_stream_output,
@@ -265,27 +252,6 @@ class MngStreamManager(MutableModel):
     def stop(self) -> None:
         """Stop all streaming subprocesses."""
         self._cg.__exit__(None, None, None)
-
-    def _fetch_and_update_agents(self) -> None:
-        """Fetch agent data (including SSH info) via mng list --json and update the resolver."""
-        fetch_cg = ConcurrencyGroup(name="mng-list-json")
-        try:
-            with fetch_cg:
-                result = fetch_cg.run_process_to_completion(
-                    command=[self.mng_binary, "list", "--json", "--quiet"],
-                    timeout=_SUBPROCESS_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                )
-            if result.returncode == 0:
-                parsed = parse_agents_from_json(result.stdout)
-                self.resolver.update_agents(parsed)
-
-                new_ids = {str(aid) for aid in parsed.agent_ids}
-                self._sync_events_streams(new_ids)
-            else:
-                logger.warning("mng list --json failed: {}", result.stderr.strip())
-        except ConcurrencyExceptionGroup as e:
-            logger.warning("Failed to fetch agent data: {}", e)
 
     def _on_list_stream_output(self, line: str, is_stderr: bool) -> None:
         """Handle a line of output from mng list --stream."""
@@ -297,30 +263,44 @@ class MngStreamManager(MutableModel):
         self._handle_discovery_line(stripped)
 
     def _handle_discovery_line(self, line: str) -> None:
-        """Parse a discovery event line and update state."""
+        """Parse a discovery event line and update state.
+
+        Extracts both agent IDs and SSH info from the DISCOVERY_FULL event,
+        building the SSH info mapping from host data carried in the event.
+        """
         event = parse_discovery_event_line(line)
         if not isinstance(event, FullDiscoverySnapshotEvent):
             return
 
-        new_ids = {str(agent.agent_id) for agent in event.agents}
-
-        with self._lock:
-            truly_new = new_ids - self._known_agent_ids
-
-        if truly_new:
-            # Fetch SSH info for the new agents by re-running mng list --json
-            self._fetch_and_update_agents()
-        else:
-            # Just update agent IDs, preserving existing SSH info
-            agent_ids = tuple(agent.agent_id for agent in event.agents)
-            existing_ssh_info = self.resolver.get_all_ssh_info()
-            self.resolver.update_agents(
-                ParsedAgentsResult(
-                    agent_ids=agent_ids,
-                    ssh_info_by_agent_id=existing_ssh_info,
+        # Build SSH info by host_id from the event's hosts
+        ssh_by_host_id: dict[str, RemoteSSHInfo] = {}
+        for host in event.hosts:
+            if host.ssh is not None:
+                ssh_by_host_id[str(host.host_id)] = RemoteSSHInfo(
+                    user=host.ssh.user,
+                    host=host.ssh.host,
+                    port=host.ssh.port,
+                    key_path=host.ssh.key_path,
                 )
+
+        # Map each agent to its host's SSH info
+        agent_ids: list[AgentId] = []
+        ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
+        for agent in event.agents:
+            agent_ids.append(agent.agent_id)
+            host_ssh = ssh_by_host_id.get(str(agent.host_id))
+            if host_ssh is not None:
+                ssh_info_by_agent_id[str(agent.agent_id)] = host_ssh
+
+        self.resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=tuple(agent_ids),
+                ssh_info_by_agent_id=ssh_info_by_agent_id,
             )
-            self._sync_events_streams(new_ids)
+        )
+
+        new_ids = {str(aid) for aid in agent_ids}
+        self._sync_events_streams(new_ids)
 
     def _sync_events_streams(self, new_agent_ids: set[str]) -> None:
         """Start events streams for newly discovered agents."""

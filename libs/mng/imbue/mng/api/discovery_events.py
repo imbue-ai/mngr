@@ -28,6 +28,7 @@ from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mng/discovery")
 
@@ -123,6 +124,22 @@ def discovered_host_from_agent_details(agent_details: AgentDetails) -> Discovere
         host_id=agent_details.host.id,
         host_name=HostName(agent_details.host.name),
         provider_name=agent_details.host.provider_name,
+        ssh=agent_details.host.ssh,
+    )
+
+
+def _build_ssh_info_from_host(host: OnlineHostInterface) -> SSHInfo | None:
+    """Build SSHInfo from an online host's SSH connection info, or None for local hosts."""
+    ssh_connection = host._get_ssh_connection_info()
+    if ssh_connection is None:
+        return None
+    user, hostname, port, key_path = ssh_connection
+    return SSHInfo(
+        user=user,
+        host=hostname,
+        port=port,
+        key_path=key_path,
+        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
     )
 
 
@@ -137,6 +154,7 @@ def discovered_host_from_online_host(
         host_id=host.id,
         host_name=HostName(certified.host_name),
         provider_name=provider_name,
+        ssh=_build_ssh_info_from_host(host),
     )
 
 

@@ -23,7 +23,6 @@ from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import CpuResources
 from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostResources
-from imbue.mng.interfaces.data_types import SSHInfo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -33,6 +32,7 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.utils.cel_utils import compile_cel_filters
 from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import tmux_session_cleanup
