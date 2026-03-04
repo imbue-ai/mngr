@@ -990,8 +990,8 @@ class ClaudeAgent(BaseAgent):
                 global_data = json.loads(global_config_path.read_text())
                 if global_data.get("primaryApiKey"):
                     data["primaryApiKey"] = global_data["primaryApiKey"]
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("Failed to read primaryApiKey from global config: {}", exc)
 
         return data
 
