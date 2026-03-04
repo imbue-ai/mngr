@@ -972,26 +972,22 @@ class ClaudeAgent(BaseAgent):
         projects = data.setdefault("projects", {})
         projects[str(self.work_dir.resolve())] = {"hasTrustDialogAccepted": True}
 
+        # Read the global config once for both source project config and primaryApiKey
+        global_config = read_claude_config(get_claude_config_path())
+
         # For worktree mode, copy source project config from the global config
         if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
             git_common_dir = find_git_common_dir(self.work_dir, self.mng_ctx.concurrency_group)
             if git_common_dir is not None:
                 source_path = git_common_dir.parent.resolve()
-                global_config = read_claude_config(get_claude_config_path())
                 global_projects = global_config.get("projects", {})
                 source_config = find_project_config(global_projects, source_path)
                 if source_config is not None:
                     projects[str(source_path)] = source_config
 
         # Copy primaryApiKey from global config if available
-        global_config_path = get_claude_config_path()
-        if global_config_path.exists():
-            try:
-                global_data = json.loads(global_config_path.read_text())
-                if global_data.get("primaryApiKey"):
-                    data["primaryApiKey"] = global_data["primaryApiKey"]
-            except (json.JSONDecodeError, OSError) as exc:
-                logger.debug("Failed to read primaryApiKey from global config: {}", exc)
+        if global_config.get("primaryApiKey"):
+            data["primaryApiKey"] = global_config["primaryApiKey"]
 
         return data
 
