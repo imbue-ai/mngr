@@ -18,7 +18,6 @@ from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.fetcher import _build_pr_branch_index
 from imbue.mng_kanpan.fetcher import _find_git_cwd
 from imbue.mng_kanpan.fetcher import _pr_priority
-from imbue.mng_kanpan.fetcher import _resolve_agent_branch
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
 
@@ -129,24 +128,6 @@ def test_build_pr_branch_index_merged_wins_over_closed() -> None:
     merged_pr = _make_pr_info(number=2, head_branch="branch-a", state=PrState.MERGED)
     result = _build_pr_branch_index((closed_pr, merged_pr))
     assert result["branch-a"].number == 2
-
-
-# === _resolve_agent_branch ===
-
-
-def test_resolve_agent_branch_returns_branch_from_agent_details() -> None:
-    agent = _make_agent_details(name="my-agent", branch="mng/my-agent")
-    assert _resolve_agent_branch(agent) == "mng/my-agent"
-
-
-def test_resolve_agent_branch_returns_custom_branch_name() -> None:
-    agent = _make_agent_details(name="my-agent", branch="feature/custom-branch")
-    assert _resolve_agent_branch(agent) == "feature/custom-branch"
-
-
-def test_resolve_agent_branch_returns_none_when_no_branch() -> None:
-    agent = _make_agent_details(name="my-agent", branch=None)
-    assert _resolve_agent_branch(agent) is None
 
 
 # === fetch_board_snapshot ===

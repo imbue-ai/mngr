@@ -58,7 +58,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     # Build board entries with branch and PR info
     entries: list[AgentBoardEntry] = []
     for agent in result.agents:
-        branch = _resolve_agent_branch(agent)
+        branch = agent.branch
         pr = pr_by_branch.get(branch) if branch else None
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
@@ -128,11 +128,6 @@ def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:
         if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists():
             return agent.work_dir
     return None
-
-
-def _resolve_agent_branch(agent: AgentDetails) -> str | None:
-    """Return the git branch associated with an agent, or None if unknown."""
-    return agent.branch
 
 
 def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:
