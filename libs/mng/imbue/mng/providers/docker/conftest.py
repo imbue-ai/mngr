@@ -13,6 +13,7 @@ from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
+from imbue.mng.utils.testing import run_mng_subprocess
 
 
 @pytest.fixture
@@ -34,23 +35,14 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
 
     # Destroy all agents created during the test.
     try:
-        list_result = subprocess.run(
-            ["uv", "run", "mng", "list", "--format", "json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-        )
+        list_result = run_mng_subprocess("list", "--format", "json", env=env, timeout=30)
         if list_result.returncode == 0 and list_result.stdout.strip():
-            for agent in json.loads(list_result.stdout):
-                agent_name = agent.get("name", "")
+            data = json.loads(list_result.stdout)
+            agents = data.get("agents", []) if isinstance(data, dict) else data
+            for agent in agents:
+                agent_name = agent.get("name", "") if isinstance(agent, dict) else ""
                 if agent_name:
-                    subprocess.run(
-                        ["uv", "run", "mng", "destroy", agent_name, "--force"],
-                        capture_output=True,
-                        timeout=30,
-                        env=env,
-                    )
+                    run_mng_subprocess("destroy", agent_name, "--force", env=env, timeout=30)
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, json.JSONDecodeError, OSError):
         pass
 
