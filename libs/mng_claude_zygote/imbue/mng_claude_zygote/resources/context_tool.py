@@ -79,6 +79,8 @@ def _read_tail_lines(file_path: pathlib.Path, n: int) -> list[str]:
     key = str(file_path)
     try:
         size = file_path.stat().st_size
+    except FileNotFoundError:
+        return []
     except OSError as e:
         print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []
@@ -126,6 +128,8 @@ def _get_new_lines(file_path: pathlib.Path) -> list[str]:
 
     try:
         current_size = file_path.stat().st_size
+    except FileNotFoundError:
+        return []
     except OSError as e:
         print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []

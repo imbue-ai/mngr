@@ -57,6 +57,7 @@ except ImportError:
 
 _DEFAULT_CEL_FILTER: Final[str] = (
     'source != "claude_transcript" && source != "common_transcript" && source != "monitor"'
+    ' && source != "conversations"'
     " && ("
     '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
     ")"
@@ -448,6 +449,94 @@ def _drain_stderr(
             logger.debug("Stderr reader error: {}", exc)
 
 
+# -- Chat event pairing --
+
+# Maximum time to wait for an assistant response before delivering the user
+# message anyway (in seconds). Prevents events from being held indefinitely
+# if the assistant never responds (e.g. conversation closed, error, etc.).
+_CHAT_PAIR_TIMEOUT_SECONDS: Final[float] = 300.0
+
+
+def _separate_chat_events(
+    lines: list[str],
+    held_user_messages: dict[str, tuple[list[str], float]],
+) -> list[str]:
+    """Separate chat message events into paired (ready) and held (waiting).
+
+    For events from the "messages" source:
+    - User messages are held back until an assistant response for the same
+      conversation_id arrives, so that the agent sees both together.
+    - When an assistant message arrives, the corresponding held user messages
+      are released and included alongside it.
+    - User messages held longer than _CHAT_PAIR_TIMEOUT_SECONDS are released
+      even without an assistant response.
+
+    Non-message events pass through unchanged.
+
+    Args:
+        lines: Parsed JSONL lines to process.
+        held_user_messages: Mutable dict mapping conversation_id to
+            (list of held JSONL lines, timestamp when first held).
+            Updated in place.
+
+    Returns:
+        Lines ready for delivery (non-message events + paired chat events).
+    """
+    ready: list[str] = []
+    new_user_messages: dict[str, list[str]] = {}
+    assistant_cids: set[str] = set()
+
+    now = time.monotonic()
+
+    for line in lines:
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            ready.append(line)
+            continue
+
+        source = parsed.get("source", "")
+        if source != "messages":
+            ready.append(line)
+            continue
+
+        role = parsed.get("role", "")
+        cid = parsed.get("conversation_id", "")
+
+        if role == "user" and cid:
+            new_user_messages.setdefault(cid, []).append(line)
+        elif role == "assistant" and cid:
+            assistant_cids.add(cid)
+            ready.append(line)
+        else:
+            ready.append(line)
+
+    # Release held messages for conversations that now have an assistant response
+    for cid in assistant_cids:
+        if cid in held_user_messages:
+            held_lines, _ = held_user_messages.pop(cid)
+            ready.extend(held_lines)
+        if cid in new_user_messages:
+            ready.extend(new_user_messages.pop(cid))
+
+    # Release timed-out held messages
+    timed_out_cids = [
+        cid for cid, (_, held_at) in held_user_messages.items() if now - held_at > _CHAT_PAIR_TIMEOUT_SECONDS
+    ]
+    for cid in timed_out_cids:
+        held_lines, _ = held_user_messages.pop(cid)
+        ready.extend(held_lines)
+
+    # Hold new user messages that don't have a matching assistant response
+    for cid, user_lines in new_user_messages.items():
+        if cid in held_user_messages:
+            held_user_messages[cid][0].extend(user_lines)
+        else:
+            held_user_messages[cid] = (user_lines, now)
+
+    return ready
+
+
 # -- Delivery loop helpers --
 
 
@@ -563,6 +652,9 @@ def _run_delivery_loop(
     consecutive_failures = 0
     has_notified_user = False
 
+    # Chat event pairing: hold user messages until assistant responds
+    held_user_messages: dict[str, tuple[list[str], float]] = {}
+
     while not stop_event.is_set():
         # If we're in a failure state, wait with exponential backoff
         if consecutive_failures > 0:
@@ -594,8 +686,17 @@ def _run_delivery_loop(
             pending, delivery_state, is_catching_up
         )
 
+        # Separate chat events: hold user messages until assistant responds
+        deliverable_lines = _separate_chat_events(deliverable_lines, held_user_messages)
+
         if not deliverable_lines:
             continue
+
+        # Recompute last_parsed since chat separation may have changed the line set
+        try:
+            last_parsed = json.loads(deliverable_lines[-1])
+        except json.JSONDecodeError:
+            pass
 
         # Consume a rate-limit token
         if not token_bucket.consume():

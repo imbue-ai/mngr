@@ -14,6 +14,7 @@ from imbue.mng_claude_zygote.conftest import EventWatcherSubprocessCapture
 from imbue.mng_claude_zygote.conftest import write_changelings_settings_toml
 from imbue.mng_claude_zygote.data_types import WatcherSettings
 from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
+from imbue.mng_claude_zygote.resources.event_watcher import _CHAT_PAIR_TIMEOUT_SECONDS
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_BURST_SIZE
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_CEL_FILTER
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
@@ -34,6 +35,7 @@ from imbue.mng_claude_zygote.resources.event_watcher import _load_watcher_settin
 from imbue.mng_claude_zygote.resources.event_watcher import _save_delivery_state
 from imbue.mng_claude_zygote.resources.event_watcher import _send_chat_notification
 from imbue.mng_claude_zygote.resources.event_watcher import _send_message
+from imbue.mng_claude_zygote.resources.event_watcher import _separate_chat_events
 from imbue.mng_claude_zygote.resources.event_watcher import _should_skip_for_catchup
 from imbue.mng_claude_zygote.resources.event_watcher import _write_notification_event
 
@@ -547,3 +549,120 @@ def test_compute_backoff_seconds_exponential_growth() -> None:
 def test_compute_backoff_seconds_caps_at_max() -> None:
     # With base=2 and max=60, 2 * 2^(n-1) caps at 60 for n >= 6 (2*32=64 > 60)
     assert _compute_backoff_seconds(10) == 60.0
+
+
+# -- _separate_chat_events tests --
+
+
+def _make_message_event(role: str, cid: str = "conv-1", event_id: str = "evt-1") -> str:
+    return json.dumps(
+        {
+            "source": "messages",
+            "role": role,
+            "conversation_id": cid,
+            "event_id": event_id,
+            "timestamp": "2026-03-01T12:00:00Z",
+        }
+    )
+
+
+def _make_non_message_event(source: str = "scheduled", event_id: str = "evt-s1") -> str:
+    return json.dumps(
+        {
+            "source": source,
+            "type": "trigger",
+            "event_id": event_id,
+            "timestamp": "2026-03-01T12:00:00Z",
+        }
+    )
+
+
+def test_separate_chat_events_passes_non_message_events() -> None:
+    """Non-message events pass through unchanged."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_non_message_event()]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert len(held) == 0
+
+
+def test_separate_chat_events_holds_user_message_without_assistant() -> None:
+    """User messages are held when no assistant response is present."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_message_event("user")]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 0
+    assert "conv-1" in held
+    assert len(held["conv-1"][0]) == 1
+
+
+def test_separate_chat_events_releases_pair() -> None:
+    """User + assistant for the same conversation are both delivered."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", event_id="evt-u1"),
+        _make_message_event("assistant", event_id="evt-a1"),
+    ]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 2
+    assert len(held) == 0
+
+
+def test_separate_chat_events_releases_previously_held_on_assistant() -> None:
+    """Previously held user messages are released when assistant arrives."""
+    user_line = _make_message_event("user", event_id="evt-u1")
+    held: dict[str, tuple[list[str], float]] = {"conv-1": ([user_line], time.monotonic())}
+    lines = [_make_message_event("assistant", event_id="evt-a1")]
+    result = _separate_chat_events(lines, held)
+    # Both the previously held user message and the assistant message should be delivered
+    assert len(result) == 2
+    assert "conv-1" not in held
+
+
+def test_separate_chat_events_timeout_releases_held() -> None:
+    """User messages held past the timeout are released even without assistant."""
+    user_line = _make_message_event("user", event_id="evt-u1")
+    old_time = time.monotonic() - _CHAT_PAIR_TIMEOUT_SECONDS - 1.0
+    held: dict[str, tuple[list[str], float]] = {"conv-1": ([user_line], old_time)}
+    # Empty batch, but timeout should release the held message
+    result = _separate_chat_events([], held)
+    assert len(result) == 1
+    assert "conv-1" not in held
+
+
+def test_separate_chat_events_different_conversations() -> None:
+    """Messages from different conversations are handled independently."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", cid="conv-1", event_id="evt-u1"),
+        _make_message_event("user", cid="conv-2", event_id="evt-u2"),
+        _make_message_event("assistant", cid="conv-1", event_id="evt-a1"),
+    ]
+    result = _separate_chat_events(lines, held)
+    # conv-1 pair should be delivered, conv-2 user should be held
+    assert len(result) == 2
+    assert "conv-1" not in held
+    assert "conv-2" in held
+
+
+def test_separate_chat_events_mixed_with_non_message() -> None:
+    """Non-message events are delivered even when chat messages are held."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", event_id="evt-u1"),
+        _make_non_message_event(),
+    ]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1  # Only the non-message event
+    parsed = json.loads(result[0])
+    assert parsed["source"] == "scheduled"
+    assert "conv-1" in held
+
+
+def test_separate_chat_events_malformed_json_passes_through() -> None:
+    """Malformed JSON lines pass through unchanged."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = ["not json at all"]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert result[0] == "not json at all"
