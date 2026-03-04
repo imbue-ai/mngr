@@ -471,6 +471,8 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    host_id: HostId | None = None,
+    provider_name: ProviderInstanceName | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -478,9 +480,9 @@ def make_test_agent_details(
     construction logic. Accepts optional overrides for commonly varied fields.
     """
     host_details = HostDetails(
-        id=HostId.generate(),
+        id=host_id or HostId.generate(),
         name="test-host",
-        provider_name=ProviderInstanceName("local"),
+        provider_name=provider_name or ProviderInstanceName("local"),
         snapshots=snapshots or [],
         state=HostState.RUNNING,
         plugin=host_plugin or {},

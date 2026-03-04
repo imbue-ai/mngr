@@ -1,8 +1,5 @@
 import json
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
-from uuid import uuid4
 
 from imbue.mng.api.discovery_events import AgentDiscoveryEvent
 from imbue.mng.api.discovery_events import DiscoveryEventType
@@ -23,38 +20,12 @@ from imbue.mng.api.discovery_events import make_host_discovery_event
 from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.config.data_types import MngConfig
-from imbue.mng.interfaces.data_types import AgentDetails
-from imbue.mng.interfaces.data_types import HostDetails
-from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.testing import make_test_agent_details
 from imbue.mng.utils.testing import make_test_discovered_agent
 from imbue.mng.utils.testing import make_test_discovered_host
-
-
-def _make_agent_details(host_id: HostId, provider_name: ProviderInstanceName) -> AgentDetails:
-    host_details = HostDetails(
-        id=host_id,
-        name="test-host",
-        provider_name=provider_name,
-    )
-    return AgentDetails(
-        id=AgentId.generate(),
-        name=AgentName(f"test-agent-{uuid4().hex}"),
-        type="claude",
-        command=CommandString("echo test"),
-        work_dir=Path("/tmp/test"),
-        create_time=datetime.now(timezone.utc),
-        start_on_boot=False,
-        state=AgentLifecycleState.RUNNING,
-        labels={},
-        host=host_details,
-    )
-
 
 # === Path Helper Tests ===
 
@@ -107,18 +78,18 @@ def test_make_full_discovery_snapshot_event_has_correct_fields() -> None:
 def test_discovered_agent_from_agent_details_preserves_key_fields() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("docker")
-    details = _make_agent_details(host_id, provider_name)
+    details = make_test_agent_details(host_id=host_id, provider_name=provider_name)
     discovered = discovered_agent_from_agent_details(details)
     assert discovered.agent_id == details.id
     assert discovered.agent_name == details.name
     assert discovered.provider_name == provider_name
-    assert discovered.certified_data["type"] == "claude"
+    assert discovered.certified_data["type"] == "generic"
 
 
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("modal")
-    details = _make_agent_details(host_id, provider_name)
+    details = make_test_agent_details(host_id=host_id, provider_name=provider_name)
     host = discovered_host_from_agent_details(details)
     assert host.host_id == host_id
     assert host.host_name == HostName("test-host")
@@ -128,8 +99,8 @@ def test_discovered_host_from_agent_details_preserves_key_fields() -> None:
 def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("local")
-    details1 = _make_agent_details(host_id, provider_name)
-    details2 = _make_agent_details(host_id, provider_name)
+    details1 = make_test_agent_details(host_id=host_id, provider_name=provider_name)
+    details2 = make_test_agent_details(host_id=host_id, provider_name=provider_name)
     agents, hosts = extract_agents_and_hosts_from_full_listing([details1, details2])
     assert len(agents) == 2
     assert len(hosts) == 1
