@@ -15,8 +15,11 @@ from imbue.mng.interfaces.data_types import VolumeFile
 from imbue.mng.interfaces.data_types import VolumeFileType
 from imbue.mng.interfaces.volume import BaseVolume
 
-# Label used on state containers (shared with instance.py for discovery)
-STATE_CONTAINER_TYPE_LABEL: Final[str] = "com.imbue.mng.type"
+# Docker label constants shared between volume.py and instance.py.
+# Defined here (the lower-level module) to avoid circular imports.
+LABEL_PREFIX: Final[str] = "com.imbue.mng."
+LABEL_PROVIDER: Final[str] = f"{LABEL_PREFIX}provider"
+STATE_CONTAINER_TYPE_LABEL: Final[str] = f"{LABEL_PREFIX}type"
 STATE_CONTAINER_TYPE_VALUE: Final[str] = "state-container"
 
 # Shell command that keeps PID 1 alive and responds to SIGTERM.
@@ -71,8 +74,7 @@ def ensure_state_container(
     # label so the container is discoverable by _list_containers().
     labels: dict[str, str] = {STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}
     if provider_name:
-        # Use the same label key as host containers (com.imbue.mng.provider)
-        labels["com.imbue.mng.provider"] = provider_name
+        labels[LABEL_PROVIDER] = provider_name
 
     # Create the container with a named volume
     logger.debug("Creating Docker state container: {}", container_name)

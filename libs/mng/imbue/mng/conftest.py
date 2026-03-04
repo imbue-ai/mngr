@@ -30,6 +30,7 @@ from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
+from imbue.mng.providers.docker.volume import LABEL_PROVIDER
 from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -828,8 +829,9 @@ def _get_stale_docker_state_containers(max_age_seconds: int = 3600) -> list[tupl
     """Get Docker state containers from tests that are older than max_age_seconds.
 
     Returns a list of (container_id, container_name) tuples for state containers
-    that have the test prefix (mng_ followed by a hex ID) and are older than
-    the threshold. This catches containers leaked by crashed or interrupted tests.
+    whose provider label starts with "docker-test-" (the prefix used by
+    make_docker_provider_with_cleanup) and that are older than the threshold.
+    This catches containers leaked by crashed or interrupted test runs.
     """
     try:
         client = docker.from_env()
@@ -858,7 +860,7 @@ def _get_stale_docker_state_containers(max_age_seconds: int = 3600) -> list[tupl
         # container names like "mng_<test_id>-docker-state-<user_id>".
         # We use the presence of "docker-test-" in the provider label as the signal.
         labels = container.labels or {}
-        provider_name = labels.get("com.imbue.mng.provider", "")
+        provider_name = labels.get(LABEL_PROVIDER, "")
         if not provider_name.startswith("docker-test-"):
             continue
 
