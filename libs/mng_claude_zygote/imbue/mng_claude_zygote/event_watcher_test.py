@@ -17,11 +17,13 @@ from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_mod
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_BURST_SIZE
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_CEL_FILTER
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
+from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_MAX_DELIVERY_RETRIES
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_MAX_MESSAGES_PER_MINUTE
 from imbue.mng_claude_zygote.resources.event_watcher import _DeliveryState
 from imbue.mng_claude_zygote.resources.event_watcher import _EventWatcherSettings
 from imbue.mng_claude_zygote.resources.event_watcher import _SendRateTracker
 from imbue.mng_claude_zygote.resources.event_watcher import _TokenBucket
+from imbue.mng_claude_zygote.resources.event_watcher import _compute_backoff_seconds
 from imbue.mng_claude_zygote.resources.event_watcher import _compute_rate_warning
 from imbue.mng_claude_zygote.resources.event_watcher import _deliver_batch
 from imbue.mng_claude_zygote.resources.event_watcher import _filter_catchup_events
@@ -32,6 +34,7 @@ from imbue.mng_claude_zygote.resources.event_watcher import _load_watcher_settin
 from imbue.mng_claude_zygote.resources.event_watcher import _save_delivery_state
 from imbue.mng_claude_zygote.resources.event_watcher import _send_message
 from imbue.mng_claude_zygote.resources.event_watcher import _should_skip_for_catchup
+from imbue.mng_claude_zygote.resources.event_watcher import _write_notification_event
 
 # -- Controllable clock for deterministic TokenBucket tests --
 
@@ -59,6 +62,7 @@ def test_defaults_match_between_data_types_and_event_watcher() -> None:
     assert model_defaults.event_burst_size == _DEFAULT_BURST_SIZE
     assert model_defaults.max_event_messages_per_minute == _DEFAULT_MAX_MESSAGES_PER_MINUTE
     assert model_defaults.high_rate_warning_threshold_per_minute == _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
+    assert model_defaults.max_delivery_retries == _DEFAULT_MAX_DELIVERY_RETRIES
 
 
 # -- _load_watcher_settings tests --
@@ -415,7 +419,7 @@ def test_deliver_batch_updates_state_on_success(
     event_line = json.dumps({"event_id": "evt-42", "timestamp": "2026-03-01T12:00:00Z"})
     last_parsed = json.loads(event_line)
 
-    _deliver_batch(
+    success = _deliver_batch(
         deliverable_lines=[event_line],
         last_parsed=last_parsed,
         agent_name="test-agent",
@@ -427,6 +431,8 @@ def test_deliver_batch_updates_state_on_success(
         time_since_last=10.0,
         rate_warning=None,
     )
+
+    assert success is True
 
     # Verify state was updated
     assert delivery_state.last_event_id == "evt-42"
@@ -456,7 +462,7 @@ def test_deliver_batch_puts_events_back_on_failure(
 
     event_lines = ['{"event_id": "evt-1"}', '{"event_id": "evt-2"}']
 
-    _deliver_batch(
+    success = _deliver_batch(
         deliverable_lines=event_lines,
         last_parsed={"event_id": "evt-2"},
         agent_name="test-agent",
@@ -469,6 +475,8 @@ def test_deliver_batch_puts_events_back_on_failure(
         rate_warning=None,
     )
 
+    assert success is False
+
     # Verify events were put back in buffer (at the front)
     assert event_buffer == event_lines
 
@@ -480,3 +488,39 @@ def test_deliver_batch_puts_events_back_on_failure(
 
     # Verify state file was NOT created
     assert not state_file.exists()
+
+
+# -- _write_notification_event tests --
+
+
+def test_write_notification_event_creates_file(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    _write_notification_event(events_dir, "Test notification", level="WARNING")
+
+    events_file = events_dir / "monitor" / "events.jsonl"
+    assert events_file.exists()
+
+    lines = events_file.read_text().strip().split("\n")
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["type"] == "delivery_notification"
+    assert event["source"] == "monitor"
+    assert event["level"] == "WARNING"
+    assert event["message"] == "Test notification"
+    assert "event_id" in event
+    assert "timestamp" in event
+
+
+# -- _compute_backoff_seconds tests --
+
+
+def test_compute_backoff_seconds_exponential_growth() -> None:
+    assert _compute_backoff_seconds(1) == 2.0
+    assert _compute_backoff_seconds(2) == 4.0
+    assert _compute_backoff_seconds(3) == 8.0
+    assert _compute_backoff_seconds(4) == 16.0
+
+
+def test_compute_backoff_seconds_caps_at_max() -> None:
+    # With base=2 and max=60, 2 * 2^(n-1) caps at 60 for n >= 6 (2*32=64 > 60)
+    assert _compute_backoff_seconds(10) == 60.0

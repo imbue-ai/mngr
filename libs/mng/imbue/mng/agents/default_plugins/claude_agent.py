@@ -505,12 +505,12 @@ class ClaudeAgent(BaseAgent):
         return "claude"
 
     def uses_marker_based_send_message(self) -> bool:
-        """Enable marker-based send_message for Claude Code.
+        """Enable paste-detection send_message for Claude Code.
 
         Claude Code echoes input to the terminal and has a complex input handler
         that can misinterpret Enter as a literal newline if sent too quickly after
-        the message text. The marker-based approach ensures the input handler has
-        fully processed the message before submitting.
+        the message text. The paste-detection approach waits for the pasted content
+        to appear on screen before submitting.
         """
         return True
 

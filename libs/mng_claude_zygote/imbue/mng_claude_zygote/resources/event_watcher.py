@@ -30,9 +30,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from uuid import uuid4
 
 from loguru import logger
 
@@ -59,6 +62,7 @@ _DEFAULT_CEL_FILTER: Final[str] = (
 _DEFAULT_BURST_SIZE: Final[int] = 5
 _DEFAULT_MAX_MESSAGES_PER_MINUTE: Final[int] = 10
 _DEFAULT_HIGH_RATE_WARNING_THRESHOLD: Final[int] = 8
+_DEFAULT_MAX_DELIVERY_RETRIES: Final[int] = 3
 
 _DELIVERY_STATE_FILENAME: Final[str] = ".event_delivery_state.json"
 
@@ -68,6 +72,10 @@ _MESSAGE_SEND_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # How often the delivery loop polls for buffered events
 _DELIVERY_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+
+# Exponential backoff for delivery retries
+_BACKOFF_BASE_SECONDS: Final[float] = 2.0
+_BACKOFF_MAX_SECONDS: Final[float] = 60.0
 
 
 # -- Settings --
@@ -81,6 +89,7 @@ class _EventWatcherSettings:
     burst_size: int = _DEFAULT_BURST_SIZE
     max_messages_per_minute: int = _DEFAULT_MAX_MESSAGES_PER_MINUTE
     high_rate_warning_threshold: int = _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
+    max_delivery_retries: int = _DEFAULT_MAX_DELIVERY_RETRIES
 
 
 def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
@@ -95,6 +104,7 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
         high_rate_warning_threshold=watchers.get(
             "high_rate_warning_threshold_per_minute", _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
         ),
+        max_delivery_retries=watchers.get("max_delivery_retries", _DEFAULT_MAX_DELIVERY_RETRIES),
     )
 
 
@@ -294,6 +304,36 @@ def _send_message(agent_name: str, message: str) -> bool:
     return True
 
 
+def _write_notification_event(events_dir: Path, message: str, level: str = "WARNING") -> None:
+    """Write a notification event to events/monitor/events.jsonl.
+
+    These events are visible through the event system and web UI,
+    providing user-facing notifications about delivery issues.
+    """
+    now = datetime.now(timezone.utc)
+    event = {
+        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z",
+        "type": "delivery_notification",
+        "event_id": f"evt-{uuid4().hex}",
+        "source": "monitor",
+        "level": level,
+        "message": message,
+    }
+    monitor_dir = events_dir / "monitor"
+    monitor_dir.mkdir(parents=True, exist_ok=True)
+    events_file = monitor_dir / "events.jsonl"
+    try:
+        with events_file.open("a") as f:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        logger.error("Failed to write notification event: {}", exc)
+
+
+def _compute_backoff_seconds(consecutive_failures: int) -> float:
+    """Compute exponential backoff duration based on the number of consecutive failures."""
+    return min(_BACKOFF_BASE_SECONDS * (2 ** (consecutive_failures - 1)), _BACKOFF_MAX_SECONDS)
+
+
 # -- Subprocess management --
 
 
@@ -407,8 +447,12 @@ def _deliver_batch(
     buffer_lock: threading.Lock,
     time_since_last: float | None,
     rate_warning: str | None,
-) -> None:
-    """Format, send, and persist a batch of events. On failure, put events back in buffer."""
+) -> bool:
+    """Format, send, and persist a batch of events. Returns True on success.
+
+    On failure, puts events back in the buffer for later retry.
+    The caller is responsible for backoff and notification logic.
+    """
     message = _format_delivery_message(deliverable_lines, time_since_last, rate_warning)
     logger.info("Sending {} event(s) to '{}'", len(deliverable_lines), agent_name)
 
@@ -419,10 +463,12 @@ def _deliver_batch(
         delivery_state.last_delivery_monotonic = time.monotonic()
         _save_delivery_state(state_file, delivery_state)
         logger.info("Delivered {} event(s), state updated", len(deliverable_lines))
-    else:
-        logger.warning("Failed to deliver {} event(s), will retry", len(deliverable_lines))
-        with buffer_lock:
-            event_buffer[0:0] = deliverable_lines
+        return True
+
+    logger.warning("Failed to deliver {} event(s), will retry", len(deliverable_lines))
+    with buffer_lock:
+        event_buffer[0:0] = deliverable_lines
+    return False
 
 
 # -- Delivery loop --
@@ -432,11 +478,17 @@ def _run_delivery_loop(
     settings: _EventWatcherSettings,
     agent_name: str,
     state_file: Path,
+    events_dir: Path,
     event_buffer: list[str],
     buffer_lock: threading.Lock,
     stop_event: threading.Event,
 ) -> None:
-    """Main delivery loop: drain buffer, rate-limit, format, and deliver to agent."""
+    """Main delivery loop: drain buffer, rate-limit, format, and deliver to agent.
+
+    Tracks consecutive delivery failures and applies exponential backoff.
+    After ``max_delivery_retries`` consecutive failures, writes a notification
+    event to events/monitor/events.jsonl. On recovery, writes another event.
+    """
     delivery_state = _load_delivery_state(state_file)
     is_catching_up = bool(delivery_state.last_event_id or delivery_state.last_timestamp)
 
@@ -452,8 +504,18 @@ def _run_delivery_loop(
         rate_per_second=settings.max_messages_per_minute / 60.0,
     )
     rate_tracker = _SendRateTracker()
+    consecutive_failures = 0
+    has_notified_user = False
 
     while not stop_event.is_set():
+        # If we're in a failure state, wait with exponential backoff
+        if consecutive_failures > 0:
+            backoff = _compute_backoff_seconds(consecutive_failures)
+            logger.debug("Backing off for {:.1f}s after {} consecutive failures", backoff, consecutive_failures)
+            stop_event.wait(timeout=backoff)
+            if stop_event.is_set():
+                break
+
         # Wait for a token to become available
         wait_time = token_bucket.time_until_token()
         if wait_time > 0:
@@ -492,8 +554,8 @@ def _run_delivery_loop(
 
         rate_warning = _compute_rate_warning(rate_tracker, settings.high_rate_warning_threshold)
 
-        # Send the batch
-        _deliver_batch(
+        # Send the batch (single attempt, no retries inside)
+        success = _deliver_batch(
             deliverable_lines=deliverable_lines,
             last_parsed=last_parsed,
             agent_name=agent_name,
@@ -505,6 +567,38 @@ def _run_delivery_loop(
             time_since_last=time_since_last,
             rate_warning=rate_warning,
         )
+
+        if success:
+            if has_notified_user:
+                _write_notification_event(
+                    events_dir,
+                    f"Event delivery to agent '{agent_name}' has recovered "
+                    f"after {consecutive_failures} consecutive failures.",
+                    level="INFO",
+                )
+                logger.info("Event delivery recovered after {} failures", consecutive_failures)
+            consecutive_failures = 0
+            has_notified_user = False
+        else:
+            consecutive_failures += 1
+            logger.warning(
+                "Delivery failure {} for agent '{}'",
+                consecutive_failures,
+                agent_name,
+            )
+            if consecutive_failures >= settings.max_delivery_retries and not has_notified_user:
+                _write_notification_event(
+                    events_dir,
+                    f"Event delivery to agent '{agent_name}' has failed "
+                    f"{consecutive_failures} consecutive times. "
+                    "Events are being buffered and will be retried.",
+                    level="ERROR",
+                )
+                logger.error(
+                    "Delivery has failed {} consecutive times, notified user",
+                    consecutive_failures,
+                )
+                has_notified_user = True
 
 
 # -- Main --
@@ -525,12 +619,16 @@ def main() -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / _DELIVERY_STATE_FILENAME
 
+    # Events directory for notification events
+    events_dir = agent_state_dir / "events"
+
     logger.info("Event watcher started")
     logger.info("  Agent name: {}", agent_name)
     logger.info("  CEL filter: {}", settings.cel_filter)
     logger.info("  Burst size: {}", settings.burst_size)
     logger.info("  Max messages/min: {}", settings.max_messages_per_minute)
     logger.info("  Rate warning threshold: {}/min", settings.high_rate_warning_threshold)
+    logger.info("  Max delivery retries: {}", settings.max_delivery_retries)
     logger.info("  State file: {}", state_file)
 
     stop_event = threading.Event()
@@ -541,7 +639,7 @@ def main() -> None:
     # Start the long-lived delivery thread
     delivery_thread = threading.Thread(
         target=_run_delivery_loop,
-        args=(settings, agent_name, state_file, event_buffer, buffer_lock, stop_event),
+        args=(settings, agent_name, state_file, events_dir, event_buffer, buffer_lock, stop_event),
         daemon=True,
     )
     delivery_thread.start()

@@ -264,6 +264,11 @@ class WatcherSettings(FrozenModel):
         default=PositiveInt(8),
         description="When messages per minute exceeds this, include a rate warning in the delivery envelope.",
     )
+    max_delivery_retries: PositiveInt = Field(
+        default=PositiveInt(3),
+        description="Maximum consecutive delivery failures before notifying the user. "
+        "Uses exponential backoff between retries.",
+    )
 
 
 class ProvisioningSettings(FrozenModel):
