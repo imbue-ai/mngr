@@ -1,7 +1,5 @@
 """Unit tests for the mng-changeling-chat CLI module."""
 
-import json
-
 import pytest
 from click.testing import CliRunner
 
@@ -12,6 +10,7 @@ from imbue.mng_changeling_chat.cli import _resolve_latest_conversation_args
 from imbue.mng_changeling_chat.cli import chat
 from imbue.mng_changeling_chat.cli import resolve_chat_args
 from imbue.mng_changeling_chat.conftest import _TestAgent
+from imbue.mng_changeling_chat.conftest import create_conversation_events
 
 
 def test_chat_command_help_shows_all_options() -> None:
@@ -100,20 +99,17 @@ def test_resolve_chat_args_last_flag_with_conversations(
 ) -> None:
     host, agent = local_host_and_agent
 
-    # Create conversation events so --last has something to find
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    conv_dir = agent_state_dir / "events" / "conversations"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-    (conv_dir / "events.jsonl").write_text(
-        json.dumps(
+    create_conversation_events(
+        host,
+        agent,
+        [
             {
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-latest",
                 "model": "claude-opus-4-6",
-            }
-        )
-        + "\n"
+            },
+        ],
     )
 
     opts = _make_opts(last=True)
@@ -139,20 +135,17 @@ def test_resolve_chat_args_non_interactive_defaults_to_latest(
 ) -> None:
     host, agent = local_host_and_agent
 
-    # Create a conversation
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    conv_dir = agent_state_dir / "events" / "conversations"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-    (conv_dir / "events.jsonl").write_text(
-        json.dumps(
+    create_conversation_events(
+        host,
+        agent,
+        [
             {
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-noninteractive",
                 "model": "claude-opus-4-6",
-            }
-        )
-        + "\n"
+            },
+        ],
     )
 
     opts = _make_opts()
@@ -213,19 +206,17 @@ def test_resolve_latest_conversation_args_resumes_latest(
 ) -> None:
     host, agent = local_host_and_agent
 
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    conv_dir = agent_state_dir / "events" / "conversations"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-    (conv_dir / "events.jsonl").write_text(
-        json.dumps(
+    create_conversation_events(
+        host,
+        agent,
+        [
             {
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-abc",
                 "model": "claude-opus-4-6",
-            }
-        )
-        + "\n"
+            },
+        ],
     )
 
     result = _resolve_latest_conversation_args(agent, host)

@@ -1,6 +1,5 @@
 """Unit tests for the mng-changeling-chat API module."""
 
-import json
 import shlex
 from datetime import datetime
 from datetime import timezone
@@ -22,6 +21,8 @@ from imbue.mng_changeling_chat.api import _build_remote_chat_script
 from imbue.mng_changeling_chat.api import get_latest_conversation_id
 from imbue.mng_changeling_chat.api import list_conversations_on_agent
 from imbue.mng_changeling_chat.conftest import _TestAgent
+from imbue.mng_changeling_chat.conftest import create_conversation_events
+from imbue.mng_changeling_chat.conftest import create_message_events
 
 # =========================================================================
 # Tests for _build_chat_script_path
@@ -115,38 +116,6 @@ def test_build_conversation_event_paths(
 # =========================================================================
 
 
-def _create_conversation_events(
-    host: Host,
-    agent: _TestAgent,
-    conversations: list[dict[str, str]],
-) -> None:
-    """Create conversation event files on the host for testing."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    conv_dir = agent_state_dir / "events" / "conversations"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-
-    lines = []
-    for conv in conversations:
-        lines.append(json.dumps(conv))
-    (conv_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
-
-
-def _create_message_events(
-    host: Host,
-    agent: _TestAgent,
-    messages: list[dict[str, str]],
-) -> None:
-    """Create message event files on the host for testing."""
-    agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    msg_dir = agent_state_dir / "events" / "messages"
-    msg_dir.mkdir(parents=True, exist_ok=True)
-
-    lines = []
-    for msg in messages:
-        lines.append(json.dumps(msg))
-    (msg_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
-
-
 def test_list_conversations_returns_empty_when_no_event_files(
     local_host_and_agent: tuple[Host, _TestAgent],
 ) -> None:
@@ -162,7 +131,7 @@ def test_list_conversations_returns_conversations_sorted_by_updated_at(
 ) -> None:
     host, agent = local_host_and_agent
 
-    _create_conversation_events(
+    create_conversation_events(
         host,
         agent,
         [
@@ -195,7 +164,7 @@ def test_list_conversations_uses_message_timestamps_for_updated_at(
 ) -> None:
     host, agent = local_host_and_agent
 
-    _create_conversation_events(
+    create_conversation_events(
         host,
         agent,
         [
@@ -214,7 +183,7 @@ def test_list_conversations_uses_message_timestamps_for_updated_at(
         ],
     )
 
-    _create_message_events(
+    create_message_events(
         host,
         agent,
         [
@@ -265,7 +234,7 @@ def test_get_latest_conversation_id_returns_most_recent(
 ) -> None:
     host, agent = local_host_and_agent
 
-    _create_conversation_events(
+    create_conversation_events(
         host,
         agent,
         [

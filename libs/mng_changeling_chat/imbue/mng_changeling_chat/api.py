@@ -68,20 +68,20 @@ def _build_conversation_event_paths(
 
 # Remote Python script that reads conversation and message event files and outputs
 # a JSON array of conversation info objects sorted by updated_at descending.
-# Parameterized by {conv_file} and {msg_file} paths.
-_LIST_CONVERSATIONS_SCRIPT_TEMPLATE: str = """
+# Receives paths as sys.argv[1] (conversations) and sys.argv[2] (messages).
+_LIST_CONVERSATIONS_SCRIPT: str = """
 import json, sys
 from pathlib import Path
 
-conv_file = Path('{conv_file}')
-msg_file = Path('{msg_file}')
+conv_file = Path(sys.argv[1])
+msg_file = Path(sys.argv[2])
 
 if not conv_file.exists():
     print('[]')
     sys.exit(0)
 
-convs = {{}}
-for line in conv_file.read_text().splitlines():
+convs = {}
+for line_idx, line in enumerate(conv_file.read_text().splitlines(), 1):
     line = line.strip()
     if not line:
         continue
@@ -89,19 +89,20 @@ for line in conv_file.read_text().splitlines():
         event = json.loads(line)
         cid = event['conversation_id']
         convs[cid] = event
-    except (json.JSONDecodeError, KeyError):
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f'WARNING: skipping malformed conversation event line {line_idx}: {e}', file=sys.stderr)
         continue
 
 if not convs:
     print('[]')
     sys.exit(0)
 
-updated_at = {{}}
+updated_at = {}
 for cid, event in convs.items():
     updated_at[cid] = event.get('timestamp', '')
 
 if msg_file.exists():
-    for line in msg_file.read_text().splitlines():
+    for line_idx, line in enumerate(msg_file.read_text().splitlines(), 1):
         line = line.strip()
         if not line:
             continue
@@ -112,17 +113,18 @@ if msg_file.exists():
             if cid in convs and ts:
                 if cid not in updated_at or ts > updated_at[cid]:
                     updated_at[cid] = ts
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f'WARNING: skipping malformed message event line {line_idx}: {e}', file=sys.stderr)
             continue
 
 result = []
 for cid, event in convs.items():
-    result.append({{
+    result.append({
         'conversation_id': cid,
         'model': event.get('model', '?'),
         'created_at': event.get('timestamp', '?'),
         'updated_at': updated_at.get(cid, event.get('timestamp', '?')),
-    }})
+    })
 
 result.sort(key=lambda r: r['updated_at'], reverse=True)
 print(json.dumps(result))
@@ -210,13 +212,16 @@ def list_conversations_on_agent(
     """
     conversations_path, messages_path = _build_conversation_event_paths(agent, host)
 
-    read_script = _LIST_CONVERSATIONS_SCRIPT_TEMPLATE.format(
-        conv_file=conversations_path,
-        msg_file=messages_path,
+    # Pass paths as command-line arguments (not string interpolation) to avoid
+    # injection issues from paths containing special characters
+    command = (
+        f"python3 -c {shlex.quote(_LIST_CONVERSATIONS_SCRIPT)}"
+        f" {shlex.quote(str(conversations_path))}"
+        f" {shlex.quote(str(messages_path))}"
     )
 
     result = host.execute_command(
-        f"python3 -c {shlex.quote(read_script)}",
+        command,
         cwd=agent.work_dir,
     )
 

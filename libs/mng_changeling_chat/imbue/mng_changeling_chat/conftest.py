@@ -4,6 +4,7 @@ Uses shared plugin test fixtures from mng for common setup (plugin manager,
 environment isolation, git repos, etc.) and defines chat-specific fixtures below.
 """
 
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -61,3 +62,35 @@ def local_host_and_agent(
         host=host,
     )
     return host, agent
+
+
+def create_conversation_events(
+    host: Host,
+    agent: _TestAgent,
+    conversations: list[dict[str, str]],
+) -> None:
+    """Create conversation event files on the host for testing."""
+    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    conv_dir = agent_state_dir / "events" / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = []
+    for conv in conversations:
+        lines.append(json.dumps(conv))
+    (conv_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def create_message_events(
+    host: Host,
+    agent: _TestAgent,
+    messages: list[dict[str, str]],
+) -> None:
+    """Create message event files on the host for testing."""
+    agent_state_dir = host.host_dir / "agents" / str(agent.id)
+    msg_dir = agent_state_dir / "events" / "messages"
+    msg_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = []
+    for msg in messages:
+        lines.append(json.dumps(msg))
+    (msg_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
