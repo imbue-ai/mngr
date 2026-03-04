@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.agents.base_agent import BaseAgent
+from imbue.mng.agents.base_agent import _check_paste_content
+from imbue.mng.agents.base_agent import _normalize_for_match
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
@@ -350,11 +352,18 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_uses_marker_based_send_message_returns_false_by_default(
+def test_uses_paste_detection_send_returns_false_by_default(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that uses_marker_based_send_message returns False by default."""
-    assert test_agent.uses_marker_based_send_message() is False
+    """Test that uses_paste_detection_send returns False by default."""
+    assert test_agent.uses_paste_detection_send() is False
+
+
+def test_tmux_target_appends_window_zero(
+    test_agent: BaseAgent,
+) -> None:
+    """tmux_target should return session_name:0 to always target window 0."""
+    assert test_agent.tmux_target == f"{test_agent.session_name}:0"
 
 
 def test_get_tui_ready_indicator_returns_none_by_default(
@@ -364,53 +373,34 @@ def test_get_tui_ready_indicator_returns_none_by_default(
     assert test_agent.get_tui_ready_indicator() is None
 
 
-@pytest.mark.tmux
-def test_send_backspace_with_noop_sends_keys_to_tmux(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that _send_backspace_with_noop sends backspaces and noop keys to tmux session."""
-    session_name = f"{test_agent.mng_ctx.config.prefix}{test_agent.name}"
+def test_normalize_for_match_strips_non_alnum_and_lowercases() -> None:
+    """_normalize_for_match should strip non-alphanumeric chars and lowercase."""
+    assert _normalize_for_match("Hello, World!") == "helloworld"
+    assert _normalize_for_match("foo-bar_baz 123") == "foobarbaz123"
+    assert _normalize_for_match("") == ""
+    assert _normalize_for_match("  \n\t  ") == ""
 
-    # Create a tmux session with some text
-    test_agent.host.execute_command(
-        f"tmux new-session -d -s '{session_name}' 'cat'",
-        timeout_seconds=5.0,
-    )
 
-    try:
-        # Wait for cat to start
-        wait_for(
-            lambda: test_agent.host.execute_command(
-                f"tmux list-panes -t '{session_name}' -F '#{{pane_current_command}}'"
-            ).stdout.strip()
-            == "cat",
-            timeout=5.0,
-            error_message="cat process not ready",
-        )
+def test_check_paste_content_detects_paste_indicator() -> None:
+    """_check_paste_content returns True when tmux paste indicator is present."""
+    assert _check_paste_content("some text\n[Pasted text 123 chars]\nmore text", "anything") is True
 
-        # Send some text
-        test_agent.host.execute_command(f"tmux send-keys -t '{session_name}' -l 'hello'")
 
-        # Wait for text to appear
-        wait_for(
-            lambda: "hello" in (test_agent._capture_pane_content(session_name) or ""),
-            timeout=5.0,
-            error_message="text not visible in pane",
-        )
+def test_check_paste_content_detects_fuzzy_content_match() -> None:
+    """_check_paste_content returns True when normalized message tail is found in pane."""
+    pane = "prompt> hello world this is a test message"
+    assert _check_paste_content(pane, "Hello, World! This is a test message") is True
 
-        # Now send backspaces with noop - should remove some characters
-        test_agent._send_backspace_with_noop(session_name, count=2)
 
-        # Verify backspaces were processed (last 2 chars should be removed)
-        content = test_agent._capture_pane_content(session_name)
-        assert content is not None
-        # After backspaces, "hello" should become "hel"
-        assert "hel" in content
-    finally:
-        test_agent.host.execute_command(
-            f"tmux kill-session -t '{session_name}' 2>/dev/null",
-            timeout_seconds=5.0,
-        )
+def test_check_paste_content_returns_false_when_no_match() -> None:
+    """_check_paste_content returns False when neither paste indicator nor content match."""
+    pane = "prompt> totally different content"
+    assert _check_paste_content(pane, "Hello, World! This is a test message") is False
+
+
+def test_check_paste_content_handles_empty_message() -> None:
+    """_check_paste_content returns True for empty messages (nothing to verify)."""
+    assert _check_paste_content("some content", "") is True
 
 
 @pytest.mark.tmux
@@ -419,6 +409,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
 ) -> None:
     """Test that _send_enter_and_wait_for_signal returns True when tmux wait-for signal is received."""
     session_name = f"{test_agent.mng_ctx.config.prefix}{test_agent.name}"
+    tmux_target = f"{session_name}:0"
     wait_channel = f"mng-submit-{session_name}"
 
     # Create a tmux session
@@ -436,7 +427,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
         )
 
         # Call the method - it should receive the signal and return True
-        result = test_agent._send_enter_and_wait_for_signal(session_name, wait_channel)
+        result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
         assert result is True
     finally:
         test_agent.host.execute_command(
@@ -453,6 +444,7 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
     # Use a shorter timeout so the test doesn't wait the full 2 seconds
     test_agent.enter_submission_timeout_seconds = 0.2
     session_name = f"{test_agent.mng_ctx.config.prefix}{test_agent.name}"
+    tmux_target = f"{session_name}:0"
     # Use a unique channel that won't be signaled
     wait_channel = f"mng-submit-never-signaled-{session_name}"
 
@@ -464,7 +456,7 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
 
     try:
         # Call the method without signaling - should timeout and return False
-        result = test_agent._send_enter_and_wait_for_signal(session_name, wait_channel)
+        result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
         assert result is False
     finally:
         test_agent.host.execute_command(

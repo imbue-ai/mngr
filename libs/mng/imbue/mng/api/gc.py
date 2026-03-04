@@ -15,6 +15,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.data_types import GcResult
+from imbue.mng.api.discovery_events import emit_host_destroyed
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
@@ -179,7 +180,8 @@ def gc_machines(
                             seconds_since_stopped is not None
                             and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
                         ):
-                            if len(host.discover_agents()) == 0 or host.get_state() in (
+                            agent_refs = host.discover_agents()
+                            if len(agent_refs) == 0 or host.get_state() in (
                                 HostState.FAILED,
                                 HostState.CRASHED,
                                 HostState.DESTROYED,
@@ -191,6 +193,11 @@ def gc_machines(
                                     #  someone else starts it, you might have a host that is running but is untracked
                                     #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
                                     provider.delete_host(host)
+                                    emit_host_destroyed(
+                                        mng_ctx.config,
+                                        host_ref.host_id,
+                                        [ref.agent_id for ref in agent_refs],
+                                    )
                                 result.machines_deleted.append(host_ref)
                         # no matter what we're done--the rest of the logic only applies to online hosts
                         continue
@@ -218,6 +225,7 @@ def gc_machines(
                         mng_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
                         provider.destroy_host(host_to_destroy)
                         mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
+                        emit_host_destroyed(mng_ctx.config, host_ref.host_id, [])
 
                     result.machines_destroyed.append(host_ref)
 

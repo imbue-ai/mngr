@@ -56,7 +56,15 @@ mng_list_warn_threshold_seconds = 15    # Warning threshold for mng list command
 [watchers]
 conversation_poll_interval_seconds = 5  # Poll interval for conversation watcher
 event_poll_interval_seconds = 3         # Poll interval for event watcher
-watched_event_sources = ["messages", "scheduled", "mng_agents", "stop"]
+transcript_poll_interval_seconds = 5    # Poll interval for transcript watcher
+# CEL filter for the event watcher (passed to 'mng events --filter').
+# Default: exclude transcript, monitor sources (to avoid feedback loops)
+# and log events that aren't ERROR/WARNING.
+event_cel_filter = 'source != "claude_transcript" && source != "common_transcript" && source != "monitor" && (!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING")))'
+event_burst_size = 5                    # Messages allowed in initial burst before rate limiting
+max_event_messages_per_minute = 10      # Sustained rate limit for event delivery
+high_rate_warning_threshold_per_minute = 8  # Include rate warning when messages/min exceeds this
+max_delivery_retries = 3                # Consecutive failures before notifying user
 
 [provisioning]
 fs_hard_timeout_seconds = 16.0          # Hard timeout for filesystem operations

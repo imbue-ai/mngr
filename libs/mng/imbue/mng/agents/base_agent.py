@@ -1,4 +1,5 @@
 import json
+import re
 import shlex
 import time
 from datetime import datetime
@@ -10,7 +11,6 @@ from typing import Final
 from typing import Mapping
 from typing import NoReturn
 from typing import Sequence
-from uuid import uuid4
 
 from loguru import logger
 from pydantic import Field
@@ -33,7 +33,7 @@ from imbue.mng.primitives import Permission
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.polling import poll_until
 
-# Constants for send_message marker-based synchronization
+# Constants for send_message paste-detection synchronization
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 10.0
 _TUI_READY_TIMEOUT_SECONDS: Final[float] = 10.0
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -41,6 +41,33 @@ _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 # Default timeout for signal-based synchronization
 # Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
 _DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# Compiled once for _normalize_for_match performance
+_NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
+
+
+def _normalize_for_match(text: str) -> str:
+    """Strip non-alphanumeric characters and lowercase for fuzzy matching."""
+    return _NON_ALNUM_RE.sub("", text.lower())
+
+
+def _check_paste_content(pane_content: str, message: str) -> bool:
+    """Check whether pasted message content is visible in pane text.
+
+    Returns True if the tmux paste indicator is present OR if a
+    normalized tail of the message matches the normalized pane content.
+    """
+    if "[Pasted text " in pane_content:
+        return True
+
+    normalized_pane = _normalize_for_match(pane_content)
+    normalized_msg = _normalize_for_match(message)
+
+    probe_length = min(60, len(normalized_msg))
+    if probe_length == 0:
+        return True
+    probe = normalized_msg[-probe_length:]
+    return probe in normalized_pane
 
 
 class BaseAgent(AgentInterface):
@@ -236,31 +263,42 @@ class BaseAgent(AgentInterface):
     def session_name(self) -> str:
         return f"{self.mng_ctx.config.prefix}{self.name}"
 
+    @property
+    def tmux_target(self) -> str:
+        """Tmux target for the agent's primary window (window 0).
+
+        Agents always run in window 0 of their tmux session. Using the bare
+        session name as a tmux target selects the *currently active* window,
+        which is wrong when additional windows exist (e.g., watchers, ttyd).
+        """
+        return f"{self.session_name}:0"
+
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
 
         For agents that echo input to the terminal (like Claude Code), uses a
-        marker-based synchronization approach to ensure the message is fully
-        received before sending Enter. This avoids race conditions where Enter
-        could be interpreted as a literal newline instead of a submit action.
+        paste-detection approach to ensure the message is fully received before
+        sending Enter. This avoids race conditions where Enter could be
+        interpreted as a literal newline instead of a submit action.
 
-        Subclasses can enable this by overriding uses_marker_based_send_message().
+        Subclasses can enable this by overriding uses_paste_detection_send().
 
         Before sending, runs preflight checks (e.g., dialog detection) that
         subclasses can customize by overriding _preflight_send_message().
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
-            self._preflight_send_message(self.session_name)
+            self._preflight_send_message(self.tmux_target)
 
-            if self.uses_marker_based_send_message():
-                self._send_message_with_marker(self.session_name, message)
+            if self.uses_paste_detection_send():
+                self._send_message_with_paste_detection(self.tmux_target, message)
             else:
-                self._send_message_simple(self.session_name, message)
+                self._send_message_simple(self.tmux_target, message)
 
-    def uses_marker_based_send_message(self) -> bool:
-        """Return True to use marker-based synchronization for send_message.
+    def uses_paste_detection_send(self) -> bool:
+        """Return True to use paste-detection synchronization for send_message.
 
-        Marker-based send requires the application to echo input to the terminal.
+        When enabled, send_message sends text without a trailing newline, waits
+        for paste detection or fuzzy content match on the pane, then sends Enter.
         This is useful for interactive agents like Claude Code where sending Enter
         immediately after the message text can cause race conditions.
 
@@ -279,7 +317,7 @@ class BaseAgent(AgentInterface):
         """
         return None
 
-    def _preflight_send_message(self, session_name: str) -> None:
+    def _preflight_send_message(self, tmux_target: str) -> None:
         """Run preflight checks before sending a message.
 
         Called at the start of send_message. Default is a no-op.
@@ -287,7 +325,7 @@ class BaseAgent(AgentInterface):
         and raise an appropriate error to abort the send.
         """
 
-    def _raise_send_timeout(self, session_name: str, timeout_reason: str) -> NoReturn:
+    def _raise_send_timeout(self, tmux_target: str, timeout_reason: str) -> NoReturn:
         """Raise a SendMessageError for a send timeout."""
         raise SendMessageError(str(self.name), timeout_reason)
 
@@ -309,100 +347,60 @@ class BaseAgent(AgentInterface):
             # Wait for TUI to be ready if an indicator is configured
             tui_indicator = self.get_tui_ready_indicator()
             if tui_indicator is not None:
-                self._wait_for_tui_ready(self.session_name, tui_indicator)
+                self._wait_for_tui_ready(self.tmux_target, tui_indicator)
 
     def capture_pane_content(self) -> str | None:
         """Capture the current tmux pane content for this agent."""
-        return self._capture_pane_content(self.session_name)
+        return self._capture_pane_content(self.tmux_target)
 
-    def _send_message_simple(self, session_name: str, message: str) -> None:
-        """Send a message without marker-based synchronization."""
-        send_msg_cmd = f"tmux send-keys -t '{session_name}' -l {shlex.quote(message)}"
+    def _send_message_simple(self, tmux_target: str, message: str) -> None:
+        """Send a message directly without waiting for paste confirmation."""
+        send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
         result = self.host.execute_command(send_msg_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
 
-        send_enter_cmd = f"tmux send-keys -t '{session_name}' Enter"
+        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
         result = self.host.execute_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
 
-    def _send_message_with_marker(self, session_name: str, message: str) -> None:
-        """Send a message using marker-based synchronization.
+    def _send_message_with_paste_detection(self, tmux_target: str, message: str) -> None:
+        """Send a message using paste-detection synchronization.
 
-        This approach appends a unique marker to the message, waits for it to appear
-        in the terminal, removes it with backspaces, and then sends Enter. This ensures
-        the input handler has fully processed the message text before submitting.
+        Sends the message text WITHOUT a trailing newline, then waits for
+        evidence that the text was received before pressing Enter. Evidence
+        is either:
 
-        On failure (e.g. marker visibility or submission timeout), partial text
-        including the marker may remain in the input field. We intentionally do not
-        attempt cleanup because deleting text risks accidentally removing part of
-        the user's message -- leaving stale marker text is safer than data loss.
+        1. The tmux paste indicator (``[Pasted text ``) visible on screen, or
+        2. A fuzzy content match: the last chunk of the message (stripped to
+           alphanumeric, lowercased) appears in the pane content (similarly
+           treated).
+
+        Once the message is confirmed on screen, sends Enter via
+        ``_send_enter_and_wait`` for submission signal synchronization.
         """
-
-        # Generate a unique marker to detect when the message has been fully received
-        # Using just the UUID without newlines - newlines are harder to reliably delete
-        # with backspace in some input areas
-        marker = uuid4().hex
-        message_with_marker = message + marker
-
-        # Send the message with marker
-        send_msg_cmd = f"tmux send-keys -t '{session_name}' -l {shlex.quote(message_with_marker)}"
+        # Send keys WITHOUT a trailing newline (so it probably does not submit)
+        send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
         result = self.host.execute_command(send_msg_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
 
-        # Wait for the marker to appear in the pane (confirms message was fully received)
-        self._wait_for_marker_visible(session_name, marker)
-
-        # Remove the marker by sending backspaces (32 hex chars for UUID)
-        # Send backspaces and noop keys to clean up the marker
-        self._send_backspace_with_noop(session_name, count=len(marker))
-
-        # Verify the marker is gone and the message ends correctly
-        # Use the tail of the last line of the message as the expected ending, since
-        # only that portion is visible on the current input line in the tmux pane.
-        last_line = message.rsplit("\n", 1)[-1]
-        expected_ending = last_line[-32:] if len(last_line) > 32 else last_line
-        self._wait_for_message_ending(session_name, marker, expected_ending)
+        # Wait for the pasted content to appear on screen
+        self._wait_for_paste_visible(tmux_target, message)
 
         # Send Enter and wait for submission signal
-        self._send_enter_and_wait(session_name)
+        self._send_enter_and_wait(tmux_target)
 
-    def _send_backspace_with_noop(self, session_name: str, count: int = 1) -> None:
-        """Send backspace(s) followed by noop keys to reset input handler state.
-
-        This helper sends the specified number of backspaces, then sends a no-op
-        key sequence (Left then Right) to reset state.
-
-        The noop keys are necessary because Claude Code's input handler can get into
-        a state after backspaces where Enter is interpreted as a literal newline.
-        Sending any key (even a no-op) before Enter fixes this.
-        """
-        if count > 0:
-            backspace_keys = " ".join(["BSpace"] * count)
-            backspace_cmd = f"tmux send-keys -t '{session_name}' {backspace_keys}"
-            result = self.host.execute_command(backspace_cmd)
-            if not result.success:
-                raise SendMessageError(
-                    str(self.name), f"tmux send-keys BSpace failed: {result.stderr or result.stdout}"
-                )
-
-        # Send a no-op key sequence (Left then Right) to reset input handler state
-        noop_cmd = f"tmux send-keys -t '{session_name}' Left Right"
-        result = self.host.execute_command(noop_cmd)
-        if not result.success:
-            logger.warning("Failed to send noop keys: {}", result.stderr or result.stdout)
-
-    def _capture_pane_content(self, session_name: str) -> str | None:
+    def _capture_pane_content(self, tmux_target: str) -> str | None:
         """Capture the current pane content, returning None on failure."""
         return capture_tmux_pane_content(
             self.host,
-            session_name,
+            tmux_target,
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
         )
 
-    def _wait_for_tui_ready(self, session_name: str, indicator: str) -> None:
+    def _wait_for_tui_ready(self, tmux_target: str, indicator: str) -> None:
         """Wait until the TUI is ready by looking for the indicator string in the pane.
 
         This ensures the application's UI is fully rendered before we send input.
@@ -411,10 +409,10 @@ class BaseAgent(AgentInterface):
         """
         with log_span("Waiting for TUI to be ready (looking for: {})", indicator):
             if not poll_until(
-                lambda: self._check_pane_contains(session_name, indicator),
+                lambda: self._check_pane_contains(tmux_target, indicator),
                 timeout=_TUI_READY_TIMEOUT_SECONDS,
             ):
-                pane_content = self._capture_pane_content(session_name)
+                pane_content = self._capture_pane_content(tmux_target)
                 if pane_content is not None:
                     logger.error(
                         "TUI ready timeout -- remote pane content:\n{}",
@@ -428,65 +426,59 @@ class BaseAgent(AgentInterface):
                     + (f"\nPane content:\n{pane_content}" if pane_content else ""),
                 )
 
-    def _wait_for_marker_visible(self, session_name: str, marker: str) -> None:
-        """Wait until the marker is visible in the tmux pane.
+    def _wait_for_paste_visible(self, tmux_target: str, message: str) -> None:
+        """Wait until pasted content is confirmed visible in the tmux pane.
 
-        Note: We check if marker is IN the pane, not at the end, because
-        Claude Code has a status line at the bottom that appears after the input area.
+        Checks two conditions (either is sufficient):
+
+        1. The tmux paste indicator ``[Pasted text `` appears on screen.
+        2. A fuzzy content match: join all pane lines, strip to lowercase
+           alphanumeric, and check that the last chunk of the message
+           (similarly normalized) is present.
         """
-        with log_span("Waiting for marker: {}", marker):
+        with log_span("Waiting for pasted content to appear"):
             if not poll_until(
-                lambda: self._check_pane_contains(session_name, marker),
+                lambda: self._is_paste_visible(tmux_target, message),
                 timeout=_SEND_MESSAGE_TIMEOUT_SECONDS,
             ):
                 self._raise_send_timeout(
-                    session_name,
-                    f"Timeout waiting for message marker to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
+                    tmux_target,
+                    f"Timeout waiting for pasted content to appear (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
                 )
 
-    def _check_pane_contains(self, session_name: str, text: str) -> bool:
+    def _is_paste_visible(self, tmux_target: str, message: str) -> bool:
+        """Check whether the pasted message is visible in the pane.
+
+        Delegates to the pure ``_check_paste_content`` function after
+        capturing the pane. Returns False if the pane cannot be captured.
+        """
+        content = self._capture_pane_content(tmux_target)
+        if content is None:
+            return False
+        return _check_paste_content(content, message)
+
+    def _check_pane_contains(self, tmux_target: str, text: str) -> bool:
         """Check if the pane content contains the given text."""
-        content = self._capture_pane_content(session_name)
+        content = self._capture_pane_content(tmux_target)
         found = content is not None and text in content
         return found
 
-    def _wait_for_message_ending(self, session_name: str, marker: str, expected_ending: str) -> None:
-        """Wait until the marker is removed and the expected message ending is visible.
-
-        Note: We check if expected_ending is IN the pane, not at the end, because
-        Claude Code has a status line at the bottom that appears after the input area.
-        """
-        if not poll_until(
-            lambda: self._check_marker_removed_and_contains(session_name, marker, expected_ending),
-            timeout=_SEND_MESSAGE_TIMEOUT_SECONDS,
-        ):
-            self._raise_send_timeout(
-                session_name,
-                f"Timeout waiting for message to be ready for submission (waited {_SEND_MESSAGE_TIMEOUT_SECONDS:.1f}s)",
-            )
-        logger.trace("Verified marker removed and expected content visible in pane")
-
-    def _check_marker_removed_and_contains(self, session_name: str, marker: str, expected_ending: str) -> bool:
-        """Check if the marker is gone and pane contains expected content."""
-        content = self._capture_pane_content(session_name)
-        if content is None:
-            return False
-        marker_gone = marker not in content
-        contains_expected = expected_ending in content
-        return marker_gone and contains_expected
-
-    def _send_enter_and_wait(self, session_name: str) -> None:
+    def _send_enter_and_wait(self, tmux_target: str) -> None:
         """Send Enter to submit the message and wait for the submission signal.
 
         Uses tmux wait-for to detect when the UserPromptSubmit hook fires.
         Raises SendMessageError if the signal is not received within the timeout.
+
+        The wait_channel is derived from the pure session name (without window
+        suffix) because the UserPromptSubmit hook signals using ``#S`` which
+        is just the session name.
         """
-        wait_channel = f"mng-submit-{session_name}"
-        if self._send_enter_and_wait_for_signal(session_name, wait_channel):
+        wait_channel = f"mng-submit-{self.session_name}"
+        if self._send_enter_and_wait_for_signal(tmux_target, wait_channel):
             logger.debug("Message submitted successfully")
             return
 
-        pane_content = self._capture_pane_content(session_name)
+        pane_content = self._capture_pane_content(tmux_target)
         if pane_content is not None:
             logger.error(
                 "TUI send enter and wait timeout -- remote pane content:\n{}",
@@ -496,11 +488,11 @@ class BaseAgent(AgentInterface):
             logger.error("TUI send enter and wait timeout -- failed to capture remote pane content")
 
         self._raise_send_timeout(
-            session_name,
+            tmux_target,
             f"Timeout waiting for message submission signal (waited {self.enter_submission_timeout_seconds}s)",
         )
 
-    def _send_enter_and_wait_for_signal(self, session_name: str, wait_channel: str) -> bool:
+    def _send_enter_and_wait_for_signal(self, tmux_target: str, wait_channel: str) -> bool:
         """Send Enter and wait for the tmux wait-for signal from the hook.
 
         This starts waiting BEFORE sending Enter to avoid a race condition where
@@ -519,7 +511,7 @@ class BaseAgent(AgentInterface):
             f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '
             f'tmux send-keys -t "$1" Enter; '
             f"wait $W"
-            f"' {shlex.quote(wait_channel)} {shlex.quote(session_name)}"
+            f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
         start = time.time()
         result = self.host.execute_command(cmd, timeout_seconds=timeout_secs + 1)

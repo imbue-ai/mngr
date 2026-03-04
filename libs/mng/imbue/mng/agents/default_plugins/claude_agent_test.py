@@ -584,12 +584,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_uses_marker_based_send_message_returns_true(
+def test_uses_paste_detection_send_returns_true(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
 ) -> None:
-    """ClaudeAgent.uses_marker_based_send_message should return True."""
+    """ClaudeAgent.uses_paste_detection_send should return True."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
-    assert agent.uses_marker_based_send_message() is True
+    assert agent.uses_paste_detection_send() is True
 
 
 def test_configure_readiness_hooks_raises_when_not_gitignored(

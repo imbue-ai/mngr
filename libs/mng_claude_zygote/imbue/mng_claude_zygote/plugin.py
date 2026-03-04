@@ -177,6 +177,15 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
         provision_default_content(host, self.work_dir, provisioning)
         create_changeling_symlinks(host, self.work_dir, provisioning)
+
+        # Re-configure readiness hooks AFTER symlinks are created.
+        # create_changeling_symlinks replaces .claude/settings.local.json
+        # with a symlink to thinking/settings.json (via ln -sf), which
+        # destroys the hooks that ClaudeAgent.provision() wrote there.
+        # Re-running _configure_readiness_hooks writes the hooks through
+        # the symlink into thinking/settings.json.
+        self._configure_readiness_hooks(host)
+
         provision_changeling_scripts(host, provisioning)
         provision_llm_tools(host, provisioning)
 

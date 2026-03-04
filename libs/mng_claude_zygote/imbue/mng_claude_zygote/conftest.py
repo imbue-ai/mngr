@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import types
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
+from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
 
 register_plugin_test_fixtures(globals())
 
@@ -297,6 +299,37 @@ def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, 
                 (row_id, prompt, response, model, dt, cid),
             )
         conn.commit()
+
+
+class EventWatcherSubprocessCapture:
+    """Records calls to subprocess.run for assertion in event watcher tests."""
+
+    def __init__(self, *, returncode: int = 0, stderr: str = "") -> None:
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self._returncode = returncode
+        self._stderr = stderr
+
+    def run(self, cmd: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        self.calls.append((cmd, kwargs))
+        return types.SimpleNamespace(returncode=self._returncode, stdout="", stderr=self._stderr)
+
+
+@pytest.fixture()
+def mock_subprocess_success(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubprocessCapture:
+    """Replace event_watcher's subprocess with a recording stub (returncode=0)."""
+    capture = EventWatcherSubprocessCapture(returncode=0)
+    mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)
+    monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
+    return capture
+
+
+@pytest.fixture()
+def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubprocessCapture:
+    """Replace event_watcher's subprocess with a recording stub (returncode=1)."""
+    capture = EventWatcherSubprocessCapture(returncode=1, stderr="send failed")
+    mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)
+    monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
+    return capture
 
 
 def write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:

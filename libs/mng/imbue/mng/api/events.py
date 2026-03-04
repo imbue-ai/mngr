@@ -524,6 +524,12 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
 
     source = data.get("source", source_hint)
 
+    # Ensure source is always in data so CEL filters can reference it.
+    # Some event files omit 'source' from individual JSON lines since
+    # the source is implied by the file path; we backfill it here.
+    if "source" not in data:
+        data["source"] = source
+
     return EventRecord(
         raw_line=stripped,
         timestamp=timestamp,

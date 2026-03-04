@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
@@ -52,7 +53,7 @@ def test_event_envelope_is_frozen() -> None:
         event_id=_EID,
         source=_SRC,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         envelope.type = EventType("changed")  # type: ignore[misc]
 
 
@@ -169,5 +170,5 @@ def test_log_event_is_frozen() -> None:
         message="test",
         pid=PositiveInt(1),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         event.level = "INFO"  # type: ignore[misc]

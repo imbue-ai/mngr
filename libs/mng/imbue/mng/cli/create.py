@@ -44,7 +44,6 @@ from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import write_human_line
-from imbue.mng.config.completion_writer import add_agent_name_to_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import AgentNotFoundError
@@ -808,13 +807,6 @@ def _create_agent(
         is_work_dir_created = True
     else:
         is_work_dir_created = False
-
-    # Optimistically update tab completion cache so the new agent name is
-    # immediately available. Done before the background/sync fork since the
-    # name is already determined. If creation fails, the stale entry will be
-    # cleaned up on the next background refresh.
-    if agent_opts.name is not None:
-        add_agent_name_to_cache(agent_opts.name)
 
     # If --no-connect and --no-await-ready, run api_create in background
     # Note: --edit-message incompatibility is validated early (before editor creation) to avoid

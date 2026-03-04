@@ -6,6 +6,9 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mng.api.data_types import CleanupResult
 from imbue.mng.api.data_types import GcResourceTypes
+from imbue.mng.api.discovery_events import emit_agent_destroyed
+from imbue.mng.api.discovery_events import emit_discovery_events_for_host
+from imbue.mng.api.discovery_events import emit_host_destroyed
 from imbue.mng.api.gc import gc as api_gc
 from imbue.mng.api.list import list_agents
 from imbue.mng.api.providers import get_all_provider_instances
@@ -108,6 +111,8 @@ def _execute_destroy(
                                         mng_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
                                         result.destroyed_agents.append(agent_details.name)
                                         logger.debug("Destroyed agent: {}", agent_details.name)
+                                        emit_agent_destroyed(mng_ctx.config, agent_details.id, host_id)
+                                        emit_discovery_events_for_host(mng_ctx.config, online_host)
                                         break
                                 else:
                                     # Agent not found on host (likely already cleaned up)
@@ -131,6 +136,7 @@ def _execute_destroy(
                             for agent_details in host_agents:
                                 result.destroyed_agents.append(agent_details.name)
                                 logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
+                            emit_host_destroyed(mng_ctx.config, host_id, [ad.id for ad in host_agents])
                         except MngError as e:
                             error_msg = f"Error destroying offline host {host_id}: {e}"
                             logger.warning(error_msg)

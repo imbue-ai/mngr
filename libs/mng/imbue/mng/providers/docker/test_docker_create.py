@@ -3,33 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_short_random_string
-from imbue.mng.utils.testing import get_subprocess_test_env
 
 pytestmark = [pytest.mark.docker, pytest.mark.acceptance, pytest.mark.rsync]
-
-
-@pytest.fixture
-def docker_subprocess_env(tmp_path: Path) -> dict[str, str]:
-    """Create a subprocess test environment for Docker tests."""
-    host_dir = tmp_path / "docker-test-hosts"
-    host_dir.mkdir()
-    prefix = f"{generate_test_environment_name()}-"
-    return get_subprocess_test_env(
-        root_name="mng-docker-test",
-        prefix=prefix,
-        host_dir=host_dir,
-    )
-
-
-@pytest.fixture
-def temp_source_dir(tmp_path: Path) -> Path:
-    """Create a temporary source directory for tests."""
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    (source_dir / "test.txt").write_text("test content")
-    return source_dir
 
 
 @pytest.mark.timeout(120)

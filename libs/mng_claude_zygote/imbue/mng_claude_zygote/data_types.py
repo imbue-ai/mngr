@@ -242,7 +242,35 @@ class WatcherSettings(FrozenModel):
     )
     watched_event_sources: tuple[str, ...] = Field(
         default=("messages", "scheduled", "mng_agents", "stop"),
-        description="Event sources monitored by the event watcher.",
+        description="Event sources monitored by the event watcher. "
+        "Deprecated: use event_cel_filter instead for CEL-based filtering via mng events.",
+    )
+    event_cel_filter: str = Field(
+        default=(
+            'source != "claude_transcript" && source != "common_transcript" && source != "monitor"'
+            " && ("
+            '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
+            ")"
+        ),
+        description="CEL filter expression passed to 'mng events --filter'. "
+        "Controls which event sources the event watcher receives.",
+    )
+    event_burst_size: PositiveInt = Field(
+        default=PositiveInt(5),
+        description="Number of messages allowed in the initial burst before rate limiting kicks in.",
+    )
+    max_event_messages_per_minute: PositiveInt = Field(
+        default=PositiveInt(10),
+        description="Maximum event messages delivered to the agent per minute (sustained rate).",
+    )
+    high_rate_warning_threshold_per_minute: PositiveInt = Field(
+        default=PositiveInt(8),
+        description="When messages per minute exceeds this, include a rate warning in the delivery envelope.",
+    )
+    max_delivery_retries: PositiveInt = Field(
+        default=PositiveInt(3),
+        description="Maximum consecutive delivery failures before notifying the user. "
+        "Uses exponential backoff between retries.",
     )
 
 

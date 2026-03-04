@@ -6,7 +6,6 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 from pydantic import ConfigDict
-from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
@@ -36,6 +35,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import CleanupAction
@@ -545,16 +545,14 @@ def _run_cleanup_selector(agents: list[AgentDetails], action: CleanupAction) -> 
 
     input_handler = _CleanupInputHandler(state=state)
 
-    screen = Screen()
-    screen.tty_signal_keys(intr="undefined")
-
-    loop = MainLoop(
-        frame,
-        palette=palette,
-        unhandled_input=input_handler,
-        screen=screen,
-    )
-    loop.run()
+    with create_urwid_screen_preserving_terminal() as screen:
+        loop = MainLoop(
+            frame,
+            palette=palette,
+            unhandled_input=input_handler,
+            screen=screen,
+        )
+        loop.run()
 
     if state.result is None:
         return []

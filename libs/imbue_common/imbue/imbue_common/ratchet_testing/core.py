@@ -307,21 +307,6 @@ def get_ratchet_failures(
     return tuple(sorted_chunks)
 
 
-def clear_ratchet_caches() -> None:
-    """Clear all LRU caches used by ratchet testing to free memory.
-
-    Call this after all ratchet tests have completed to release cached file contents,
-    AST trees, and file listings. This prevents the ratchet test worker from holding
-    large amounts of memory that could contribute to resource pressure when the worker
-    runs subsequent non-ratchet tests.
-    """
-    _get_all_files_with_extension.cache_clear()
-    _read_file_contents.cache_clear()
-    _parse_file_ast.cache_clear()
-    _get_ast_nodes_by_type.cache_clear()
-    _get_file_blame_dates.cache_clear()
-
-
 def _resolve_blame_dates(
     chunks: tuple[RatchetMatchChunk, ...],
 ) -> tuple[DatedRatchetMatchChunk, ...]:

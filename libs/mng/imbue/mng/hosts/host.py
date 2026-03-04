@@ -72,6 +72,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.primitives import default_branch_name
+from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng.utils.git_utils import get_git_author_info
@@ -1584,25 +1585,10 @@ class Host(BaseHost, OnlineHostInterface):
         logger.debug("Wrote env vars", count=len(env_vars), path=str(env_path))
 
     def _build_source_env_commands(self, agent: AgentInterface) -> list[str]:
-        """Build shell commands that source host and agent env files.
-
-        Returns a list of shell commands that:
-        1. Set 'set -a' to auto-export all sourced variables
-        2. Source host env if it exists (host env first)
-        3. Source agent env if it exists (agent can override host)
-        4. Restore with 'set +a'
-
-        The caller is responsible for joining these appropriately.
-        """
+        """Build shell commands that source host and agent env files."""
         host_env_path = self.host_dir / "env"
         agent_env_path = self.get_agent_env_path(agent)
-
-        return [
-            "set -a",
-            f"[ -f {shlex.quote(str(host_env_path))} ] && . {shlex.quote(str(host_env_path))} || true",
-            f"[ -f {shlex.quote(str(agent_env_path))} ] && . {shlex.quote(str(agent_env_path))} || true",
-            "set +a",
-        ]
+        return build_source_env_shell_commands(host_env_path, agent_env_path)
 
     def _build_source_env_prefix(self, agent: AgentInterface) -> str:
         """Build a shell prefix that sources host and agent env files if they exist."""

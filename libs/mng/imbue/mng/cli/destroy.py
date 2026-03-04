@@ -12,6 +12,9 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discovery_events import emit_agent_destroyed
+from imbue.mng.api.discovery_events import emit_discovery_events_for_host
+from imbue.mng.api.discovery_events import emit_host_destroyed
 from imbue.mng.api.gc import gc as api_gc
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
@@ -35,6 +38,7 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
@@ -52,6 +56,7 @@ class _OfflineHostToDestroy(FrozenModel):
     host: HostInterface = Field(description="The offline host to destroy")
     provider: ProviderInstanceInterface = Field(description="The provider instance for this host")
     agent_names: list[AgentName] = Field(description="Names of agents on this host targeted for destruction")
+    agent_ids: list[AgentId] = Field(description="IDs of agents on this host targeted for destruction")
 
 
 class _DestroyTargets(FrozenModel):
@@ -306,6 +311,10 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             destroyed_agents.append(agent.name)
             _output(f"Destroyed agent: {agent.name}", output_opts)
 
+            # Emit agent_destroyed event, then re-emit remaining host state
+            emit_agent_destroyed(mng_ctx.config, agent.id, host.id)
+            emit_discovery_events_for_host(mng_ctx.config, host)
+
         except MngError as e:
             _output(f"Error destroying agent {agent.name}: {e}", output_opts)
 
@@ -319,6 +328,9 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             destroyed_agents.extend(offline.agent_names)
             for name in offline.agent_names:
                 _output(f"Destroyed agent: {name} (via host destruction)", output_opts)
+
+            # Emit host_destroyed event with all agent IDs
+            emit_host_destroyed(mng_ctx.config, offline.host.id, offline.agent_ids)
         except MngError as e:
             _output(f"Error destroying offline host: {e}", output_opts)
 
@@ -472,6 +484,7 @@ def _handle_offline_or_unreachable_host(
                 host=offline_host,
                 provider=provider,
                 agent_names=[ref.agent_name for ref in all_agent_refs_on_host],
+                agent_ids=[ref.agent_id for ref in all_agent_refs_on_host],
             )
         )
         seen_offline_hosts.add(host_id_str)

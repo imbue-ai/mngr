@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
@@ -7,6 +9,7 @@ from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.agent import AgentInterface
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import DiscoveredHost
@@ -57,16 +60,24 @@ def select_agent_interactively_with_host(
     mng_ctx: MngContext,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
+    agent_filter: Callable[[AgentDetails], bool] | None = None,
+    no_agents_message: str = "No agents found",
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Show interactive UI to select an agent.
+
+    When agent_filter is provided, only agents matching the predicate are shown
+    in the interactive selector.
 
     Returns tuple of (agent, host) or None if user quit without selecting.
     """
     list_result = list_agents(mng_ctx, is_streaming=False)
-    if not list_result.agents:
-        raise UserInputError("No agents found")
+    agents = list_result.agents
+    if agent_filter is not None:
+        agents = [a for a in agents if agent_filter(a)]
+    if not agents:
+        raise UserInputError(no_agents_message)
 
-    selected = select_agent_interactively(list_result.agents)
+    selected = select_agent_interactively(agents)
     if selected is None:
         return None
 
@@ -128,8 +139,13 @@ def find_agent_for_command(
     host_filter: str | None,
     is_start_desired: bool = False,
     skip_agent_state_check: bool = False,
+    agent_filter: Callable[[AgentDetails], bool] | None = None,
+    no_agents_message: str = "No agents found",
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Find an agent by identifier, or interactively if no identifier given.
+
+    When agent_filter is provided and selection is interactive, only agents
+    matching the predicate are shown in the selector.
 
     Returns (agent, host) tuple, or None if the user cancelled interactive selection.
     Raises UserInputError if no agent specified and not running in interactive mode.
@@ -154,6 +170,8 @@ def find_agent_for_command(
         mng_ctx,
         is_start_desired=is_start_desired,
         skip_agent_state_check=skip_agent_state_check,
+        agent_filter=agent_filter,
+        no_agents_message=no_agents_message,
     )
     if result is None:
         return None

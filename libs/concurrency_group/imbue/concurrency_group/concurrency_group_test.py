@@ -127,7 +127,7 @@ def test_failed_threads_raise_when_probed() -> None:
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer") as cg:
-            thread = cg.start_new_thread(target=_raise_intentional_error)
+            cg.start_new_thread(target=_raise_intentional_error)
             cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
             i += 1
     assert exception_info.value.only_exception_is_instance_of(_IntentionalTestError)
@@ -139,7 +139,7 @@ def test_failed_threads_raise_when_exiting() -> None:
     i = 0
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer") as cg:
-            thread = cg.start_new_thread(target=_raise_intentional_error)
+            cg.start_new_thread(target=_raise_intentional_error)
             i += 1
     assert exception_info.value.only_exception_is_instance_of(_IntentionalTestError)
     assert i == 1
@@ -148,14 +148,14 @@ def test_failed_threads_raise_when_exiting() -> None:
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_failed_threads_do_not_raise_when_suppressed() -> None:
     with ConcurrencyGroup(name="outer") as cg:
-        thread = cg.start_new_thread(target=_raise_intentional_error, suppressed_exceptions=(_IntentionalTestError,))
+        cg.start_new_thread(target=_raise_intentional_error, suppressed_exceptions=(_IntentionalTestError,))
         cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_failed_threads_do_not_raise_when_explicitly_unchecked() -> None:
     with ConcurrencyGroup(name="outer") as cg:
-        thread = cg.start_new_thread(target=_raise_intentional_error, is_checked=False)
+        cg.start_new_thread(target=_raise_intentional_error, is_checked=False)
         cg.raise_if_any_strands_or_ancestors_failed_or_is_shutting_down()
 
 
@@ -227,7 +227,7 @@ def test_do_not_allow_starting_new_strands_if_the_previous_failed(tmp_path: Path
 def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
-            process1 = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
+            cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
             process2 = cg.run_process_in_background(["bash", "-c", "exit 1"], is_checked_by_group=True)
             assert poll_until(lambda: process2.poll() is not None, timeout=5.0)
             raise _IntentionalTestError("intentional test failure")
@@ -239,7 +239,7 @@ def test_all_failure_modes_get_combined(tmp_path: Path) -> None:
 
 def test_nesting_in_the_same_thread_just_works() -> None:
     with ConcurrencyGroup(name="outer") as cg_outer:
-        with cg_outer.make_concurrency_group(name="inner") as cg_inner:
+        with cg_outer.make_concurrency_group(name="inner"):
             pass
 
 
@@ -342,7 +342,7 @@ def test_parent_failures_propagate_recursively() -> None:
     closure: dict[str, Any] = {"i": 0}
     setup_done_event = Event()
     outer_thread: ObservableThread | None = None
-    with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
+    with pytest.raises(ConcurrencyExceptionGroup):
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=TINY_SLEEP) as cg_outer:
             outer_thread = cg_outer.start_new_thread(
                 target=_create_two_nested_concurrency_groups_that_expect_parent_failure,
@@ -376,7 +376,7 @@ def test_exhausted_concurrency_group_cannot_make_nested_groups() -> None:
     with cg:
         cg.start_new_thread(target=lambda: 1)
     with pytest.raises(InvalidConcurrencyGroupStateError):
-        cg_nested = cg.make_concurrency_group(name="inner")
+        cg.make_concurrency_group(name="inner")
 
 
 # Shutdown-related tests
@@ -402,7 +402,7 @@ def test_shutdown_propagates_to_children_and_kills_processes(tmp_path: Path) -> 
     closure = {"i": 0}
     process_started_event = Event()
     with ConcurrencyGroup(name="outer") as cg:
-        thread = cg.start_new_thread(
+        cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process,
             args=(cg, closure, tmp_path, process_started_event),
         )
@@ -432,7 +432,7 @@ def test_new_resources_cannot_be_created_when_shutting_down(tmp_path: Path) -> N
     closure = {"i": 0}
     process_started_event = Event()
     with ConcurrencyGroup(name="outer") as cg:
-        thread = cg.start_new_thread(
+        cg.start_new_thread(
             target=_create_nested_concurrency_group_and_run_process_while_shutting_down,
             args=(cg, tmp_path, closure, process_started_event),
         )
@@ -460,15 +460,15 @@ def test_processes_get_cleaned_up() -> None:
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_new_resources_cannot_be_created_when_ancestor_has_failed_strands() -> None:
     exception_info_thread: Any = None
-    with pytest.raises(ConcurrencyExceptionGroup) as exception_info_outer:
+    with pytest.raises(ConcurrencyExceptionGroup):
         with ConcurrencyGroup(name="outer") as cg_outer:
-            with pytest.raises(ConcurrencyExceptionGroup) as exception_info_inner:
+            with pytest.raises(ConcurrencyExceptionGroup):
                 with cg_outer.make_concurrency_group(name="inner") as cg_inner:
                     outer_failed_thread = cg_outer.start_new_thread(target=_raise_intentional_error)
                     with pytest.raises(_IntentionalTestError):
                         outer_failed_thread.join()
                     with pytest.raises(ConcurrencyExceptionGroup):
-                        outer_successful_thread = cg_outer.start_new_thread(target=lambda: 1)
+                        cg_outer.start_new_thread(target=lambda: 1)
                     with pytest.raises(ConcurrencyExceptionGroup) as exception_info_thread:
-                        inner_thread = cg_inner.start_new_thread(target=lambda: 1)
+                        cg_inner.start_new_thread(target=lambda: 1)
     assert exception_info_thread.value.only_exception_is_instance_of(AncestorConcurrentFailure)

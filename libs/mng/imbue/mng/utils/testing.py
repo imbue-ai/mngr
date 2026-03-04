@@ -38,7 +38,10 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
@@ -468,6 +471,8 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    host_id: HostId | None = None,
+    provider_name: ProviderInstanceName | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -475,9 +480,9 @@ def make_test_agent_details(
     construction logic. Accepts optional overrides for commonly varied fields.
     """
     host_details = HostDetails(
-        id=HostId.generate(),
+        id=host_id or HostId.generate(),
         name="test-host",
-        provider_name=ProviderInstanceName("local"),
+        provider_name=provider_name or ProviderInstanceName("local"),
         snapshots=snapshots or [],
         state=HostState.RUNNING,
         plugin=host_plugin or {},
@@ -967,3 +972,58 @@ AllowUsers {current_user}
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+# =============================================================================
+# Discovery event test factories
+# =============================================================================
+
+
+def make_test_discovered_agent() -> DiscoveredAgent:
+    """Create a DiscoveredAgent with random IDs and realistic certified_data for testing."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName(f"test-agent-{uuid4().hex}")
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=agent_id,
+        agent_name=agent_name,
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "id": str(agent_id),
+            "name": str(agent_name),
+            "type": "claude",
+            "command": "claude --model sonnet",
+            "work_dir": "/tmp/test",
+            "start_on_boot": False,
+            "labels": {},
+            "permissions": [],
+        },
+    )
+
+
+def make_test_discovered_host() -> DiscoveredHost:
+    """Create a DiscoveredHost with random IDs for testing."""
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName(f"test-host-{uuid4().hex}"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def write_discovery_snapshot_to_path(events_path: Path, agent_names: Sequence[str]) -> None:
+    """Write a DISCOVERY_FULL event to a JSONL file for testing completion and event replay."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    agents = [
+        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
+        for i, name in enumerate(agent_names)
+    ]
+    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    event = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-snapshot",
+        "source": "mng/discovery",
+        "agents": agents,
+        "hosts": hosts,
+    }
+    events_path.write_text(json.dumps(event) + "\n")

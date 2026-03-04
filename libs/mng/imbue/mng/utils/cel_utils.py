@@ -76,7 +76,7 @@ def apply_cel_filters_to_context(
             result = prgm.evaluate(cel_context)
             if not result:
                 return False
-        except CELEvalError as e:
+        except (CELEvalError, TypeError) as e:
             logger.warning("Error evaluating include filter on {}: {}", error_context_description, e)
             return False
 
@@ -85,7 +85,7 @@ def apply_cel_filters_to_context(
             result = prgm.evaluate(cel_context)
             if result:
                 return False
-        except CELEvalError as e:
+        except (CELEvalError, TypeError) as e:
             logger.warning("Error evaluating exclude filter on {}: {}", error_context_description, e)
             continue
 

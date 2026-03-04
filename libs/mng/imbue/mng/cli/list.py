@@ -1,10 +1,14 @@
+import json
 import re
 import shutil
 import string
 import sys
+import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -18,6 +22,10 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
+from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
+from imbue.mng.api.discovery_events import get_discovery_events_path
+from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import list_agents as api_list_agents
 from imbue.mng.cli.common_opts import CommonCliOptions
@@ -29,10 +37,10 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import render_format_template
 from imbue.mng.cli.output_helpers import write_human_line
-from imbue.mng.cli.watch_mode import run_watch_loop
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
@@ -122,6 +130,7 @@ class ListCliOptions(CommonCliOptions):
     limit: int | None
     watch: int | None
     on_error: str
+    stream: bool
 
 
 @click.command(name="list")
@@ -202,12 +211,18 @@ class ListCliOptions(CommonCliOptions):
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
 )
-@optgroup.group("Watch Mode")
+@optgroup.group("Watch / Stream Mode")
 @optgroup.option(
     "-w",
     "--watch",
     type=int,
     help="Continuously watch and update status at specified interval (seconds)",
+)
+@optgroup.option(
+    "--stream",
+    is_flag=True,
+    help="Stream discovery events as JSONL. Outputs a full snapshot, then tails the event file for updates. "
+    "Periodically re-polls to catch any missed changes.",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -326,6 +341,24 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
+    if opts.stream:
+        # Stream mode emits unfiltered snapshots for state reconstruction,
+        # so filtering and sorting options are not supported
+        is_any_filter_set = bool(include_filters_tuple or exclude_filters_tuple or provider_names or limit)
+        if is_any_filter_set:
+            raise click.UsageError(
+                "--stream emits unfiltered snapshots and cannot be combined with "
+                "--include, --exclude, --running, --stopped, --local, --remote, "
+                "--provider, --project, --label, --tag, or --limit"
+            )
+        if opts.watch:
+            raise click.UsageError("--stream and --watch cannot be used together")
+        _list_stream(
+            mng_ctx=mng_ctx,
+            error_behavior=error_behavior,
+        )
+        return
+
     if output_opts.output_format == OutputFormat.JSONL:
         _list_jsonl(
             ctx,
@@ -400,10 +433,11 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     if opts.watch:
         try:
-            run_watch_loop(
-                iteration_fn=lambda: _run_list_iteration(iteration_params, ctx),
-                interval_seconds=opts.watch,
-                on_error_continue=True,
+            _list_watch_with_stream(
+                iteration_params=iteration_params,
+                ctx=ctx,
+                mng_ctx=mng_ctx,
+                max_interval_seconds=opts.watch,
             )
         except KeyboardInterrupt:
             logger.info("\nWatch mode stopped")
@@ -1174,3 +1208,256 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
+
+
+# === Watch Mode (stream-backed) ===
+
+
+def _list_watch_with_stream(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    mng_ctx: MngContext,
+    max_interval_seconds: int,
+) -> None:
+    """Watch mode backed by the discovery event stream.
+
+    Does an initial full list and display, then monitors the discovery events
+    file for changes. When a change is detected (from create, destroy, etc.),
+    re-polls immediately. Also re-polls at max_interval_seconds as a safety net.
+    """
+    logger.info("Starting watch mode (stream-backed): refreshing on changes or every {} seconds", max_interval_seconds)
+    logger.info("Press Ctrl+C to stop")
+
+    events_path = get_discovery_events_path(mng_ctx.config)
+
+    # Initial display
+    _run_list_iteration(iteration_params, ctx)
+
+    # Tail the events file and re-render when changes arrive.
+    # Use a stop_event to allow clean shutdown on KeyboardInterrupt.
+    stop_event = threading.Event()
+    try:
+        _run_watch_loop_with_event_tailing(
+            iteration_params=iteration_params,
+            ctx=ctx,
+            events_path=events_path,
+            max_interval_seconds=max_interval_seconds,
+            stop_event=stop_event,
+        )
+    finally:
+        stop_event.set()
+
+
+def _run_watch_loop_with_event_tailing(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+) -> None:
+    """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
+    _run_event_driven_watch(
+        events_path=events_path,
+        max_interval_seconds=max_interval_seconds,
+        stop_event=stop_event,
+        on_refresh=lambda: _refresh_watch_display(iteration_params, ctx),
+    )
+
+
+def _refresh_watch_display(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+) -> None:
+    """Run a single refresh cycle for watch mode."""
+    logger.info("\nRefreshing...")
+    try:
+        _run_list_iteration(iteration_params, ctx)
+    except MngError as e:
+        logger.error("Error in watch iteration (continuing): {}", e)
+
+
+def _poll_events_file_for_changes(
+    events_path: Path,
+    watched_size: int,
+    changed_flag: threading.Event,
+    stop_event: threading.Event,
+    max_polls: int,
+) -> None:
+    """Poll the events file until its size changes or stop_event is set."""
+    current_size = watched_size
+    for _ in range(max_polls):
+        if stop_event.is_set() or changed_flag.is_set():
+            return
+        try:
+            if events_path.exists():
+                new_size = events_path.stat().st_size
+                if new_size != current_size:
+                    changed_flag.set()
+                    return
+        except OSError as e:
+            logger.trace("OSError while polling events file: {}", e)
+        stop_event.wait(timeout=0.1)
+
+
+def _run_event_driven_watch(
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+    on_refresh: Callable[[], None],
+) -> None:
+    """Run the watch loop, calling on_refresh each time the events file changes or the interval elapses."""
+    for _ in range(100_000):
+        if stop_event.is_set():
+            break
+
+        last_size = events_path.stat().st_size if events_path.exists() else 0
+        is_changed = threading.Event()
+
+        watcher = threading.Thread(
+            target=_poll_events_file_for_changes,
+            args=(events_path, last_size, is_changed, stop_event, max_interval_seconds * 10),
+            daemon=True,
+        )
+        watcher.start()
+
+        is_changed.wait(timeout=float(max_interval_seconds))
+        stop_event_was_set = stop_event.is_set()
+        watcher.join(timeout=2.0)
+
+        if stop_event_was_set:
+            break
+
+        on_refresh()
+
+
+# === Stream Mode ===
+
+_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+
+
+def _stream_emit_line(
+    line: str,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Parse and emit a single JSONL line to stdout, deduplicating by event_id."""
+    stripped = line.strip()
+    if not stripped:
+        return
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.trace("Skipped malformed JSONL line in discovery event stream")
+        return
+    event_id = data.get("event_id")
+    with emit_lock:
+        if event_id and event_id in emitted_event_ids:
+            return
+        if event_id:
+            emitted_event_ids.add(event_id)
+        sys.stdout.write(stripped + "\n")
+        sys.stdout.flush()
+
+
+def _stream_tail_events_file(
+    events_path: Path,
+    initial_offset: int,
+    stop_event: threading.Event,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Poll the events file for new content written by other mng processes."""
+    current_offset = initial_offset
+    while not stop_event.is_set():
+        try:
+            if events_path.exists():
+                file_size = events_path.stat().st_size
+                # Handle file truncation (reset to start)
+                if file_size < current_offset:
+                    current_offset = 0
+                if file_size > current_offset:
+                    with open(events_path) as f:
+                        f.seek(current_offset)
+                        new_content = f.read()
+                        current_offset = f.tell()
+                    for line in new_content.splitlines():
+                        if stop_event.is_set():
+                            break
+                        _stream_emit_line(line, emitted_event_ids, emit_lock)
+        except OSError as e:
+            logger.trace("OSError while tailing discovery events file: {}", e)
+        stop_event.wait(timeout=1.0)
+
+
+def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered list and write a full discovery snapshot event.
+
+    Full snapshots must be unfiltered so they can be used for state reconstruction.
+    """
+    result = api_list_agents(
+        mng_ctx=mng_ctx,
+        is_streaming=False,
+        error_behavior=error_behavior,
+    )
+    discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(result.agents)
+    write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
+
+
+def _list_stream(
+    mng_ctx: MngContext,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """Stream discovery events to stdout as JSONL.
+
+    Snapshots are always unfiltered so they can be used for state reconstruction.
+
+    1. Write an unfiltered full snapshot, emit from the latest snapshot in the file
+    2. Tail the events file for new events written by other mng processes
+    3. Periodically re-poll (unfiltered) and write new full snapshots
+    """
+    events_path = get_discovery_events_path(mng_ctx.config)
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+
+    # Phase 1: write an unfiltered full snapshot, then emit from the latest snapshot
+    try:
+        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write initial discovery snapshot: {}", e)
+
+    # Find the latest full snapshot offset, read from there
+    if events_path.exists():
+        snapshot_offset = find_latest_full_snapshot_offset(events_path)
+        with open(events_path) as f:
+            f.seek(snapshot_offset)
+            for line in f:
+                _stream_emit_line(line, emitted_event_ids, emit_lock)
+
+    # Record the current file position for tailing
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
+
+    # Phase 2: tail the events file for new events from other processes
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=_stream_tail_events_file,
+        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock),
+        daemon=True,
+    )
+    tail.start()
+
+    # Phase 3: periodically re-poll (unfiltered) and write full snapshots
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
+            if stop_event.is_set():
+                break
+            try:
+                _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+                # The tail thread will pick up the new snapshot and emit it
+            except (MngError, OSError) as e:
+                logger.warning("Stream poll failed (continuing): {}", e)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)

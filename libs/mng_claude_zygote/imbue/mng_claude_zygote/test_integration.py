@@ -559,14 +559,22 @@ def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
 def test_event_watcher_reads_settings_for_watched_sources(
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that the event watcher script reads watched_event_sources from settings."""
+    """Verify that the event watcher script reads settings from settings.toml."""
 
     work_dir = local_shell_host.host_dir / "work"
     changelings_dir = work_dir / ".changelings"
     changelings_dir.mkdir(parents=True)
 
-    # Write a settings.toml with custom watched sources
-    settings_content = '[watchers]\nwatched_event_sources = ["messages", "stop"]\nevent_poll_interval_seconds = 7\n'
+    # Write a settings.toml with custom watcher settings (both legacy and new fields)
+    settings_content = (
+        "[watchers]\n"
+        'watched_event_sources = ["messages", "stop"]\n'
+        "event_poll_interval_seconds = 7\n"
+        'event_cel_filter = "source == \\"messages\\""\n'
+        "event_burst_size = 3\n"
+        "max_event_messages_per_minute = 20\n"
+        "high_rate_warning_threshold_per_minute = 15\n"
+    )
     (changelings_dir / "settings.toml").write_text(settings_content)
 
     # The event watcher reads settings via a Python snippet at startup.
@@ -578,7 +586,11 @@ s = tomllib.loads(p.read_text()) if p.exists() else {{}}
 w = s.get('watchers', {{}})
 print(json.dumps({{
     'poll': w.get('event_poll_interval_seconds', 3),
-    'sources': w.get('watched_event_sources', ['messages', 'scheduled', 'mng_agents', 'stop'])
+    'sources': w.get('watched_event_sources', ['messages', 'scheduled', 'mng_agents', 'stop']),
+    'cel_filter': w.get('event_cel_filter', ''),
+    'burst_size': w.get('event_burst_size', 5),
+    'max_messages_per_minute': w.get('max_event_messages_per_minute', 10),
+    'high_rate_warning_threshold': w.get('high_rate_warning_threshold_per_minute', 8),
 }}))
 """
     result = subprocess.run(
@@ -591,6 +603,10 @@ print(json.dumps({{
     parsed = json.loads(result.stdout.strip())
     assert parsed["poll"] == 7
     assert parsed["sources"] == ["messages", "stop"]
+    assert parsed["cel_filter"] == 'source == "messages"'
+    assert parsed["burst_size"] == 3
+    assert parsed["max_messages_per_minute"] == 20
+    assert parsed["high_rate_warning_threshold"] == 15
 
 
 # -- Tmux window injection integration tests --
