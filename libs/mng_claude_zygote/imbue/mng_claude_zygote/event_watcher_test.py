@@ -665,6 +665,16 @@ def test_separate_chat_events_mixed_with_non_message() -> None:
     assert "conv-1" in held
 
 
+def test_separate_chat_events_assistant_only_passes_through() -> None:
+    """Assistant messages without a corresponding user message are delivered immediately."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_message_event("assistant", event_id="evt-a1")]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert json.loads(result[0])["role"] == "assistant"
+    assert len(held) == 0
+
+
 def test_separate_chat_events_malformed_json_passes_through() -> None:
     """Malformed JSON lines pass through unchanged."""
     held: dict[str, tuple[list[str], float]] = {}

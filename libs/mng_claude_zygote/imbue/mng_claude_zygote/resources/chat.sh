@@ -171,38 +171,39 @@ new_conversation() {
         tool_args=$(build_tool_args)
         log "Starting live-chat session: model=$model tool_args='$tool_args'"
 
-        # llm live-chat prints "PID: <pid> | Conversation: <id>" to stdout
-        # before the interactive session. We capture the output via `script`
-        # (which preserves TTY for interactivity) and parse the conversation
-        # ID from it in a background process.
-        local _script_out
-        _script_out=$(mktemp)
+        # llm live-chat creates a conversation in the llm database. We need
+        # to register the correct conversation ID in our events file. Record
+        # the current max rowid so the background process can find the NEW
+        # conversation (rather than picking up a stale one from a prior session).
+        local _llm_db _max_rowid
+        _llm_db=$(llm logs path 2>/dev/null || echo "")
+        _max_rowid=0
+        if [ -n "$_llm_db" ] && [ -f "$_llm_db" ]; then
+            _max_rowid=$(sqlite3 "$_llm_db" "SELECT COALESCE(MAX(rowid), 0) FROM conversations" 2>/dev/null || echo "0")
+        fi
 
         (
-            # Poll the script output file for the conversation ID line.
-            # Strip ANSI escape codes before matching since script captures
-            # raw terminal output.
+            # Poll for a conversation created after we started (rowid > saved).
             for _i in $(seq 1 60); do
                 sleep 1
-                _llm_cid=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$_script_out" 2>/dev/null \
-                    | grep -m1 'Conversation: ' \
-                    | sed 's/.*Conversation: //' \
-                    | tr -d '[:space:]' || true)
-                if [ -n "$_llm_cid" ]; then
-                    append_conversation_event "$_llm_cid" "$model" "conversation_created"
-                    log "Recorded conversation event for llm cid=$_llm_cid"
-                    break
+                if [ -n "$_llm_db" ] && [ -f "$_llm_db" ]; then
+                    _new_cid=$(sqlite3 "$_llm_db" \
+                        "SELECT id FROM conversations WHERE rowid > $_max_rowid ORDER BY rowid ASC LIMIT 1" \
+                        2>/dev/null || true)
+                    if [ -n "$_new_cid" ]; then
+                        append_conversation_event "$_new_cid" "$model" "conversation_created"
+                        log "Recorded conversation event for new cid=$_new_cid (rowid > $_max_rowid)"
+                        break
+                    fi
                 fi
             done
         ) &
 
-        # script -q: quiet (no "Script started" messages)
-        # script -f: flush after each write
         # shellcheck disable=SC2086
         if [ -n "$message" ]; then
-            exec script -qf "$_script_out" -c "llm live-chat -m '$model' ${sys_args[*]} $tool_args $(printf '%q' "$message")"
+            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args "$message"
         else
-            exec script -qf "$_script_out" -c "llm live-chat -m '$model' ${sys_args[*]} $tool_args"
+            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args
         fi
     fi
 }
