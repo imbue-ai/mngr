@@ -8,6 +8,7 @@ from imbue.mng.cli.complete import _filter_aliases
 from imbue.mng.cli.complete import _get_completions
 from imbue.mng.cli.complete import _read_agent_names
 from imbue.mng.cli.complete import _read_cache
+from imbue.mng.utils.testing import write_discovery_snapshot_to_path
 
 
 def _write_command_cache(cache_dir: Path, data: dict[str, object]) -> None:
@@ -18,23 +19,8 @@ def _write_command_cache(cache_dir: Path, data: dict[str, object]) -> None:
 
 def _write_discovery_events(host_dir: Path, agent_names: list[str]) -> None:
     """Write a DISCOVERY_FULL event to the discovery events file for testing."""
-    events_dir = host_dir / "events" / "mng" / "discovery"
-    events_dir.mkdir(parents=True, exist_ok=True)
-    events_path = events_dir / "events.jsonl"
-    agents = [
-        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
-        for i, name in enumerate(agent_names)
-    ]
-    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
-    event = {
-        "timestamp": "2025-01-01T00:00:00Z",
-        "type": "DISCOVERY_FULL",
-        "event_id": "evt-1",
-        "source": "mng/discovery",
-        "agents": agents,
-        "hosts": hosts,
-    }
-    events_path.write_text(json.dumps(event) + "\n")
+    events_path = host_dir / "events" / "mng" / "discovery" / "events.jsonl"
+    write_discovery_snapshot_to_path(events_path, agent_names)
 
 
 def _make_cache_data(

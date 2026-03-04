@@ -4,6 +4,7 @@ import shutil
 import string
 import sys
 import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
@@ -1257,12 +1258,24 @@ def _run_watch_loop_with_event_tailing(
     stop_event: threading.Event,
 ) -> None:
     """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
-    for _ in _wait_for_events_or_timeout(events_path, max_interval_seconds, stop_event):
-        logger.info("\nRefreshing...")
-        try:
-            _run_list_iteration(iteration_params, ctx)
-        except MngError as e:
-            logger.error("Error in watch iteration (continuing): {}", e)
+    _run_event_driven_watch(
+        events_path=events_path,
+        max_interval_seconds=max_interval_seconds,
+        stop_event=stop_event,
+        on_refresh=lambda: _refresh_watch_display(iteration_params, ctx),
+    )
+
+
+def _refresh_watch_display(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+) -> None:
+    """Run a single refresh cycle for watch mode."""
+    logger.info("\nRefreshing...")
+    try:
+        _run_list_iteration(iteration_params, ctx)
+    except MngError as e:
+        logger.error("Error in watch iteration (continuing): {}", e)
 
 
 def _poll_events_file_for_changes(
@@ -1283,21 +1296,18 @@ def _poll_events_file_for_changes(
                 if new_size != current_size:
                     changed_flag.set()
                     return
-        except OSError:
-            pass
+        except OSError as e:
+            logger.trace("OSError while polling events file: {}", e)
         stop_event.wait(timeout=0.1)
 
 
-def _wait_for_events_or_timeout(
+def _run_event_driven_watch(
     events_path: Path,
     max_interval_seconds: int,
     stop_event: threading.Event,
-) -> list[None]:
-    """Block until the events file changes or the max interval elapses.
-
-    Returns a single-element list if a refresh should occur, or empty if stopped.
-    """
-    iterations: list[None] = []
+    on_refresh: Callable[[], None],
+) -> None:
+    """Run the watch loop, calling on_refresh each time the events file changes or the interval elapses."""
     for _ in range(100_000):
         if stop_event.is_set():
             break
@@ -1318,9 +1328,8 @@ def _wait_for_events_or_timeout(
 
         if stop_event_was_set:
             break
-        iterations.append(None)
 
-    return iterations
+        on_refresh()
 
 
 # === Stream Mode ===

@@ -1,37 +1,14 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from imbue.mng.cli.complete_names import resolve_names_from_discovery_stream
+from imbue.mng.utils.testing import write_discovery_snapshot_to_path
 
 
-def _write_discovery_snapshot(host_dir: Path, agent_names: list[str]) -> Path:
-    """Write a discovery event stream with a full snapshot for testing."""
-    events_dir = host_dir / "events" / "mng" / "discovery"
-    events_dir.mkdir(parents=True, exist_ok=True)
-    agents = [
-        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
-        for i, name in enumerate(agent_names)
-    ]
-    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
-    event = {
-        "timestamp": "2025-01-01T00:00:00Z",
-        "type": "DISCOVERY_FULL",
-        "event_id": "evt-1",
-        "source": "mng/discovery",
-        "agents": agents,
-        "hosts": hosts,
-    }
-    events_path = events_dir / "events.jsonl"
-    events_path.write_text(json.dumps(event) + "\n")
-    return events_path
-
-
-@pytest.mark.acceptance
 def test_complete_names_reads_discovery_stream(tmp_path: Path) -> None:
     """The complete_names module should resolve agent names from the discovery event stream."""
-    events_path = _write_discovery_snapshot(tmp_path, ["beta-agent", "alpha-agent"])
+    events_path = tmp_path / "events" / "mng" / "discovery" / "events.jsonl"
+    write_discovery_snapshot_to_path(events_path, ["beta-agent", "alpha-agent"])
 
     agent_names, host_names = resolve_names_from_discovery_stream(events_path)
 
@@ -39,7 +16,6 @@ def test_complete_names_reads_discovery_stream(tmp_path: Path) -> None:
     assert host_names == ["localhost"]
 
 
-@pytest.mark.acceptance
 def test_complete_names_handles_destroyed_agents(tmp_path: Path) -> None:
     """The complete_names module should exclude destroyed agents."""
     events_dir = tmp_path / "events" / "mng" / "discovery"
@@ -73,7 +49,6 @@ def test_complete_names_handles_destroyed_agents(tmp_path: Path) -> None:
     assert agent_names == ["kept-agent"]
 
 
-@pytest.mark.acceptance
 def test_complete_names_handles_host_destroyed(tmp_path: Path) -> None:
     """The complete_names module should remove agents when their host is destroyed."""
     events_dir = tmp_path / "events" / "mng" / "discovery"
@@ -110,7 +85,6 @@ def test_complete_names_handles_host_destroyed(tmp_path: Path) -> None:
     assert host_names == ["host-one"]
 
 
-@pytest.mark.acceptance
 def test_complete_names_returns_empty_when_no_file(tmp_path: Path) -> None:
     """Returns empty lists when the discovery events file does not exist."""
     nonexistent = tmp_path / "no" / "such" / "file.jsonl"
@@ -121,7 +95,6 @@ def test_complete_names_returns_empty_when_no_file(tmp_path: Path) -> None:
     assert host_names == []
 
 
-@pytest.mark.acceptance
 def test_complete_names_incremental_agent_discovered(tmp_path: Path) -> None:
     """AGENT_DISCOVERED events after the snapshot should add new agents."""
     events_dir = tmp_path / "events" / "mng" / "discovery"

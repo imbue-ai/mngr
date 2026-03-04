@@ -9,9 +9,9 @@ snapshot, then replays incremental events to determine which agents and
 hosts are currently active.
 
 Usage:
-    python -m imbue.mng.cli.complete_names            # print agent names
-    python -m imbue.mng.cli.complete_names --hosts     # print host names
-    python -m imbue.mng.cli.complete_names --both      # print both
+    python -m imbue.mng.cli.complete_names
+    python -m imbue.mng.cli.complete_names --hosts
+    python -m imbue.mng.cli.complete_names --both
 """
 
 import json
@@ -139,6 +139,9 @@ def resolve_names_from_discovery_stream(
                 # Remove all agents belonging to this host
                 for agent_id in data.get("agent_ids", []):
                     agent_name_by_id.pop(agent_id, None)
+
+        else:
+            pass
 
     agent_names = sorted(set(agent_name_by_id.values()))
     host_names = sorted(set(host_name_by_id.values()))

@@ -1008,3 +1008,22 @@ def make_test_discovered_host() -> DiscoveredHost:
         host_name=HostName(f"test-host-{uuid4().hex}"),
         provider_name=ProviderInstanceName("local"),
     )
+
+
+def write_discovery_snapshot_to_path(events_path: Path, agent_names: Sequence[str]) -> None:
+    """Write a DISCOVERY_FULL event to a JSONL file for testing completion and event replay."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    agents = [
+        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
+        for i, name in enumerate(agent_names)
+    ]
+    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    event = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-snapshot",
+        "source": "mng/discovery",
+        "agents": agents,
+        "hosts": hosts,
+    }
+    events_path.write_text(json.dumps(event) + "\n")
