@@ -10,7 +10,7 @@
 # Usage:
 #   chat --new [message]              Create a new conversation (user-initiated)
 #   chat --new --as-agent [message]   Create a new conversation (agent-initiated)
-#   chat --resume <cid>              Resume an existing conversation
+#   chat --resume <conversation-id>  Resume an existing conversation
 #   chat --list                      List all conversations
 #   chat --help                      Show usage information
 #   chat                             List conversations and show help hint
@@ -76,7 +76,7 @@ print('claude-opus-4.6')
     echo "${_model:-claude-opus-4.6}"
 }
 
-generate_cid() {
+generate_conversation_id() {
     echo "conv-$(date +%s)-$(head -c 4 /dev/urandom | xxd -p)"
 }
 
@@ -84,7 +84,7 @@ generate_cid() {
 # Uses the standard envelope: timestamp, type, event_id, source + conversation fields
 # Optional 4th argument is a JSON object of tags (e.g. '{"daily":"2026-03-04"}')
 append_conversation_event() {
-    local cid="$1"
+    local conversation_id="$1"
     local model="$2"
     local event_type="${3:-conversation_created}"
     local tags="${4:-}"
@@ -95,12 +95,12 @@ append_conversation_event() {
     mkdir -p "$(dirname "$CONVERSATIONS_EVENTS")"
     if [ -n "$tags" ]; then
         printf '{"timestamp":"%s","type":"%s","event_id":"%s","source":"conversations","conversation_id":"%s","model":"%s","tags":%s}\n' \
-            "$timestamp" "$event_type" "$event_id" "$cid" "$model" "$tags" >> "$CONVERSATIONS_EVENTS"
+            "$timestamp" "$event_type" "$event_id" "$conversation_id" "$model" "$tags" >> "$CONVERSATIONS_EVENTS"
     else
         printf '{"timestamp":"%s","type":"%s","event_id":"%s","source":"conversations","conversation_id":"%s","model":"%s"}\n' \
-            "$timestamp" "$event_type" "$event_id" "$cid" "$model" >> "$CONVERSATIONS_EVENTS"
+            "$timestamp" "$event_type" "$event_id" "$conversation_id" "$model" >> "$CONVERSATIONS_EVENTS"
     fi
-    log "Appended event: type=$event_type cid=$cid model=$model event_id=$event_id tags=$tags"
+    log "Appended event: type=$event_type conversation_id=$conversation_id model=$model event_id=$event_id tags=$tags"
 }
 
 build_tool_args() {
@@ -152,10 +152,10 @@ new_conversation() {
 
     local model
     model=$(get_default_model)
-    local cid
-    cid=$(generate_cid)
+    local conversation_id
+    conversation_id=$(generate_conversation_id)
 
-    log "Creating new conversation: cid=$cid model=$model as_agent=$as_agent message_len=${#message}"
+    log "Creating new conversation: conversation_id=$conversation_id model=$model as_agent=$as_agent message_len=${#message}"
 
     # Build system prompt args for llm live-chat only (llm inject does not support -s).
     local system_prompt
@@ -166,13 +166,13 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
-        append_conversation_event "$cid" "$model" "conversation_created"
+        append_conversation_event "$conversation_id" "$model" "conversation_created"
         if [ -n "$message" ]; then
-            log "Injecting agent message into conversation $cid"
-            llm inject --cid "$cid" -m "$model" "$message"
+            log "Injecting agent message into conversation $conversation_id"
+            llm inject --cid "$conversation_id" -m "$model" "$message"
             log "Agent message injected successfully"
         fi
-        echo "$cid"
+        echo "$conversation_id"
     else
         local tool_args
         tool_args=$(build_tool_args)
@@ -194,12 +194,12 @@ new_conversation() {
             for _i in $(seq 1 60); do
                 sleep 1
                 if [ -n "$_llm_db" ] && [ -f "$_llm_db" ]; then
-                    _new_cid=$(sqlite3 "$_llm_db" \
+                    _new_conversation_id=$(sqlite3 "$_llm_db" \
                         "SELECT id FROM conversations WHERE rowid > $_max_rowid ORDER BY rowid ASC LIMIT 1" \
                         2>/dev/null || true)
-                    if [ -n "$_new_cid" ]; then
-                        append_conversation_event "$_new_cid" "$model" "conversation_created"
-                        log "Recorded conversation event for new cid=$_new_cid (rowid > $_max_rowid)"
+                    if [ -n "$_new_conversation_id" ]; then
+                        append_conversation_event "$_new_conversation_id" "$model" "conversation_created"
+                        log "Recorded conversation event for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
                         break
                     fi
                 fi
@@ -216,19 +216,19 @@ new_conversation() {
 }
 
 resume_conversation() {
-    local cid="$1"
+    local conversation_id="$1"
     shift
 
-    log "Resuming conversation: cid=$cid"
+    log "Resuming conversation: conversation_id=$conversation_id"
 
     # Get the model from the latest event for this conversation
     local model
-    model=$(grep -F "\"conversation_id\":\"$cid\"" "$CONVERSATIONS_EVENTS" 2>/dev/null \
+    model=$(grep -F "\"conversation_id\":\"$conversation_id\"" "$CONVERSATIONS_EVENTS" 2>/dev/null \
         | tail -1 \
         | jq -r '.model' 2>/dev/null \
         || get_default_model)
 
-    log "Resolved model for conversation $cid: $model"
+    log "Resolved model for conversation $conversation_id: $model"
 
     local tool_args
     tool_args=$(build_tool_args)
@@ -238,9 +238,9 @@ resume_conversation() {
     if [ -n "$system_prompt" ]; then
         sys_args=(-s "$system_prompt")
     fi
-    log "Starting live-chat session (resume): cid=$cid model=$model tool_args='$tool_args'"
+    log "Starting live-chat session (resume): conversation_id=$conversation_id model=$model tool_args='$tool_args'"
     # shellcheck disable=SC2086
-    exec llm live-chat --show-history -c --cid "$cid" -m "$model" "${sys_args[@]}" $tool_args
+    exec llm live-chat --show-history -c --cid "$conversation_id" -m "$model" "${sys_args[@]}" $tool_args
 }
 
 list_conversations() {
@@ -259,7 +259,7 @@ from pathlib import Path
 
 events_file = '$CONVERSATIONS_EVENTS'
 messages_file = '${AGENT_DATA_DIR}/events/messages/events.jsonl'
-convs = {}
+conversations = {}
 line_num = 0
 for line in open(events_file):
     line_num += 1
@@ -268,8 +268,8 @@ for line in open(events_file):
         continue
     try:
         event = json.loads(line)
-        cid = event['conversation_id']
-        convs[cid] = event
+        conversation_id = event['conversation_id']
+        conversations[conversation_id] = event
     except (json.JSONDecodeError, KeyError) as e:
         print(f'  WARNING: malformed line {line_num} in {events_file}: {e}', file=sys.stderr)
         print(f'    line content: {line[:200]}', file=sys.stderr)
@@ -283,25 +283,25 @@ if Path(messages_file).exists():
         if not line:
             continue
         try:
-            msg = json.loads(line)
-            cid = msg.get('conversation_id', '')
-            ts = msg.get('timestamp', '')
-            if cid and ts:
-                if cid not in updated_at or ts > updated_at[cid]:
-                    updated_at[cid] = ts
+            message = json.loads(line)
+            conversation_id = message.get('conversation_id', '')
+            ts = message.get('timestamp', '')
+            if conversation_id and ts:
+                if conversation_id not in updated_at or ts > updated_at[conversation_id]:
+                    updated_at[conversation_id] = ts
         except (json.JSONDecodeError, KeyError) as e:
             print(f'WARNING: malformed message event line: {e}', file=sys.stderr)
             continue
 
 # Filter out internal conversations (tagged with 'internal')
-visible_convs = {cid: e for cid, e in convs.items() if 'internal' not in e.get('tags', {})}
+visible_conversations = {conversation_id: e for conversation_id, e in conversations.items() if 'internal' not in e.get('tags', {})}
 
-for cid, event in visible_convs.items():
-    event['updated_at'] = updated_at.get(cid, event.get('timestamp', '?'))
+for conversation_id, event in visible_conversations.items():
+    event['updated_at'] = updated_at.get(conversation_id, event.get('timestamp', '?'))
 
-sorted_convs = sorted(visible_convs.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
+sorted_conversations = sorted(visible_conversations.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
 
-for event in sorted_convs:
+for event in sorted_conversations:
     tags = event.get('tags', {})
     tags_str = '  tags=' + json.dumps(tags) if tags else ''
     print(f\"  {event.get('conversation_id','?')}  model={event.get('model', '?')}  created_at={event.get('timestamp', '?')}  updated_at={event.get('updated_at', '?')}{tags_str}\")
