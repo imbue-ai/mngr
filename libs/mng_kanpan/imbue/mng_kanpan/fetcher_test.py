@@ -1,3 +1,4 @@
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_kanpan.data_types import CheckStatus
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
@@ -236,31 +238,20 @@ def test_fetch_board_snapshot_with_list_errors() -> None:
     assert "ConnectionError" in snapshot.errors[0]
 
 
-def test_fetch_board_snapshot_surfaces_gh_errors() -> None:
-    mock_list_result = MagicMock()
-    mock_list_result.agents = []
-    mock_list_result.errors = []
+def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "repo"
+    init_git_repo_with_config(repo_dir)
+    # Add a GitHub remote so _get_github_repo_path succeeds
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
 
-    pr_result = FetchPrsResult(prs=(), error="gh pr list failed: not a git repository")
+    agent = _make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local")
 
-    mng_ctx = MagicMock()
-    mng_ctx.concurrency_group = MagicMock()
-
-    with (
-        patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
-    ):
-        snapshot = fetch_board_snapshot(mng_ctx)
-
-    assert len(snapshot.errors) == 1
-    assert "gh pr list failed" in snapshot.errors[0]
-    assert snapshot.prs_loaded is False
-
-
-def test_fetch_board_snapshot_suppresses_create_pr_url_when_prs_not_loaded() -> None:
-    agent = _make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-
-    pr_result = FetchPrsResult(prs=(), error="gh auth failed")
+    pr_result = FetchPrsResult(prs=(), error="gh pr list failed: auth required")
 
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
@@ -272,9 +263,14 @@ def test_fetch_board_snapshot_suppresses_create_pr_url_when_prs_not_loaded() -> 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
         patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
-        patch("imbue.mng_kanpan.fetcher._get_github_repo_path", return_value="org/repo"),
+        patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value="mng/agent-1"),
     ):
         snapshot = fetch_board_snapshot(mng_ctx)
 
+    assert len(snapshot.errors) == 1
+    assert "gh pr list failed" in snapshot.errors[0]
     assert snapshot.prs_loaded is False
+    assert snapshot.entries[0].branch == "mng/agent-1"
+    # When PRs failed to load, create_pr_url should be suppressed even though
+    # the agent has a branch and a valid GitHub remote
     assert snapshot.entries[0].create_pr_url is None
