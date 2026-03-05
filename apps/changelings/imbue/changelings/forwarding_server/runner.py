@@ -19,7 +19,7 @@ def start_forwarding_server(
 
     Starts background streaming subprocesses via MngStreamManager:
     - `mng list --stream` to continuously discover agents and hosts
-    - `mng events <agent-id> servers.jsonl --follow` per agent to discover servers
+    - `mng events <agent-id> servers/events.jsonl --follow` per agent to discover servers
 
     For remote agents (those with SSH info), the server tunnels traffic
     through SSH using paramiko.

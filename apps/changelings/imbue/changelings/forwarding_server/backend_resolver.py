@@ -22,13 +22,13 @@ from imbue.mng.api.discovery_events import HostSSHInfoEvent
 from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
 
-SERVERS_LOG_FILENAME: Final[str] = "servers.jsonl"
+SERVERS_LOG_FILENAME: Final[str] = "servers/events.jsonl"
 
 
 class ServerLogRecord(FrozenModel):
-    """A record of a server started by an agent, as written to servers.jsonl.
+    """A record of a server started by an agent, as written to servers/events.jsonl.
 
-    Each line of servers.jsonl is a JSON object with these fields.
+    Each line of servers/events.jsonl is a JSON object with these fields.
     Agents write these records on startup so the forwarding server can discover them.
     """
 
@@ -229,7 +229,7 @@ class MngStreamManager(MutableModel):
     1. `mng list --stream --quiet` to discover agents and hosts.
        Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
        and HOST_SSH_INFO events for SSH connection details per host.
-    2. `mng events <agent-id> servers.jsonl --follow --quiet` (one per agent)
+    2. `mng events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
        to discover each agent's servers.
     """
 
@@ -366,7 +366,7 @@ class MngStreamManager(MutableModel):
             logger.debug("Skipping invalid server log line for {}: {}", agent_id, e)
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mng events <agent-id> servers.jsonl --follow for a single agent."""
+        """Start mng events <agent-id> servers/events.jsonl --follow for a single agent."""
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 

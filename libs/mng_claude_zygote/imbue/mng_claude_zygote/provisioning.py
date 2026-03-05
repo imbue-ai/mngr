@@ -507,6 +507,7 @@ def create_event_log_directories(
     - events/monitor/           (future) monitor agent events
     - events/claude_transcript/ inner monologue (written by Claude background tasks)
     - events/common_transcript/ agent-agnostic transcript (written by transcript watcher)
+    - events/servers/           server registration records
     """
     for source in (
         "conversations",
@@ -517,6 +518,7 @@ def create_event_log_directories(
         "monitor",
         "claude_transcript",
         "common_transcript",
+        "servers",
     ):
         source_dir = agent_state_dir / "events" / source
         _execute_with_timing(

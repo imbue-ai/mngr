@@ -39,7 +39,7 @@ AGENT_NAME: Final[str] = os.environ.get("MNG_AGENT_NAME", "")
 HOST_NAME: Final[str] = os.environ.get("MNG_HOST_NAME", "")
 
 SERVERS_JSONL_PATH: Final[Path | None] = (
-    Path(AGENT_STATE_DIR) / "events" / "servers.jsonl" if AGENT_STATE_DIR else None
+    Path(AGENT_STATE_DIR) / "events" / "servers" / "events.jsonl" if AGENT_STATE_DIR else None
 )
 MESSAGES_EVENTS_PATH: Final[Path | None] = (
     Path(AGENT_STATE_DIR) / "events" / "messages" / "events.jsonl" if AGENT_STATE_DIR else None
@@ -386,7 +386,7 @@ def main() -> None:
 
     _log(f"Listening on port {port}")
 
-    # Register this web server in servers.jsonl
+    # Register this web server in servers/events.jsonl
     _register_server(WEB_SERVER_NAME, port)
 
     # Handle shutdown signals.

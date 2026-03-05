@@ -15,7 +15,7 @@ def make_agents_json(*agent_ids: AgentId) -> str:
 
 
 def make_server_log(server: str, url: str) -> str:
-    """Build a single JSONL line matching the servers.jsonl format."""
+    """Build a single JSONL line matching the servers/events.jsonl format."""
     return json.dumps({"server": server, "url": url}) + "\n"
 
 
@@ -27,7 +27,7 @@ def make_resolver_with_data(
 
     agents_json is a JSON string matching `mng list --json` format, used to populate
     agent IDs and SSH info. server_logs is a mapping of agent ID string to raw
-    servers.jsonl content, parsed to populate the server URL map for each agent.
+    servers/events.jsonl content, parsed to populate the server URL map for each agent.
     """
     resolver = MngCliBackendResolver()
 
