@@ -757,20 +757,20 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
     return [(attr, prefix), f" ({count})"]
 
 
-def _build_board_widgets(state: _KanpanState) -> SimpleFocusListWalker[AttrMap | Text | Divider]:
+def _build_board_widgets(
+    snapshot: BoardSnapshot | None,
+) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
 
-    Returns a SimpleFocusListWalker and populates state.index_to_entry with the
-    mapping from list walker index to agent name for selectable entries.
+    Returns (walker, index_to_entry) where index_to_entry maps list walker
+    indices to the AgentBoardEntry for selectable rows.
     """
-    snapshot = state.snapshot
-    state.index_to_entry = {}
-
+    index_to_entry: dict[int, AgentBoardEntry] = {}
     walker: SimpleFocusListWalker[AttrMap | Text | Divider] = SimpleFocusListWalker([])
 
     if snapshot is None:
         walker.append(Text("Loading..."))
-        return walker
+        return walker, index_to_entry
 
     # Classify entries into sections
     by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
@@ -807,7 +807,7 @@ def _build_board_widgets(state: _KanpanState) -> SimpleFocusListWalker[AttrMap |
             for attr in _AGENT_LINE_ATTRS:
                 focus_map[attr] = f"{attr}_focus"
             walker.append(AttrMap(item, None, focus_map=focus_map))
-            state.index_to_entry[idx] = entry
+            index_to_entry[idx] = entry
 
     if not has_content:
         walker.append(Text("No agents found."))
@@ -819,7 +819,7 @@ def _build_board_widgets(state: _KanpanState) -> SimpleFocusListWalker[AttrMap |
         for error in snapshot.errors:
             walker.append(Text(("error_text", f"  {error}")))
 
-    return walker
+    return walker, index_to_entry
 
 
 def _refresh_display(state: _KanpanState) -> None:
@@ -832,7 +832,7 @@ def _refresh_display(state: _KanpanState) -> None:
     if focused_entry is not None:
         state.focused_agent_name = focused_entry.name
 
-    walker = _build_board_widgets(state)
+    walker, state.index_to_entry = _build_board_widgets(state.snapshot)
     state.list_walker = walker
     state.frame.body = ListBox(walker)
 

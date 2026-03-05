@@ -28,7 +28,6 @@ from imbue.mng_kanpan.fetcher import _pr_priority
 from imbue.mng_kanpan.fetcher import _resolve_agent_branch
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
-from imbue.mng_kanpan.tui import _KanpanState
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 
@@ -343,19 +342,6 @@ def test_carry_forward_pr_data_handles_new_agents() -> None:
 # === _build_board_widgets: first-load PR failure ===
 
 
-def _make_minimal_state(snapshot: BoardSnapshot | None) -> _KanpanState:
-    """Create a minimal _KanpanState with a snapshot for widget-building tests."""
-    return _KanpanState.model_construct(
-        mng_ctx=MagicMock(),
-        snapshot=snapshot,
-        frame=MagicMock(),
-        footer_left_text=MagicMock(),
-        footer_left_attr=MagicMock(),
-        footer_right=MagicMock(),
-        index_to_entry={},
-    )
-
-
 def _extract_text(walker: list[object]) -> list[str]:
     """Extract plain text from all Text widgets in a walker."""
     texts: list[str] = []
@@ -398,8 +384,7 @@ def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
         prs_loaded=False,
         fetch_time_seconds=1.0,
     )
-    state = _make_minimal_state(snapshot)
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(snapshot)
 
     texts = _extract_text(list(walker))
     assert _text_contains(texts, "PRs not loaded")
@@ -423,8 +408,7 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
         prs_loaded=True,
         fetch_time_seconds=1.0,
     )
-    state = _make_minimal_state(snapshot)
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(snapshot)
 
     texts = _extract_text(list(walker))
     assert _text_contains(texts, "no PR yet")
@@ -461,8 +445,7 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
     )
 
     carried = _carry_forward_pr_data(old, new)
-    state = _make_minimal_state(carried)
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(carried)
 
     texts = _extract_text(list(walker))
     # Carried-forward PR data renders the same as a normal successful load
