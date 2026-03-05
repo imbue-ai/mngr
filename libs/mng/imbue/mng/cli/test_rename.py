@@ -16,6 +16,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
+from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
@@ -94,15 +95,17 @@ def test_rename_running_agent_renames_tmux_session(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
-        assert tmux_session_exists(old_session_name)
+        wait_for(
+            lambda: tmux_session_exists(old_session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {old_session_name} to exist",
+        )
 
         rename_result = cli_runner.invoke(
             rename,
