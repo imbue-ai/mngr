@@ -650,61 +650,69 @@ class _ConnectionErrorMockProvider(MockProviderInstance):
         raise HostConnectionError(f"No offline host for {host_id}")
 
 
+class _ConnectionErrorListingFixture:
+    """Shared test objects for HostConnectionError listing tests."""
+
+    def __init__(
+        self,
+        temp_mng_ctx: MngContext,
+        temp_host_dir: Path,
+        error_to_raise: HostConnectionError | None = None,
+        host_name: str = "test-host",
+        agent_name: str = "test-agent",
+    ) -> None:
+        self.host_id = HostId.generate()
+        now = datetime.now(timezone.utc)
+        certified_data = CertifiedHostData(
+            host_id=str(self.host_id),
+            host_name=host_name,
+            created_at=now,
+            updated_at=now,
+        )
+        self.provider = _ConnectionErrorMockProvider(
+            error_to_raise=error_to_raise,
+            name=ProviderInstanceName("test-provider"),
+            host_dir=temp_host_dir,
+            mng_ctx=temp_mng_ctx,
+        )
+        offline_host = make_offline_host(certified_data, self.provider, temp_mng_ctx)
+        self.provider.mock_hosts = [offline_host]
+        self.host_ref = DiscoveredHost(
+            host_id=self.host_id,
+            host_name=HostName(host_name),
+            provider_name=self.provider.name,
+        )
+        self.agent_ref = DiscoveredAgent(
+            host_id=self.host_id,
+            agent_id=AgentId.generate(),
+            agent_name=AgentName(agent_name),
+            provider_name=self.provider.name,
+            certified_data={"command": "sleep 100"},
+        )
+        self.result = ListResult()
+
+
 def test_collect_host_details_falls_back_to_offline_on_connection_error(
     temp_mng_ctx: MngContext,
     temp_host_dir: Path,
 ) -> None:
     """When get_host_and_agent_details raises HostConnectionError, the host should
     be listed using offline data instead of crashing."""
-    host_id = HostId.generate()
-    host_name = HostName("unreachable-host")
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=str(host_name),
-        created_at=now,
-        updated_at=now,
-    )
-
-    provider = _ConnectionErrorMockProvider(
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_host_dir,
-        mng_ctx=temp_mng_ctx,
-    )
-    offline_host = make_offline_host(certified_data, provider, temp_mng_ctx)
-    provider.mock_hosts = [offline_host]
-
-    host_ref = DiscoveredHost(
-        host_id=host_id,
-        host_name=host_name,
-        provider_name=provider.name,
-    )
-    agent_ref = DiscoveredAgent(
-        host_id=host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("test-agent"),
-        provider_name=provider.name,
-        certified_data={"command": "sleep 100"},
-    )
-
-    result = ListResult()
-    params = _make_list_params()
+    f = _ConnectionErrorListingFixture(temp_mng_ctx, temp_host_dir)
 
     _collect_and_emit_details_for_host(
-        host_ref=host_ref,
-        agent_refs=[agent_ref],
-        provider=provider,
-        params=params,
-        result=result,
+        host_ref=f.host_ref,
+        agent_refs=[f.agent_ref],
+        provider=f.provider,
+        params=_make_list_params(),
+        result=f.result,
         results_lock=Lock(),
     )
 
-    # Agent should be listed with STOPPED state (offline fallback)
-    assert len(result.agents) == 1
-    assert result.agents[0].name == AgentName("test-agent")
-    assert result.agents[0].state == AgentLifecycleState.STOPPED
+    assert len(f.result.agents) == 1
+    assert f.result.agents[0].state == AgentLifecycleState.STOPPED
     # Host should NOT be marked as UNAUTHENTICATED (it's a connection error, not auth)
-    assert result.agents[0].host.state != HostState.UNAUTHENTICATED
+    assert f.result.agents[0].host.state != HostState.UNAUTHENTICATED
 
 
 def test_collect_host_details_marks_auth_failure_on_authentication_error(
@@ -713,52 +721,21 @@ def test_collect_host_details_marks_auth_failure_on_authentication_error(
 ) -> None:
     """When get_host_and_agent_details raises HostAuthenticationError, the host
     should be listed as UNAUTHENTICATED."""
-    host_id = HostId.generate()
-    host_name = HostName("auth-failed-host")
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=str(host_name),
-        created_at=now,
-        updated_at=now,
+    f = _ConnectionErrorListingFixture(
+        temp_mng_ctx, temp_host_dir, error_to_raise=HostAuthenticationError("Auth failed")
     )
-
-    provider = _ConnectionErrorMockProvider(
-        error_to_raise=HostAuthenticationError("Auth failed"),
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_host_dir,
-        mng_ctx=temp_mng_ctx,
-    )
-    offline_host = make_offline_host(certified_data, provider, temp_mng_ctx)
-    provider.mock_hosts = [offline_host]
-
-    host_ref = DiscoveredHost(
-        host_id=host_id,
-        host_name=host_name,
-        provider_name=provider.name,
-    )
-    agent_ref = DiscoveredAgent(
-        host_id=host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("auth-agent"),
-        provider_name=provider.name,
-        certified_data={"command": "sleep 100"},
-    )
-
-    result = ListResult()
-    params = _make_list_params()
 
     _collect_and_emit_details_for_host(
-        host_ref=host_ref,
-        agent_refs=[agent_ref],
-        provider=provider,
-        params=params,
-        result=result,
+        host_ref=f.host_ref,
+        agent_refs=[f.agent_ref],
+        provider=f.provider,
+        params=_make_list_params(),
+        result=f.result,
         results_lock=Lock(),
     )
 
-    assert len(result.agents) == 1
-    assert result.agents[0].host.state == HostState.UNAUTHENTICATED
+    assert len(f.result.agents) == 1
+    assert f.result.agents[0].host.state == HostState.UNAUTHENTICATED
 
 
 def test_process_host_with_error_handling_catches_host_connection_error(
@@ -767,50 +744,17 @@ def test_process_host_with_error_handling_catches_host_connection_error(
 ) -> None:
     """_process_host_with_error_handling should not crash on HostConnectionError
     when error_behavior is CONTINUE."""
-    host_id = HostId.generate()
-    host_name = HostName("error-host")
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=str(host_name),
-        created_at=now,
-        updated_at=now,
-    )
+    f = _ConnectionErrorListingFixture(temp_mng_ctx, temp_host_dir)
 
-    provider = _ConnectionErrorMockProvider(
-        name=ProviderInstanceName("test-provider"),
-        host_dir=temp_host_dir,
-        mng_ctx=temp_mng_ctx,
-    )
-    offline_host = make_offline_host(certified_data, provider, temp_mng_ctx)
-    provider.mock_hosts = [offline_host]
-
-    host_ref = DiscoveredHost(
-        host_id=host_id,
-        host_name=host_name,
-        provider_name=provider.name,
-    )
-    agent_ref = DiscoveredAgent(
-        host_id=host_id,
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("error-agent"),
-        provider_name=provider.name,
-        certified_data={"command": "sleep 100"},
-    )
-
-    result = ListResult()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
-
-    # Should not raise
     _process_host_with_error_handling(
-        host_ref=host_ref,
-        agent_refs=[agent_ref],
-        provider=provider,
-        params=params,
-        result=result,
+        host_ref=f.host_ref,
+        agent_refs=[f.agent_ref],
+        provider=f.provider,
+        params=_make_list_params(error_behavior=ErrorBehavior.CONTINUE),
+        result=f.result,
         results_lock=Lock(),
     )
 
     # Agent should be listed (fell back to offline data)
-    assert len(result.agents) == 1
-    assert result.errors == []
+    assert len(f.result.agents) == 1
+    assert f.result.errors == []
