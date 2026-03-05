@@ -28,7 +28,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import PluginName
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSection
 from imbue.mng_kanpan.data_types import BoardSnapshot
@@ -862,12 +861,7 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
 
 def _load_user_commands(mng_ctx: MngContext) -> dict[str, CustomCommand]:
     """Load user-defined commands from plugin config."""
-    plugin_name = PluginName("kanpan")
-    if plugin_name not in mng_ctx.config.plugins:
-        return {}
-    config = mng_ctx.config.plugins[plugin_name]
-    if not isinstance(config, KanpanPluginConfig):
-        return {}
+    config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
     # Config loader uses model_construct() which bypasses validation,
     # so nested dicts may not be parsed into CustomCommand objects.
     result: dict[str, CustomCommand] = {}

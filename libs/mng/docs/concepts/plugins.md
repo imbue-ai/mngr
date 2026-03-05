@@ -148,6 +148,183 @@ Called when collecting data for hosts and agents. These allow plugins to compute
 
 **Dependency ordering:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B.
 
+## Writing a Plugin
+
+A plugin is a Python package that declares an entry point for the `mng` group and contains functions decorated with `@hookimpl`.
+
+### Package setup
+
+Register your plugin via a setuptools entry point in `pyproject.toml`:
+
+```toml
+[project.entry-points.mng]
+my_plugin = "my_package.plugin_module"
+```
+
+The entry point name (here `my_plugin`) becomes your plugin's identity -- it appears in `mng plugin list` and is the name users pass to `mng plugin enable my_plugin`. The value points to any Python module containing your `@hookimpl` functions.
+
+### Hook implementations
+
+Decorate module-level functions with `@hookimpl` to implement hooks:
+
+```python
+from imbue.mng import hookimpl
+
+@hookimpl
+def on_after_provisioning(agent, host, mng_ctx):
+    # your logic here
+    ...
+```
+
+Hooks must be module-level functions (not methods on a class). The function name must match the hook name exactly. You only need to implement the hooks you care about.
+
+### Plugin configuration
+
+If your plugin needs user-configurable settings, define a config class and register it at import time:
+
+```python
+from pydantic import Field
+from imbue.mng.config.data_types import PluginConfig
+from imbue.mng.config.plugin_registry import register_plugin_config
+
+class MyPluginConfig(PluginConfig):
+    some_option: str = Field(default="default_value")
+
+    def merge_with(self, override: "PluginConfig") -> "MyPluginConfig":
+        if not isinstance(override, MyPluginConfig):
+            return self
+        return MyPluginConfig(
+            enabled=override.enabled if override.enabled is not None else self.enabled,
+            some_option=override.some_option if override.some_option is not None else self.some_option,
+        )
+
+# This MUST be at module level (not inside a hook) -- the config system
+# needs to know the class before it parses TOML files.
+register_plugin_config("my_plugin", MyPluginConfig)
+```
+
+The base `PluginConfig` provides an `enabled: bool` field automatically. Custom config classes must implement `merge_with()` so that config layering (user, project, profile) works correctly.
+
+Users configure your plugin in their TOML settings:
+
+```toml
+[plugins.my_plugin]
+enabled = true
+some_option = "custom_value"
+```
+
+To access your config at runtime, use `mng_ctx.get_plugin_config()`:
+
+```python
+config = mng_ctx.get_plugin_config("my_plugin", MyPluginConfig)
+# Returns MyPluginConfig with defaults if no config entry exists.
+# Raises ConfigParseError if the entry exists but has the wrong type.
+```
+
+### How hooks receive state
+
+Hooks receive context through their function arguments. The hookspecs define what each hook gets. There are three patterns:
+
+**Return value hooks** receive nothing and return data. Used by registration hooks:
+
+```python
+@hookimpl
+def register_cli_commands():
+    return [my_command]
+```
+
+**Mutable dict hooks** receive a dict and modify it in place. Used by `on_load_config`, `override_command_options`, and `modify_env_vars_for_deploy`:
+
+```python
+@hookimpl
+def override_command_options(command_name, command_class, params):
+    if command_name != "create":
+        return
+    existing = params.get("add_command", ())
+    params["add_command"] = (*existing, 'my_window="my-command"')
+```
+
+**Chained hooks** receive the previous hook's output and return a modified copy (or `None` to pass through). Used by `on_before_create`:
+
+```python
+@hookimpl
+def on_before_create(args):
+    # Return modified args, or None to pass through unchanged
+    return args.model_copy(update={"create_work_dir": False})
+```
+
+The `MngContext` object is the central state carrier. Hooks that receive it can access `mng_ctx.config` (the merged config), `mng_ctx.pm` (the plugin manager), and `mng_ctx.profile_dir` (user profile directory).
+
+### CLI commands
+
+To add a new top-level command to `mng`, implement `register_cli_commands` and follow the standard command pattern:
+
+```python
+# cli.py
+import click
+from imbue.mng.cli.common_opts import CommonCliOptions
+from imbue.mng.cli.common_opts import add_common_options
+from imbue.mng.cli.common_opts import setup_command_context
+from imbue.mng.cli.help_formatter import CommandHelpMetadata
+from imbue.mng.cli.help_formatter import add_pager_help_option
+
+class MyCommandOptions(CommonCliOptions):
+    my_arg: str | None
+
+@click.command()
+@click.argument("my_arg", default=None, required=False)
+@add_common_options
+@click.pass_context
+def my_command(ctx, **kwargs):
+    mng_ctx, output_opts, opts = setup_command_context(
+        ctx=ctx, command_name="my-command", command_class=MyCommandOptions,
+    )
+    # opts.my_arg is now typed and available
+    ...
+
+CommandHelpMetadata(
+    key="my-command",
+    one_line_description="Brief description of what this does",
+    synopsis="mng my-command [MY_ARG]",
+    description="Extended description.",
+).register()
+
+add_pager_help_option(my_command)
+```
+
+```python
+# plugin.py
+from imbue.mng import hookimpl
+from my_package.cli import my_command
+
+@hookimpl
+def register_cli_commands():
+    return [my_command]
+```
+
+### Extending existing commands
+
+Use `override_command_options` to modify the behavior of existing commands. Convention: always check `command_name` first and return early for commands you don't care about. When appending to tuple-valued params, preserve existing values:
+
+```python
+@hookimpl
+def override_command_options(command_name, command_class, params):
+    if command_name != "create":
+        return
+    existing = params.get("env", ())
+    params["env"] = (*existing, "MY_VAR=1")
+```
+
+To add visible CLI options to existing commands (so they appear in `--help`), implement `register_cli_options`.
+
+### Error handling
+
+Raise `MngError` (from `imbue.mng.errors`) for operational errors that should abort the current command with a user-facing message. Lifecycle hooks that can abort operations (like `on_before_host_create`) do so by raising exceptions.
+
+### Cross-plugin dependencies
+
+If your plugin depends on another plugin, declare it as a standard Python package dependency. You can then import from that plugin's modules directly.
+
 ## Built-in Plugins
 
 `mng` ships with built-in plugins for common agent types:
