@@ -751,7 +751,7 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
     """
     state_str = str(entry.state)
     state_attr = _get_state_attr(entry)
-    cell_markup: dict[str, str | tuple[Hashable, str]] = {
+    raw_markup: dict[str, str | tuple[Hashable, str]] = {
         "name": f"  {entry.name}",
         "state": (state_attr, state_str) if state_attr else state_str,
         "git": _get_push_cell_text(entry),
@@ -762,7 +762,9 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
 
     # Muted agents: flatten all markup to gray
     if section == BoardSection.MUTED:
-        cell_markup = {k: ("muted", v[1] if isinstance(v, tuple) else v) for k, v in cell_markup.items()}
+        cell_markup = {k: ("muted", v[1] if isinstance(v, tuple) else v) for k, v in raw_markup.items()}
+    else:
+        cell_markup = raw_markup
 
     cols: list[tuple[int, Text] | Text] = []
     for col in _BOARD_COLUMNS:
