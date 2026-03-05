@@ -248,7 +248,7 @@ class WatcherSettings(FrozenModel):
     )
     event_cel_filter: str = Field(
         default=(
-            'source != "claude_transcript" && source != "common_transcript" && source != "monitor"'
+            'source != "claude_transcript" && source != "common_transcript"'
             ' && source != "conversations" && source != "delivery_failures"'
             " && ("
             '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
