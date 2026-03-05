@@ -160,7 +160,12 @@ class _SelectableRow(Columns):
 
     Columns.selectable() checks children rather than _selectable, so we
     must override it explicitly to make the widget focusable in a ListBox.
+    Each row tracks its entry and section so it can update its own mark indicator.
     """
+
+    entry: AgentBoardEntry
+    section: BoardSection
+    name_text: Text
 
     def selectable(self) -> bool:
         return True
@@ -168,6 +173,34 @@ class _SelectableRow(Columns):
     def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
         """Pass all keys through (no keys are handled by this widget)."""
         return key
+
+    def set_mark(self, mark: PendingMark | None) -> None:
+        """Update the name cell to reflect the given mark (or clear it)."""
+        name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(
+            self.entry, mark
+        )
+        if self.section == BoardSection.MUTED:
+            if isinstance(name_markup, list):
+                plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in name_markup)
+            elif isinstance(name_markup, tuple):
+                plain = name_markup[1]
+            else:
+                plain = name_markup
+            name_markup = ("muted", plain)
+        self.name_text.set_text(name_markup)
+
+
+def _make_selectable_row(
+    cols: list[tuple[int, Text] | Text],
+    entry: AgentBoardEntry,
+    section: BoardSection,
+    dividechars: int = 0,
+) -> _SelectableRow:
+    """Create a _SelectableRow with entry and section metadata attached."""
+    row = _SelectableRow(cols, dividechars=dividechars)
+    row.entry = entry
+    row.section = section
+    return row
 
 
 class _KanpanState(MutableModel):
@@ -300,9 +333,23 @@ def _is_safe_to_delete(entry: AgentBoardEntry) -> bool:
     return entry.pr is not None and entry.pr.state == PrState.MERGED
 
 
+def _update_row_mark(state: _KanpanState, walker_idx: int, mark: PendingMark | None) -> None:
+    """Update the mark indicator on a single row without rebuilding the display."""
+    if state.list_walker is None:
+        return
+    attr_map_widget = state.list_walker[walker_idx]
+    row: _SelectableRow = attr_map_widget.original_widget
+    row.set_mark(mark)
+
+
 def _toggle_mark(state: _KanpanState, mark: PendingMark) -> None:
     """Toggle a dired-style mark on the focused agent, then advance focus."""
-    entry = _get_focused_entry(state)
+    if state.list_walker is None:
+        return
+    _, focus_idx = state.list_walker.get_focus()
+    if focus_idx is None:
+        return
+    entry = state.index_to_entry.get(focus_idx)
     if entry is None:
         return
 
@@ -313,10 +360,12 @@ def _toggle_mark(state: _KanpanState, mark: PendingMark) -> None:
     existing = state.marks.get(entry.name)
     if existing == mark:
         del state.marks[entry.name]
+        new_mark = None
     else:
         state.marks[entry.name] = mark
+        new_mark = mark
 
-    _refresh_display(state)
+    _update_row_mark(state, focus_idx, new_mark)
     _update_mark_count_footer(state)
 
     # Advance focus to next agent (like dired)
@@ -325,12 +374,17 @@ def _toggle_mark(state: _KanpanState, mark: PendingMark) -> None:
 
 def _unmark_focused(state: _KanpanState) -> None:
     """Remove any mark from the focused agent, then advance focus."""
-    entry = _get_focused_entry(state)
+    if state.list_walker is None:
+        return
+    _, focus_idx = state.list_walker.get_focus()
+    if focus_idx is None:
+        return
+    entry = state.index_to_entry.get(focus_idx)
     if entry is None:
         return
     if entry.name in state.marks:
         del state.marks[entry.name]
-        _refresh_display(state)
+        _update_row_mark(state, focus_idx, None)
         _update_mark_count_footer(state)
     _advance_focus(state)
 
@@ -339,8 +393,12 @@ def _unmark_all(state: _KanpanState) -> None:
     """Remove all marks."""
     if not state.marks:
         return
+    # Update each marked row's display before clearing
+    marked_names = set(state.marks.keys())
     state.marks.clear()
-    _refresh_display(state)
+    for idx, entry in state.index_to_entry.items():
+        if entry.name in marked_names:
+            _update_row_mark(state, idx, None)
     _update_mark_count_footer(state)
 
 
@@ -964,13 +1022,19 @@ def _build_agent_row(
         cell_markup = raw_markup
 
     cols: list[tuple[int, Text] | Text] = []
+    name_text: Text | None = None
     for defn in _BOARD_COLUMN_DEFS:
         widget = Text(cell_markup[defn.name])
+        if defn.name == "name":
+            name_text = widget
         if defn.flexible:
             cols.append(widget)
         else:
             cols.append((widths[defn.name], widget))
-    return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
+    row = _make_selectable_row(cols, entry=entry, section=section, dividechars=_COL_DIVIDER_CHARS)
+    if name_text is not None:
+        row.name_text = name_text
+    return row
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
