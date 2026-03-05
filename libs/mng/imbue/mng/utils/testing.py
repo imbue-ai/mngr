@@ -951,7 +951,7 @@ AllowUsers {current_user}
     sshd_config_path.write_text(sshd_config)
 
     # Start sshd
-    proc = subprocess.Popen(
+    process = subprocess.Popen(
         [sshd_path, "-D", "-f", str(sshd_config_path), "-e"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -969,12 +969,12 @@ AllowUsers {current_user}
 
     finally:
         # Stop sshd
-        proc.send_signal(signal.SIGTERM)
+        process.send_signal(signal.SIGTERM)
         try:
-            proc.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            process.kill()
+            process.wait()
 
 
 # =============================================================================

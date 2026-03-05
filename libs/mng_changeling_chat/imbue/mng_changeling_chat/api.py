@@ -113,26 +113,26 @@ if not conv_file.exists():
     print('[]')
     sys.exit(0)
 
-convs = {}
+conversations = {}
 for line_idx, line in enumerate(conv_file.read_text().splitlines(), 1):
     line = line.strip()
     if not line:
         continue
     try:
         event = json.loads(line)
-        cid = event['conversation_id']
-        convs[cid] = event
+        conversation_id = event['conversation_id']
+        conversations[conversation_id] = event
     except (json.JSONDecodeError, KeyError) as e:
         print(f'WARNING: skipping malformed conversation event line {line_idx}: {e}', file=sys.stderr)
         continue
 
-if not convs:
+if not conversations:
     print('[]')
     sys.exit(0)
 
 updated_at = {}
-for cid, event in convs.items():
-    updated_at[cid] = event.get('timestamp', '')
+for conversation_id, event in conversations.items():
+    updated_at[conversation_id] = event.get('timestamp', '')
 
 if msg_file.exists():
     for line_idx, line in enumerate(msg_file.read_text().splitlines(), 1):
@@ -141,25 +141,25 @@ if msg_file.exists():
             continue
         try:
             msg = json.loads(line)
-            cid = msg.get('conversation_id', '')
+            conversation_id = msg.get('conversation_id', '')
             ts = msg.get('timestamp', '')
-            if cid in convs and ts:
-                if cid not in updated_at or ts > updated_at[cid]:
-                    updated_at[cid] = ts
+            if conversation_id in conversations and ts:
+                if conversation_id not in updated_at or ts > updated_at[conversation_id]:
+                    updated_at[conversation_id] = ts
         except (json.JSONDecodeError, KeyError) as e:
             print(f'WARNING: skipping malformed message event line {line_idx}: {e}', file=sys.stderr)
             continue
 
 result = []
-for cid, event in convs.items():
+for conversation_id, event in conversations.items():
     # Skip internal conversations (e.g. system_notifications)
     if 'internal' in event.get('tags', {}):
         continue
     result.append({
-        'conversation_id': cid,
+        'conversation_id': conversation_id,
         'model': event.get('model', '?'),
         'created_at': event.get('timestamp', '?'),
-        'updated_at': updated_at.get(cid, event.get('timestamp', '?')),
+        'updated_at': updated_at.get(conversation_id, event.get('timestamp', '?')),
     })
 
 result.sort(key=lambda r: r['updated_at'], reverse=True)

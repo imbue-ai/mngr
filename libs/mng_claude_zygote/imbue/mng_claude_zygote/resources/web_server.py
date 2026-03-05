@@ -129,10 +129,10 @@ def _read_conversations() -> list[dict[str, str]]:
                 continue
             try:
                 event = json.loads(line)
-                cid = event.get("conversation_id", "")
-                if cid:
-                    conversations_by_id[cid] = {
-                        "conversation_id": cid,
+                conversation_id = event.get("conversation_id", "")
+                if conversation_id:
+                    conversations_by_id[conversation_id] = {
+                        "conversation_id": conversation_id,
                         "model": event.get("model", "unknown"),
                         "created_at": event.get("timestamp", ""),
                         "updated_at": event.get("timestamp", ""),
@@ -148,12 +148,12 @@ def _read_conversations() -> list[dict[str, str]]:
             if not line:
                 continue
             try:
-                msg = json.loads(line)
-                cid = msg.get("conversation_id", "")
-                ts = msg.get("timestamp", "")
-                if cid and ts and cid in conversations_by_id:
-                    if ts > conversations_by_id[cid]["updated_at"]:
-                        conversations_by_id[cid]["updated_at"] = ts
+                message = json.loads(line)
+                conversation_id = message.get("conversation_id", "")
+                ts = message.get("timestamp", "")
+                if conversation_id and ts and conversation_id in conversations_by_id:
+                    if ts > conversations_by_id[conversation_id]["updated_at"]:
+                        conversations_by_id[conversation_id]["updated_at"] = ts
             except json.JSONDecodeError as e:
                 _log(f"Skipping malformed message event line: {e}")
                 continue
@@ -297,7 +297,7 @@ def _render_conversations_page() -> str:
 
     conv_items = ""
     for conv in conversations:
-        cid = _html_escape(conv["conversation_id"])
+        conversation_id = _html_escape(conv["conversation_id"])
         model = _html_escape(conv.get("model", ""))
         updated = _html_escape(conv.get("updated_at", ""))
         detail = model
@@ -306,10 +306,10 @@ def _render_conversations_page() -> str:
         conv_items += (
             f'<li class="item">'
             f'<div class="item-info">'
-            f'<span class="item-name">{cid}</span>'
+            f'<span class="item-name">{conversation_id}</span>'
             f'<span class="item-detail">{detail}</span>'
             f"</div>"
-            f'<a class="link-btn" href="chat?cid={cid}">Open</a>'
+            f'<a class="link-btn" href="chat?cid={conversation_id}">Open</a>'
             f"</li>\n"
         )
 
@@ -394,17 +394,31 @@ class _WebServerHandler(BaseHTTPRequestHandler):
         agent_name = _html_escape(AGENT_NAME or "Agent")
 
         if path == "/" or path == "/index.html":
-            cid = _get_most_recent_conversation_id()
-            if cid is not None:
-                self._send_html(_render_iframe_page(agent_name, cid, f"../chat/?arg={cid}", active="conversations"))
+            conversation_id = _get_most_recent_conversation_id()
+            if conversation_id is not None:
+                self._send_html(
+                    _render_iframe_page(
+                        agent_name,
+                        conversation_id,
+                        f"../chat/?arg={conversation_id}",
+                        active="conversations",
+                    )
+                )
             else:
                 self._send_html(_render_conversations_page())
         elif path == "/chat":
-            cid = (query.get("cid") or [""])[0]
-            if not cid:
+            conversation_id = (query.get("cid") or [""])[0]
+            if not conversation_id:
                 self._send_redirect("conversations")
             else:
-                self._send_html(_render_iframe_page(agent_name, cid, f"../chat/?arg={cid}", active="conversations"))
+                self._send_html(
+                    _render_iframe_page(
+                        agent_name,
+                        conversation_id,
+                        f"../chat/?arg={conversation_id}",
+                        active="conversations",
+                    )
+                )
         elif path == "/conversations":
             self._send_html(_render_conversations_page())
         elif path == "/terminal":

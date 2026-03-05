@@ -322,7 +322,7 @@ class MngStreamManager(MutableModel):
 
         self._update_resolver(tuple(agent_ids))
 
-        new_ids = {str(aid) for aid in agent_ids}
+        new_ids = {str(agent_id) for agent_id in agent_ids}
         self._sync_events_streams(new_ids)
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
@@ -335,7 +335,7 @@ class MngStreamManager(MutableModel):
         )
         with self._lock:
             self._ssh_by_host_id[str(event.host_id)] = ssh_info
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+            agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
 
         self._update_resolver(agent_ids)
 

@@ -525,8 +525,8 @@ def test_conversation_event_serializes_to_valid_jsonl(chat_env: ChatScriptEnv) -
 
     assert result.returncode == 0
 
-    cid = result.stdout.strip()
-    assert cid.startswith("conv-"), f"Expected conversation ID, got: {cid!r}"
+    conversation_id = result.stdout.strip()
+    assert conversation_id.startswith("conv-"), f"Expected conversation ID, got: {conversation_id!r}"
 
     events_file = chat_env.conversations_dir / "events.jsonl"
     assert events_file.exists(), "conversations/events.jsonl should exist"
@@ -537,7 +537,7 @@ def test_conversation_event_serializes_to_valid_jsonl(chat_env: ChatScriptEnv) -
     event = json.loads(lines[-1])
     assert event["type"] == "conversation_created"
     assert event["source"] == "conversations"
-    assert event["conversation_id"] == cid
+    assert event["conversation_id"] == conversation_id
     assert event["model"] == "claude-sonnet-4-6"
     assert "timestamp" in event
     assert "event_id" in event
@@ -548,20 +548,20 @@ def test_multiple_conversations_create_separate_events(chat_env: ChatScriptEnv) 
     """Verify that creating multiple conversations produces separate events."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
-    cids = []
+    conversation_ids = []
     for _ in range(3):
         result = chat_env.run("--new", "--as-agent")
         assert result.returncode == 0
-        cids.append(result.stdout.strip())
+        conversation_ids.append(result.stdout.strip())
 
-    assert len(set(cids)) == 3, f"Expected 3 unique CIDs, got: {cids}"
+    assert len(set(conversation_ids)) == 3, f"Expected 3 unique conversation IDs, got: {conversation_ids}"
 
     events_file = chat_env.conversations_dir / "events.jsonl"
     lines = events_file.read_text().strip().split("\n")
     assert len(lines) == 3
 
-    event_cids = [json.loads(line)["conversation_id"] for line in lines]
-    assert set(event_cids) == set(cids)
+    event_conversation_ids = [json.loads(line)["conversation_id"] for line in lines]
+    assert set(event_conversation_ids) == set(conversation_ids)
 
 
 @pytest.mark.timeout(30)

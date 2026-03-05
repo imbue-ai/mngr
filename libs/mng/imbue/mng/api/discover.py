@@ -44,7 +44,7 @@ def warn_on_duplicate_host_names(
                 "This should never happen -- it may indicate a bug or a race condition during host creation.",
                 host_name,
                 provider_name,
-                ", ".join(str(hid) for hid in host_ids),
+                ", ".join(str(host_id) for host_id in host_ids),
             )
 
 
