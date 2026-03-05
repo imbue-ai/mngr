@@ -40,6 +40,7 @@ from imbue.mng.interfaces.host import AgentGitOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
@@ -615,6 +616,35 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "MNG_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
     assert "permissions_waiting" in hook["command"]
+
+
+def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """ClaudeAgent.get_lifecycle_state should return WAITING when permissions_waiting file exists."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+
+    with patch.object(type(agent).__mro__[1], "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
+        # Without the file, should stay RUNNING
+        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+
+        # Create the permissions_waiting file
+        (agent._get_agent_dir() / "permissions_waiting").touch()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+
+
+def test_get_lifecycle_state_does_not_override_non_running_states(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """ClaudeAgent.get_lifecycle_state should not override non-RUNNING states even when permissions_waiting exists."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    (agent._get_agent_dir() / "permissions_waiting").touch()
+
+    for state in (AgentLifecycleState.STOPPED, AgentLifecycleState.WAITING, AgentLifecycleState.DONE):
+        with patch.object(type(agent).__mro__[1], "get_lifecycle_state", return_value=state):
+            assert agent.get_lifecycle_state() == state
 
 
 def test_get_expected_process_name_returns_claude(

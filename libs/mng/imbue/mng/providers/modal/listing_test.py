@@ -70,7 +70,6 @@ def test_parse_listing_output_extracts_agent_data() -> None:
         "START_MTIME=1700000050\n"
         "TMUX_INFO=0|claude|456\n"
         "ACTIVE=true\n"
-        "PERMISSIONS_WAITING=false\n"
         "URL=https://example.com\n"
         "---MNG_AGENT_END---\n"
     )
@@ -84,7 +83,6 @@ def test_parse_listing_output_extracts_agent_data() -> None:
     assert agent["start_activity_mtime"] == 1700000050
     assert agent["tmux_info"] == "0|claude|456"
     assert agent["is_active"] is True
-    assert agent["is_permissions_waiting"] is False
     assert agent["url"] == "https://example.com"
 
 
