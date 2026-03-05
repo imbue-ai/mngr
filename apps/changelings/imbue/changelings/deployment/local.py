@@ -10,7 +10,6 @@ from pydantic import Field
 from imbue.changelings.config.data_types import ChangelingPaths
 from imbue.changelings.config.data_types import DeploymentProvider
 from imbue.changelings.config.data_types import MNG_BINARY
-from imbue.changelings.errors import AgentAlreadyExistsError
 from imbue.changelings.errors import ChangelingError
 from imbue.changelings.errors import GitCloneError
 from imbue.changelings.errors import GitCommitError
@@ -225,16 +224,11 @@ def deploy_changeling(
     4. Returns the deployment result with the login URL
 
     The agent itself is responsible for writing its server info to
-    $MNG_AGENT_STATE_DIR/events/servers.jsonl on startup, which the forwarding
+    $MNG_AGENT_STATE_DIR/events/servers/events.jsonl on startup, which the forwarding
     server reads to discover backends.
     """
     with log_span("Deploying changeling '{}' via provider '{}'", agent_name, provider.value):
         _verify_mng_available()
-
-        _check_agent_not_exists(
-            agent_name=agent_name,
-            concurrency_group=concurrency_group,
-        )
 
         _create_mng_agent(
             changeling_dir=changeling_dir,
@@ -262,52 +256,6 @@ def _verify_mng_available() -> None:
     """Verify that the mng binary is available on PATH."""
     if shutil.which(MNG_BINARY) is None:
         raise MngNotFoundError("The 'mng' command was not found on PATH. Install mng first: uv tool install mng")
-
-
-def _check_agent_not_exists(
-    agent_name: AgentName,
-    concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Check that no agent with this name already exists.
-
-    Raises AgentAlreadyExistsError if an agent with the given name is found.
-    """
-    result = concurrency_group.run_process_to_completion(
-        command=[
-            MNG_BINARY,
-            "list",
-            "--include",
-            'name == "{}"'.format(agent_name),
-            "--json",
-        ],
-        is_checked_after=False,
-    )
-
-    if result.returncode != 0:
-        logger.warning("Agent existence check failed (exit code {}), proceeding without check", result.returncode)
-        return
-
-    _raise_if_agent_exists(agent_name, result.stdout)
-
-
-def _raise_if_agent_exists(agent_name: AgentName, mng_list_output: str) -> None:
-    """Parse mng list JSON output and raise if an agent with the given name exists.
-
-    Silently returns if the output cannot be parsed as JSON (defensive -- the caller
-    already verified the subprocess succeeded).
-    """
-    try:
-        data = json.loads(mng_list_output)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse mng list output for existence check, proceeding without check")
-        return
-
-    agents = data.get("agents", [])
-    if agents:
-        raise AgentAlreadyExistsError(
-            "An agent named '{}' already exists. "
-            "Use 'changeling update' to update it, or 'changeling destroy' to remove it.".format(agent_name)
-        )
 
 
 def _create_mng_agent(
@@ -340,6 +288,7 @@ def _create_mng_agent(
             "--agent-id",
             str(agent_id),
             "--no-connect",
+            "--await-ready",
             "-t",
             "entrypoint",
             "--label",

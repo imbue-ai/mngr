@@ -10,7 +10,6 @@ from imbue.changelings.deployment.local import AgentIdLookupError
 from imbue.changelings.deployment.local import MngCreateError
 from imbue.changelings.deployment.local import _create_mng_agent
 from imbue.changelings.deployment.local import _generate_auth_code
-from imbue.changelings.deployment.local import _raise_if_agent_exists
 from imbue.changelings.deployment.local import _run_mng_command
 from imbue.changelings.deployment.local import clone_git_repo
 from imbue.changelings.deployment.local import commit_files_in_repo
@@ -96,37 +95,6 @@ def test_agent_already_exists_error_message() -> None:
     )
     assert "changeling update" in str(err)
     assert "changeling destroy" in str(err)
-
-
-def test_raise_if_agent_exists_raises_when_agent_found() -> None:
-    """Verify that _raise_if_agent_exists raises when the JSON output contains agents."""
-    mng_output = json.dumps({"agents": [{"id": "agent-abc123", "name": "my-agent"}]})
-
-    with pytest.raises(AgentAlreadyExistsError, match="already exists"):
-        _raise_if_agent_exists(AgentName("my-agent"), mng_output)
-
-
-def test_raise_if_agent_exists_does_not_raise_when_no_agents() -> None:
-    """Verify that _raise_if_agent_exists does not raise when agents list is empty."""
-    mng_output = json.dumps({"agents": []})
-
-    _raise_if_agent_exists(AgentName("my-agent"), mng_output)
-
-
-def test_raise_if_agent_exists_does_not_raise_for_invalid_json() -> None:
-    """Verify that _raise_if_agent_exists silently proceeds on malformed JSON."""
-    _raise_if_agent_exists(AgentName("my-agent"), "not valid json {{{")
-
-
-def test_raise_if_agent_exists_error_mentions_update_and_destroy() -> None:
-    """Verify the error message mentions changeling update and changeling destroy."""
-    mng_output = json.dumps({"agents": [{"id": "agent-abc123"}]})
-
-    with pytest.raises(AgentAlreadyExistsError) as exc_info:
-        _raise_if_agent_exists(AgentName("my-agent"), mng_output)
-
-    assert "changeling update" in str(exc_info.value)
-    assert "changeling destroy" in str(exc_info.value)
 
 
 def test_clone_git_repo_clones_local_repo(tmp_path: Path) -> None:

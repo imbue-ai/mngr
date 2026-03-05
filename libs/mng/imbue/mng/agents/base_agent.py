@@ -20,6 +20,7 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.common import determine_lifecycle_state
+from imbue.mng.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mng.hosts.tmux import capture_tmux_pane_content
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import FileTransferSpec
@@ -353,12 +354,43 @@ class BaseAgent(AgentInterface):
         """Capture the current tmux pane content for this agent."""
         return self._capture_pane_content(self.tmux_target)
 
+    def _send_tmux_literal_keys(self, tmux_target: str, message: str) -> None:
+        """Send literal text to a tmux pane, choosing the best method by length.
+
+        For short messages (< 1024 chars), uses ``tmux send-keys -l``.
+        For long messages (>= 1024 chars), writes the text to a temp file on
+        the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
+        the tmux "command too long" error.
+        """
+        if len(message) < LONG_MESSAGE_THRESHOLD:
+            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
+            result = self.host.execute_command(send_msg_cmd)
+            if not result.success:
+                raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
+        else:
+            tmp_path = Path(f"/tmp/mng-msg-buffer-{self.session_name}.txt")
+            quoted_buffer = shlex.quote(f"mng-{self.session_name}")
+            quoted_path = shlex.quote(str(tmp_path))
+            try:
+                self.host.write_text_file(tmp_path, message)
+                load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
+                result = self.host.execute_command(load_cmd)
+                if not result.success:
+                    raise SendMessageError(
+                        str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
+                    )
+                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
+                result = self.host.execute_command(paste_cmd)
+                if not result.success:
+                    raise SendMessageError(
+                        str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
+                    )
+            finally:
+                self.host.execute_command(f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}")
+
     def _send_message_simple(self, tmux_target: str, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""
-        send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
-        result = self.host.execute_command(send_msg_cmd)
-        if not result.success:
-            raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
+        self._send_tmux_literal_keys(tmux_target, message)
 
         send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
         result = self.host.execute_command(send_enter_cmd)
@@ -381,10 +413,7 @@ class BaseAgent(AgentInterface):
         ``_send_enter_and_wait`` for submission signal synchronization.
         """
         # Send keys WITHOUT a trailing newline (so it probably does not submit)
-        send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
-        result = self.host.execute_command(send_msg_cmd)
-        if not result.success:
-            raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
+        self._send_tmux_literal_keys(tmux_target, message)
 
         # Wait for the pasted content to appear on screen
         self._wait_for_paste_visible(tmux_target, message)
@@ -626,7 +655,7 @@ class BaseAgent(AgentInterface):
     # =========================================================================
 
     def get_env_vars(self) -> dict[str, str]:
-        env_path = self._get_agent_dir() / "environment"
+        env_path = self._get_agent_dir() / "env"
         try:
             content = self.host.read_text_file(env_path)
             return parse_env_file(content)
@@ -636,7 +665,7 @@ class BaseAgent(AgentInterface):
     def set_env_vars(self, env: Mapping[str, str]) -> None:
         lines = [f"{key}={value}" for key, value in env.items()]
         content = "\n".join(lines) + "\n" if lines else ""
-        env_path = self._get_agent_dir() / "environment"
+        env_path = self._get_agent_dir() / "env"
         self.host.write_text_file(env_path, content)
 
     def get_env_var(self, key: str) -> str | None:

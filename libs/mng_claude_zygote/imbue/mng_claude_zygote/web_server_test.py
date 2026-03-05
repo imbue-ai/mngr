@@ -168,36 +168,43 @@ def test_register_server_appends_multiple(web_server_module: Any) -> None:
 # -- Page rendering tests --
 
 
-def test_render_main_page_contains_new_conversation_link(web_server_module: Any) -> None:
-    page = web_server_module._render_main_page()
-    assert "../chat/?arg=NEW" in page
+def test_render_conversations_page_contains_new_conversation_link(web_server_module: Any) -> None:
+    page = web_server_module._render_conversations_page()
+    assert "chat?cid=NEW" in page
     assert "New Conversation" in page
 
 
-def test_render_main_page_contains_agents_link(web_server_module: Any) -> None:
-    page = web_server_module._render_main_page()
+def test_render_conversations_page_contains_header_links(web_server_module: Any) -> None:
+    page = web_server_module._render_conversations_page()
+    assert "terminal" in page
+    assert "Terminal" in page
     assert "agents-page" in page
-    assert "All Agents" in page
+    assert "Agents" in page
+    assert "conversations" in page
+    assert "Conversations" in page
 
 
-def test_render_main_page_shows_empty_state_with_no_conversations(web_server_module: Any) -> None:
-    page = web_server_module._render_main_page()
+def test_render_conversations_page_shows_empty_state_with_no_conversations(web_server_module: Any) -> None:
+    page = web_server_module._render_conversations_page()
     assert "No conversations yet" in page
 
 
-def test_render_main_page_lists_conversations(web_server_module: Any) -> None:
+def test_render_conversations_page_lists_conversations(web_server_module: Any) -> None:
     events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
     events_path.parent.mkdir(parents=True, exist_ok=True)
     events_path.write_text(_make_conversation_event("conv-render-82741") + "\n")
 
-    page = web_server_module._render_main_page()
+    page = web_server_module._render_conversations_page()
     assert "conv-render-82741" in page
-    assert "../chat/?arg=conv-render-82741" in page
+    assert "chat?cid=conv-render-82741" in page
 
 
-def test_render_agents_page_contains_back_link(web_server_module: Any) -> None:
+def test_render_agents_page_contains_header_links(web_server_module: Any) -> None:
     page = web_server_module._render_agents_page()
-    assert "Back to Conversations" in page
+    assert "terminal" in page
+    assert "Terminal" in page
+    assert "conversations" in page
+    assert "Conversations" in page
 
 
 def test_render_agents_page_shows_empty_state(web_server_module: Any) -> None:
@@ -205,7 +212,7 @@ def test_render_agents_page_shows_empty_state(web_server_module: Any) -> None:
     assert "No agents found" in page
 
 
-def test_render_agents_page_lists_running_agents(web_server_module: Any) -> None:
+def test_render_agents_page_lists_agents_with_state(web_server_module: Any) -> None:
     web_server_module._cached_agents = [
         {"name": "my-agent-82741", "state": "RUNNING"},
         {"name": "stopped-agent-82741", "state": "STOPPED"},
@@ -214,10 +221,90 @@ def test_render_agents_page_lists_running_agents(web_server_module: Any) -> None
         page = web_server_module._render_agents_page()
         assert "my-agent-82741" in page
         assert "stopped-agent-82741" in page
-        assert "../agent-tmux/?arg=my-agent-82741" in page
         assert "RUNNING" in page
         assert "STOPPED" in page
-        # Running agent should have a connect link, stopped should be disabled
-        assert "disabled" in page
     finally:
         web_server_module._cached_agents = []
+
+
+# -- Iframe page rendering tests --
+
+
+def test_render_iframe_page_contains_iframe_with_src(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "My Chat", "../chat/?arg=conv-1")
+    assert "<iframe" in page
+    assert "../chat/?arg=conv-1" in page
+    assert "iframe-layout" in page
+    assert "iframe-container" in page
+
+
+def test_render_iframe_page_contains_header(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "My Chat", "../chat/?arg=conv-1", active="conversations")
+    assert "TestAgent" in page
+    assert "Conversations" in page
+    assert "Terminal" in page
+    assert "Agents" in page
+
+
+def test_render_iframe_page_highlights_active_nav(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "Title", "../chat/", active="terminal")
+    assert 'class="active"' in page
+
+
+def test_render_iframe_page_escapes_src(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "Title", '../chat/?arg=a"b')
+    assert "a&quot;b" in page
+
+
+def test_render_iframe_page_escapes_title(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "</title><script>xss</script>", "../chat/")
+    assert "<script>" not in page
+    assert "&lt;/title&gt;" in page
+
+
+# -- Main page tests --
+
+
+def test_get_most_recent_conversation_id_returns_none_when_no_conversations(
+    web_server_module: Any,
+) -> None:
+    result = web_server_module._get_most_recent_conversation_id()
+    assert result is None
+
+
+def test_get_most_recent_conversation_id_returns_most_recent(
+    web_server_module: Any,
+) -> None:
+    events_path = web_server_module.CONVERSATIONS_EVENTS_PATH
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        _make_conversation_event("conv-old-82741", timestamp="2026-01-01T00:00:00Z"),
+        _make_conversation_event("conv-new-82741", timestamp="2026-02-01T00:00:00Z"),
+    ]
+    events_path.write_text("\n".join(lines) + "\n")
+
+    result = web_server_module._get_most_recent_conversation_id()
+    assert result == "conv-new-82741"
+
+
+# -- Header rendering tests --
+
+
+def test_render_header_highlights_active_conversations(web_server_module: Any) -> None:
+    header = web_server_module._render_header("Agent", active="conversations")
+    assert 'class="active" href="conversations"' in header
+
+
+def test_render_header_highlights_active_terminal(web_server_module: Any) -> None:
+    header = web_server_module._render_header("Agent", active="terminal")
+    assert 'class="active" href="terminal"' in header
+
+
+def test_render_header_highlights_active_agents(web_server_module: Any) -> None:
+    header = web_server_module._render_header("Agent", active="agents")
+    assert 'class="active" href="agents-page"' in header
+
+
+def test_render_header_no_active_when_unspecified(web_server_module: Any) -> None:
+    header = web_server_module._render_header("Agent")
+    assert 'class="active"' not in header

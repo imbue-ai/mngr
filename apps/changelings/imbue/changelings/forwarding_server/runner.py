@@ -6,7 +6,7 @@ from imbue.changelings.config.data_types import ChangelingPaths
 from imbue.changelings.forwarding_server.app import create_forwarding_server
 from imbue.changelings.forwarding_server.auth import FileAuthStore
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
-from imbue.changelings.forwarding_server.backend_resolver import SubprocessMngCli
+from imbue.changelings.forwarding_server.backend_resolver import MngStreamManager
 from imbue.changelings.forwarding_server.ssh_tunnel import SSHTunnelManager
 
 
@@ -17,17 +17,20 @@ def start_forwarding_server(
 ) -> None:
     """Start the forwarding server using uvicorn.
 
-    The server discovers backend URLs by calling `mng events <agent-id> servers.jsonl`
-    and discovers agents via `mng list`. For remote agents (those with SSH info in the
-    mng list output), the server tunnels traffic through SSH using paramiko.
+    Starts background streaming subprocesses via MngStreamManager:
+    - `mng list --stream` to continuously discover agents and hosts
+    - `mng events <agent-id> servers/events.jsonl --follow` per agent to discover servers
 
-    This ensures newly deployed changelings are immediately available without
-    restarting the forwarding server, whether they are local or remote.
+    For remote agents (those with SSH info), the server tunnels traffic
+    through SSH using paramiko.
     """
     paths = ChangelingPaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
-    backend_resolver = MngCliBackendResolver(mng_cli=SubprocessMngCli())
+    backend_resolver = MngCliBackendResolver()
+    stream_manager = MngStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
+
+    stream_manager.start()
 
     app = create_forwarding_server(
         auth_store=auth_store,
@@ -36,4 +39,7 @@ def start_forwarding_server(
         tunnel_manager=tunnel_manager,
     )
 
-    uvicorn.run(app, host=host, port=port)
+    try:
+        uvicorn.run(app, host=host, port=port)
+    finally:
+        stream_manager.stop()

@@ -14,6 +14,7 @@ from imbue.mng_claude_zygote.conftest import EventWatcherSubprocessCapture
 from imbue.mng_claude_zygote.conftest import write_changelings_settings_toml
 from imbue.mng_claude_zygote.data_types import WatcherSettings
 from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
+from imbue.mng_claude_zygote.resources.event_watcher import _CHAT_PAIR_TIMEOUT_SECONDS
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_BURST_SIZE
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_CEL_FILTER
 from imbue.mng_claude_zygote.resources.event_watcher import _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
@@ -29,11 +30,13 @@ from imbue.mng_claude_zygote.resources.event_watcher import _deliver_batch
 from imbue.mng_claude_zygote.resources.event_watcher import _filter_catchup_events
 from imbue.mng_claude_zygote.resources.event_watcher import _format_delivery_message
 from imbue.mng_claude_zygote.resources.event_watcher import _format_time_since_last
+from imbue.mng_claude_zygote.resources.event_watcher import _get_system_notifications_conversation_id
 from imbue.mng_claude_zygote.resources.event_watcher import _load_delivery_state
 from imbue.mng_claude_zygote.resources.event_watcher import _load_watcher_settings
 from imbue.mng_claude_zygote.resources.event_watcher import _save_delivery_state
 from imbue.mng_claude_zygote.resources.event_watcher import _send_chat_notification
 from imbue.mng_claude_zygote.resources.event_watcher import _send_message
+from imbue.mng_claude_zygote.resources.event_watcher import _separate_chat_events
 from imbue.mng_claude_zygote.resources.event_watcher import _should_skip_for_catchup
 from imbue.mng_claude_zygote.resources.event_watcher import _write_notification_event
 
@@ -498,40 +501,94 @@ def test_write_notification_event_creates_file(tmp_path: Path) -> None:
     events_dir = tmp_path / "events"
     _write_notification_event(events_dir, "Test notification", level="WARNING")
 
-    events_file = events_dir / "monitor" / "events.jsonl"
+    events_file = events_dir / "delivery_failures" / "events.jsonl"
     assert events_file.exists()
 
     lines = events_file.read_text().strip().split("\n")
     assert len(lines) == 1
     event = json.loads(lines[0])
     assert event["type"] == "delivery_notification"
-    assert event["source"] == "monitor"
+    assert event["source"] == "delivery_failures"
     assert event["level"] == "WARNING"
     assert event["message"] == "Test notification"
     assert "event_id" in event
     assert "timestamp" in event
 
 
+# -- _get_system_notifications_conversation_id tests --
+
+
+def test_get_system_notifications_conversation_id_returns_first_conversation_id(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    conv_dir = events_dir / "conversations"
+    conv_dir.mkdir(parents=True)
+    events_file = conv_dir / "events.jsonl"
+    events_file.write_text(
+        json.dumps({"conversation_id": "sys-notif-123", "type": "conversation_created"})
+        + "\n"
+        + json.dumps({"conversation_id": "other-conv", "type": "conversation_created"})
+        + "\n"
+    )
+    assert _get_system_notifications_conversation_id(events_dir) == "sys-notif-123"
+
+
+def test_get_system_notifications_conversation_id_returns_none_when_no_file(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    assert _get_system_notifications_conversation_id(events_dir) is None
+
+
+def test_get_system_notifications_conversation_id_returns_none_when_empty_file(tmp_path: Path) -> None:
+    events_dir = tmp_path / "events"
+    conv_dir = events_dir / "conversations"
+    conv_dir.mkdir(parents=True)
+    (conv_dir / "events.jsonl").write_text("\n")
+    assert _get_system_notifications_conversation_id(events_dir) is None
+
+
 # -- _send_chat_notification tests --
 
 
+def _setup_conversations_file(tmp_path: Path, conversation_id: str = "sys-notif-test") -> Path:
+    """Create a conversations events file with one entry and return events_dir."""
+    events_dir = tmp_path / "events"
+    conv_dir = events_dir / "conversations"
+    conv_dir.mkdir(parents=True)
+    events_file = conv_dir / "events.jsonl"
+    events_file.write_text(json.dumps({"conversation_id": conversation_id, "type": "conversation_created"}) + "\n")
+    return events_dir
+
+
 def test_send_chat_notification_returns_true_on_success(
+    tmp_path: Path,
     mock_subprocess_success: EventWatcherSubprocessCapture,
 ) -> None:
     """_send_chat_notification returns True when llm succeeds."""
-    assert _send_chat_notification("test message") is True
+    events_dir = _setup_conversations_file(tmp_path)
+    assert _send_chat_notification(events_dir, "test message") is True
     assert len(mock_subprocess_success.calls) == 1
     cmd = mock_subprocess_success.calls[0][0]
     assert "llm" in cmd
     assert "chat" in cmd
-    assert "mng-system-notifications" in cmd
+    assert "sys-notif-test" in cmd
 
 
 def test_send_chat_notification_returns_false_on_failure(
+    tmp_path: Path,
     mock_subprocess_failure: EventWatcherSubprocessCapture,
 ) -> None:
     """_send_chat_notification returns False when llm fails."""
-    assert _send_chat_notification("test message") is False
+    events_dir = _setup_conversations_file(tmp_path)
+    assert _send_chat_notification(events_dir, "test message") is False
+
+
+def test_send_chat_notification_returns_false_when_no_conversation(
+    tmp_path: Path,
+    mock_subprocess_success: EventWatcherSubprocessCapture,
+) -> None:
+    """_send_chat_notification returns False when no conversations file exists."""
+    events_dir = tmp_path / "events"
+    assert _send_chat_notification(events_dir, "test message") is False
+    assert len(mock_subprocess_success.calls) == 0
 
 
 # -- _compute_backoff_seconds tests --
@@ -547,3 +604,136 @@ def test_compute_backoff_seconds_exponential_growth() -> None:
 def test_compute_backoff_seconds_caps_at_max() -> None:
     # With base=2 and max=60, 2 * 2^(n-1) caps at 60 for n >= 6 (2*32=64 > 60)
     assert _compute_backoff_seconds(10) == 60.0
+
+
+# -- _separate_chat_events tests --
+
+
+def _make_message_event(role: str, conversation_id: str = "conv-1", event_id: str = "evt-1") -> str:
+    return json.dumps(
+        {
+            "source": "messages",
+            "role": role,
+            "conversation_id": conversation_id,
+            "event_id": event_id,
+            "timestamp": "2026-03-01T12:00:00Z",
+        }
+    )
+
+
+def _make_non_message_event(source: str = "scheduled", event_id: str = "evt-s1") -> str:
+    return json.dumps(
+        {
+            "source": source,
+            "type": "trigger",
+            "event_id": event_id,
+            "timestamp": "2026-03-01T12:00:00Z",
+        }
+    )
+
+
+def test_separate_chat_events_passes_non_message_events() -> None:
+    """Non-message events pass through unchanged."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_non_message_event()]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert len(held) == 0
+
+
+def test_separate_chat_events_holds_user_message_without_assistant() -> None:
+    """User messages are held when no assistant response is present."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_message_event("user")]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 0
+    assert "conv-1" in held
+    assert len(held["conv-1"][0]) == 1
+
+
+def test_separate_chat_events_releases_pair() -> None:
+    """User + assistant for the same conversation are both delivered, user first."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", event_id="evt-u1"),
+        _make_message_event("assistant", event_id="evt-a1"),
+    ]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 2
+    assert len(held) == 0
+    # User message must come before assistant message
+    assert json.loads(result[0])["role"] == "user"
+    assert json.loads(result[1])["role"] == "assistant"
+
+
+def test_separate_chat_events_releases_previously_held_on_assistant() -> None:
+    """Previously held user messages are released when assistant arrives, user first."""
+    user_line = _make_message_event("user", event_id="evt-u1")
+    held: dict[str, tuple[list[str], float]] = {"conv-1": ([user_line], time.monotonic())}
+    lines = [_make_message_event("assistant", event_id="evt-a1")]
+    result = _separate_chat_events(lines, held)
+    # Both the previously held user message and the assistant message should be delivered
+    assert len(result) == 2
+    assert "conv-1" not in held
+    # User message must come before assistant message
+    assert json.loads(result[0])["role"] == "user"
+    assert json.loads(result[1])["role"] == "assistant"
+
+
+def test_separate_chat_events_timeout_releases_held() -> None:
+    """User messages held past the timeout are released even without assistant."""
+    user_line = _make_message_event("user", event_id="evt-u1")
+    old_time = time.monotonic() - _CHAT_PAIR_TIMEOUT_SECONDS - 1.0
+    held: dict[str, tuple[list[str], float]] = {"conv-1": ([user_line], old_time)}
+    # Empty batch, but timeout should release the held message
+    result = _separate_chat_events([], held)
+    assert len(result) == 1
+    assert "conv-1" not in held
+
+
+def test_separate_chat_events_different_conversations() -> None:
+    """Messages from different conversations are handled independently."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", conversation_id="conv-1", event_id="evt-u1"),
+        _make_message_event("user", conversation_id="conv-2", event_id="evt-u2"),
+        _make_message_event("assistant", conversation_id="conv-1", event_id="evt-a1"),
+    ]
+    result = _separate_chat_events(lines, held)
+    # conv-1 pair should be delivered, conv-2 user should be held
+    assert len(result) == 2
+    assert "conv-1" not in held
+    assert "conv-2" in held
+
+
+def test_separate_chat_events_mixed_with_non_message() -> None:
+    """Non-message events are delivered even when chat messages are held."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [
+        _make_message_event("user", event_id="evt-u1"),
+        _make_non_message_event(),
+    ]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1  # Only the non-message event
+    parsed = json.loads(result[0])
+    assert parsed["source"] == "scheduled"
+    assert "conv-1" in held
+
+
+def test_separate_chat_events_assistant_only_passes_through() -> None:
+    """Assistant messages without a corresponding user message are delivered immediately."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = [_make_message_event("assistant", event_id="evt-a1")]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert json.loads(result[0])["role"] == "assistant"
+    assert len(held) == 0
+
+
+def test_separate_chat_events_malformed_json_passes_through() -> None:
+    """Malformed JSON lines pass through unchanged."""
+    held: dict[str, tuple[list[str], float]] = {}
+    lines = ["not json at all"]
+    result = _separate_chat_events(lines, held)
+    assert len(result) == 1
+    assert result[0] == "not json at all"

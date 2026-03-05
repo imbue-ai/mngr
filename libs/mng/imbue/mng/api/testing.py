@@ -72,7 +72,7 @@ class FakeHost(MutableModel):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
-    def _get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Return configured SSH connection info, or None for local hosts."""
         if self.is_local:
             return None

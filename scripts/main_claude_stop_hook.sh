@@ -93,9 +93,9 @@ git fetch --all
 if ! git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
     log_info "Pushing base branch to origin (not yet present remotely)..."
     if ! retry_command 3 git push origin "$BASE_BRANCH"; then
-        log_error "Failed to push base branch after retries"
+        log_error "Failed to push base branch after retries. Perhaps changes were made locally by the linter? Or maybe you forgot to commit something?"
         notify_user || echo "No notify_user function defined, skipping."
-        exit 1
+        exit 2
     fi
 fi
 
@@ -119,9 +119,9 @@ if git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1; then
     fi
 fi
 
-# Push merge commits (if any were created)
+# Push merge commits (if any were created), setting upstream tracking if needed
 log_info "Pushing any merge commits..."
-if ! retry_command 3 git push origin HEAD; then
+if ! retry_command 3 git push -u origin HEAD; then
     log_error "Failed to push merge commits after retries. Perhaps you forgot to commit something? Or pre-commit hooks changed something? Or you made a mistake and modified a previous commit?"
     exit 2
 fi

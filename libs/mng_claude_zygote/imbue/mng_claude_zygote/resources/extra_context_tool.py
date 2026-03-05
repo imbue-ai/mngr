@@ -96,8 +96,8 @@ def gather_extra_context() -> str:
     if agent_data_dir_str:
         agent_data_dir = pathlib.Path(agent_data_dir_str)
 
-        # Extended inner monologue (from events/claude_transcript/events.jsonl)
-        transcript = agent_data_dir / "events" / "claude_transcript" / "events.jsonl"
+        # Extended inner monologue (from logs/claude_transcript/events.jsonl)
+        transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
         if transcript.exists():
             try:
                 lines = transcript.read_text().strip().split("\n")
@@ -115,23 +115,23 @@ def gather_extra_context() -> str:
         if conversations_file.exists():
             try:
                 lines = conversations_file.read_text().strip().split("\n")
-                convs: dict[str, dict[str, str]] = {}
+                conversations: dict[str, dict[str, str]] = {}
                 for line in lines:
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         event = json.loads(line)
-                        cid = event["conversation_id"]
-                        convs[cid] = event
+                        conversation_id = event["conversation_id"]
+                        conversations[conversation_id] = event
                     except (json.JSONDecodeError, KeyError) as e:
                         print(f"WARNING: malformed conversation event: {e}", file=sys.stderr)
                         continue
-                if convs:
+                if conversations:
                     conv_lines = []
-                    for cid, event in convs.items():
+                    for conversation_id, event in conversations.items():
                         conv_lines.append(
-                            f"  {cid}: model={event.get('model', '?')}, created={event.get('timestamp', '?')}"
+                            f"  {conversation_id}: model={event.get('model', '?')}, created={event.get('timestamp', '?')}"
                         )
                     sections.append("## All Conversations\n" + "\n".join(conv_lines))
             except OSError as e:
@@ -157,8 +157,8 @@ def _format_extra_events(lines: list[str]) -> str:
             ts = event.get("timestamp", "?")
             if "role" in event and "content" in event:
                 content = str(event["content"])[:_MAX_CONTENT_LENGTH]
-                cid = event.get("conversation_id", "?")
-                formatted_parts.append(f"  [{ts}] [{event.get('role', '?')}@{cid}] {content}")
+                conversation_id = event.get("conversation_id", "?")
+                formatted_parts.append(f"  [{ts}] [{event.get('role', '?')}@{conversation_id}] {content}")
             elif "data" in event:
                 formatted_parts.append(
                     f"  [{ts}] [{event_type}] {json.dumps(event.get('data', {}))[:_MAX_CONTENT_LENGTH]}"

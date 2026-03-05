@@ -1564,9 +1564,9 @@ def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
 
 
 def test_get_ssh_connection_info_returns_none_for_local_host(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that _get_ssh_connection_info returns None for local hosts."""
+    """Test that get_ssh_connection_info returns None for local hosts."""
     host, _ = host_with_temp_dir
-    ssh_info = host._get_ssh_connection_info()
+    ssh_info = host.get_ssh_connection_info()
     assert ssh_info is None
 
 

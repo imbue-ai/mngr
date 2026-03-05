@@ -79,6 +79,8 @@ def _read_tail_lines(file_path: pathlib.Path, n: int) -> list[str]:
     key = str(file_path)
     try:
         size = file_path.stat().st_size
+    except FileNotFoundError:
+        return []
     except OSError as e:
         print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []
@@ -126,6 +128,8 @@ def _get_new_lines(file_path: pathlib.Path) -> list[str]:
 
     try:
         current_size = file_path.stat().st_size
+    except FileNotFoundError:
+        return []
     except OSError as e:
         print(f"WARNING: failed to stat {file_path}: {e}", file=sys.stderr)
         return []
@@ -162,7 +166,7 @@ def gather_context() -> str:
 
     Returns context from:
     - New messages from other active conversations (from events/messages/events.jsonl)
-    - New inner monologue entries (from events/claude_transcript/events.jsonl)
+    - New inner monologue entries (from logs/claude_transcript/events.jsonl)
     - New trigger events (from events/scheduled/, mng_agents/, stop/, monitor/)
 
     Call this at the start of each conversation turn for situational awareness.
@@ -179,8 +183,8 @@ def gather_context() -> str:
     sections: list[str] = []
     is_first_call = len(_last_file_sizes) == 0
 
-    # Inner monologue (from events/claude_transcript/events.jsonl)
-    transcript = agent_data_dir / "events" / "claude_transcript" / "events.jsonl"
+    # Inner monologue (from logs/claude_transcript/events.jsonl)
+    transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
     if is_first_call:
         recent = _read_tail_lines(transcript, _MAX_TRANSCRIPT_LINES)
         if recent:
@@ -194,27 +198,27 @@ def gather_context() -> str:
 
     # Messages from other conversations (from events/messages/events.jsonl)
     messages_file = agent_data_dir / "events" / "messages" / "events.jsonl"
-    current_cid = os.environ.get("LLM_CONVERSATION_ID", "")
+    current_conversation_id = os.environ.get("LLM_CONVERSATION_ID", "")
     if is_first_call:
         recent_msgs = _read_tail_lines(messages_file, _MAX_MESSAGES_LINES)
         if recent_msgs:
-            other_convs: dict[str, list[str]] = {}
+            other_conversations: dict[str, list[str]] = {}
             for line in recent_msgs:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     event = json.loads(line)
-                    cid = event.get("conversation_id", "")
-                    if cid and cid != current_cid:
-                        other_convs.setdefault(cid, []).append(line)
+                    conversation_id = event.get("conversation_id", "")
+                    if conversation_id and conversation_id != current_conversation_id:
+                        other_conversations.setdefault(conversation_id, []).append(line)
                 except json.JSONDecodeError as e:
                     print(f"WARNING: malformed JSON in messages events: {e}", file=sys.stderr)
                     continue
-            for cid, msgs in other_convs.items():
+            for conversation_id, msgs in other_conversations.items():
                 recent = msgs[-_MAX_MESSAGES_PER_CONVERSATION:]
                 formatted = _format_events(recent)
-                sections.append(f"## Conversation {cid} (last {len(recent)} messages)\n{formatted}")
+                sections.append(f"## Conversation {conversation_id} (last {len(recent)} messages)\n{formatted}")
     else:
         new_msg_lines = _get_new_lines(messages_file)[-_MAX_MESSAGES_LINES:]
         if new_msg_lines:
@@ -222,7 +226,7 @@ def gather_context() -> str:
             for line in new_msg_lines:
                 try:
                     event = json.loads(line.strip())
-                    if event.get("conversation_id", "") != current_cid:
+                    if event.get("conversation_id", "") != current_conversation_id:
                         other_msgs.append(line)
                 except json.JSONDecodeError as e:
                     print(f"WARNING: malformed JSON in new messages: {e}", file=sys.stderr)
@@ -268,8 +272,8 @@ def _format_events(lines: list[str]) -> str:
             ts = event.get("timestamp", "?")
             if "role" in event and "content" in event:
                 content = str(event["content"])[:_MAX_CONTENT_LENGTH]
-                cid = event.get("conversation_id", "?")
-                formatted_parts.append(f"  [{ts}] [{event.get('role', '?')}@{cid}] {content}")
+                conversation_id = event.get("conversation_id", "?")
+                formatted_parts.append(f"  [{ts}] [{event.get('role', '?')}@{conversation_id}] {content}")
             elif "data" in event:
                 formatted_parts.append(
                     f"  [{ts}] [{event_type}] {json.dumps(event.get('data', {}))[:_MAX_CONTENT_LENGTH]}"

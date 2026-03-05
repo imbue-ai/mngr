@@ -509,8 +509,8 @@ def test_set_certified_data_calls_callback(fake_provider: MockProviderInstance, 
     # Track callback invocations
     callback_calls: list[tuple[HostId, CertifiedHostData]] = []
 
-    def on_updated(hid: HostId, data: CertifiedHostData) -> None:
-        callback_calls.append((hid, data))
+    def on_updated(host_id: HostId, data: CertifiedHostData) -> None:
+        callback_calls.append((host_id, data))
 
     host = OfflineHost(
         id=host_id,

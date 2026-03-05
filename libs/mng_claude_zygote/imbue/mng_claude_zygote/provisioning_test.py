@@ -21,15 +21,20 @@ from imbue.mng_claude_zygote.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
 from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
 from imbue.mng_claude_zygote.provisioning import _is_recursive_plugin_registered
+from imbue.mng_claude_zygote.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_zygote.provisioning import compute_claude_project_dir_name
+from imbue.mng_claude_zygote.provisioning import configure_llm_user_path
 from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
+from imbue.mng_claude_zygote.provisioning import create_daily_conversation
 from imbue.mng_claude_zygote.provisioning import create_event_log_directories
+from imbue.mng_claude_zygote.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_zygote.provisioning import install_llm_toolchain
-from imbue.mng_claude_zygote.provisioning import link_memory_directory
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
+from imbue.mng_claude_zygote.provisioning import resolve_work_dir_abs
+from imbue.mng_claude_zygote.provisioning import setup_memory_directory
 from imbue.mng_claude_zygote.provisioning import validate_talking_role_constraints
 from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
 from imbue.mng_claude_zygote.resources import context_tool as context_tool_module
@@ -130,7 +135,7 @@ def test_conversion_handles_assistant_message_with_text() -> None:
             "timestamp": "2026-01-01T00:00:01Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [{"type": "text", "text": "Hello back!"}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
@@ -140,7 +145,7 @@ def test_conversion_handles_assistant_message_with_text() -> None:
     events = _run_conversion([raw])
     assert len(events) == 1
     assert events[0]["type"] == "assistant_message"
-    assert events[0]["model"] == "claude-opus-4-6"
+    assert events[0]["model"] == "claude-opus-4.6"
     assert events[0]["text"] == "Hello back!"
 
 
@@ -152,7 +157,7 @@ def test_conversion_handles_tool_results() -> None:
             "timestamp": "2026-01-01T00:00:03Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [
                     {"type": "tool_use", "id": "toolu_456", "name": "Read", "input": {"file_path": "/tmp/test.txt"}},
                 ],
@@ -307,7 +312,7 @@ def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
             "timestamp": "2026-01-01T00:00:02.000000000Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [{"type": "tool_use", "id": "toolu_c2", "name": "Read", "input": {"file": "test.txt"}}],
                 "stop_reason": "tool_use",
                 "usage": {"input_tokens": 50, "output_tokens": 30},
@@ -346,45 +351,78 @@ def test_compute_claude_project_dir_name_replaces_dots() -> None:
     assert compute_claude_project_dir_name("/home/user/.changelings/agent") == "-home-user--changelings-agent"
 
 
-def test_link_memory_directory_creates_memory_dir() -> None:
+def _run_setup_memory(
+    work_dir: str = "/home/user/.changelings/agent",
+    active_role: str = "thinking",
+) -> StubHost:
+    """Run setup_memory_directory on a StubHost and return the host for inspection."""
     host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, host), Path(work_dir), active_role, work_dir, _DEFAULT_PROVISIONING)
+    return host
 
+
+def test_setup_memory_directory_creates_both_dirs() -> None:
+    host = _run_setup_memory()
     assert any("mkdir" in c and "/memory" in c for c in host.executed_commands)
+    assert any("mkdir" in c and ".claude/projects" in c for c in host.executed_commands)
 
 
-def test_link_memory_directory_creates_claude_project_dir_with_home_var() -> None:
-    host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
-
+def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
+    host = _run_setup_memory()
     # Must use $HOME (not ~) so tilde expansion works inside quotes
     mkdir_cmds = [c for c in host.executed_commands if "mkdir" in c and ".claude/projects" in c]
-    assert len(mkdir_cmds) == 1
+    assert len(mkdir_cmds) >= 1
     assert "$HOME" in mkdir_cmds[0]
     assert "-home-user--changelings-agent" in mkdir_cmds[0]
 
 
-def test_link_memory_directory_creates_symlink_with_correct_paths() -> None:
-    host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
-
-    ln_cmds = [c for c in host.executed_commands if "ln -sfn" in c]
-    assert len(ln_cmds) == 1
-    # Symlink target should be the memory dir
-    assert "/memory" in ln_cmds[0]
-    # Symlink source should use $HOME for the Claude project dir
-    assert "$HOME/.claude/projects/" in ln_cmds[0]
-    assert "-home-user--changelings-agent" in ln_cmds[0]
+def test_setup_memory_directory_rsyncs_initial_content() -> None:
+    host = _run_setup_memory()
+    rsync_cmds = [c for c in host.executed_commands if "rsync" in c]
+    assert len(rsync_cmds) == 1
+    assert "/memory/" in rsync_cmds[0]
+    assert "$HOME/.claude/projects/" in rsync_cmds[0]
 
 
-def test_link_memory_directory_does_not_use_literal_tilde() -> None:
+def test_setup_memory_directory_removes_old_symlink() -> None:
+    """Verify that rm -f is used to remove any old symlink before mkdir."""
+    host = _run_setup_memory()
+    mkdir_cmds = [c for c in host.executed_commands if "rm -f" in c and ".claude/projects" in c]
+    assert len(mkdir_cmds) >= 1
+
+
+def test_setup_memory_directory_does_not_use_literal_tilde() -> None:
     """Verify that ~ is never used in paths (it doesn't expand inside single quotes)."""
-    host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/project"), _DEFAULT_PROVISIONING)
-
+    host = _run_setup_memory(work_dir="/home/user/project")
     for cmd in host.executed_commands:
         if ".claude/projects" in cmd:
             assert "~" not in cmd, f"Found literal ~ in command (won't expand in quotes): {cmd}"
+
+
+def test_build_memory_sync_hooks_config_has_pre_and_post() -> None:
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
+    assert "PreToolUse" in config["hooks"]
+    assert "PostToolUse" in config["hooks"]
+
+
+def test_build_memory_sync_hooks_config_pre_syncs_work_dir_to_project() -> None:
+    """PreToolUse should rsync FROM <role>/memory/ TO Claude project memory/."""
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
+    pre_cmd = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    # rsync source comes before destination: rsync -a --delete SRC/ DST/
+    work_dir_pos = pre_cmd.index("/home/user/.changelings/agent/thinking/memory")
+    project_pos = pre_cmd.index("$HOME/.claude/projects/")
+    assert work_dir_pos < project_pos, "PreToolUse should sync work_dir -> project (work_dir first in rsync args)"
+
+
+def test_build_memory_sync_hooks_config_post_syncs_project_to_work_dir() -> None:
+    """PostToolUse should rsync FROM Claude project memory/ TO <role>/memory/."""
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
+    post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    # rsync source comes before destination: rsync -a --delete SRC/ DST/
+    work_dir_pos = post_cmd.index("/home/user/.changelings/agent/thinking/memory")
+    project_pos = post_cmd.index("$HOME/.claude/projects/")
+    assert project_pos < work_dir_pos, "PostToolUse should sync project -> work_dir (project first in rsync args)"
 
 
 # -- Provisioning function tests (using _StubHost) --
@@ -440,44 +478,37 @@ def test_install_llm_toolchain_raises_on_plugin_install_failure() -> None:
 
 def test_create_changeling_symlinks_checks_global_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("GLOBAL.md" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_checks_thinking_prompt() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("thinking/PROMPT.md" in c for c in host.executed_commands)
 
 
-def test_create_changeling_symlinks_checks_thinking_settings() -> None:
+def test_create_changeling_symlinks_creates_claude_dir_symlink() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
-    assert any("thinking/settings.json" in c for c in host.executed_commands)
+    assert any("ln -sfn" in c and "thinking/.claude" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_creates_claude_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("ln -sf" in c and "CLAUDE.md" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_creates_claude_local_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("ln -sf" in c and "CLAUDE.local.md" in c for c in host.executed_commands)
-
-
-def test_create_changeling_symlinks_creates_skills_symlink() -> None:
-    host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    assert any("ln -sfn" in c and "skills" in c for c in host.executed_commands)
 
 
 def test_provision_default_content_writes_global_md() -> None:
@@ -501,7 +532,7 @@ def test_provision_default_content_writes_thinking_settings() -> None:
     provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
 
 
 def test_provision_default_content_writes_skills_to_thinking() -> None:
@@ -509,7 +540,7 @@ def test_provision_default_content_writes_skills_to_thinking() -> None:
     provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
 
 
 def test_provision_changeling_scripts_creates_commands_dir() -> None:
@@ -560,8 +591,122 @@ def test_create_event_log_directories_creates_all_source_dirs() -> None:
     host = StubHost()
     create_event_log_directories(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
 
-    for source in ("conversations", "messages", "scheduled", "mng_agents", "stop", "monitor", "claude_transcript"):
+    for source in (
+        "conversations",
+        "messages",
+        "scheduled",
+        "mng_agents",
+        "stop",
+        "monitor",
+        "delivery_failures",
+        "common_transcript",
+        "servers",
+    ):
         assert any(source in c and "mkdir" in c for c in host.executed_commands), f"Missing mkdir for {source}"
+
+    # Also verify log directories are created
+    assert any("claude_transcript" in c and "mkdir" in c for c in host.executed_commands), (
+        "Missing mkdir for logs/claude_transcript"
+    )
+
+
+# -- configure_llm_user_path tests --
+
+
+def test_configure_llm_user_path_creates_dir() -> None:
+    host = StubHost()
+    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
+    configure_llm_user_path(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+
+    # Should create llm_data directory
+    assert any("llm_data" in c and "mkdir" in c for c in host.executed_commands)
+
+
+# -- create_system_notifications_conversation tests --
+
+
+_FAKE_INJECT_RESULT = StubCommandResult(
+    stdout="Injected message into conversation fake-conv-id-123\n",
+)
+
+
+def test_create_system_notifications_conversation_runs_inject_and_records_event() -> None:
+    host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
+    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
+    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+
+    # Should run llm inject with LLM_USER_PATH prefix (no --cid, llm assigns the ID)
+    inject_commands = [c for c in host.executed_commands if "llm inject" in c]
+    assert len(inject_commands) == 1
+    assert "--cid" not in inject_commands[0]
+    assert "LLM_USER_PATH=" in inject_commands[0]
+    assert "llm_data" in inject_commands[0]
+
+    # Should create conversations directory
+    assert any("conversations" in c and "mkdir" in c for c in host.executed_commands)
+
+    # Should append a conversation_created event using the ID from llm inject output
+    event_commands = [
+        c for c in host.executed_commands if "conversations" in c and "events.jsonl" in c and "echo" in c
+    ]
+    assert len(event_commands) == 1
+    assert "conversation_created" in event_commands[0]
+    assert "fake-conv-id-123" in event_commands[0]
+    # Should be tagged as internal
+    assert '"internal"' in event_commands[0]
+    assert '"system_notifications"' in event_commands[0]
+
+
+def test_create_system_notifications_conversation_skips_event_on_inject_failure() -> None:
+    host = StubHost(
+        command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
+    )
+    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
+    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+
+    # Should have attempted llm inject
+    inject_commands = [c for c in host.executed_commands if "llm inject" in c]
+    assert len(inject_commands) == 1
+
+    # Should NOT have written a conversation event (early return on failure)
+    event_commands = [c for c in host.executed_commands if "events.jsonl" in c and "echo" in c]
+    assert len(event_commands) == 0
+
+
+# -- create_daily_conversation tests --
+
+
+def test_create_daily_conversation_runs_inject_and_records_tagged_event() -> None:
+    host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
+    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
+    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4.6")
+
+    # Should run llm inject with the greeting and LLM_USER_PATH
+    inject_commands = [c for c in host.executed_commands if "llm inject" in c]
+    assert len(inject_commands) == 1
+    assert "Elena" in inject_commands[0]
+    assert "claude-opus-4.6" in inject_commands[0]
+    assert "LLM_USER_PATH=" in inject_commands[0]
+
+    # Should append a conversation_created event with daily tag and parsed CID
+    event_commands = [
+        c for c in host.executed_commands if "conversations" in c and "events.jsonl" in c and "echo" in c
+    ]
+    assert len(event_commands) == 1
+    assert '"daily"' in event_commands[0]
+    assert "fake-conv-id-123" in event_commands[0]
+
+
+def test_create_daily_conversation_skips_event_on_inject_failure() -> None:
+    host = StubHost(
+        command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
+    )
+    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
+    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4.6")
+
+    # Should NOT have written a conversation event
+    event_commands = [c for c in host.executed_commands if "events.jsonl" in c and "echo" in c]
+    assert len(event_commands) == 0
 
 
 # -- mng availability check tests --
@@ -787,11 +932,11 @@ def test_get_new_lines_returns_empty_when_no_new_data(tmp_path: Path) -> None:
     assert result == []
 
 
-def _make_message_line(event_id: str, cid: str, role: str = "user", content: str = "hello") -> str:
+def _make_message_line(event_id: str, conversation_id: str, role: str = "user", content: str = "hello") -> str:
     return (
         f'{{"timestamp":"2026-01-01T00:00:00Z","type":"message",'
         f'"event_id":"{event_id}","source":"messages",'
-        f'"conversation_id":"{cid}","role":"{role}","content":"{content}"}}'
+        f'"conversation_id":"{conversation_id}","role":"{role}","content":"{content}"}}'
     )
 
 
@@ -810,7 +955,7 @@ def test_gather_context_first_call_shows_transcript_and_triggers(
     module = _load_fresh_context_tool("gc_transcript")
 
     # Set up transcript
-    transcript_dir = tmp_path / "events" / "claude_transcript"
+    transcript_dir = tmp_path / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
@@ -991,8 +1136,9 @@ def test_gather_context_first_call_returns_no_context_when_all_empty(
     """Verify gather_context returns 'No context available' when all source dirs are empty."""
     module = _load_fresh_context_tool("gc_all_empty")
     # Create all the log directories but leave them empty (no events.jsonl files)
-    for source in ("claude_transcript", "messages", "scheduled", "mng_agents", "stop", "monitor"):
+    for source in ("messages", "scheduled", "mng_agents", "stop", "monitor"):
         (tmp_path / "events" / source).mkdir(parents=True)
+    (tmp_path / "logs" / "claude_transcript").mkdir(parents=True)
 
     monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(tmp_path))
 
@@ -1007,7 +1153,7 @@ def test_gather_context_incremental_new_inner_monologue(
     """Verify gather_context returns new inner monologue entries on subsequent calls."""
     module = _load_fresh_context_tool("gc_inc_monologue")
 
-    transcript_dir = tmp_path / "events" / "claude_transcript"
+    transcript_dir = tmp_path / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
@@ -1160,22 +1306,32 @@ def test_create_changeling_symlinks_skips_when_target_does_not_exist() -> None:
             "test -d": StubCommandResult(success=False),
         }
     )
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     # No symlink commands should have been executed
     assert not any("ln -sf" in c for c in host.executed_commands)
     assert not any("ln -sfn" in c for c in host.executed_commands)
 
 
+def test_create_changeling_symlinks_removes_existing_real_dir() -> None:
+    """Verify that a real .claude/ directory is removed before creating the symlink."""
+    host = StubHost()
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    # Should have a command that checks for and removes real directories
+    rm_cmds = [c for c in host.executed_commands if "rm -rf" in c and ".claude" in c]
+    assert len(rm_cmds) >= 1
+
+
 def test_create_changeling_symlinks_raises_on_symlink_failure() -> None:
     """Verify RuntimeError when symlink creation fails."""
     host = StubHost(
         command_results={
-            "ln -sf": StubCommandResult(success=False, stderr="permission denied"),
+            "ln -sfn": StubCommandResult(success=False, stderr="permission denied"),
         }
     )
-    with pytest.raises(RuntimeError, match="Failed to create symlink"):
-        create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    with pytest.raises(RuntimeError, match="Failed to create directory symlink"):
+        create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
 
 def test_install_llm_toolchain_raises_on_plugin_install_failure_live_chat() -> None:
@@ -1189,7 +1345,7 @@ def test_install_llm_toolchain_raises_on_plugin_install_failure_live_chat() -> N
         install_llm_toolchain(cast(Any, host), _DEFAULT_PROVISIONING)
 
 
-def test_link_memory_directory_raises_on_resolve_failure() -> None:
+def test_resolve_work_dir_abs_raises_on_failure() -> None:
     """Verify RuntimeError when work_dir resolution fails."""
     host = StubHost(
         command_results={
@@ -1197,18 +1353,18 @@ def test_link_memory_directory_raises_on_resolve_failure() -> None:
         }
     )
     with pytest.raises(RuntimeError, match="Failed to resolve absolute path"):
-        link_memory_directory(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+        resolve_work_dir_abs(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
 
-def test_link_memory_directory_raises_on_link_failure() -> None:
-    """Verify RuntimeError when memory symlink creation fails."""
+def test_setup_memory_directory_raises_on_sync_failure() -> None:
+    """Verify RuntimeError when memory rsync fails."""
     host = StubHost(
         command_results={
-            "ln -sfn": StubCommandResult(success=False, stderr="link failed"),
+            "rsync": StubCommandResult(success=False, stderr="sync failed"),
         }
     )
-    with pytest.raises(RuntimeError, match="Failed to link memory directory"):
-        link_memory_directory(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    with pytest.raises(RuntimeError, match="Failed to sync memory directory"):
+        setup_memory_directory(cast(Any, host), Path("/test/work"), "thinking", "/test/work", _DEFAULT_PROVISIONING)
 
 
 def test_provision_llm_tools_uses_correct_mode() -> None:
@@ -1300,7 +1456,7 @@ def test_extra_context_tool_with_transcript(extra_context_env: tuple[Any, Path])
     """Verify gather_extra_context reads transcript entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(5)]
@@ -1320,7 +1476,7 @@ def test_extra_context_tool_with_conversations(extra_context_env: tuple[Any, Pat
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         '{"timestamp":"2026-01-01T00:01:00Z","type":"conversation_created","event_id":"c2",'
         '"source":"conversations","conversation_id":"conv-2","model":"claude-sonnet-4-6"}\n'
     )
@@ -1362,7 +1518,7 @@ def test_extra_context_tool_with_empty_transcript(extra_context_env: tuple[Any, 
     """Verify gather_extra_context handles empty transcript file."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     (transcript_dir / "events.jsonl").write_text("")
 
@@ -1380,7 +1536,7 @@ def test_extra_context_tool_conversations_with_malformed_json(extra_context_env:
     conv_file.write_text(
         "not valid json\n"
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
     )
 
     result = module.gather_extra_context()
@@ -1404,7 +1560,7 @@ def test_extra_context_tool_transcript_with_many_entries(extra_context_env: tupl
     """Verify gather_extra_context limits transcript to last 50 entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(100)]
@@ -1425,7 +1581,7 @@ def test_extra_context_tool_conversations_updates_existing_conversation(
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         '{"timestamp":"2026-01-01T00:01:00Z","type":"model_changed","event_id":"c2",'
         '"source":"conversations","conversation_id":"conv-1","model":"claude-sonnet-4-6"}\n'
     )
@@ -1445,7 +1601,7 @@ def test_extra_context_tool_conversations_with_empty_lines(extra_context_env: tu
     conv_file.write_text(
         "\n"
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         "\n"
     )
 
@@ -1492,12 +1648,12 @@ def test_provision_default_content_writes_missing_files() -> None:
     assert any("GLOBAL.md" in p for p in written_paths)
     assert any("talking/PROMPT.md" in p for p in written_paths)
     assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/settings.json" in p for p in written_paths)
-    assert any("thinking/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/list-conversations/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/delegate-task/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/list-event-types/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/list-conversations/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/delegate-task/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/list-event-types/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
 
 
 def test_provision_default_content_skips_existing_files() -> None:
@@ -1529,7 +1685,7 @@ def test_provision_default_content_writes_to_thinking_dir() -> None:
 
     written_paths = [str(path) for path, _ in host.written_text_files]
     assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
 
 
 # -- validate_talking_role_constraints tests --

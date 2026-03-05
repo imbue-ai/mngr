@@ -11,12 +11,14 @@ from loguru import logger
 
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
+from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import AgentErrorInfo
 from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
@@ -410,6 +412,99 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
     host_details = _make_host_details()
     agent = _make_agent_details("any-agent", host_details)
     assert _apply_cel_filters(agent, [], []) is True
+
+
+# =============================================================================
+# _maybe_write_full_discovery_snapshot Tests
+# =============================================================================
+
+
+def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_free(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("snapshot-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_FULL" in content
+    assert "snapshot-agent" in content
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("error-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+    result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when provider_names is set."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("filtered-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=("local",),
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_include_filters_set(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when include_filters are set."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("include-filtered-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=('name == "include-filtered-agent"',),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
 
 
 # =============================================================================

@@ -38,7 +38,7 @@ The settings are modeled by `ClaudeZygoteSettings` in `imbue.mng_claude_zygote.d
 
 ```toml
 [chat]
-model = "claude-opus-4-6"               # Default model for new conversation threads
+model = "claude-opus-4.6"               # Default model for new conversation threads
 
 [chat.context]
 max_transcript_line_count = 10          # Max inner monologue lines in context
@@ -58,9 +58,9 @@ conversation_poll_interval_seconds = 5  # Poll interval for conversation watcher
 event_poll_interval_seconds = 3         # Poll interval for event watcher
 transcript_poll_interval_seconds = 5    # Poll interval for transcript watcher
 # CEL filter for the event watcher (passed to 'mng events --filter').
-# Default: exclude transcript, monitor sources (to avoid feedback loops)
+# Default: exclude common_transcript, conversations, delivery_failures,
 # and log events that aren't ERROR/WARNING.
-event_cel_filter = 'source != "claude_transcript" && source != "common_transcript" && source != "monitor" && (!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING")))'
+event_cel_filter = 'source != "common_transcript" && source != "conversations" && source != "delivery_failures" && (!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING")))'
 event_burst_size = 5                    # Messages allowed in initial burst before rate limiting
 max_event_messages_per_minute = 10      # Sustained rate limit for event delivery
 high_rate_warning_threshold_per_minute = 8  # Include rate warning when messages/min exceeds this
@@ -81,7 +81,7 @@ Bash scripts read settings via python3 one-liners with fallback defaults. Python
 
 Changelings use space in the host volume (via the agent dir) for persistent data. The structure and format of this data is up to each individual changeling. You can optionally configure them to store their memories in git (but that is less secure, as data would leak out if synced).
 
-Changelings *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNG_AGENT_STATE_DIR/events/servers.jsonl` -- one line per server -- containing the server name and URL, e.g. `{"server": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different servers (e.g. a "web" UI server and an "api" backend server). Later entries for the same server name override earlier ones. The forwarding server reads this via `mng events <agent-id> servers.jsonl` to discover all backends.
+Changelings *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNG_AGENT_STATE_DIR/events/servers/events.jsonl` -- one line per server -- containing the server name and URL, e.g. `{"server": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different servers (e.g. a "web" UI server and an "api" backend server). Later entries for the same server name override earlier ones. The forwarding server reads this via `mng events <agent-id> servers/events.jsonl` to discover all backends.
 
 # Forwarding server
 

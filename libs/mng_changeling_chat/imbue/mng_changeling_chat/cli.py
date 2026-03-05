@@ -265,16 +265,16 @@ def _resolve_latest_conversation_args(
 ) -> list[str]:
     """Resolve chat args for --last mode (or non-interactive default)."""
     try:
-        latest_cid = get_latest_conversation_id(agent, host)
+        latest_conversation_id = get_latest_conversation_id(agent, host)
     except ChatCommandError as e:
         logger.warning("Could not list conversations: {}", e)
-        latest_cid = None
-    if latest_cid is None:
+        latest_conversation_id = None
+    if latest_conversation_id is None:
         logger.info("No existing conversations found. Starting a new one.")
         return ["--new"]
     else:
-        logger.info("Resuming latest conversation: {}", latest_cid)
-        return ["--resume", latest_cid]
+        logger.info("Resuming latest conversation: {}", latest_conversation_id)
+        return ["--resume", latest_conversation_id]
 
 
 @pure
