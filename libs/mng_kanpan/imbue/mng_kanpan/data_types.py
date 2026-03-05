@@ -105,7 +105,7 @@ class KanpanPluginConfig(PluginConfig):
     )
     auto_refresh_cooldown_seconds: float = Field(
         default=60.0,
-        description="Minimum seconds between automatic refreshes (triggered by delete, push, etc.)",
+        description="Minimum seconds before retrying after a failed full refresh",
     )
     manual_refresh_cooldown_seconds: float = Field(
         default=5.0,

@@ -27,10 +27,10 @@ Kanpan rate-limits refreshes to avoid hammering the GitHub API. Two cooldown dur
 
 ```toml
 [plugins.kanpan]
-# Minimum seconds between automatic refreshes (after delete, push, custom commands, etc.)
+# Minimum seconds before retrying after a failed full refresh
 auto_refresh_cooldown_seconds = 60.0
 # Minimum seconds between manual refreshes (pressing 'r')
 manual_refresh_cooldown_seconds = 5.0
 ```
 
-When a refresh is requested within the cooldown window, it is deferred until the cooldown expires. A manual refresh with a shorter cooldown will replace a pending automatic refresh if it would fire sooner.
+When a manual refresh is requested within the cooldown window, it is deferred until the cooldown expires. A manual refresh with a shorter cooldown will replace a pending automatic refresh if it would fire sooner. Operations like delete, push, and custom commands trigger a cheap local-only refresh that bypasses cooldown (no GitHub API calls).
