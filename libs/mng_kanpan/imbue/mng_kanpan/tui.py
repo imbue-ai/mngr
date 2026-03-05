@@ -744,6 +744,15 @@ _BOARD_CELL_TEXT_FNS: dict[str, Callable[[AgentBoardEntry], str]] = {
     "ci": _get_check_cell_text,
 }
 
+_BOARD_CELL_MARKUP_FNS: dict[str, Callable[[AgentBoardEntry], str | tuple[Hashable, str]]] = {
+    "name": _get_name_cell_text,
+    "state": _get_state_cell_markup,
+    "git": _get_push_cell_text,
+    "pr": _get_pr_cell_text,
+    "ci": _get_check_cell_markup,
+    "link": _get_link_cell_text,
+}
+
 
 def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[str, int]:
     """Compute column widths based on content, like tabulate auto-sizing.
@@ -775,14 +784,7 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
 
     Muted agents are rendered entirely in gray.
     """
-    raw_markup: dict[str, str | tuple[Hashable, str]] = {
-        "name": _get_name_cell_text(entry),
-        "state": _get_state_cell_markup(entry),
-        "git": _get_push_cell_text(entry),
-        "pr": _get_pr_cell_text(entry),
-        "ci": _get_check_cell_markup(entry),
-        "link": _get_link_cell_text(entry),
-    }
+    raw_markup = {col: fn(entry) for col, fn in _BOARD_CELL_MARKUP_FNS.items()}
 
     # Muted agents: flatten all markup to gray
     if section == BoardSection.MUTED:
