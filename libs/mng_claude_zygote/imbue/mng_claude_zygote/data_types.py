@@ -40,9 +40,6 @@ SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_DELIVERY_FAILURES: Final[EventSource] = EventSource("delivery_failures")
 SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("common_transcript")
 
-# Log source (raw format, lives under logs/ not events/)
-LOG_SOURCE_CLAUDE_TRANSCRIPT: Final[str] = "claude_transcript"
-
 
 class ConversationEvent(EventEnvelope):
     """An event in events/conversations/events.jsonl tracking conversation lifecycle.
