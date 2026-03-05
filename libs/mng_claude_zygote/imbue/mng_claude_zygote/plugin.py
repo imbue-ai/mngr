@@ -42,7 +42,7 @@ AGENT_TTYD_SERVER_NAME: Final[str] = AGENT_TTYD_WINDOW_NAME
 # 2. Starts ttyd on a random port (-p 0) running `tmux attach` to that session
 #    - Unsets TMUX env var so tmux allows the nested attach from ttyd's child process
 # 3. Watches ttyd's stderr for the assigned port number (via shared helper)
-# 4. Writes a servers.jsonl record so the changelings forwarding server can discover it
+# 4. Writes a servers/events.jsonl record so the changelings forwarding server can discover it
 _AGENT_TTYD_INVOCATION = (
     "_SESSION=$(tmux display-message -p '#{session_name}') && "
     'ttyd -p 0 -t disableLeaveAlert=true -W bash -c \'unset TMUX && exec tmux attach -t "$1":0\' -- "$_SESSION"'

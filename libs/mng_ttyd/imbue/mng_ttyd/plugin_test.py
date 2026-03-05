@@ -91,8 +91,8 @@ def test_ttyd_command_uses_random_port() -> None:
 
 
 def test_ttyd_command_writes_server_log() -> None:
-    """Verify that the ttyd command writes to servers.jsonl for forwarding server discovery."""
-    assert "servers.jsonl" in TTYD_COMMAND
+    """Verify that the ttyd command writes to servers/events.jsonl for forwarding server discovery."""
+    assert "servers/events.jsonl" in TTYD_COMMAND
     assert TTYD_SERVER_NAME in TTYD_COMMAND
     assert "MNG_AGENT_STATE_DIR" in TTYD_COMMAND
 
