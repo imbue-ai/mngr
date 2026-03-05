@@ -377,6 +377,10 @@ def _extract_text(walker: list[object]) -> list[str]:
     return texts
 
 
+def _text_contains(texts: list[str], substring: str) -> bool:
+    return any(substring in t for t in texts)
+
+
 def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
     """When the first load fails to fetch PRs, the heading should say 'PRs not loaded'
     and no create-PR links should appear."""
@@ -398,14 +402,10 @@ def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
     walker = _build_board_widgets(state)
 
     texts = _extract_text(list(walker))
-    # Section heading should indicate PRs weren't loaded
-    assert any("PRs not loaded" in t for t in texts), f"Expected 'PRs not loaded' in {texts}"
-    # Should NOT show "no PR yet"
-    assert not any("no PR yet" in t for t in texts), f"Unexpected 'no PR yet' in {texts}"
-    # Should NOT show create PR links
-    assert not any("create PR" in t for t in texts), f"Unexpected 'create PR' in {texts}"
-    # Error should appear at the bottom
-    assert any("gh pr list failed" in t for t in texts), f"Expected error in {texts}"
+    assert _text_contains(texts, "PRs not loaded")
+    assert not _text_contains(texts, "no PR yet")
+    assert not _text_contains(texts, "create PR")
+    assert _text_contains(texts, "gh pr list failed")
 
 
 def test_first_load_pr_success_shows_normal_heading() -> None:
@@ -427,5 +427,44 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
     walker = _build_board_widgets(state)
 
     texts = _extract_text(list(walker))
-    assert any("no PR yet" in t for t in texts), f"Expected 'no PR yet' in {texts}"
-    assert not any("PRs not loaded" in t for t in texts), f"Unexpected 'PRs not loaded' in {texts}"
+    assert _text_contains(texts, "no PR yet")
+    assert not _text_contains(texts, "PRs not loaded")
+
+
+def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
+    """When the second load fails to fetch PRs, carry-forward preserves PR data
+    and the TUI shows normal PR info (not 'PRs not loaded')."""
+    pr = _make_pr_info(number=42, head_branch="mng/agent-1")
+    old_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=pr,
+        create_pr_url=None,
+    )
+    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        errors=("gh pr list failed: network error",),
+        prs_loaded=False,
+        fetch_time_seconds=2.0,
+    )
+
+    carried = _carry_forward_pr_data(old, new)
+    state = _make_minimal_state(carried)
+    walker = _build_board_widgets(state)
+
+    texts = _extract_text(list(walker))
+    assert _text_contains(texts, "PR ")
+    assert not _text_contains(texts, "PRs not loaded")
+    assert _text_contains(texts, "network error")
