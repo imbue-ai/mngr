@@ -110,7 +110,7 @@ def test_mng_create_with_tags_on_docker(
             "--no-ensure-clean",
             "--source-path",
             str(temp_source_dir),
-            "--tag",
+            "--host-label",
             "env=test",
             "--",
             expected_output,
