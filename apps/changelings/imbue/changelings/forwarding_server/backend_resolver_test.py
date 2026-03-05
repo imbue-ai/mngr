@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from imbue.changelings.forwarding_server.backend_resolver import BackendResolverInterface
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import MngStreamManager
@@ -98,11 +100,36 @@ def test_parse_server_log_records_returns_empty_for_empty_input() -> None:
     assert parse_server_log_records("\n") == []
 
 
-def test_parse_server_log_records_skips_invalid_lines() -> None:
+def test_parse_server_log_records_raises_on_invalid_json() -> None:
     text = 'bad line\n{"server": "web", "url": "http://127.0.0.1:9100"}\n'
+    with pytest.raises(json.JSONDecodeError):
+        parse_server_log_records(text)
+
+
+def test_parse_server_log_records_raises_on_missing_fields() -> None:
+    text = '{"server": "web"}\n'
+    with pytest.raises(ValueError, match="missing required fields"):
+        parse_server_log_records(text)
+
+
+def test_parse_server_log_records_ignores_envelope_fields() -> None:
+    text = (
+        json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:00.000000000Z",
+                "type": "server_registered",
+                "event_id": "evt-abc123",
+                "source": "servers",
+                "server": "web",
+                "url": "http://127.0.0.1:9100",
+            }
+        )
+        + "\n"
+    )
     records = parse_server_log_records(text)
 
     assert len(records) == 1
+    assert records[0].server == ServerName("web")
     assert records[0].url == "http://127.0.0.1:9100"
 
 

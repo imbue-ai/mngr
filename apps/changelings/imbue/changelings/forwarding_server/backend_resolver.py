@@ -157,18 +157,34 @@ def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
     return parse_agents_from_json(json_output).agent_ids
 
 
+def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord:
+    """Parse a single JSON dict into a ServerLogRecord.
+
+    Extracts only the 'server' and 'url' fields, ignoring any extra
+    envelope fields (timestamp, event_id, source, type) that may be present.
+    Raises ValueError if required fields are missing.
+    """
+    server = raw.get("server")
+    url = raw.get("url")
+    if not server or not url:
+        raise ValueError(f"Server log record missing required fields (server={server!r}, url={url!r})")
+    return ServerLogRecord(server=ServerName(str(server)), url=str(url))
+
+
 def parse_server_log_records(text: str) -> list[ServerLogRecord]:
-    """Parse JSONL text into server log records, skipping invalid lines."""
+    """Parse JSONL text into server log records.
+
+    Extracts only the 'server' and 'url' fields, ignoring any extra
+    envelope fields (timestamp, event_id, source, type) that may be present.
+    Raises on malformed lines rather than silently skipping them.
+    """
     records: list[ServerLogRecord] = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
-        try:
-            raw = json.loads(line)
-            records.append(ServerLogRecord.model_validate(raw))
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("Skipping invalid server log record: {}", e)
+        raw = json.loads(line)
+        records.append(parse_server_log_record(raw))
     return records
 
 
@@ -356,14 +372,14 @@ class MngStreamManager(MutableModel):
         aid_str = str(agent_id)
         try:
             raw = json.loads(stripped)
-            record = ServerLogRecord.model_validate(raw)
+            record = parse_server_log_record(raw)
             servers = self._events_servers.get(aid_str)
             if servers is None:
                 return
             servers[str(record.server)] = record.url
             self.resolver.update_servers(agent_id, dict(servers))
         except (json.JSONDecodeError, ValueError) as e:
-            logger.debug("Skipping invalid server log line for {}: {}", agent_id, e)
+            logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
         """Start mng events <agent-id> servers/events.jsonl --follow for a single agent."""
