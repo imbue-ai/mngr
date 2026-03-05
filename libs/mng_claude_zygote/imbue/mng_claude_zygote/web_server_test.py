@@ -256,6 +256,12 @@ def test_render_iframe_page_escapes_src(web_server_module: Any) -> None:
     assert "a&quot;b" in page
 
 
+def test_render_iframe_page_escapes_title(web_server_module: Any) -> None:
+    page = web_server_module._render_iframe_page("TestAgent", "</title><script>xss</script>", "../chat/")
+    assert "<script>" not in page
+    assert "&lt;/title&gt;" in page
+
+
 # -- Main page tests --
 
 

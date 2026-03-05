@@ -277,9 +277,10 @@ def _render_header(agent_name: str, active: str = "") -> str:
 
 def _render_iframe_page(agent_name: str, title: str, iframe_src: str, active: str = "") -> str:
     """Render a full-height page with header and an iframe filling the remaining space."""
+    escaped_title = _html_escape(title)
     return f"""<!DOCTYPE html>
 <html>
-<head><title>{title} - {agent_name}</title><style>{_CSS}</style></head>
+<head><title>{escaped_title} - {agent_name}</title><style>{_CSS}</style></head>
 <body class="iframe-layout">
   {_render_header(agent_name, active=active)}
   <div class="iframe-container">
