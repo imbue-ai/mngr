@@ -446,16 +446,6 @@ class DialogDetectedError(SendMessageError):
         )
 
 
-class PermissionDialogIndicator(DialogIndicator):
-    """Detects Claude Code permission dialogs (e.g., tool approval prompts)."""
-
-    def get_match_string(self) -> str:
-        return "Do you want to proceed?"
-
-    def get_description(self) -> str:
-        return "permission dialog"
-
-
 class TrustDialogIndicator(DialogIndicator):
     """Detects the Claude Code workspace trust dialog shown on first launch in a directory."""
 
@@ -524,7 +514,6 @@ class ClaudeAgent(BaseAgent):
         return "Claude Code"
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
-        PermissionDialogIndicator(),
         TrustDialogIndicator(),
         ThemeSelectionIndicator(),
         EffortCalloutIndicator(),
@@ -534,8 +523,10 @@ class ClaudeAgent(BaseAgent):
         """Check for blocking dialogs before sending a message.
 
         Captures the tmux pane and checks for known dialog indicators
-        (permission prompts, trust dialogs, theme selection, effort callout).
+        (trust dialogs, theme selection, effort callout).
         Raises DialogDetectedError if any are found.
+        Note: permission dialogs are handled via the PermissionRequest hook
+        and the permissions_waiting file, not by tmux pane scanning.
         """
         content = self._capture_pane_content(tmux_target)
         if content is None:
