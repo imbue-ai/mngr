@@ -93,9 +93,9 @@ git fetch --all
 if ! git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
     log_info "Pushing base branch to origin (not yet present remotely)..."
     if ! retry_command 3 git push origin "$BASE_BRANCH"; then
-        log_error "Failed to push base branch after retries"
+        log_error "Failed to push base branch after retries. Perhaps changes were made locally by the linter? Or maybe you forgot to commit something?"
         notify_user || echo "No notify_user function defined, skipping."
-        exit 1
+        exit 2
     fi
 fi
 
