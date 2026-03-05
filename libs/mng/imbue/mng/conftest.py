@@ -501,8 +501,11 @@ _WORKSPACE_PACKAGES = (
 def isolated_mng_venv(tmp_path: Path) -> Path:
     """Create a temporary venv with mng installed for subprocess-based tests.
 
-    Returns the venv directory. Use `venv / "bin" / "mng"` to run mng
-    commands, or `venv / "bin" / "python"` for the interpreter.
+    Returns the venv directory. Use ``venv / "bin" / "mng"`` to run mng
+    commands, or ``venv / "bin" / "python"`` for the interpreter.
+
+    Writes a ``uv-receipt.toml`` so that ``require_uv_tool_receipt()``
+    recognises this venv as a uv-tool-managed installation.
 
     This fixture is useful for tests that install/uninstall packages and
     need full isolation from the main workspace venv.
@@ -543,6 +546,16 @@ def isolated_mng_venv(tmp_path: Path) -> Path:
         cg.run_process_to_completion(
             ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
         )
+
+    # Write a uv-receipt.toml so plugin add/remove recognise this as a
+    # uv-tool-managed venv (the receipt lives at sys.prefix root).
+    receipt_content = (
+        '[tool]\nrequirements = [{ name = "mng" }]\n'
+        "entrypoints = [\n"
+        f'    {{ name = "mng", install-path = "{venv_dir / "bin" / "mng"}", from = "mng" }},\n'
+        "]\n"
+    )
+    (venv_dir / "uv-receipt.toml").write_text(receipt_content)
 
     return venv_dir
 

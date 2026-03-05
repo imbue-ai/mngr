@@ -66,7 +66,7 @@ def on_before_host_create(name: HostName, provider_name: ProviderInstanceName) -
 
 
 @hookspec
-def on_host_created(host: HostInterface) -> None:
+def on_host_created(host: HostInterface, mng_ctx: MngContext) -> None:
     """[experimental] Called after a new host has been created.
 
     This hook fires after provider.create_host() completes during `mng create`

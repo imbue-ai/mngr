@@ -90,7 +90,7 @@ def create(
     # Notify plugins that a new host was created (only for new hosts)
     if is_new_host:
         with log_span("Calling on_host_created hooks"):
-            mng_ctx.pm.hook.on_host_created(host=host)
+            mng_ctx.pm.hook.on_host_created(host=host, mng_ctx=mng_ctx)
 
     # while we are deploying an agent, lock the host:
     with host.lock_cooperatively():
