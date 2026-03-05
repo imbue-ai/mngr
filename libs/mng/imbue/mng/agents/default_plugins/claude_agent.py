@@ -27,16 +27,22 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mng import hookimpl
 from imbue.mng.agents.base_agent import BaseAgent
+from imbue.mng.agents.default_plugins.claude_config import ClaudeBypassPermissionsNotAcceptedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mng.agents.default_plugins.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mng.agents.default_plugins.claude_config import accept_bypass_permissions
 from imbue.mng.agents.default_plugins.claude_config import add_claude_trust_for_path
 from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
 from imbue.mng.agents.default_plugins.claude_config import check_claude_dialogs_dismissed
+from imbue.mng.agents.default_plugins.claude_config import complete_onboarding
 from imbue.mng.agents.default_plugins.claude_config import dismiss_effort_callout
 from imbue.mng.agents.default_plugins.claude_config import ensure_claude_dialogs_dismissed
 from imbue.mng.agents.default_plugins.claude_config import find_project_config
 from imbue.mng.agents.default_plugins.claude_config import get_claude_config_path
+from imbue.mng.agents.default_plugins.claude_config import is_bypass_permissions_accepted
 from imbue.mng.agents.default_plugins.claude_config import is_effort_callout_dismissed
+from imbue.mng.agents.default_plugins.claude_config import is_onboarding_completed
 from imbue.mng.agents.default_plugins.claude_config import is_source_directory_trusted
 from imbue.mng.agents.default_plugins.claude_config import merge_hooks_config
 from imbue.mng.agents.default_plugins.claude_config import read_claude_config
@@ -332,6 +338,26 @@ def _prompt_user_for_effort_callout_dismissal() -> bool:
         "can start without it interfering with automated input.\n",
     )
     return click.confirm("Would you like to update ~/.claude.json to dismiss this?", default=False)
+
+
+def _prompt_user_for_onboarding_completion() -> bool:
+    """Prompt the user to mark Claude Code onboarding as complete."""
+    logger.info(
+        "\nClaude Code onboarding has not been completed yet.\n"
+        "mng needs to mark onboarding as complete in ~/.claude.json so that\n"
+        "Claude Code can start without the onboarding flow interfering with automated input.\n",
+    )
+    return click.confirm("Would you like to update ~/.claude.json to skip onboarding?", default=True)
+
+
+def _prompt_user_for_bypass_permissions() -> bool:
+    """Prompt the user to accept the Claude Code bypass permissions prompt."""
+    logger.info(
+        "\nClaude Code's bypass permissions prompt has not been accepted yet.\n"
+        "mng needs to mark this as accepted in ~/.claude.json so that Claude Code\n"
+        "can start without the prompt interfering with automated input.\n",
+    )
+    return click.confirm("Would you like to update ~/.claude.json to accept this?", default=True)
 
 
 def _claude_json_has_primary_api_key() -> bool:
@@ -795,10 +821,10 @@ class ClaudeAgent(BaseAgent):
         This method performs read-only validation only. No writes to
         disk or interactive prompts -- actual setup happens in provision().
 
-        For worktree mode on non-interactive runs: validates that all
-        known Claude startup dialogs (trust, effort callout) are dismissed
-        so we fail early with a clear message. Interactive and auto-approve
-        runs skip these checks because provision() will handle them.
+        For non-interactive local runs: validates that all known Claude
+        startup dialogs are dismissed so we fail early with a clear message.
+        Interactive and auto-approve runs skip these checks because
+        provision() will handle them.
         """
         if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
             if not host.is_local:
@@ -807,12 +833,16 @@ class ClaudeAgent(BaseAgent):
                     "Claude trust extension requires local filesystem access. "
                     "Use --copy or --clone instead."
                 )
-            if not mng_ctx.is_interactive and not mng_ctx.is_auto_approve:
+
+        if host.is_local and not mng_ctx.is_interactive and not mng_ctx.is_auto_approve:
+            # Determine trust path based on copy mode
+            copy_mode = options.git.copy_mode if options.git else None
+            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
                 git_common_dir = find_git_common_dir(self.work_dir, mng_ctx.concurrency_group)
-                if git_common_dir is not None:
-                    source_path = git_common_dir.parent
-                    # Check the global config for user intent (pre-provisioning validation)
-                    check_claude_dialogs_dismissed(get_claude_config_path(), source_path)
+                trust_path = git_common_dir.parent if git_common_dir is not None else self.work_dir
+            else:
+                trust_path = self.work_dir
+            check_claude_dialogs_dismissed(get_claude_config_path(), trust_path)
 
         config = self._get_claude_config()
         if not config.check_installation:
@@ -919,32 +949,47 @@ class ClaudeAgent(BaseAgent):
         with log_span("Configuring readiness hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
-    def _ensure_no_blocking_dialogs(self, source_path: Path, mng_ctx: MngContext) -> None:
-        """Ensure all known Claude startup dialogs are dismissed for source_path.
+    def _ensure_no_blocking_dialogs(self, source_path: Path | None, mng_ctx: MngContext) -> None:
+        """Ensure all known Claude startup dialogs are dismissed in the global config.
 
-        Checks and writes to the global config (~/.claude.json) to record user
-        intent. The per-agent config dir is set up separately with all needed
-        dialog-suppression fields.
+        All dialogs that could intercept tmux input must be dismissed before
+        starting an agent, otherwise mng message will break. Writes to the
+        global config (~/.claude.json) to record user intent; the per-agent
+        config inherits these settings.
 
         For auto-approve mode, silently dismisses all dialogs. For interactive
         mode, prompts the user for each undismissed dialog. For non-interactive
         mode, raises the appropriate error.
+
+        source_path is the trusted source directory (for worktree/copy modes).
+        When None (clone mode), trust is prompted for work_dir instead.
         """
         global_config_path = get_claude_config_path()
+        trust_path = source_path if source_path is not None else self.work_dir
 
         if mng_ctx.is_auto_approve:
-            ensure_claude_dialogs_dismissed(global_config_path, source_path)
+            ensure_claude_dialogs_dismissed(global_config_path, trust_path)
             return
 
-        if not is_source_directory_trusted(global_config_path, source_path):
-            if not mng_ctx.is_interactive or not _prompt_user_for_trust(source_path):
-                raise ClaudeDirectoryNotTrustedError(str(source_path))
-            add_claude_trust_for_path(global_config_path, source_path)
+        if not is_source_directory_trusted(global_config_path, trust_path):
+            if not mng_ctx.is_interactive or not _prompt_user_for_trust(trust_path):
+                raise ClaudeDirectoryNotTrustedError(str(trust_path))
+            add_claude_trust_for_path(global_config_path, trust_path)
 
         if not is_effort_callout_dismissed(global_config_path):
             if not mng_ctx.is_interactive or not _prompt_user_for_effort_callout_dismissal():
                 raise ClaudeEffortCalloutNotDismissedError()
             dismiss_effort_callout(global_config_path)
+
+        if not is_onboarding_completed(global_config_path):
+            if not mng_ctx.is_interactive or not _prompt_user_for_onboarding_completion():
+                raise ClaudeOnboardingNotCompletedError()
+            complete_onboarding(global_config_path)
+
+        if not is_bypass_permissions_accepted(global_config_path):
+            if not mng_ctx.is_interactive or not _prompt_user_for_bypass_permissions():
+                raise ClaudeBypassPermissionsNotAcceptedError()
+            accept_bypass_permissions(global_config_path)
 
     def _setup_per_agent_config_dir(
         self,
@@ -1066,9 +1111,11 @@ class ClaudeAgent(BaseAgent):
         Only adds per-agent identity: worktree source project config and
         primaryApiKey. Falls back to generated defaults if no global config exists.
 
-        Trust for work_dir is only added when trust_working_directory is True
-        or when using worktree mode (where trust is inherited from the source).
-        Otherwise Claude Code will prompt the user, matching pre-per-agent behavior.
+        Trust for work_dir is added by extending from the source directory
+        (for worktree/copy modes), by trust_working_directory config, or
+        inherited from the global config (for clone mode where the user was
+        already prompted). Falls back to generated defaults if no global
+        config exists.
         """
         global_config = read_claude_config(get_claude_config_path())
         if global_config:
@@ -1077,9 +1124,10 @@ class ClaudeAgent(BaseAgent):
             data = _generate_claude_json(config.version)
 
         projects = data.setdefault("projects", {})
+        copy_mode = options.git.copy_mode if options.git else None
 
-        # For worktree mode, copy source project config (trust inherited from source)
-        if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
+        # For worktree/copy mode, extend trust from the source to the work_dir
+        if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
             git_common_dir = find_git_common_dir(self.work_dir, self.mng_ctx.concurrency_group)
             if git_common_dir is not None:
                 source_path = git_common_dir.parent.resolve()
@@ -1087,8 +1135,6 @@ class ClaudeAgent(BaseAgent):
                 source_config = find_project_config(global_projects, source_path)
                 if source_config is not None:
                     projects[str(source_path)] = source_config
-                    # Extend trust to the worktree (same as extend_claude_trust_to_worktree
-                    # did for the global config in the old code)
                     worktree_path_str = str(self.work_dir.resolve())
                     if worktree_path_str not in projects:
                         worktree_config = copy.deepcopy(source_config)
@@ -1096,7 +1142,7 @@ class ClaudeAgent(BaseAgent):
                         worktree_config["_mngSourcePath"] = str(source_path)
                         projects[worktree_path_str] = worktree_config
 
-        # Only add trust for work_dir when explicitly requested
+        # trust_working_directory: auto-add trust for work_dir
         if config.trust_working_directory:
             projects.setdefault(str(self.work_dir.resolve()), {})["hasTrustDialogAccepted"] = True
 
@@ -1110,25 +1156,31 @@ class ClaudeAgent(BaseAgent):
     ) -> None:
         """Provision the per-agent config dir, install Claude, and configure hooks.
 
-        For worktree-mode agents on local hosts, ensures all Claude startup dialogs
-        are dismissed in the global config (user intent), then creates the per-agent
-        config with trust entries for the worktree.
-
-        When trust_working_directory is enabled, unconditionally adds trust for the
-        agent's working directory in the global config.
+        For local hosts, ensures all known Claude startup dialogs are dismissed
+        in the global config so they don't intercept tmux input. Trust handling
+        depends on the copy mode:
+        - worktree/copy: trust is extended from the source directory
+        - clone: trust is prompted for the work_dir
+        - trust_working_directory=True: trust is auto-added for work_dir
         """
-        if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
-            git_common_dir = find_git_common_dir(self.work_dir, mng_ctx.concurrency_group)
-            if git_common_dir is not None:
-                source_path = git_common_dir.parent
-                # Ensure dialogs are dismissed in the global config (user intent)
-                self._ensure_no_blocking_dialogs(source_path, mng_ctx)
-
         config = self._get_claude_config()
 
-        if config.trust_working_directory and host.is_local:
-            # Record user intent in the global config
-            ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
+        if host.is_local:
+            # Determine the source path for trust extension
+            source_path: Path | None = None
+            copy_mode = options.git.copy_mode if options.git else None
+            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+                git_common_dir = find_git_common_dir(self.work_dir, mng_ctx.concurrency_group)
+                if git_common_dir is not None:
+                    source_path = git_common_dir.parent
+
+            if config.trust_working_directory:
+                # Auto-approve all dialogs for agents that opt into trust
+                ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
+            else:
+                # Check/prompt for all blocking dialogs
+                # source_path=None (clone/no-git) means trust is prompted for work_dir
+                self._ensure_no_blocking_dialogs(source_path, mng_ctx)
 
         # Ensure claude is installed (and at the right version if pinned)
         if config.check_installation:

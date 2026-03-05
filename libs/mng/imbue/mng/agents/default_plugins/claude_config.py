@@ -37,19 +37,35 @@ class ClaudeDirectoryNotTrustedError(ConfigError):
 
 
 class ClaudeEffortCalloutNotDismissedError(ConfigError):
-    """The effort callout has not been dismissed in Claude's global config.
-
-    Claude Code shows an effort callout on startup when effortCalloutDismissed
-    is not set to true in ~/.claude.json. When mng uses tmux send-keys to
-    deliver the initial prompt, the keystrokes may interact with this callout
-    instead of the prompt, causing the intended message to be lost.
-    """
+    """The effort callout has not been dismissed in Claude's global config."""
 
     def __init__(self) -> None:
         super().__init__(
             "Claude Code's effort callout has not been dismissed in ~/.claude.json. "
             "Run `mng create` interactively (without --no-connect) to be prompted, "
             "or run Claude Code manually and dismiss the callout."
+        )
+
+
+class ClaudeOnboardingNotCompletedError(ConfigError):
+    """Claude Code onboarding has not been completed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claude Code onboarding has not been completed in ~/.claude.json. "
+            "Run `mng create` interactively (without --no-connect) to be prompted, "
+            "or run Claude Code manually to complete onboarding."
+        )
+
+
+class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
+    """The bypass permissions prompt has not been accepted."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claude Code's bypass permissions prompt has not been accepted in ~/.claude.json. "
+            "Run `mng create` interactively (without --no-connect) to be prompted, "
+            "or run Claude Code manually and accept the prompt."
         )
 
 
@@ -311,22 +327,66 @@ def dismiss_effort_callout(config_path: Path) -> None:
     logger.trace("Dismissed effort callout in Claude config")
 
 
+def is_onboarding_completed(config_path: Path) -> bool:
+    """Check whether onboarding has been completed in the given config file."""
+    config = read_claude_config(config_path)
+    return bool(config.get("hasCompletedOnboarding", False))
+
+
+def check_onboarding_completed(config_path: Path) -> None:
+    """Check that onboarding has been completed. Raises ClaudeOnboardingNotCompletedError if not."""
+    if not is_onboarding_completed(config_path):
+        raise ClaudeOnboardingNotCompletedError()
+
+
+def complete_onboarding(config_path: Path) -> None:
+    """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get("hasCompletedOnboarding", False):
+            return
+        config["hasCompletedOnboarding"] = True
+        _write_claude_config_atomic(config_path, config)
+
+    logger.trace("Marked onboarding as completed in Claude config")
+
+
+def is_bypass_permissions_accepted(config_path: Path) -> bool:
+    """Check whether the bypass permissions prompt has been accepted in the given config file."""
+    config = read_claude_config(config_path)
+    return bool(config.get("bypassPermissionsModeAccepted", False))
+
+
+def check_bypass_permissions_accepted(config_path: Path) -> None:
+    """Check that bypass permissions has been accepted. Raises ClaudeBypassPermissionsNotAcceptedError if not."""
+    if not is_bypass_permissions_accepted(config_path):
+        raise ClaudeBypassPermissionsNotAcceptedError()
+
+
+def accept_bypass_permissions(config_path: Path) -> None:
+    """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get("bypassPermissionsModeAccepted", False):
+            return
+        config["bypassPermissionsModeAccepted"] = True
+        _write_claude_config_atomic(config_path, config)
+
+    logger.trace("Accepted bypass permissions in Claude config")
+
+
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
     """Check that all known Claude startup dialogs have been dismissed.
 
     Verifies that the config file is configured so that Claude Code can start
     without showing any dialogs that could intercept automated input.
 
-    Checks:
-    - Trust dialog: source_path (or ancestor) has hasTrustDialogAccepted=true
-    - Effort callout: global effortCalloutDismissed is true
-
-    Raises ClaudeDirectoryNotTrustedError if the source is not trusted.
-    Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
-    been dismissed.
+    Raises the appropriate error for the first undismissed dialog found.
     """
     check_source_directory_trusted(config_path, source_path)
     check_effort_callout_dismissed(config_path)
+    check_onboarding_completed(config_path)
+    check_bypass_permissions_accepted(config_path)
 
 
 def ensure_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
@@ -335,13 +395,11 @@ def ensure_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> Non
     Sets the necessary fields in the config file so that Claude Code can start
     without showing any dialogs. This is the remediation for errors raised by
     check_claude_dialogs_dismissed.
-
-    Sets:
-    - Trust: marks source_path as trusted (hasTrustDialogAccepted=true)
-    - Effort callout: sets effortCalloutDismissed=true
     """
     add_claude_trust_for_path(config_path, source_path)
     dismiss_effort_callout(config_path)
+    complete_onboarding(config_path)
+    accept_bypass_permissions(config_path)
 
 
 def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, Any] | None:

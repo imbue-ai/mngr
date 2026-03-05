@@ -660,13 +660,15 @@ def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) ->
 
 
 def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> None:
-    """Test that check_claude_dialogs_dismissed passes when trust and effort callout are set."""
+    """Test that check_claude_dialogs_dismissed passes when all dialogs are set."""
     config_file = get_claude_config_path()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
     config = {
         "effortCalloutDismissed": True,
+        "hasCompletedOnboarding": True,
+        "bypassPermissionsModeAccepted": True,
         "projects": {
             str(source_path): {"hasTrustDialogAccepted": True},
         },
@@ -676,8 +678,8 @@ def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> N
     check_claude_dialogs_dismissed(config_file, source_path)
 
 
-def test_ensure_claude_dialogs_dismissed_sets_both(tmp_path: Path) -> None:
-    """Test that ensure_claude_dialogs_dismissed sets trust and effort callout."""
+def test_ensure_claude_dialogs_dismissed_sets_all(tmp_path: Path) -> None:
+    """Test that ensure_claude_dialogs_dismissed sets all dialog fields."""
     config_file = get_claude_config_path()
     source_path = tmp_path / "source"
     source_path.mkdir()
@@ -689,6 +691,8 @@ def test_ensure_claude_dialogs_dismissed_sets_both(tmp_path: Path) -> None:
 
     updated = json.loads(config_file.read_text())
     assert updated["effortCalloutDismissed"] is True
+    assert updated["hasCompletedOnboarding"] is True
+    assert updated["bypassPermissionsModeAccepted"] is True
     assert updated["projects"][str(source_path)]["hasTrustDialogAccepted"] is True
 
 
