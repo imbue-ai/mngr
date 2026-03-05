@@ -94,6 +94,24 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I watch agent status in real time?\n"
     "response: mng list --watch 5\n\n"
     #
+    "user: How do I list all agents that are running or waiting?\n"
+    "response: Use a CEL filter on the `state` field:\n"
+    '    mng list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    #
+    "user: How do I list agents whose name contains 'prod'?\n"
+    "response: mng list --include 'name.contains(\"prod\")'\n\n"
+    #
+    "user: How do I find agents that have been idle for more than an hour?\n"
+    "response: mng list --include 'idle_seconds > 3600'\n\n"
+    #
+    "user: How do I list running agents on Modal?\n"
+    'response: mng list --include \'state == "RUNNING" && host.provider == "modal"\'\n'
+    "To include agents that are waiting for input, add WAITING:\n"
+    '    mng list --include \'(state == "RUNNING" || state == "WAITING") && host.provider == "modal"\'\n\n'
+    #
+    "user: How do I list agents for the mng project?\n"
+    "response: mng list --include 'labels.project == \"mng\"'\n\n"
+    #
     "user: How do I message only agents with a specific tag?\n"
     "response: Use a CEL filter:\n"
     '    mng message --include \'tags.feature == "auth"\' -m "run the auth test suite"\n\n'
@@ -162,6 +180,21 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     #
     "user: list running agents as json\n"
     "response: mng list --running --format json\n\n"
+    #
+    "user: list all agents that are running or waiting\n"
+    'response: mng list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    #
+    "user: list agents whose name contains prod\n"
+    "response: mng list --include 'name.contains(\"prod\")'\n\n"
+    #
+    "user: find agents idle for more than an hour\n"
+    "response: mng list --include 'idle_seconds > 3600'\n\n"
+    #
+    "user: list running agents on modal\n"
+    'response: mng list --include \'state == "RUNNING" && host.provider == "modal"\'\n\n'
+    #
+    "user: list agents for the mng project\n"
+    "response: mng list --include 'labels.project == \"mng\"'\n\n"
     #
     "user: clone my-agent into a new agent called experiment\n"
     "response: mng clone my-agent experiment\n\n"
