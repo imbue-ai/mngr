@@ -1,6 +1,8 @@
 from datetime import datetime
 from datetime import timezone
+from typing import Any
 
+from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.data_types import StoredChannelInfo
 from imbue.slack_exporter.data_types import StoredMessage
 from imbue.slack_exporter.data_types import StoredUser
@@ -36,6 +38,24 @@ def make_stored_channel_info(
         fetched_at=FIXED_FETCH_TIME,
         raw={"id": channel_id, "name": channel_name},
     )
+
+
+def make_fake_api_caller(
+    response_by_method: dict[str, list[dict[str, Any]]],
+) -> SlackApiCaller:
+    """Create a fake SlackApiCaller that returns pre-configured responses per method.
+
+    Each method maps to a list of responses returned in order (for pagination).
+    """
+    call_index_by_method: dict[str, int] = {}
+
+    def fake_api_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+        responses = response_by_method.get(method, [])
+        idx = call_index_by_method.get(method, 0)
+        call_index_by_method[method] = idx + 1
+        return responses[idx]
+
+    return fake_api_caller
 
 
 def make_stored_user(

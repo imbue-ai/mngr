@@ -6,7 +6,6 @@ from typing import Any
 
 from imbue.slack_exporter.data_types import ChannelConfig
 from imbue.slack_exporter.data_types import ExporterSettings
-from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.data_types import StoredChannelInfo
 from imbue.slack_exporter.exporter import _datetime_to_slack_timestamp
 from imbue.slack_exporter.exporter import _fetch_all_messages_for_channel
@@ -16,23 +15,9 @@ from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
 from imbue.slack_exporter.primitives import SlackMessageTimestamp
 from imbue.slack_exporter.store import save_messages
+from imbue.slack_exporter.testing import make_fake_api_caller
 from imbue.slack_exporter.testing import make_stored_channel_info
 from imbue.slack_exporter.testing import make_stored_message
-
-
-def _make_fake_api_caller(
-    response_by_method: dict[str, list[dict[str, Any]]],
-) -> SlackApiCaller:
-    """Create a fake SlackApiCaller that returns pre-configured responses per method."""
-    call_index_by_method: dict[str, int] = {}
-
-    def fake_api_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
-        responses = response_by_method.get(method, [])
-        idx = call_index_by_method.get(method, 0)
-        call_index_by_method[method] = idx + 1
-        return responses[idx]
-
-    return fake_api_caller
 
 
 def _history_response(
@@ -99,7 +84,7 @@ def test_filter_changed_channels_includes_changed() -> None:
 
 
 def test_fetch_all_messages_fetches_single_page() -> None:
-    api_caller = _make_fake_api_caller(
+    api_caller = make_fake_api_caller(
         {
             "conversations.history": [
                 _history_response(messages=[{"ts": "1700000000.000001", "text": "hello"}]),
@@ -120,7 +105,7 @@ def test_fetch_all_messages_fetches_single_page() -> None:
 
 
 def test_fetch_all_messages_handles_pagination() -> None:
-    api_caller = _make_fake_api_caller(
+    api_caller = make_fake_api_caller(
         {
             "conversations.history": [
                 _history_response(
@@ -145,7 +130,7 @@ def test_fetch_all_messages_handles_pagination() -> None:
 
 
 def test_run_export_writes_to_directory_structure(temp_output_dir: Path) -> None:
-    api_caller = _make_fake_api_caller(
+    api_caller = make_fake_api_caller(
         {
             "conversations.list": [
                 _channel_list_response(channels=[{"id": "C123", "name": "general"}]),
@@ -194,7 +179,7 @@ def test_run_export_skips_unchanged_channels(temp_output_dir: Path) -> None:
     # Run twice with same data
     run_export(
         settings,
-        api_caller=_make_fake_api_caller(
+        api_caller=make_fake_api_caller(
             {
                 "conversations.list": [
                     _channel_list_response(channels=[{"id": "C123", "name": "general"}]),
@@ -206,7 +191,7 @@ def test_run_export_skips_unchanged_channels(temp_output_dir: Path) -> None:
     )
     run_export(
         settings,
-        api_caller=_make_fake_api_caller(
+        api_caller=make_fake_api_caller(
             {
                 "conversations.list": [
                     _channel_list_response(channels=[{"id": "C123", "name": "general"}]),
