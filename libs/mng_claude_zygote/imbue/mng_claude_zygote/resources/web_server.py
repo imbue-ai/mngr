@@ -148,9 +148,9 @@ def _read_conversations() -> list[dict[str, str]]:
             if not line:
                 continue
             try:
-                msg = json.loads(line)
-                conversation_id = msg.get("conversation_id", "")
-                ts = msg.get("timestamp", "")
+                message = json.loads(line)
+                conversation_id = message.get("conversation_id", "")
+                ts = message.get("timestamp", "")
                 if conversation_id and ts and conversation_id in conversations_by_id:
                     if ts > conversations_by_id[conversation_id]["updated_at"]:
                         conversations_by_id[conversation_id]["updated_at"] = ts

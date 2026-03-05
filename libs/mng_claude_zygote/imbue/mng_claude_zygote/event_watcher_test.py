@@ -518,7 +518,7 @@ def test_write_notification_event_creates_file(tmp_path: Path) -> None:
 # -- _get_system_notifications_conversation_id tests --
 
 
-def test_get_system_notifications_conversation_id_returns_first_cid(tmp_path: Path) -> None:
+def test_get_system_notifications_conversation_id_returns_first_conversation_id(tmp_path: Path) -> None:
     events_dir = tmp_path / "events"
     conv_dir = events_dir / "conversations"
     conv_dir.mkdir(parents=True)
