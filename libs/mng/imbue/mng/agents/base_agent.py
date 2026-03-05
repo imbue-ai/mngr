@@ -210,8 +210,9 @@ class BaseAgent(AgentInterface):
             )
             ps_output = ps_result.stdout if ps_result.success else ""
 
-            # Check if the active file exists
+            # Check if the active and permissions_waiting files exist
             is_active = self._check_file_exists(self._get_agent_dir() / "active")
+            is_permissions_waiting = self._check_file_exists(self._get_agent_dir() / "permissions_waiting")
 
             expected_process_name = self.get_expected_process_name()
 
@@ -220,6 +221,7 @@ class BaseAgent(AgentInterface):
                 is_active=is_active,
                 expected_process_name=expected_process_name,
                 ps_output=ps_output,
+                is_permissions_waiting=is_permissions_waiting,
             )
             logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
             return state

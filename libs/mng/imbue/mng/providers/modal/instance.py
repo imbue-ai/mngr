@@ -281,6 +281,11 @@ if [ -d '{host_dir}/agents' ]; then
         else
             echo "ACTIVE=false"
         fi
+        if [ -f "${{agent_dir}}permissions_waiting" ]; then
+            echo "PERMISSIONS_WAITING=true"
+        else
+            echo "PERMISSIONS_WAITING=false"
+        fi
         url=$(cat "${{agent_dir}}status/url" 2>/dev/null | tr -d '\\n')
         echo "URL=$url"
         echo '{_SEP_AGENT_END}'
@@ -347,6 +352,8 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
             agent_raw["tmux_info"] = val if val else None
         elif aline.startswith("ACTIVE="):
             agent_raw["is_active"] = aline[len("ACTIVE=") :].strip() == "true"
+        elif aline.startswith("PERMISSIONS_WAITING="):
+            agent_raw["is_permissions_waiting"] = aline[len("PERMISSIONS_WAITING=") :].strip() == "true"
         elif aline.startswith("URL="):
             val = aline[len("URL=") :].strip()
             agent_raw["url"] = val if val else None
@@ -2621,6 +2628,7 @@ log "=== Shutdown script completed ==="
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
             ps_output=ps_output,
+            is_permissions_waiting=agent_raw.get("is_permissions_waiting", False),
         )
 
         return AgentDetails(

@@ -152,12 +152,16 @@ def determine_lifecycle_state(
     is_active: bool,
     expected_process_name: str,
     ps_output: str,
+    is_permissions_waiting: bool = False,
 ) -> AgentLifecycleState:
     """Determine agent lifecycle state from tmux info and ps output.
 
     This is a pure function that replicates the logic from
     BaseAgent.get_lifecycle_state() using pre-collected data instead of
     making SSH calls.
+
+    The is_permissions_waiting flag overrides is_active: when True, the agent
+    is always considered WAITING (blocked on a permission dialog).
     """
     if not tmux_info:
         return AgentLifecycleState.STOPPED
@@ -171,14 +175,16 @@ def determine_lifecycle_state(
     if pane_dead == "1":
         return AgentLifecycleState.DONE
 
+    is_effectively_active = is_active and not is_permissions_waiting
+
     if current_command == expected_process_name:
-        return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
+        return AgentLifecycleState.RUNNING if is_effectively_active else AgentLifecycleState.WAITING
 
     # Check descendant processes
     descendant_names = get_descendant_process_names(pane_pid, ps_output)
 
     if expected_process_name in descendant_names:
-        return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
+        return AgentLifecycleState.RUNNING if is_effectively_active else AgentLifecycleState.WAITING
 
     # Check for non-shell descendant processes
     non_shell_processes = [p for p in descendant_names if p not in SHELL_COMMANDS]

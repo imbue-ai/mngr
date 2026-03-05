@@ -549,7 +549,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
 
 
 def test_build_readiness_hooks_config_has_user_prompt_submit_hook() -> None:
-    """build_readiness_hooks_config should include UserPromptSubmit hook that creates active file."""
+    """build_readiness_hooks_config should include UserPromptSubmit hook that creates active file and clears permissions_waiting."""
     config = build_readiness_hooks_config()
 
     assert "UserPromptSubmit" in config["hooks"]
@@ -559,10 +559,50 @@ def test_build_readiness_hooks_config_has_user_prompt_submit_hook() -> None:
     assert "touch" in hook["command"]
     assert "MNG_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
+
+
+def test_build_readiness_hooks_config_has_permission_request_hook() -> None:
+    """build_readiness_hooks_config should include PermissionRequest hook that creates permissions_waiting file."""
+    config = build_readiness_hooks_config()
+
+    assert "PermissionRequest" in config["hooks"]
+    assert len(config["hooks"]["PermissionRequest"]) == 1
+    hook = config["hooks"]["PermissionRequest"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    assert "touch" in hook["command"]
+    assert "MNG_AGENT_STATE_DIR" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
+
+
+def test_build_readiness_hooks_config_has_post_tool_use_hook() -> None:
+    """build_readiness_hooks_config should include PostToolUse hook that removes permissions_waiting file."""
+    config = build_readiness_hooks_config()
+
+    assert "PostToolUse" in config["hooks"]
+    assert len(config["hooks"]["PostToolUse"]) == 1
+    hook = config["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    assert "rm" in hook["command"]
+    assert "MNG_AGENT_STATE_DIR" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
+
+
+def test_build_readiness_hooks_config_has_post_tool_use_failure_hook() -> None:
+    """build_readiness_hooks_config should include PostToolUseFailure hook that removes permissions_waiting file."""
+    config = build_readiness_hooks_config()
+
+    assert "PostToolUseFailure" in config["hooks"]
+    assert len(config["hooks"]["PostToolUseFailure"]) == 1
+    hook = config["hooks"]["PostToolUseFailure"][0]["hooks"][0]
+    assert hook["type"] == "command"
+    assert "rm" in hook["command"]
+    assert "MNG_AGENT_STATE_DIR" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
 
 
 def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
-    """build_readiness_hooks_config should include Notification idle_prompt hook that removes active file."""
+    """build_readiness_hooks_config should include Notification idle_prompt hook that removes active and permissions_waiting files."""
     config = build_readiness_hooks_config()
 
     assert "Notification" in config["hooks"]
@@ -574,6 +614,7 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "rm" in hook["command"]
     assert "MNG_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
 
 
 def test_get_expected_process_name_returns_claude(

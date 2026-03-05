@@ -108,6 +108,23 @@ def test_lifecycle_replaced_when_unknown_command() -> None:
     assert determine_lifecycle_state("0|python3|123", True, "claude", "") == AgentLifecycleState.REPLACED
 
 
+def test_lifecycle_waiting_when_permissions_waiting_and_active() -> None:
+    """When permissions_waiting is set, state should be WAITING even if active is True."""
+    assert (
+        determine_lifecycle_state("0|claude|123", True, "claude", "", is_permissions_waiting=True)
+        == AgentLifecycleState.WAITING
+    )
+
+
+def test_lifecycle_waiting_when_permissions_waiting_descendant_match() -> None:
+    """When permissions_waiting is set, descendant match should also return WAITING."""
+    ps_output = "100 1 init\n200 123 bash\n300 200 claude\n"
+    assert (
+        determine_lifecycle_state("0|bash|123", True, "claude", ps_output, is_permissions_waiting=True)
+        == AgentLifecycleState.WAITING
+    )
+
+
 # =========================================================================
 # get_descendant_process_names tests
 # =========================================================================
