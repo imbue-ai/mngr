@@ -339,11 +339,11 @@ def _prompt_user_for_trust(source_path: Path) -> bool:
 def _prompt_user_for_effort_callout_dismissal() -> bool:
     """Prompt the user to dismiss the Claude Code effort callout."""
     logger.info(
-        "\nClaude Code wants you to know that you can set model effort with /model.\n"
-        "mng needs to dismiss this callout in ~/.claude.json so that Claude Code\n"
-        "can start without it interfering with automated input.\n",
+        "\nClaude Code shows a one-time tip about setting model effort with /model.\n"
+        "mng needs to dismiss this tip in ~/.claude.json so that it doesn't\n"
+        "interfere with automated input.\n",
     )
-    return click.confirm("Would you like to update ~/.claude.json to dismiss this?", default=False)
+    return click.confirm("Would you like to update ~/.claude.json to dismiss this tip?", default=True)
 
 
 def _prompt_user_for_onboarding_completion() -> bool:
@@ -351,7 +351,8 @@ def _prompt_user_for_onboarding_completion() -> bool:
     logger.info(
         "\nClaude Code onboarding has not been completed yet.\n"
         "mng needs to mark onboarding as complete in ~/.claude.json so that\n"
-        "Claude Code can start without the onboarding flow interfering with automated input.\n",
+        "the onboarding flow doesn't interfere with automated input.\n"
+        "If you'd like to go through onboarding first, run `claude` directly.\n",
     )
     return click.confirm("Would you like to update ~/.claude.json to skip onboarding?", default=True)
 
