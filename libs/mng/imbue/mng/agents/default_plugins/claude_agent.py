@@ -75,7 +75,13 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
     "skills",
     "agents",
     "commands",
+    "plugins",
 )
+
+# Whether to symlink (True) or copy (False) user resources from ~/.claude/
+# into local per-agent config dirs. Symlinks avoid duplication and keep the
+# per-agent dir lightweight; copies provide full isolation.
+_SYMLINK_LOCAL_USER_RESOURCES: Final[bool] = True
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
@@ -1003,13 +1009,13 @@ class ClaudeAgent(BaseAgent):
         uses per-agent config/sessions/state instead of the global ~/.claude/.
 
         For local hosts:
-        - Generates a standalone .claude.json with trust, dismissals, and onboarding markers
-        - Symlinks .credentials.json to ~/.claude/.credentials.json
-        - Copies settings.json, skills/, agents/, commands/ from ~/.claude/
+        - Copies .claude.json from global config (with per-agent trust entries)
+        - Symlinks .credentials.json (or copies keychain credentials on macOS)
+        - Symlinks settings.json, skills/, agents/, commands/, plugins/ from ~/.claude/
 
         For remote hosts:
         - Writes .claude.json, .credentials.json, settings.json directly
-        - Copies skills/, agents/, commands/ from ~/.claude/
+        - Copies skills/, agents/, commands/, plugins/ from ~/.claude/
         """
         config = self._get_claude_config()
         config_dir = self.get_claude_config_dir()
@@ -1041,15 +1047,26 @@ class ClaudeAgent(BaseAgent):
         else:
             _provision_file_credentials(host, config_dir)
 
-        # 3. Copy settings and other items from ~/.claude/ if sync_home_settings
+        # 3. Sync user resources from ~/.claude/ into the per-agent config dir
         if config.sync_home_settings:
             home_claude = Path.home() / ".claude"
-            for relative_path, source_path in _collect_claude_home_dir_files(home_claude).items():
-                dest_path = config_dir / relative_path
-                host.execute_command(f"mkdir -p {shlex.quote(str(dest_path.parent))}", timeout_seconds=5.0)
-                host.execute_command(
-                    f"cp {shlex.quote(str(source_path))} {shlex.quote(str(dest_path))}", timeout_seconds=5.0
-                )
+            for item_name in _CLAUDE_HOME_SYNC_ITEMS:
+                source = home_claude / item_name
+                if not source.exists():
+                    continue
+                dest = config_dir / item_name
+                if _SYMLINK_LOCAL_USER_RESOURCES:
+                    host.execute_command(
+                        f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+                    )
+                elif source.is_dir():
+                    host.execute_command(
+                        f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+                    )
+                else:
+                    host.execute_command(
+                        f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+                    )
 
     def _setup_remote_config_dir(
         self,
