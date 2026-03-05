@@ -1,5 +1,6 @@
 import os
 import subprocess
+from collections.abc import Callable
 from collections.abc import Hashable
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -668,6 +669,16 @@ def _get_state_attr(entry: AgentBoardEntry) -> str:
     return ""
 
 
+def _get_name_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the name column cell."""
+    return f"  {entry.name}"
+
+
+def _get_state_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the state column cell."""
+    return str(entry.state)
+
+
 def _get_check_cell_text(entry: AgentBoardEntry) -> str:
     """Get plain text for the CI check status column cell."""
     if entry.pr is None or entry.pr.check_status == CheckStatus.UNKNOWN:
@@ -721,15 +732,19 @@ def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[s
     Each column is sized to fit the widest value (or header), with the
     last column (link) left flexible to fill remaining terminal space.
     """
-    widths: dict[str, int] = {col: len(_BOARD_HEADER_LABELS[col]) for col in _BOARD_COLUMNS}
-    for entry in entries:
-        widths["name"] = max(widths["name"], len(f"  {entry.name}"))
-        widths["state"] = max(widths["state"], len(str(entry.state)))
-        widths["git"] = max(widths["git"], len(_get_push_cell_text(entry)))
-        widths["pr"] = max(widths["pr"], len(_get_pr_cell_text(entry)))
-        widths["ci"] = max(widths["ci"], len(_get_check_cell_text(entry)))
-    # link column is flexible (not included in fixed widths)
-    return widths
+    cell_text_fns: dict[str, Callable[[AgentBoardEntry], str]] = {
+        "name": _get_name_cell_text,
+        "state": _get_state_cell_text,
+        "git": _get_push_cell_text,
+        "pr": _get_pr_cell_text,
+        "ci": _get_check_cell_text,
+    }
+    return {
+        col: max(len(_BOARD_HEADER_LABELS[col]), *(len(fn(e)) for e in entries))
+        if entries
+        else len(_BOARD_HEADER_LABELS[col])
+        for col, fn in cell_text_fns.items()
+    }
 
 
 def _build_column_header(widths: dict[str, int]) -> Columns:
@@ -749,11 +764,11 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
 
     Muted agents are rendered entirely in gray.
     """
-    state_str = str(entry.state)
     state_attr = _get_state_attr(entry)
+    state_text = _get_state_cell_text(entry)
     raw_markup: dict[str, str | tuple[Hashable, str]] = {
-        "name": f"  {entry.name}",
-        "state": (state_attr, state_str) if state_attr else state_str,
+        "name": _get_name_cell_text(entry),
+        "state": (state_attr, state_text) if state_attr else state_text,
         "git": _get_push_cell_text(entry),
         "pr": _get_pr_cell_text(entry),
         "ci": _get_check_cell_markup(entry),
