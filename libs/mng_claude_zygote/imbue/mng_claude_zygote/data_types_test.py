@@ -58,7 +58,7 @@ def test_conversation_event_tags_default_to_empty() -> None:
         event_id=_EID,
         source=SOURCE_CONVERSATIONS,
         conversation_id=ConversationId("conv-1"),
-        model=ChatModel("claude-opus-4-6"),
+        model=ChatModel("claude-opus-4.6"),
     )
     assert event.tags == {}
     data = json.loads(event.model_dump_json())
@@ -72,7 +72,7 @@ def test_conversation_event_with_tags() -> None:
         event_id=_EID,
         source=SOURCE_CONVERSATIONS,
         conversation_id=ConversationId("daily-2026-03-04"),
-        model=ChatModel("claude-opus-4-6"),
+        model=ChatModel("claude-opus-4.6"),
         tags={"daily": "2026-03-04"},
     )
     assert event.tags == {"daily": "2026-03-04"}
@@ -88,7 +88,7 @@ def test_conversation_event_roundtrips_with_tags() -> None:
             "event_id": "evt-abc",
             "source": "conversations",
             "conversation_id": "conv-1",
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4.6",
             "tags": {"daily": "2026-03-04"},
         }
     )
@@ -104,7 +104,7 @@ def test_conversation_event_roundtrips_without_tags() -> None:
             "event_id": "evt-abc",
             "source": "conversations",
             "conversation_id": "conv-1",
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4.6",
         }
     )
     event = ConversationEvent.model_validate_json(raw)

@@ -133,7 +133,7 @@ def test_conversion_handles_assistant_message_with_text() -> None:
             "timestamp": "2026-01-01T00:00:01Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [{"type": "text", "text": "Hello back!"}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 100, "output_tokens": 50},
@@ -143,7 +143,7 @@ def test_conversion_handles_assistant_message_with_text() -> None:
     events = _run_conversion([raw])
     assert len(events) == 1
     assert events[0]["type"] == "assistant_message"
-    assert events[0]["model"] == "claude-opus-4-6"
+    assert events[0]["model"] == "claude-opus-4.6"
     assert events[0]["text"] == "Hello back!"
 
 
@@ -155,7 +155,7 @@ def test_conversion_handles_tool_results() -> None:
             "timestamp": "2026-01-01T00:00:03Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [
                     {"type": "tool_use", "id": "toolu_456", "name": "Read", "input": {"file_path": "/tmp/test.txt"}},
                 ],
@@ -310,7 +310,7 @@ def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
             "timestamp": "2026-01-01T00:00:02.000000000Z",
             "message": {
                 "role": "assistant",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
                 "content": [{"type": "tool_use", "id": "toolu_c2", "name": "Read", "input": {"file": "test.txt"}}],
                 "stop_reason": "tool_use",
                 "usage": {"input_tokens": 50, "output_tokens": 30},
@@ -651,13 +651,13 @@ def test_create_system_notifications_conversation_skips_event_on_inject_failure(
 def test_create_daily_conversation_runs_inject_and_records_tagged_event() -> None:
     host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4-6")
+    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4.6")
 
     # Should run llm inject with the greeting and LLM_USER_PATH
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
     assert len(inject_commands) == 1
     assert "Elena" in inject_commands[0]
-    assert "claude-opus-4-6" in inject_commands[0]
+    assert "claude-opus-4.6" in inject_commands[0]
     assert "LLM_USER_PATH=" in inject_commands[0]
 
     # Should append a conversation_created event with daily tag and parsed CID
@@ -674,7 +674,7 @@ def test_create_daily_conversation_skips_event_on_inject_failure() -> None:
         command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
     )
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4-6")
+    create_daily_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING, "claude-opus-4.6")
 
     # Should NOT have written a conversation event
     event_commands = [c for c in host.executed_commands if "events.jsonl" in c and "echo" in c]
@@ -1438,7 +1438,7 @@ def test_extra_context_tool_with_conversations(extra_context_env: tuple[Any, Pat
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         '{"timestamp":"2026-01-01T00:01:00Z","type":"conversation_created","event_id":"c2",'
         '"source":"conversations","conversation_id":"conv-2","model":"claude-sonnet-4-6"}\n'
     )
@@ -1498,7 +1498,7 @@ def test_extra_context_tool_conversations_with_malformed_json(extra_context_env:
     conv_file.write_text(
         "not valid json\n"
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
     )
 
     result = module.gather_extra_context()
@@ -1543,7 +1543,7 @@ def test_extra_context_tool_conversations_updates_existing_conversation(
     conv_file = conv_dir / "events.jsonl"
     conv_file.write_text(
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         '{"timestamp":"2026-01-01T00:01:00Z","type":"model_changed","event_id":"c2",'
         '"source":"conversations","conversation_id":"conv-1","model":"claude-sonnet-4-6"}\n'
     )
@@ -1563,7 +1563,7 @@ def test_extra_context_tool_conversations_with_empty_lines(extra_context_env: tu
     conv_file.write_text(
         "\n"
         '{"timestamp":"2026-01-01T00:00:00Z","type":"conversation_created","event_id":"c1",'
-        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4-6"}\n'
+        '"source":"conversations","conversation_id":"conv-1","model":"claude-opus-4.6"}\n'
         "\n"
     )
 

@@ -187,7 +187,7 @@ class ClaudeZygoteAgent(ClaudeAgent):
 
         if config.install_llm:
             create_system_notifications_conversation(host, agent_state_dir, provisioning)
-            chat_model = settings.chat.model or "claude-opus-4-6"
+            chat_model = settings.chat.model or "claude-opus-4.6"
             create_daily_conversation(host, agent_state_dir, provisioning, chat_model)
 
         link_memory_directory(host, self.work_dir, provisioning)

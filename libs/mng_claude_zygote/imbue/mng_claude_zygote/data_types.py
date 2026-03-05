@@ -136,7 +136,7 @@ class CommonAssistantMessageEvent(EventEnvelope):
     """
 
     role: MessageRole = Field(default=MessageRole("assistant"), description="Always 'assistant'.")
-    model: ChatModel = Field(description="Model that generated this response (e.g. 'claude-opus-4-6').")
+    model: ChatModel = Field(description="Model that generated this response (e.g. 'claude-opus-4.6').")
     text: str = Field(description="Concatenated text content blocks from the response.")
     tool_calls: tuple[CommonToolCallSummary, ...] = Field(default=(), description="Tool calls made in this response.")
     stop_reason: str | None = Field(default=None, description="Why the response ended (e.g. 'end_turn', 'tool_use').")

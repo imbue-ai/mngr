@@ -38,7 +38,7 @@ The settings are modeled by `ClaudeZygoteSettings` in `imbue.mng_claude_zygote.d
 
 ```toml
 [chat]
-model = "claude-opus-4-6"               # Default model for new conversation threads
+model = "claude-opus-4.6"               # Default model for new conversation threads
 
 [chat.context]
 max_transcript_line_count = 10          # Max inner monologue lines in context

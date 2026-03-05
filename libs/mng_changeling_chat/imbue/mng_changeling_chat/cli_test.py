@@ -110,7 +110,7 @@ def test_resolve_chat_args_last_flag_with_conversations(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-latest",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
         ],
     )
@@ -146,7 +146,7 @@ def test_resolve_chat_args_non_interactive_defaults_to_latest(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-noninteractive",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
         ],
     )
@@ -217,7 +217,7 @@ def test_resolve_latest_conversation_args_resumes_latest(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-abc",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
         ],
     )

@@ -141,7 +141,7 @@ def test_list_conversations_returns_conversations_sorted_by_updated_at(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-older",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
             {
                 "timestamp": "2026-03-01T12:00:00Z",
@@ -158,7 +158,7 @@ def test_list_conversations_returns_conversations_sorted_by_updated_at(
     assert result[0].conversation_id == "conv-newer"
     assert result[1].conversation_id == "conv-older"
     assert result[0].model == "claude-sonnet-4-6"
-    assert result[1].model == "claude-opus-4-6"
+    assert result[1].model == "claude-opus-4.6"
 
 
 def test_list_conversations_uses_message_timestamps_for_updated_at(
@@ -174,13 +174,13 @@ def test_list_conversations_uses_message_timestamps_for_updated_at(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-old-but-active",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
             {
                 "timestamp": "2026-03-01T12:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-newer-but-stale",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
         ],
     )
@@ -244,13 +244,13 @@ def test_get_latest_conversation_id_returns_most_recent(
                 "timestamp": "2026-03-01T10:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-aaa",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
             {
                 "timestamp": "2026-03-01T12:00:00Z",
                 "type": "conversation_created",
                 "conversation_id": "conv-bbb",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4.6",
             },
         ],
     )

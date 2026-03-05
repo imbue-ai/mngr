@@ -73,7 +73,7 @@ print('claude-opus-4.6')
         log_error "Failed to load settings: $(cat "$_stderr_file")"
     fi
     rm -f "$_stderr_file"
-    echo "${_model:-claude-opus-4-6}"
+    echo "${_model:-claude-opus-4.6}"
 }
 
 generate_cid() {
