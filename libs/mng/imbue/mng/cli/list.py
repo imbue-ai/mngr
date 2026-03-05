@@ -1400,32 +1400,30 @@ def _list_stream(
 
     Snapshots are always unfiltered so they can be used for state reconstruction.
 
-    1. Write an unfiltered full snapshot, emit from the latest snapshot in the file
-    2. Tail the events file for new events written by other mng processes
-    3. Periodically re-poll (unfiltered) and write new full snapshots
+    1. Emit from the latest cached snapshot on disk (instant, if available)
+    2. Run a full sync in the background to update the event stream
+    3. Tail the events file for new events written by the background sync or other processes
+    4. Periodically re-poll (unfiltered) and write new full snapshots
     """
     events_path = get_discovery_events_path(mng_ctx.config)
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
 
-    # Phase 1: write an unfiltered full snapshot, then emit from the latest snapshot
-    try:
-        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
-    except (MngError, OSError) as e:
-        logger.warning("Failed to write initial discovery snapshot: {}", e)
-
-    # Find the latest full snapshot offset, read from there
+    # Phase 1: emit from the latest cached snapshot on disk (fast path)
+    has_cached_snapshot = False
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        with open(events_path) as f:
-            f.seek(snapshot_offset)
-            for line in f:
-                _stream_emit_line(line, emitted_event_ids, emit_lock)
+        if snapshot_offset > 0:
+            has_cached_snapshot = True
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
 
     # Record the current file position for tailing
     initial_offset = events_path.stat().st_size if events_path.exists() else 0
 
-    # Phase 2: tail the events file for new events from other processes
+    # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
     tail = threading.Thread(
         target=_stream_tail_events_file,
@@ -1434,7 +1432,27 @@ def _list_stream(
     )
     tail.start()
 
-    # Phase 3: periodically re-poll (unfiltered) and write full snapshots
+    # Phase 3: run the initial full sync
+    # If we had a cached snapshot, run this in the background so the user sees results immediately.
+    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+    if has_cached_snapshot:
+        initial_sync = threading.Thread(
+            target=_write_unfiltered_full_snapshot_logged,
+            args=(mng_ctx, error_behavior),
+            daemon=True,
+        )
+        initial_sync.start()
+    else:
+        _write_unfiltered_full_snapshot_logged(mng_ctx, error_behavior)
+        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        if events_path.exists():
+            snapshot_offset = find_latest_full_snapshot_offset(events_path)
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
+
+    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:
         while not stop_event.is_set():
             stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
@@ -1450,3 +1468,11 @@ def _list_stream(
     finally:
         stop_event.set()
         tail.join(timeout=5.0)
+
+
+def _write_unfiltered_full_snapshot_logged(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered full snapshot, logging any errors instead of raising."""
+    try:
+        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write discovery snapshot: {}", e)
