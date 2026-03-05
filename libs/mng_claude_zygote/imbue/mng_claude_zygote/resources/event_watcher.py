@@ -289,7 +289,7 @@ def _send_message(agent_name: str, message: str) -> bool:
     """Send a message to the agent via mng message. Returns True on success."""
     try:
         result = subprocess.run(
-            ["uv", "run", "mng", "message", agent_name, "-m", message],
+            ["uv", "run", "mng", "message", agent_name, "--provider", "local", "-m", message],
             capture_output=True,
             text=True,
             timeout=_MESSAGE_SEND_TIMEOUT_SECONDS,
