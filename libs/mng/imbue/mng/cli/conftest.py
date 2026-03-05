@@ -23,6 +23,7 @@ from imbue.mng.cli.provision import provision
 from imbue.mng.cli.pull import pull
 from imbue.mng.cli.push import push
 from imbue.mng.cli.rename import rename
+from imbue.mng.cli.self_upgrade import self_upgrade
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
@@ -246,6 +247,7 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (pull, ["--help"], "pull"),
     (push, ["--help"], "push"),
     (rename, ["--help"], "rename"),
+    (self_upgrade, ["--help"], "selfupgrade"),
     (start, ["--help"], "start"),
     (stop, ["--help"], "stop"),
     (cli, ["snapshot", "create", "--help"], "snapshot_create"),

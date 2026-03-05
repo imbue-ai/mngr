@@ -35,6 +35,7 @@ from imbue.mng.cli.provision import provision
 from imbue.mng.cli.pull import pull
 from imbue.mng.cli.push import push
 from imbue.mng.cli.rename import rename
+from imbue.mng.cli.self_upgrade import self_upgrade
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
@@ -314,6 +315,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     config,
     gc,
     plugin_command,
+    self_upgrade,
 ]
 
 for cmd in BUILTIN_COMMANDS:
