@@ -15,7 +15,7 @@ def _extract_text(walker: list[object]) -> list[str]:
     """Extract plain text from all Text widgets in a walker."""
     texts: list[str] = []
     for widget in walker:
-        inner = widget._original_widget if isinstance(widget, AttrMap) else widget
+        inner = widget.original_widget if isinstance(widget, AttrMap) else widget
         if not isinstance(inner, Text):
             continue
         raw = inner.text
