@@ -22,6 +22,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentLifecycleState
@@ -600,7 +601,10 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
         return
 
     try:
-        state.snapshot = state.refresh_future.result()
+        new_snapshot = state.refresh_future.result()
+        if not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded:
+            new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
+        state.snapshot = new_snapshot
     except Exception as e:
         logger.debug("Refresh failed: {}", e)
         if state.snapshot is not None:
@@ -624,6 +628,31 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.footer_left_text.set_text(state.steady_footer_text)
 
     _schedule_next_refresh(loop, state)
+
+
+def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
+    """Carry forward PR data from a previous snapshot when the new one failed to load PRs.
+
+    Matches entries by agent name and copies pr and create_pr_url from the old snapshot.
+    The new snapshot's prs_loaded is set to True since we're using valid (stale) data.
+    """
+    old_by_name = {entry.name: entry for entry in old.entries}
+    updated_entries = []
+    for entry in new.entries:
+        old_entry = old_by_name.get(entry.name)
+        if old_entry is not None and old_entry.pr is not None:
+            ref = entry.field_ref()
+            entry = entry.model_copy_update(
+                to_update(ref.pr, old_entry.pr),
+                to_update(ref.create_pr_url, old_entry.create_pr_url),
+            )
+        updated_entries.append(entry)
+    return BoardSnapshot(
+        entries=tuple(updated_entries),
+        errors=new.errors,
+        prs_loaded=True,
+        fetch_time_seconds=new.fetch_time_seconds,
+    )
 
 
 def _classify_entry(entry: AgentBoardEntry) -> BoardSection:

@@ -14,6 +14,8 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng_kanpan.data_types import AgentBoardEntry
+from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import CheckStatus
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
@@ -23,6 +25,7 @@ from imbue.mng_kanpan.fetcher import _pr_priority
 from imbue.mng_kanpan.fetcher import _resolve_agent_branch
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
+from imbue.mng_kanpan.tui import _carry_forward_pr_data
 
 
 def _make_host_details(provider_name: str = "local") -> HostDetails:
@@ -274,3 +277,59 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
     # When PRs failed to load, create_pr_url should be suppressed even though
     # the agent has a branch and a valid GitHub remote
     assert snapshot.entries[0].create_pr_url is None
+
+
+# === _carry_forward_pr_data ===
+
+
+def test_carry_forward_pr_data_preserves_old_prs() -> None:
+    pr = _make_pr_info(number=42, head_branch="mng/agent-1")
+    old_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=pr,
+        create_pr_url=None,
+    )
+    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        errors=("gh auth failed",),
+        prs_loaded=False,
+        fetch_time_seconds=2.0,
+    )
+
+    result = _carry_forward_pr_data(old, new)
+    assert result.prs_loaded is True
+    assert result.entries[0].pr is not None
+    assert result.entries[0].pr.number == 42
+    # Errors from the failed fetch are still preserved
+    assert "gh auth failed" in result.errors[0]
+    # Timing comes from the new snapshot
+    assert result.fetch_time_seconds == 2.0
+
+
+def test_carry_forward_pr_data_handles_new_agents() -> None:
+    """New agents that weren't in the old snapshot get no PR data carried forward."""
+    old = BoardSnapshot(entries=(), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-new"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-new",
+    )
+    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+
+    result = _carry_forward_pr_data(old, new)
+    assert result.entries[0].pr is None
