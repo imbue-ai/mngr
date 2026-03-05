@@ -17,7 +17,7 @@ command = "uv run pytest"
 run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
-retry_count = 4
+retry_count = 0
 # Exclude acceptance and release tests
 filters = "-m 'not acceptance and not release'"
 

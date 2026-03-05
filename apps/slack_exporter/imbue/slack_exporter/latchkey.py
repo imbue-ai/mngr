@@ -2,6 +2,7 @@ import json
 import logging
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlencode
 
@@ -95,6 +96,40 @@ def parse_latchkey_response(
         raise SlackApiError(method=method, error=data.get("error", "unknown"))
 
     return data
+
+
+def fetch_paginated(
+    api_caller: Callable[[str, dict[str, str] | None], dict[str, Any]],
+    method: str,
+    base_params: dict[str, str],
+    response_key: str,
+) -> list[dict[str, Any]]:
+    """Fetch all items from a paginated Slack API endpoint.
+
+    Handles both cursor-based pagination and has_more-based pagination.
+    """
+    all_items: list[dict[str, Any]] = []
+    cursor: str | None = None
+
+    while True:
+        params = dict(base_params)
+        if cursor:
+            params["cursor"] = cursor
+
+        data = api_caller(method, params)
+        all_items.extend(data.get(response_key, []))
+
+        # Stop if has_more is explicitly False (used by history/replies endpoints)
+        if "has_more" in data and not data["has_more"]:
+            break
+
+        # Stop if no pagination cursor
+        next_cursor = extract_next_cursor(data)
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    return all_items
 
 
 def extract_next_cursor(data: dict[str, Any]) -> str | None:

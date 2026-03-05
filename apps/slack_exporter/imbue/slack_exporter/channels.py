@@ -9,7 +9,7 @@ from imbue.slack_exporter.data_types import UserEvent
 from imbue.slack_exporter.data_types import make_event_id
 from imbue.slack_exporter.data_types import make_iso_timestamp
 from imbue.slack_exporter.errors import ChannelNotFoundError
-from imbue.slack_exporter.latchkey import extract_next_cursor
+from imbue.slack_exporter.latchkey import fetch_paginated
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
 from imbue.slack_exporter.primitives import SlackUserId
@@ -22,56 +22,28 @@ _USER_SOURCE = EventSource("users")
 
 def fetch_channel_list(api_caller: SlackApiCaller) -> list[ChannelEvent]:
     """Fetch all non-archived channels from Slack."""
-    all_channels: list[ChannelEvent] = []
-    cursor: str | None = None
-
-    while True:
-        params: dict[str, str] = {
-            "exclude_archived": "true",
-            "limit": "200",
-            "types": "public_channel,private_channel",
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        data = api_caller("conversations.list", params)
-
-        for channel_raw in data.get("channels", []):
-            event = _make_channel_event(channel_raw, event_type=EventType("channel_fetched"))
-            all_channels.append(event)
-
-        next_cursor = extract_next_cursor(data)
-        if not next_cursor:
-            break
-        cursor = next_cursor
-
-    logger.info("Fetched %d channels from Slack", len(all_channels))
-    return all_channels
+    raw_channels = fetch_paginated(
+        api_caller=api_caller,
+        method="conversations.list",
+        base_params={"exclude_archived": "true", "limit": "200", "types": "public_channel,private_channel"},
+        response_key="channels",
+    )
+    channels = [_make_channel_event(raw) for raw in raw_channels]
+    logger.info("Fetched %d channels from Slack", len(channels))
+    return channels
 
 
 def fetch_user_list(api_caller: SlackApiCaller) -> list[UserEvent]:
     """Fetch all users from Slack."""
-    all_users: list[UserEvent] = []
-    cursor: str | None = None
-
-    while True:
-        params: dict[str, str] = {"limit": "200"}
-        if cursor:
-            params["cursor"] = cursor
-
-        data = api_caller("users.list", params)
-
-        for user_raw in data.get("members", []):
-            event = _make_user_event(user_raw, event_type=EventType("user_fetched"))
-            all_users.append(event)
-
-        next_cursor = extract_next_cursor(data)
-        if not next_cursor:
-            break
-        cursor = next_cursor
-
-    logger.info("Fetched %d users from Slack", len(all_users))
-    return all_users
+    raw_users = fetch_paginated(
+        api_caller=api_caller,
+        method="users.list",
+        base_params={"limit": "200"},
+        response_key="members",
+    )
+    users = [_make_user_event(raw) for raw in raw_users]
+    logger.info("Fetched %d users from Slack", len(users))
+    return users
 
 
 def resolve_channel_id(
@@ -94,10 +66,10 @@ def resolve_channel_id(
     raise ChannelNotFoundError(channel_name)
 
 
-def _make_channel_event(channel_raw: dict[str, Any], event_type: EventType) -> ChannelEvent:
+def _make_channel_event(channel_raw: dict[str, Any]) -> ChannelEvent:
     return ChannelEvent(
         timestamp=make_iso_timestamp(),
-        type=event_type,
+        type=EventType("channel_fetched"),
         event_id=make_event_id(),
         source=_CHANNEL_SOURCE,
         channel_id=SlackChannelId(channel_raw["id"]),
@@ -106,10 +78,10 @@ def _make_channel_event(channel_raw: dict[str, Any], event_type: EventType) -> C
     )
 
 
-def _make_user_event(user_raw: dict[str, Any], event_type: EventType) -> UserEvent:
+def _make_user_event(user_raw: dict[str, Any]) -> UserEvent:
     return UserEvent(
         timestamp=make_iso_timestamp(),
-        type=event_type,
+        type=EventType("user_fetched"),
         event_id=make_event_id(),
         source=_USER_SOURCE,
         user_id=SlackUserId(user_raw["id"]),

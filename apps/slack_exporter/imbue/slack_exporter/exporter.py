@@ -15,7 +15,7 @@ from imbue.slack_exporter.data_types import ReplyEvent
 from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.data_types import make_event_id
 from imbue.slack_exporter.data_types import make_iso_timestamp
-from imbue.slack_exporter.latchkey import extract_next_cursor
+from imbue.slack_exporter.latchkey import fetch_paginated
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
 from imbue.slack_exporter.primitives import SlackMessageTimestamp
@@ -70,7 +70,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     for event in fresh_channels:
         channel_id_by_name[event.channel_name] = event.channel_id
 
-    # Fetch users and split into created vs updated
+    # Fetch users (only save newly seen users for now)
     fresh_users = fetch_user_list(api_caller)
     new_users = [u for u in fresh_users if u.user_id not in existing_user_ids]
     save_user_events(settings.output_dir, StreamType.CREATED, new_users)
@@ -201,25 +201,19 @@ def _fetch_all_replies_for_thread(
     api_caller: SlackApiCaller,
 ) -> list[ReplyEvent]:
     """Fetch all replies for a specific thread, handling pagination."""
-    all_replies: list[ReplyEvent] = []
-    cursor: str | None = None
-
-    while True:
-        params: dict[str, str] = {
-            "channel": channel_id,
-            "ts": thread_ts,
-            "limit": "200",
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        data = api_caller("conversations.replies", params)
-
-        for reply_raw in data.get("messages", []):
-            ts = reply_raw.get("ts", "")
-            if not ts:
-                continue
-            event = ReplyEvent(
+    raw_replies = fetch_paginated(
+        api_caller=api_caller,
+        method="conversations.replies",
+        base_params={"channel": channel_id, "ts": thread_ts, "limit": "200"},
+        response_key="messages",
+    )
+    replies: list[ReplyEvent] = []
+    for reply_raw in raw_replies:
+        ts = reply_raw.get("ts", "")
+        if not ts:
+            continue
+        replies.append(
+            ReplyEvent(
                 timestamp=make_iso_timestamp(),
                 type=EventType("reply_fetched"),
                 event_id=make_event_id(),
@@ -230,17 +224,8 @@ def _fetch_all_replies_for_thread(
                 reply_ts=SlackMessageTimestamp(ts),
                 raw=reply_raw,
             )
-            all_replies.append(event)
-
-        if not data.get("has_more", False):
-            break
-
-        next_cursor = extract_next_cursor(data)
-        if not next_cursor:
-            break
-        cursor = next_cursor
-
-    return all_replies
+        )
+    return replies
 
 
 def _fetch_all_messages_for_channel(
@@ -251,27 +236,25 @@ def _fetch_all_messages_for_channel(
     api_caller: SlackApiCaller,
 ) -> list[MessageEvent]:
     """Fetch all messages from a channel newer than oldest_ts, handling pagination."""
-    all_messages: list[MessageEvent] = []
-    cursor: str | None = None
-
-    while True:
-        params: dict[str, str] = {
+    raw_messages = fetch_paginated(
+        api_caller=api_caller,
+        method="conversations.history",
+        base_params={
             "channel": channel_id,
             "oldest": oldest_ts,
             "inclusive": "true" if is_inclusive else "false",
             "include_all_metadata": "true",
             "limit": "200",
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        data = api_caller("conversations.history", params)
-
-        for message_raw in data.get("messages", []):
-            ts = message_raw.get("ts", "")
-            if not ts:
-                continue
-            event = MessageEvent(
+        },
+        response_key="messages",
+    )
+    messages: list[MessageEvent] = []
+    for message_raw in raw_messages:
+        ts = message_raw.get("ts", "")
+        if not ts:
+            continue
+        messages.append(
+            MessageEvent(
                 timestamp=make_iso_timestamp(),
                 type=EventType("message_fetched"),
                 event_id=make_event_id(),
@@ -281,17 +264,8 @@ def _fetch_all_messages_for_channel(
                 message_ts=SlackMessageTimestamp(ts),
                 raw=message_raw,
             )
-            all_messages.append(event)
-
-        if not data.get("has_more", False):
-            break
-
-        next_cursor = extract_next_cursor(data)
-        if not next_cursor:
-            break
-        cursor = next_cursor
-
-    return all_messages
+        )
+    return messages
 
 
 def _datetime_to_slack_timestamp(dt: datetime) -> SlackMessageTimestamp:

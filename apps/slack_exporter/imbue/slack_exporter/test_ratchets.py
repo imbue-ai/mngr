@@ -28,7 +28,7 @@ def test_prevent_eval_usage() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(4))
+    rc.check_while_true(_DIR, snapshot(1))
 
 
 def test_prevent_time_sleep() -> None:
