@@ -5,6 +5,7 @@ test_timeout_secs = 60
 retry_count = 2
 stream_output = true
 sandbox_project_root = "/code/mng"
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
 
 [provider]
 type = "modal"
@@ -14,7 +15,7 @@ dockerfile = "libs/mng/imbue/mng/resources/Dockerfile"
 type = "default"
 discover_command = "uv run pytest --collect-only -q 2>/dev/null {filters} | grep '::'"
 # Run tests in the sandbox (source is baked into /app)
-run_command = "cd /code/mng && if [ ! -f /tmp/.patch_applied ]; then git apply /offload-upload/patch --allow-empty && uv sync --all-packages && touch /tmp/.patch_applied; fi && uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml={result_file} {tests}"
+run_command = "uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml={result_file} {tests}"
 test_id_format = "{name}"
 
 [groups.all]
