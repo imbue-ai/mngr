@@ -353,10 +353,11 @@ def test_compute_claude_project_dir_name_replaces_dots() -> None:
 
 def _run_setup_memory(
     work_dir: str = "/home/user/.changelings/agent",
+    active_role: str = "thinking",
 ) -> StubHost:
     """Run setup_memory_directory on a StubHost and return the host for inspection."""
     host = StubHost()
-    setup_memory_directory(cast(Any, host), Path(work_dir), work_dir, _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, host), Path(work_dir), active_role, work_dir, _DEFAULT_PROVISIONING)
     return host
 
 
@@ -399,27 +400,27 @@ def test_setup_memory_directory_does_not_use_literal_tilde() -> None:
 
 
 def test_build_memory_sync_hooks_config_has_pre_and_post() -> None:
-    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
     assert "PreToolUse" in config["hooks"]
     assert "PostToolUse" in config["hooks"]
 
 
 def test_build_memory_sync_hooks_config_pre_syncs_work_dir_to_project() -> None:
-    """PreToolUse should rsync FROM work_dir/memory/ TO Claude project memory/."""
-    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    """PreToolUse should rsync FROM <role>/memory/ TO Claude project memory/."""
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
     pre_cmd = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     # rsync source comes before destination: rsync -a --delete SRC/ DST/
-    work_dir_pos = pre_cmd.index("/home/user/.changelings/agent/memory")
+    work_dir_pos = pre_cmd.index("/home/user/.changelings/agent/thinking/memory")
     project_pos = pre_cmd.index("$HOME/.claude/projects/")
     assert work_dir_pos < project_pos, "PreToolUse should sync work_dir -> project (work_dir first in rsync args)"
 
 
 def test_build_memory_sync_hooks_config_post_syncs_project_to_work_dir() -> None:
-    """PostToolUse should rsync FROM Claude project memory/ TO work_dir/memory/."""
-    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    """PostToolUse should rsync FROM Claude project memory/ TO <role>/memory/."""
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent", "thinking")
     post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     # rsync source comes before destination: rsync -a --delete SRC/ DST/
-    work_dir_pos = post_cmd.index("/home/user/.changelings/agent/memory")
+    work_dir_pos = post_cmd.index("/home/user/.changelings/agent/thinking/memory")
     project_pos = post_cmd.index("$HOME/.claude/projects/")
     assert project_pos < work_dir_pos, "PostToolUse should sync project -> work_dir (project first in rsync args)"
 
@@ -477,44 +478,37 @@ def test_install_llm_toolchain_raises_on_plugin_install_failure() -> None:
 
 def test_create_changeling_symlinks_checks_global_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("GLOBAL.md" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_checks_thinking_prompt() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("thinking/PROMPT.md" in c for c in host.executed_commands)
 
 
-def test_create_changeling_symlinks_checks_thinking_settings() -> None:
+def test_create_changeling_symlinks_creates_claude_dir_symlink() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
-    assert any("thinking/settings.json" in c for c in host.executed_commands)
+    assert any("ln -sfn" in c and "thinking/.claude" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_creates_claude_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("ln -sf" in c and "CLAUDE.md" in c for c in host.executed_commands)
 
 
 def test_create_changeling_symlinks_creates_claude_local_md() -> None:
     host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     assert any("ln -sf" in c and "CLAUDE.local.md" in c for c in host.executed_commands)
-
-
-def test_create_changeling_symlinks_creates_skills_symlink() -> None:
-    host = StubHost()
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    assert any("ln -sfn" in c and "skills" in c for c in host.executed_commands)
 
 
 def test_provision_default_content_writes_global_md() -> None:
@@ -538,7 +532,7 @@ def test_provision_default_content_writes_thinking_settings() -> None:
     provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
 
 
 def test_provision_default_content_writes_skills_to_thinking() -> None:
@@ -546,7 +540,7 @@ def test_provision_default_content_writes_skills_to_thinking() -> None:
     provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
 
 
 def test_provision_changeling_scripts_creates_commands_dir() -> None:
@@ -1312,7 +1306,7 @@ def test_create_changeling_symlinks_skips_when_target_does_not_exist() -> None:
             "test -d": StubCommandResult(success=False),
         }
     )
-    create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
     # No symlink commands should have been executed
     assert not any("ln -sf" in c for c in host.executed_commands)
@@ -1323,11 +1317,11 @@ def test_create_changeling_symlinks_raises_on_symlink_failure() -> None:
     """Verify RuntimeError when symlink creation fails."""
     host = StubHost(
         command_results={
-            "ln -sf": StubCommandResult(success=False, stderr="permission denied"),
+            "ln -sfn": StubCommandResult(success=False, stderr="permission denied"),
         }
     )
-    with pytest.raises(RuntimeError, match="Failed to create symlink"):
-        create_changeling_symlinks(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    with pytest.raises(RuntimeError, match="Failed to create directory symlink"):
+        create_changeling_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
 
 
 def test_install_llm_toolchain_raises_on_plugin_install_failure_live_chat() -> None:
@@ -1360,7 +1354,7 @@ def test_setup_memory_directory_raises_on_sync_failure() -> None:
         }
     )
     with pytest.raises(RuntimeError, match="Failed to sync memory directory"):
-        setup_memory_directory(cast(Any, host), Path("/test/work"), "/test/work", _DEFAULT_PROVISIONING)
+        setup_memory_directory(cast(Any, host), Path("/test/work"), "thinking", "/test/work", _DEFAULT_PROVISIONING)
 
 
 def test_provision_llm_tools_uses_correct_mode() -> None:
@@ -1644,12 +1638,12 @@ def test_provision_default_content_writes_missing_files() -> None:
     assert any("GLOBAL.md" in p for p in written_paths)
     assert any("talking/PROMPT.md" in p for p in written_paths)
     assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/settings.json" in p for p in written_paths)
-    assert any("thinking/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/list-conversations/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/delegate-task/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/list-event-types/SKILL.md" in p for p in written_paths)
-    assert any("thinking/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/list-conversations/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/delegate-task/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/list-event-types/SKILL.md" in p for p in written_paths)
+    assert any("thinking/.claude/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
 
 
 def test_provision_default_content_skips_existing_files() -> None:
@@ -1681,7 +1675,7 @@ def test_provision_default_content_writes_to_thinking_dir() -> None:
 
     written_paths = [str(path) for path, _ in host.written_text_files]
     assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/settings.json" in p for p in written_paths)
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
 
 
 # -- validate_talking_role_constraints tests --

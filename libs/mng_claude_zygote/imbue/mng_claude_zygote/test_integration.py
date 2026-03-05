@@ -215,7 +215,7 @@ def test_provisioning_creates_default_content_when_missing(
         assert expected in written_path_strings, f"Expected {relative_path} to be written to work dir"
 
     for skill_name in _DEFAULT_SKILL_DIRS:
-        expected = str(temp_git_repo / "thinking" / "skills" / skill_name / "SKILL.md")
+        expected = str(temp_git_repo / "thinking" / ".claude" / "skills" / skill_name / "SKILL.md")
         assert expected in written_path_strings, f"Expected skill {skill_name}/SKILL.md to be written"
 
 
@@ -240,17 +240,23 @@ def test_provisioning_creates_symlinks(
     """Verify that provisioning creates the expected symlinks."""
     # Set up the new directory structure
     (temp_git_repo / "GLOBAL.md").write_text("# Global instructions")
-    (temp_git_repo / "settings.json").write_text("{}")
     thinking_dir = temp_git_repo / "thinking"
     thinking_dir.mkdir()
     (thinking_dir / "PROMPT.md").write_text("# Thinking prompt")
-    (thinking_dir / "settings.json").write_text("{}")
-    skills_dir = thinking_dir / "skills"
+    claude_dir = thinking_dir / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text("{}")
+    skills_dir = claude_dir / "skills"
     skills_dir.mkdir()
     (skills_dir / "test-skill").mkdir()
     (skills_dir / "test-skill" / "SKILL.md").write_text("# Test skill")
 
-    create_changeling_symlinks(cast(Any, local_shell_host), temp_git_repo, _DEFAULT_PROVISIONING)
+    create_changeling_symlinks(cast(Any, local_shell_host), temp_git_repo, "thinking", _DEFAULT_PROVISIONING)
+
+    # .claude -> thinking/.claude (directory symlink)
+    claude_link = temp_git_repo / ".claude"
+    assert claude_link.is_symlink(), ".claude should be a symlink"
+    assert claude_link.resolve() == claude_dir.resolve()
 
     # CLAUDE.md -> GLOBAL.md
     claude_md = temp_git_repo / "CLAUDE.md"
@@ -262,20 +268,13 @@ def test_provisioning_creates_symlinks(
     assert local_md.is_symlink(), "CLAUDE.local.md should be a symlink"
     assert local_md.resolve() == (thinking_dir / "PROMPT.md").resolve()
 
-    # .claude/settings.json -> settings.json
+    # settings.json is accessible through the .claude symlink
     settings_json = temp_git_repo / ".claude" / "settings.json"
-    assert settings_json.is_symlink(), "settings.json should be a symlink"
-    assert settings_json.resolve() == (temp_git_repo / "settings.json").resolve()
+    assert settings_json.exists(), "settings.json should be accessible through .claude symlink"
 
-    # .claude/settings.local.json -> thinking/settings.json
-    settings_local_json = temp_git_repo / ".claude" / "settings.local.json"
-    assert settings_local_json.is_symlink(), "settings.local.json should be a symlink"
-    assert settings_local_json.resolve() == (thinking_dir / "settings.json").resolve()
-
-    # .claude/skills -> thinking/skills
+    # skills are accessible through the .claude symlink
     skills_link = temp_git_repo / ".claude" / "skills"
-    assert skills_link.is_symlink(), ".claude/skills should be a symlink"
-    assert skills_link.resolve() == skills_dir.resolve()
+    assert skills_link.is_dir(), ".claude/skills should be accessible through .claude symlink"
 
 
 @pytest.mark.timeout(30)
@@ -286,12 +285,12 @@ def test_provisioning_syncs_memory_directory(
 ) -> None:
     """Verify that provisioning creates both memory dirs and syncs initial content."""
     abs_work_dir = str(temp_git_repo.resolve())
-    # Create a file in work_dir/memory/ to verify initial sync
-    memory_dir = temp_git_repo / "memory"
-    memory_dir.mkdir(exist_ok=True)
+    # Create a file in thinking/memory/ to verify initial sync
+    memory_dir = temp_git_repo / "thinking" / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "test.md").write_text("hello")
 
-    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, abs_work_dir, _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", abs_work_dir, _DEFAULT_PROVISIONING)
 
     assert memory_dir.is_dir(), "memory dir should exist"
 

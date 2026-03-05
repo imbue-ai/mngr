@@ -42,10 +42,7 @@ _LLM_TOOL_FILES: Final[tuple[str, ...]] = (
 
 # Default content files written to the work directory root if missing.
 # Tuples of (resource path under defaults/, target path relative to work dir).
-_DEFAULT_WORK_DIR_FILES: Final[tuple[tuple[str, str], ...]] = (
-    ("GLOBAL.md", "GLOBAL.md"),
-    ("settings.json", "settings.json"),
-)
+_DEFAULT_WORK_DIR_FILES: Final[tuple[tuple[str, str], ...]] = (("GLOBAL.md", "GLOBAL.md"),)
 
 # Default content files for the talking agent (user-facing conversation voice).
 # Tuples of (resource path under defaults/, target path relative to work dir).
@@ -55,11 +52,11 @@ _DEFAULT_TALKING_DIR_FILES: Final[tuple[tuple[str, str], ...]] = (("talking/PROM
 # Tuples of (resource path under defaults/, target path relative to work dir).
 _DEFAULT_THINKING_DIR_FILES: Final[tuple[tuple[str, str], ...]] = (
     ("thinking/PROMPT.md", "thinking/PROMPT.md"),
-    ("thinking/settings.json", "thinking/settings.json"),
+    ("thinking/.claude/settings.json", "thinking/.claude/settings.json"),
 )
 
-# Default skill files written to thinking/skills/<name>/SKILL.md if missing.
-# Each entry is a skill directory name under defaults/thinking/skills/.
+# Default skill files written to thinking/.claude/skills/<name>/SKILL.md if missing.
+# Each entry is a skill directory name under defaults/thinking/.claude/skills/.
 _DEFAULT_SKILL_DIRS: Final[tuple[str, ...]] = (
     "send-message-to-user",
     "list-conversations",
@@ -183,11 +180,10 @@ def provision_default_content(
 
     Populates sensible defaults for:
     - GLOBAL.md (shared project instructions for all agents)
-    - settings.json (shared Claude settings for all agents)
     - talking/PROMPT.md (talking agent prompt, used as llm system prompt)
     - thinking/PROMPT.md (primary/inner monologue agent prompt)
-    - thinking/settings.json (primary agent Claude settings)
-    - thinking/skills/<name>/SKILL.md (skills for the thinking agent)
+    - thinking/.claude/settings.json (primary agent Claude settings)
+    - thinking/.claude/skills/<name>/SKILL.md (skills for the thinking agent)
 
     Only writes files that are missing -- existing files are never overwritten.
     This allows fresh deployments to work out of the box while preserving
@@ -205,10 +201,12 @@ def provision_default_content(
         target_path = work_dir / relative_path
         _write_default_if_missing(host, target_path, f"defaults/{resource_name}", settings)
 
-    skills_dir = work_dir / "thinking" / "skills"
+    skills_dir = work_dir / "thinking" / ".claude" / "skills"
     for skill_name in _DEFAULT_SKILL_DIRS:
         target_path = skills_dir / skill_name / "SKILL.md"
-        _write_default_if_missing(host, target_path, f"defaults/thinking/skills/{skill_name}/SKILL.md", settings)
+        _write_default_if_missing(
+            host, target_path, f"defaults/thinking/.claude/skills/{skill_name}/SKILL.md", settings
+        )
 
 
 def install_llm_toolchain(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
@@ -306,17 +304,27 @@ def warn_if_mng_unavailable(
 def create_changeling_symlinks(
     host: OnlineHostInterface,
     work_dir: Path,
+    active_role: str,
     settings: ProvisioningSettings,
 ) -> None:
     """Create symlinks so Claude Code discovers changeling files at standard locations.
 
+    The active role's .claude/ directory becomes the top-level .claude/ via a
+    directory symlink, so Claude Code naturally finds settings.json, skills/, etc.
+
     Creates:
+    - <work_dir>/.claude -> <work_dir>/<active_role>/.claude (directory symlink)
     - <work_dir>/CLAUDE.md -> <work_dir>/GLOBAL.md
-    - <work_dir>/CLAUDE.local.md -> <work_dir>/thinking/PROMPT.md
-    - <work_dir>/.claude/settings.json -> <work_dir>/settings.json
-    - <work_dir>/.claude/settings.local.json -> <work_dir>/thinking/settings.json
-    - <work_dir>/.claude/skills -> <work_dir>/thinking/skills  (directory symlink)
+    - <work_dir>/CLAUDE.local.md -> <work_dir>/<active_role>/PROMPT.md
     """
+    # .claude -> <active_role>/.claude (directory symlink)
+    _create_dir_symlink_if_target_exists(
+        host,
+        link_path=work_dir / ".claude",
+        target_path=work_dir / active_role / ".claude",
+        settings=settings,
+    )
+
     # CLAUDE.md -> GLOBAL.md (so Claude Code loads global instructions)
     _create_symlink_if_target_exists(
         host,
@@ -325,35 +333,11 @@ def create_changeling_symlinks(
         settings=settings,
     )
 
-    # CLAUDE.local.md -> thinking/PROMPT.md (inner monologue prompt)
+    # CLAUDE.local.md -> <active_role>/PROMPT.md (role-specific prompt)
     _create_symlink_if_target_exists(
         host,
         link_path=work_dir / "CLAUDE.local.md",
-        target_path=work_dir / "thinking" / "PROMPT.md",
-        settings=settings,
-    )
-
-    # .claude/settings.json -> settings.json (global Claude settings)
-    _create_symlink_if_target_exists(
-        host,
-        link_path=work_dir / ".claude" / "settings.json",
-        target_path=work_dir / "settings.json",
-        settings=settings,
-    )
-
-    # .claude/settings.local.json -> thinking/settings.json (thinking agent settings)
-    _create_symlink_if_target_exists(
-        host,
-        link_path=work_dir / ".claude" / "settings.local.json",
-        target_path=work_dir / "thinking" / "settings.json",
-        settings=settings,
-    )
-
-    # .claude/skills -> thinking/skills (directory symlink)
-    _create_dir_symlink_if_target_exists(
-        host,
-        link_path=work_dir / ".claude" / "skills",
-        target_path=work_dir / "thinking" / "skills",
+        target_path=work_dir / active_role / "PROMPT.md",
         settings=settings,
     )
 
@@ -760,22 +744,23 @@ def resolve_work_dir_abs(
 def setup_memory_directory(
     host: OnlineHostInterface,
     work_dir: Path,
+    active_role: str,
     work_dir_abs: str,
     settings: ProvisioningSettings,
 ) -> None:
-    """Set up the memory directory and initial sync into the Claude project memory path.
+    """Set up the per-role memory directory and initial sync into Claude project memory.
 
     Creates:
-    - <work_dir>/memory/ (if it doesn't exist)
+    - <work_dir>/<active_role>/memory/ (if it doesn't exist)
     - ~/.claude/projects/<project_name>/memory/ (real directory, not symlink)
-    - Initial rsync of contents from work_dir/memory/ to claude project memory/
+    - Initial rsync of contents from role memory/ to claude project memory/
 
     Memory sync hooks (added separately via build_memory_sync_hooks_config) keep
     the two directories in sync during agent operation: PreToolUse syncs from the
-    version-controlled work_dir into Claude's project memory, and PostToolUse
+    version-controlled role memory into Claude's project memory, and PostToolUse
     syncs back so that any memory Claude wrote is captured in version control.
     """
-    memory_dir = work_dir / "memory"
+    memory_dir = work_dir / active_role / "memory"
     project_dir_name = compute_claude_project_dir_name(work_dir_abs)
 
     # Create both memory directories.
@@ -807,18 +792,18 @@ def setup_memory_directory(
             raise RuntimeError(f"Failed to sync memory directory: {result.stderr}")
 
 
-def build_memory_sync_hooks_config(work_dir_abs: str) -> dict[str, Any]:
-    """Build Claude hooks config for syncing memory between work_dir and Claude project memory.
+def build_memory_sync_hooks_config(work_dir_abs: str, active_role: str) -> dict[str, Any]:
+    """Build Claude hooks config for syncing per-role memory with Claude project memory.
 
     Returns a hooks config dict with PreToolUse and PostToolUse entries that
     rsync the memory directory in the appropriate direction:
-    - PreToolUse: work_dir/memory/ -> ~/.claude/projects/<project>/memory/
+    - PreToolUse: <role>/memory/ -> ~/.claude/projects/<project>/memory/
       (ensures Claude sees the latest version-controlled memory)
-    - PostToolUse: ~/.claude/projects/<project>/memory/ -> work_dir/memory/
+    - PostToolUse: ~/.claude/projects/<project>/memory/ -> <role>/memory/
       (captures any memory Claude wrote back into version control)
     """
     project_dir_name = compute_claude_project_dir_name(work_dir_abs)
-    quoted_work_memory = shlex.quote(f"{work_dir_abs}/memory")
+    quoted_work_memory = shlex.quote(f"{work_dir_abs}/{active_role}/memory")
     quoted_project_dir_name = shlex.quote(project_dir_name)
     project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
 
