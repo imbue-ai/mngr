@@ -794,9 +794,9 @@ def _build_board_widgets(
             walker.append(Divider())
 
         if section == BoardSection.STILL_COOKING and not snapshot.prs_loaded:
-            attr = _SECTION_ATTR[section]
+            section_attr = _SECTION_ATTR[section]
             heading: list[str | tuple[Hashable, str]] = [
-                (attr, "In progress"),
+                (section_attr, "In progress"),
                 f" - PRs not loaded ({len(entries)})",
             ]
         else:
