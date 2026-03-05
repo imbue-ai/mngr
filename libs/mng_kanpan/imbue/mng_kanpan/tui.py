@@ -23,6 +23,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentLifecycleState
@@ -36,6 +37,7 @@ from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
+from imbue.mng_kanpan.fetcher import fetch_local_snapshot
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
 
 REFRESH_INTERVAL_SECONDS: int = 600  # 10 minutes
@@ -172,6 +174,8 @@ class _KanpanState(MutableModel):
     commands: dict[str, CustomCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
     last_refresh_time: float = 0.0
+    # Whether the current in-flight refresh is local-only (no GitHub API)
+    refresh_is_local_only: bool = False
     # Handle for the pending deferred refresh alarm (None if no alarm is pending)
     deferred_refresh_alarm: Any = None
     # Monotonic time the deferred refresh is scheduled to fire
@@ -344,8 +348,8 @@ def _finish_delete(loop: MainLoop, state: _KanpanState) -> None:
         state.delete_future = None
         state.deleting_agent_name = None
 
-    # Trigger a refresh to update the board (subject to auto cooldown)
-    _request_refresh(loop, state, state.auto_refresh_cooldown_seconds)
+    # Local-only refresh to immediately show updated state (no cooldown needed)
+    _start_local_refresh(loop, state)
 
 
 def _run_git_push(work_dir: str) -> subprocess.CompletedProcess[str]:
@@ -414,8 +418,8 @@ def _finish_push(loop: MainLoop, state: _KanpanState) -> None:
         state.push_future = None
         state.pushing_agent_name = None
 
-    # Trigger a refresh to update the board (subject to auto cooldown)
-    _request_refresh(loop, state, state.auto_refresh_cooldown_seconds)
+    # Local-only refresh to immediately show updated state (no cooldown needed)
+    _start_local_refresh(loop, state)
 
 
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
@@ -543,7 +547,7 @@ def _on_custom_command_poll(
         except Exception as e:
             _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {e}")
         if cmd.refresh_afterwards:
-            _request_refresh(loop, state, state.auto_refresh_cooldown_seconds)
+            _start_local_refresh(loop, state)
     else:
         frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
         state.footer_left_text.set_text(f"  Running {cmd.name} on {agent_name} {frame_char}")
@@ -610,12 +614,56 @@ def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
         _start_refresh(loop, state)
 
 
-def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a background refresh and begin the spinner animation."""
+def _carry_forward_pr_data(new_snapshot: BoardSnapshot, old_snapshot: BoardSnapshot | None) -> BoardSnapshot:
+    """Carry forward PR data from an old snapshot into a local-only snapshot.
+
+    For each entry in new_snapshot with pr=None, copies pr and create_pr_url
+    from the matching entry (by agent name) in old_snapshot.
+    """
+    if old_snapshot is None:
+        return new_snapshot
+    old_by_name: dict[AgentName, AgentBoardEntry] = {entry.name: entry for entry in old_snapshot.entries}
+    carried_entries: list[AgentBoardEntry] = []
+    for entry in new_snapshot.entries:
+        old_entry = old_by_name.get(entry.name)
+        if entry.pr is None and old_entry is not None and old_entry.pr is not None:
+            carried_entry = entry.model_copy_update(
+                to_update(entry.field_ref().pr, old_entry.pr),
+                to_update(entry.field_ref().create_pr_url, old_entry.create_pr_url),
+            )
+            carried_entries.append(carried_entry)
+        else:
+            carried_entries.append(entry)
+    return BoardSnapshot(
+        entries=tuple(carried_entries),
+        errors=new_snapshot.errors,
+        fetch_time_seconds=new_snapshot.fetch_time_seconds,
+    )
+
+
+def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a local-only background refresh (no GitHub API calls).
+
+    Bypasses cooldown entirely since local state is cheap to fetch.
+    """
+    if state.refresh_future is not None:
+        return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
+    state.refresh_is_local_only = True
+    state.refresh_future = state.executor.submit(fetch_local_snapshot, state.mng_ctx)
+    _schedule_spinner_tick(loop, state)
+
+
+def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a full background refresh and begin the spinner animation."""
+    if state.executor is None:
+        state.executor = ThreadPoolExecutor(max_workers=1)
+    state.footer_left_attr.set_attr_map({None: "footer"})
+    state.spinner_index = 0
+    state.refresh_is_local_only = False
     state.refresh_future = state.executor.submit(fetch_board_snapshot, state.mng_ctx)
     _schedule_spinner_tick(loop, state)
 
@@ -646,9 +694,14 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     if state.refresh_future is None:
         return
 
+    was_local_only = state.refresh_is_local_only
     failed = False
     try:
-        state.snapshot = state.refresh_future.result()
+        new_snapshot = state.refresh_future.result()
+        if was_local_only:
+            state.snapshot = _carry_forward_pr_data(new_snapshot, state.snapshot)
+        else:
+            state.snapshot = new_snapshot
     except Exception as e:
         failed = True
         logger.debug("Refresh failed: {}", e)
@@ -660,7 +713,11 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
             )
     finally:
         state.refresh_future = None
-        state.last_refresh_time = time.monotonic()
+        state.refresh_is_local_only = False
+        # Only update last_refresh_time for full refreshes (so the full-refresh
+        # cooldown isn't affected by cheap local-only refreshes)
+        if not was_local_only:
+            state.last_refresh_time = time.monotonic()
 
     _refresh_display(state)
 
@@ -674,6 +731,8 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
     if failed:
         _request_refresh(loop, state, state.auto_refresh_cooldown_seconds)
+    elif was_local_only:
+        pass
     else:
         _schedule_next_refresh(loop, state)
 

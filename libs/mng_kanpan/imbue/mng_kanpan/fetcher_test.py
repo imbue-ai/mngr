@@ -20,6 +20,7 @@ from imbue.mng_kanpan.fetcher import _find_git_cwd
 from imbue.mng_kanpan.fetcher import _pr_priority
 from imbue.mng_kanpan.fetcher import _resolve_agent_branch
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
+from imbue.mng_kanpan.fetcher import fetch_local_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
 
 
@@ -233,6 +234,28 @@ def test_fetch_board_snapshot_with_list_errors() -> None:
     assert len(snapshot.entries) == 0
     assert len(snapshot.errors) == 1
     assert "ConnectionError" in snapshot.errors[0]
+
+
+def test_fetch_local_snapshot_entries_have_no_pr() -> None:
+    """fetch_local_snapshot should return entries with pr=None and create_pr_url=None."""
+    agent1 = _make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
+
+    mock_list_result = MagicMock()
+    mock_list_result.agents = [agent1]
+    mock_list_result.errors = []
+
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result):
+        snapshot = fetch_local_snapshot(mng_ctx)
+
+    assert len(snapshot.entries) == 1
+    assert snapshot.entries[0].name == AgentName("agent-1")
+    assert snapshot.entries[0].pr is None
+    assert snapshot.entries[0].create_pr_url is None
+    assert snapshot.errors == ()
+    assert snapshot.fetch_time_seconds > 0
 
 
 def test_fetch_board_snapshot_surfaces_gh_errors() -> None:
