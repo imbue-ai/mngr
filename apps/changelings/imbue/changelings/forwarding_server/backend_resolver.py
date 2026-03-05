@@ -294,14 +294,18 @@ class MngStreamManager(MutableModel):
 
         Both event types trigger a resolver update with the current SSH mappings.
         """
-        event = parse_discovery_event_line(line)
+        try:
+            event = parse_discovery_event_line(line)
+        except Exception as e:
+            logger.error("Failed to parse discovery event line: {} (line: {})", e, line[:200])
+            return
 
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
         elif isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
-        else:
-            return
+        elif event is None:
+            logger.warning("Unrecognized discovery event line: {}", line[:200])
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update agent list and agent-to-host mapping from a full snapshot."""
