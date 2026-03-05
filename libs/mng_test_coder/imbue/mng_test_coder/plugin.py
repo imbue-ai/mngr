@@ -19,7 +19,7 @@ from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
 
 _MODEL_NAME = "matched-responses"
 
-_LLM_MATCHED_RESPONSES_PACKAGE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "llm_matched_responses"
+_LLM_MATCHED_RESPONSES_LOCAL_CHECKOUT = Path.home() / "project" / "llm-matched-responses"
 
 
 class TestCoderProvisioningError(MngError, RuntimeError):
@@ -105,25 +105,38 @@ class TestCoderAgent(ClaudeZygoteAgent):
 def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
     """Install the llm-matched-responses plugin on the host.
 
-    Uses `llm install -e <path>` to install from the local source directory
-    (editable install into llm's managed environment).
+    Tries PyPI first (`llm install llm-matched-responses`). If that fails
+    (e.g. not yet published), falls back to an editable install from the
+    local checkout at ~/project/llm-matched-responses/.
     """
     logger.info("Installing llm-matched-responses plugin")
 
-    package_dir = _LLM_MATCHED_RESPONSES_PACKAGE_DIR
-    if not package_dir.exists():
+    result = host.execute_command(
+        "llm install llm-matched-responses",
+        timeout_seconds=120.0,
+    )
+    if result.success:
+        logger.info("Installed llm-matched-responses from PyPI")
+        return
+
+    logger.debug("PyPI install failed, trying local checkout: {}", result.stderr[:200])
+
+    local_checkout = _LLM_MATCHED_RESPONSES_LOCAL_CHECKOUT
+    if not local_checkout.exists():
         raise TestCoderProvisioningError(
-            f"llm-matched-responses package not found at {package_dir}. Ensure the monorepo is checked out correctly."
+            f"llm-matched-responses is not available on PyPI and local checkout not found at {local_checkout}. "
+            "Either publish the package or clone https://github.com/imbue-ai/llm-matched-responses "
+            f"to {local_checkout}."
         )
 
     result = host.execute_command(
-        f"llm install -e {shlex.quote(str(package_dir))}",
+        f"llm install -e {shlex.quote(str(local_checkout))}",
         timeout_seconds=120.0,
     )
     if not result.success:
         raise TestCoderProvisioningError(f"Failed to install llm-matched-responses: {result.stderr}")
 
-    logger.info("llm-matched-responses plugin installed successfully")
+    logger.info("Installed llm-matched-responses from local checkout")
 
 
 def _configure_model_as_default(host: OnlineHostInterface, work_dir: Path) -> None:
