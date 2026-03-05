@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from loguru import logger
@@ -16,7 +17,9 @@ from imbue.mng.primitives import CommandString
 from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
 from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
 
-_ECHO_MODEL_NAME = "echo"
+_MODEL_NAME = "matched-responses"
+
+_LLM_MATCHED_RESPONSES_PACKAGE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "llm_matched_responses"
 
 
 class TestCoderProvisioningError(MngError, RuntimeError):
@@ -33,18 +36,19 @@ class TestCoderConfig(ClaudeZygoteConfig):
     - The command is overridden to a simple idle loop instead of Claude Code
     """
 
-    install_llm_echo: bool = Field(
+    install_llm_matched_responses: bool = Field(
         default=True,
-        description="Whether to install the llm-echo plugin during provisioning.",
+        description="Whether to install the llm-matched-responses plugin during provisioning.",
     )
 
 
 class TestCoderAgent(ClaudeZygoteAgent):
-    """A test changeling agent that uses the echo model instead of real LLMs.
+    """A test changeling agent that uses the matched-responses model instead of real LLMs.
 
     Designed for end-to-end testing without API keys. The main agent
     process is a simple idle loop (no Claude Code), and the chat
-    interface uses the llm echo model which returns predictable responses.
+    interface uses the llm matched-responses model which returns
+    predictable responses.
     """
 
     def assemble_command(
@@ -60,7 +64,8 @@ class TestCoderAgent(ClaudeZygoteAgent):
         interface (via llm live-chat) works independently.
         """
         return CommandString(
-            'echo "Test agent running (echo model). Use mng chat to interact." && while true; do sleep 60; done'
+            'echo "Test agent running (matched-responses model). Use mng chat to interact." && '
+            "while true; do sleep 60; done"
         )
 
     def provision(
@@ -69,23 +74,23 @@ class TestCoderAgent(ClaudeZygoteAgent):
         options: CreateAgentOptions,
         mng_ctx: MngContext,
     ) -> None:
-        """Provision the test agent with the echo model.
+        """Provision the test agent with the matched-responses model.
 
         Runs the standard ClaudeZygoteAgent provisioning (which installs
-        llm, creates event dirs, etc.) and then installs the llm-echo
-        plugin so the echo model is available for chat.
+        llm, creates event dirs, etc.) and then installs the
+        llm-matched-responses plugin so the model is available for chat.
 
-        Also writes .changelings/settings.toml with model = "echo"
-        so that chat.sh uses the echo model by default.
+        Also writes .changelings/settings.toml with model = "matched-responses"
+        so that chat.sh uses it by default.
         """
         super().provision(host, options, mng_ctx)
 
         config = self._get_test_coder_config()
 
-        if config.install_llm_echo:
-            _install_llm_echo_plugin(host)
+        if config.install_llm_matched_responses:
+            _install_llm_matched_responses_plugin(host)
 
-        _configure_echo_model_as_default(host, self.work_dir)
+        _configure_model_as_default(host, self.work_dir)
 
     def _get_test_coder_config(self) -> TestCoderConfig:
         """Get the test-coder-specific config."""
@@ -97,36 +102,40 @@ class TestCoderAgent(ClaudeZygoteAgent):
         return self.agent_config
 
 
-def _install_llm_echo_plugin(host: OnlineHostInterface) -> None:
-    """Install the llm-echo plugin on the host.
+def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
+    """Install the llm-matched-responses plugin on the host.
 
-    Tries `llm install llm-echo` which uses pip under the hood to install
-    the plugin into llm's managed environment. This works when llm-echo
-    is available via pip (either from PyPI or a local editable install
-    visible to the host's Python environment).
+    Uses `llm install -e <path>` to install from the local source directory
+    (editable install into llm's managed environment).
     """
-    logger.info("Installing llm-echo plugin")
+    logger.info("Installing llm-matched-responses plugin")
+
+    package_dir = _LLM_MATCHED_RESPONSES_PACKAGE_DIR
+    if not package_dir.exists():
+        raise TestCoderProvisioningError(
+            f"llm-matched-responses package not found at {package_dir}. Ensure the monorepo is checked out correctly."
+        )
 
     result = host.execute_command(
-        "llm install llm-echo",
+        f"llm install -e {shlex.quote(str(package_dir))}",
         timeout_seconds=120.0,
     )
     if not result.success:
-        raise TestCoderProvisioningError(f"Failed to install llm-echo: {result.stderr}")
+        raise TestCoderProvisioningError(f"Failed to install llm-matched-responses: {result.stderr}")
 
-    logger.info("llm-echo plugin installed successfully")
+    logger.info("llm-matched-responses plugin installed successfully")
 
 
-def _configure_echo_model_as_default(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write .changelings/settings.toml with model = "echo".
+def _configure_model_as_default(host: OnlineHostInterface, work_dir: Path) -> None:
+    """Write .changelings/settings.toml with model = "matched-responses".
 
-    This ensures chat.sh uses the echo model by default, so no
+    This ensures chat.sh uses the matched-responses model by default, so no
     API keys are needed for the chat interface.
     """
     settings_dir = work_dir / ".changelings"
     settings_path = settings_dir / "settings.toml"
 
-    settings_content = '[chat]\nmodel = "{}"\n'.format(_ECHO_MODEL_NAME)
+    settings_content = '[chat]\nmodel = "{}"\n'.format(_MODEL_NAME)
 
     mkdir_result = host.execute_command(
         f"mkdir -p {settings_dir}",
@@ -135,7 +144,7 @@ def _configure_echo_model_as_default(host: OnlineHostInterface, work_dir: Path) 
     if not mkdir_result.success:
         raise TestCoderProvisioningError(f"Failed to create settings directory {settings_dir}: {mkdir_result.stderr}")
     host.write_text_file(settings_path, settings_content)
-    logger.info("Configured echo model as default chat model")
+    logger.info("Configured matched-responses model as default chat model")
 
 
 @hookimpl

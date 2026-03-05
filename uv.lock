@@ -15,7 +15,7 @@ members = [
     "flexmux",
     "imbue",
     "imbue-common",
-    "llm-echo",
+    "llm-matched-responses",
     "mng",
     "mng-changeling-chat",
     "mng-claude-zygote",
@@ -1829,9 +1829,9 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-echo"
+name = "llm-matched-responses"
 version = "0.1.0"
-source = { editable = "libs/llm_echo" }
+source = { editable = "libs/llm_matched_responses" }
 dependencies = [
     { name = "llm" },
 ]

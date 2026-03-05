@@ -1,14 +1,14 @@
 [project]
-name = "llm-echo"
+name = "llm-matched-responses"
 version = "0.1.0"
-description = "An llm plugin that provides an echo model for testing - returns a configurable response for any input"
+description = "An llm plugin that provides a matched-responses model for testing - returns configurable responses based on input patterns"
 requires-python = ">=3.11"
 dependencies = [
     "llm>=0.22",
 ]
 
 [project.entry-points.llm]
-echo = "llm_echo"
+matched_responses = "llm_matched_responses"
 
 [build-system]
 requires = ["hatchling"]
