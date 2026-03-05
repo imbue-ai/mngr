@@ -210,7 +210,7 @@ class BaseAgent(AgentInterface):
             )
             ps_output = ps_result.stdout if ps_result.success else ""
 
-            # Check if the active and permissions_waiting files exist
+            # Check for the state indicator files
             is_active = self._check_file_exists(self._get_agent_dir() / "active")
             is_permissions_waiting = self._check_file_exists(self._get_agent_dir() / "permissions_waiting")
 
