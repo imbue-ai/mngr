@@ -11,6 +11,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mng import hookimpl
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
+from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
 from imbue.mng.agents.default_plugins.claude_config import merge_hooks_config
 from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.data_types import AgentTypeConfig
@@ -142,15 +143,20 @@ class ClaudeZygoteAgent(ClaudeAgent):
             )
         return self.agent_config
 
-    def _configure_memory_sync_hooks(self, host: OnlineHostInterface, work_dir_abs: str, active_role: str) -> None:
-        """Configure PreToolUse/PostToolUse hooks to sync per-role memory with Claude project memory.
+    def _configure_role_hooks(
+        self,
+        host: OnlineHostInterface,
+        active_role: str,
+        work_dir_abs: str,
+    ) -> None:
+        """Write all hooks (readiness + memory sync) to the active role's settings.local.json.
 
-        Writes hooks to .claude/settings.local.json (which resolves through the
-        .claude symlink to <active_role>/.claude/settings.local.json) that rsync
-        the role's memory directory before and after each tool use.
+        Writes directly to <active_role>/.claude/settings.local.json using the
+        resolved path, bypassing the symlink. This avoids the gitignore check
+        in the base class's _configure_readiness_hooks, which fails when .claude
+        is a symlink (git refuses to traverse symlinks for check-ignore).
         """
-        settings_path = self.work_dir / ".claude" / "settings.local.json"
-        hooks_config = build_memory_sync_hooks_config(work_dir_abs, active_role)
+        settings_path = self.work_dir / active_role / ".claude" / "settings.local.json"
 
         existing_settings: dict[str, Any] = {}
         try:
@@ -159,13 +165,20 @@ class ClaudeZygoteAgent(ClaudeAgent):
         except FileNotFoundError:
             pass
 
-        merged = merge_hooks_config(existing_settings, hooks_config)
-        if merged is None:
-            logger.debug("Memory sync hooks already configured in {}", settings_path)
-            return
+        # Merge readiness hooks
+        readiness_config = build_readiness_hooks_config()
+        merged = merge_hooks_config(existing_settings, readiness_config)
+        if merged is not None:
+            existing_settings = merged
 
-        with log_span("Configuring memory sync hooks in {}", settings_path):
-            host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
+        # Merge memory sync hooks
+        memory_config = build_memory_sync_hooks_config(work_dir_abs, active_role)
+        merged = merge_hooks_config(existing_settings, memory_config)
+        if merged is not None:
+            existing_settings = merged
+
+        with log_span("Configuring hooks in {}", settings_path):
+            host.write_text_file(settings_path, json.dumps(existing_settings, indent=2) + "\n")
 
     def provision(
         self,
@@ -181,11 +194,11 @@ class ClaudeZygoteAgent(ClaudeAgent):
         3. llm + plugin installation
         4. Default content (GLOBAL.md, role prompts, role .claude/ config)
         5. Symlinks for active role (.claude -> <role>/.claude, CLAUDE.md, CLAUDE.local.md)
-        6. Readiness hooks (written to .claude/settings.local.json via the symlink)
+        6. All hooks (readiness + memory sync) written to <role>/.claude/settings.local.json
         7. Watcher scripts and chat utilities
         8. Event log directory structure (events/<source>/events.jsonl)
         9. LLM tool scripts for conversation context
-        10. Per-role memory directory setup and sync hooks
+        10. Per-role memory directory setup
         """
         super().provision(host, options, mng_ctx)
 
@@ -205,12 +218,13 @@ class ClaudeZygoteAgent(ClaudeAgent):
         provision_default_content(host, self.work_dir, provisioning)
         create_changeling_symlinks(host, self.work_dir, active_role, provisioning)
 
-        # Re-configure readiness hooks AFTER symlinks are created.
-        # create_changeling_symlinks replaces the .claude directory symlink,
-        # so .claude/settings.local.json now resolves to
-        # <active_role>/.claude/settings.local.json. Re-running ensures
-        # the hooks are written to the correct location.
-        self._configure_readiness_hooks(host)
+        # Write all hooks (readiness + memory sync) directly to the role's
+        # settings.local.json using the resolved path. We cannot use
+        # self._configure_readiness_hooks(host) here because it runs
+        # `git check-ignore .claude/settings.local.json` which fails when
+        # .claude is a symlink ("pathspec beyond a symbolic link").
+        work_dir_abs = resolve_work_dir_abs(host, self.work_dir, provisioning)
+        self._configure_role_hooks(host, active_role, work_dir_abs)
 
         provision_changeling_scripts(host, provisioning)
         provision_llm_tools(host, provisioning)
@@ -225,9 +239,7 @@ class ClaudeZygoteAgent(ClaudeAgent):
             chat_model = settings.chat.model or "claude-opus-4.6"
             create_daily_conversation(host, agent_state_dir, provisioning, chat_model)
 
-        work_dir_abs = resolve_work_dir_abs(host, self.work_dir, provisioning)
         setup_memory_directory(host, self.work_dir, active_role, work_dir_abs, provisioning)
-        self._configure_memory_sync_hooks(host, work_dir_abs, active_role)
 
 
 def inject_changeling_windows(params: dict[str, Any]) -> None:
