@@ -729,6 +729,7 @@ def _get_link_cell_text(entry: AgentBoardEntry) -> str:
 
 
 class _ColumnDef(NamedTuple):
+    name: str
     header: str
     text_fn: Callable[[AgentBoardEntry], str]
     markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
@@ -736,14 +737,14 @@ class _ColumnDef(NamedTuple):
 
 
 # Single source of truth for all board column definitions (order matters)
-_BOARD_COLUMN_DEFS: dict[str, _ColumnDef] = {
-    "name": _ColumnDef("  NAME", _get_name_cell_text, _get_name_cell_text),
-    "state": _ColumnDef("STATE", _get_state_cell_text, _get_state_cell_markup),
-    "git": _ColumnDef("GIT", _get_push_cell_text, _get_push_cell_text),
-    "pr": _ColumnDef("PR", _get_pr_cell_text, _get_pr_cell_text),
-    "ci": _ColumnDef("CI", _get_check_cell_text, _get_check_cell_markup),
-    "link": _ColumnDef("LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
-}
+_BOARD_COLUMN_DEFS: list[_ColumnDef] = [
+    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text),
+    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup),
+    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text),
+    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text),
+    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup),
+    _ColumnDef("link", "LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
+]
 
 
 def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[str, int]:
@@ -754,8 +755,8 @@ def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[s
     """
     # For each fixed-width column, take the wider of the header and the widest cell value
     return {
-        col: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries))
-        for col, defn in _BOARD_COLUMN_DEFS.items()
+        defn.name: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries))
+        for defn in _BOARD_COLUMN_DEFS
         if not defn.flexible
     }
 
@@ -763,11 +764,11 @@ def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[s
 def _build_column_header(widths: dict[str, int]) -> Columns:
     """Build the column header row for the board."""
     cols: list[tuple[int, Text] | Text] = []
-    for col, defn in _BOARD_COLUMN_DEFS.items():
+    for defn in _BOARD_COLUMN_DEFS:
         if defn.flexible:
             cols.append(Text(defn.header))
         else:
-            cols.append((widths[col], Text(defn.header)))
+            cols.append((widths[defn.name], Text(defn.header)))
     return Columns(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
@@ -776,7 +777,7 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
 
     Muted agents are rendered entirely in gray.
     """
-    raw_markup = {col: defn.markup_fn(entry) for col, defn in _BOARD_COLUMN_DEFS.items()}
+    raw_markup = {defn.name: defn.markup_fn(entry) for defn in _BOARD_COLUMN_DEFS}
 
     # Muted agents: flatten all markup to gray
     if section == BoardSection.MUTED:
@@ -785,12 +786,12 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
         cell_markup = raw_markup
 
     cols: list[tuple[int, Text] | Text] = []
-    for col, defn in _BOARD_COLUMN_DEFS.items():
-        widget = Text(cell_markup[col])
+    for defn in _BOARD_COLUMN_DEFS:
+        widget = Text(cell_markup[defn.name])
         if defn.flexible:
             cols.append(widget)
         else:
-            cols.append((widths[col], widget))
+            cols.append((widths[defn.name], widget))
     return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
