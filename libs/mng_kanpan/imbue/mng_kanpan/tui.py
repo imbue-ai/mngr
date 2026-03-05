@@ -252,16 +252,14 @@ class _KanpanInputHandler(MutableModel):
             else:
                 _cancel_execute_confirmation(self.state)
             return True
-        if key in ("q", "Q", "ctrl c"):
+        if key in ("q", "ctrl c"):
             raise ExitMainLoop()
-        # Shift+U unmarks all (case-sensitive, before lowering)
         if key == "U":
             _unmark_all(self.state)
             return True
-        # Look up command by key (case-insensitive)
-        cmd = self.state.commands.get(key.lower())
+        cmd = self.state.commands.get(key)
         if cmd is not None:
-            _dispatch_command(self.state, key.lower(), cmd)
+            _dispatch_command(self.state, key, cmd)
             return True
         if key == "up":
             if _is_focus_on_first_selectable(self.state):
