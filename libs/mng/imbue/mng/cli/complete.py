@@ -54,6 +54,20 @@ def _read_agent_names() -> list[str]:
         return []
 
 
+def _is_flag_option(word: str, flag_options: list[str]) -> bool:
+    """Check if word is a known flag option.
+
+    Handles exact matches (--force, -f) and combined short flags (-fb).
+    For combined short flags, every character after the leading dash must
+    map to a known single-character flag in flag_options.
+    """
+    if word in flag_options:
+        return True
+    if not word.startswith("-") or word.startswith("--") or len(word) < 3:
+        return False
+    return all(f"-{ch}" in flag_options for ch in word[1:])
+
+
 def _get_completions() -> list[str]:
     """Compute completion candidates from environment variables and the cache."""
     comp_words_raw = os.environ.get("COMP_WORDS", "")
@@ -125,7 +139,7 @@ def _get_completions() -> list[str]:
         if choice_key in option_choices:
             # Option with predefined choices (e.g. --on-error abort|continue)
             candidates = option_choices[choice_key]
-        elif prev_word in flag_options:
+        elif _is_flag_option(prev_word, flag_options):
             # Previous word is a flag -- next position is positional
             if incomplete.startswith("--"):
                 candidates = options_by_command.get(option_key, [])
