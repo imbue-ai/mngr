@@ -185,9 +185,11 @@ The codebase aggressively uses constrained primitive types to encode domain know
 - `MutableModel`: mutable Pydantic models for interface implementations that need internal state. Critical fields like IDs are still `frozen=True`.
 - All models use `extra="forbid"` to catch typos and stale fields.
 
-### Providers
+### Default Plugins vs. Core
 
-Four provider backends ship with `mng`:
+The `mng` package itself contains a set of **default plugins** -- provider backends and agent types that are registered internally via `pm.register()` during startup. These are not separate packages; they live inside `libs/mng` and are always available. They use the same hookimpl mechanism as external plugins but are loaded directly rather than discovered via entry points.
+
+**Default provider backends** (in `providers/`):
 
 | Backend | Description | Isolation | Snapshots | Use Case |
 |---------|------------|-----------|-----------|----------|
@@ -196,17 +198,17 @@ Four provider backends ship with `mng`:
 | **modal** | Modal.com Sandboxes | VM-level | Yes | Cloud compute, auto-shutdown |
 | **ssh** | Any SSH-accessible host | Depends on host | No | Pre-existing infrastructure |
 
-Provider backends are registered via the plugin system and stored in a registry. Lazy loading is used for Modal to avoid adding ~0.1s import time to every command.
+Local and SSH are always loaded. Docker and Modal are conditionally loaded (they can be disabled via `pm.set_blocked()`), though both are hard dependencies of the mng package.
 
-### Agent Types
-
-Default agent implementations live in `agents/default_plugins/`:
+**Default agent types** (in `agents/default_plugins/`):
 
 - **ClaudeAgent** -- Claude Code with configurable model, permissions, and provisioning
 - **CodexAgent** -- OpenAI Codex CLI integration
 - **SkillAgent** -- Runs a specific skill/script
 - **CodeGuardianAgent** -- Code review agent
 - **FixmeFairyAgent** -- Automated FIXME resolver
+
+The minimal core of mng (layered architecture, interfaces, config, utils, primitives) is independent of these default plugins. The default plugins provide the concrete implementations that make mng useful out of the box.
 
 Agent types support inheritance: a custom "my-claude" type can inherit from "claude" and merge parent defaults with custom overrides.
 
@@ -256,7 +258,11 @@ The codebase includes interactive text user interfaces built with **urwid**:
 
 ## Plugin System
 
-`mng` uses [pluggy](https://pluggy.readthedocs.io/) for its plugin system. Plugins are Python packages that declare an entry point under the `mng` group:
+`mng` uses [pluggy](https://pluggy.readthedocs.io/) for its plugin system. There are two tiers of plugins:
+
+1. **Default plugins** -- ship inside `libs/mng` itself (provider backends like modal/docker, agent types like claude/codex). Registered directly via `pm.register()` during startup. See "Default Plugins vs. Core" above.
+
+2. **External plugins** -- separate packages that declare a setuptools entry point under the `mng` group:
 
 ```toml
 # In a plugin's pyproject.toml
@@ -264,13 +270,16 @@ The codebase includes interactive text user interfaces built with **urwid**:
 my_plugin = "my_package.plugin"
 ```
 
+Both tiers use the same `@hookimpl` mechanism and have access to the same hooks.
+
 ### Plugin Manager Lifecycle
 
 1. `create_plugin_manager()` creates `pluggy.PluginManager("mng")`
 2. Hookspecs registered from `plugins/hookspecs.py`
 3. Disabled plugins blocked via `pm.set_blocked()` (prevents hooks from firing without removing the plugin object, so `mng plugin list` still shows them)
 4. External plugins loaded via `pm.load_setuptools_entrypoints("mng")`
-5. All registries loaded via `load_all_registries(pm)` (agent types and provider backends)
+5. Default plugins registered via `pm.register()` for built-in agent types and provider backends
+6. All registries populated via `load_all_registries(pm)` (calls registration hooks across both tiers)
 
 ### Hook Categories
 
