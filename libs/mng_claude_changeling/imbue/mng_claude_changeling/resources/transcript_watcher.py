@@ -34,11 +34,11 @@ from typing import Any
 from loguru import logger
 
 try:
-    from imbue.mng_claude_zygote.resources.watcher_common import load_watchers_section
-    from imbue.mng_claude_zygote.resources.watcher_common import read_event_ids_from_jsonl
-    from imbue.mng_claude_zygote.resources.watcher_common import require_env
-    from imbue.mng_claude_zygote.resources.watcher_common import run_watcher_loop
-    from imbue.mng_claude_zygote.resources.watcher_common import setup_watcher_logging
+    from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+    from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
+    from imbue.mng_claude_changeling.resources.watcher_common import require_env
+    from imbue.mng_claude_changeling.resources.watcher_common import run_watcher_loop
+    from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from watcher_common import load_watchers_section  # type: ignore[no-redef]

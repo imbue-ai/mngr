@@ -14,8 +14,8 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
 
 _MODEL_NAME = "matched-responses"
 
@@ -28,10 +28,10 @@ class TestCoderProvisioningError(MngError, RuntimeError):
     ...
 
 
-class TestCoderConfig(ClaudeZygoteConfig):
+class TestCoderConfig(ClaudeChangelingConfig):
     """Config for the test-coder agent type.
 
-    Extends ClaudeZygoteConfig with defaults suitable for testing:
+    Extends ClaudeChangelingConfig with defaults suitable for testing:
     - install_llm is True (needed for chat)
     - The command is overridden to a simple idle loop instead of Claude Code
     """
@@ -42,7 +42,7 @@ class TestCoderConfig(ClaudeZygoteConfig):
     )
 
 
-class TestCoderAgent(ClaudeZygoteAgent):
+class TestCoderAgent(ClaudeChangelingAgent):
     """A test changeling agent that uses the matched-responses model instead of real LLMs.
 
     Designed for end-to-end testing without API keys. The main agent
@@ -76,7 +76,7 @@ class TestCoderAgent(ClaudeZygoteAgent):
     ) -> None:
         """Provision the test agent with the matched-responses model.
 
-        Runs the standard ClaudeZygoteAgent provisioning (which installs
+        Runs the standard ClaudeChangelingAgent provisioning (which installs
         llm, creates event dirs, etc.) and then installs the
         llm-matched-responses plugin so the model is available for chat.
 

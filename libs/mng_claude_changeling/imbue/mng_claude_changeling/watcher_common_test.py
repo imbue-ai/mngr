@@ -10,16 +10,16 @@ from typing import cast
 import pytest
 from loguru import logger
 
-from imbue.mng_claude_zygote.conftest import write_changelings_settings_toml
-from imbue.mng_claude_zygote.resources.watcher_common import ChangeHandler
-from imbue.mng_claude_zygote.resources.watcher_common import load_watchers_section
-from imbue.mng_claude_zygote.resources.watcher_common import mtime_poll_directories
-from imbue.mng_claude_zygote.resources.watcher_common import mtime_poll_files
-from imbue.mng_claude_zygote.resources.watcher_common import read_event_ids_from_jsonl
-from imbue.mng_claude_zygote.resources.watcher_common import require_env
-from imbue.mng_claude_zygote.resources.watcher_common import setup_watchdog_for_directories
-from imbue.mng_claude_zygote.resources.watcher_common import setup_watchdog_for_files
-from imbue.mng_claude_zygote.resources.watcher_common import setup_watcher_logging
+from imbue.mng_claude_changeling.conftest import write_changelings_settings_toml
+from imbue.mng_claude_changeling.resources.watcher_common import ChangeHandler
+from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+from imbue.mng_claude_changeling.resources.watcher_common import mtime_poll_directories
+from imbue.mng_claude_changeling.resources.watcher_common import mtime_poll_files
+from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
+from imbue.mng_claude_changeling.resources.watcher_common import require_env
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watchdog_for_directories
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watchdog_for_files
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 
 # -- setup_watcher_logging tests --
 

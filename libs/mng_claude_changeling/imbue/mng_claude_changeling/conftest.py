@@ -15,8 +15,8 @@ from loguru import logger
 from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mng.utils.testing import init_git_repo_with_config
-from imbue.mng_claude_zygote.provisioning import load_zygote_resource
-from imbue.mng_claude_zygote.resources import event_watcher as event_watcher_module
+from imbue.mng_claude_changeling.provisioning import load_changeling_resource
+from imbue.mng_claude_changeling.resources import event_watcher as event_watcher_module
 
 register_plugin_test_fixtures(globals())
 
@@ -140,7 +140,7 @@ class ChatScriptEnv:
         mng_log_path.write_text(load_resource_script("mng_log.sh"))
         os.chmod(mng_log_path, 0o755)
 
-        self.chat_script.write_text(load_zygote_resource("chat.sh"))
+        self.chat_script.write_text(load_changeling_resource("chat.sh"))
         os.chmod(self.chat_script, 0o755)
 
         self.agent_state_dir = temp_host_dir / "agents" / "test-agent"

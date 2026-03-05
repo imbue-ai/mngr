@@ -1,7 +1,7 @@
 [project]
-name = "mng-claude-zygote"
+name = "mng-claude-changeling"
 version = "0.1.0"
-description = "Claude zygote agent plugin for mng - base class for changeling agents built on Claude Code"
+description = "Claude changeling agent plugin for mng - base class for changeling agents built on Claude Code"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.entry-points.mng]
-claude_zygote = "imbue.mng_claude_zygote.plugin"
+claude_changeling = "imbue.mng_claude_changeling.plugin"
 
 [build-system]
 requires = ["hatchling"]

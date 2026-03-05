@@ -1,4 +1,4 @@
-"""Unit tests for the mng_claude_zygote provisioning module."""
+"""Unit tests for the mng_claude_changeling provisioning module."""
 
 import importlib
 import json
@@ -13,39 +13,39 @@ from typing import cast
 
 import pytest
 
-from imbue.mng_claude_zygote.conftest import StubCommandResult
-from imbue.mng_claude_zygote.conftest import StubHost
-from imbue.mng_claude_zygote.data_types import CommonToolResultEvent
-from imbue.mng_claude_zygote.data_types import ProvisioningSettings
-from imbue.mng_claude_zygote.provisioning import TalkingRoleConstraintError
-from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
-from imbue.mng_claude_zygote.provisioning import _is_recursive_plugin_registered
-from imbue.mng_claude_zygote.provisioning import build_memory_sync_hooks_config
-from imbue.mng_claude_zygote.provisioning import compute_claude_project_dir_name
-from imbue.mng_claude_zygote.provisioning import configure_llm_user_path
-from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
-from imbue.mng_claude_zygote.provisioning import create_daily_conversation
-from imbue.mng_claude_zygote.provisioning import create_event_log_directories
-from imbue.mng_claude_zygote.provisioning import create_system_notifications_conversation
-from imbue.mng_claude_zygote.provisioning import install_llm_toolchain
-from imbue.mng_claude_zygote.provisioning import load_zygote_resource
-from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
-from imbue.mng_claude_zygote.provisioning import provision_default_content
-from imbue.mng_claude_zygote.provisioning import provision_llm_tools
-from imbue.mng_claude_zygote.provisioning import resolve_work_dir_abs
-from imbue.mng_claude_zygote.provisioning import setup_memory_directory
-from imbue.mng_claude_zygote.provisioning import validate_talking_role_constraints
-from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
-from imbue.mng_claude_zygote.resources import context_tool as context_tool_module
-from imbue.mng_claude_zygote.resources import extra_context_tool as extra_context_tool_module
+from imbue.mng_claude_changeling.conftest import StubCommandResult
+from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.data_types import CommonToolResultEvent
+from imbue.mng_claude_changeling.data_types import ProvisioningSettings
+from imbue.mng_claude_changeling.provisioning import TalkingRoleConstraintError
+from imbue.mng_claude_changeling.provisioning import _LLM_TOOL_FILES
+from imbue.mng_claude_changeling.provisioning import _SCRIPT_FILES
+from imbue.mng_claude_changeling.provisioning import _is_recursive_plugin_registered
+from imbue.mng_claude_changeling.provisioning import build_memory_sync_hooks_config
+from imbue.mng_claude_changeling.provisioning import compute_claude_project_dir_name
+from imbue.mng_claude_changeling.provisioning import configure_llm_user_path
+from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
+from imbue.mng_claude_changeling.provisioning import create_daily_conversation
+from imbue.mng_claude_changeling.provisioning import create_event_log_directories
+from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
+from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
+from imbue.mng_claude_changeling.provisioning import load_changeling_resource
+from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
+from imbue.mng_claude_changeling.provisioning import provision_default_content
+from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import resolve_work_dir_abs
+from imbue.mng_claude_changeling.provisioning import setup_memory_directory
+from imbue.mng_claude_changeling.provisioning import validate_talking_role_constraints
+from imbue.mng_claude_changeling.provisioning import warn_if_mng_unavailable
+from imbue.mng_claude_changeling.resources import context_tool as context_tool_module
+from imbue.mng_claude_changeling.resources import extra_context_tool as extra_context_tool_module
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
 
-def test_load_zygote_resource_loads_resource() -> None:
-    """Check that the load_zygote_resource works at all"""
-    content = load_zygote_resource("chat.sh")
+def test_load_changeling_resource_loads_resource() -> None:
+    """Check that the load_changeling_resource works at all"""
+    content = load_changeling_resource("chat.sh")
     assert "#!/bin/bash" in content
 
 
@@ -54,7 +54,7 @@ def test_load_zygote_resource_loads_resource() -> None:
 
 def _extract_convert_script() -> str:
     """Extract the inline Python CONVERT_SCRIPT from transcript_watcher.sh."""
-    content = load_zygote_resource("transcript_watcher.sh")
+    content = load_changeling_resource("transcript_watcher.sh")
     start_marker = "python3 << 'CONVERT_SCRIPT'"
     start_idx = content.index(start_marker)
     start_of_python = content.index("\n", start_idx) + 1
@@ -273,10 +273,10 @@ def _load_transcript_watcher_module() -> dict[str, Any]:
 
     Returns a namespace dict containing the conversion functions.
     """
-    content = load_zygote_resource("transcript_watcher.py")
+    content = load_changeling_resource("transcript_watcher.py")
     # Also load watcher_common.py (stripped above its watchdog marker) so
     # transcript_watcher.py can import Logger from it.
-    watcher_common_content = load_zygote_resource("watcher_common.py")
+    watcher_common_content = load_changeling_resource("watcher_common.py")
     watcher_common_stripped = _strip_below_watchdog_marker(watcher_common_content)
 
     stripped = _strip_below_watchdog_marker(content)

@@ -11,7 +11,7 @@ Missing file or keys fall back to built-in defaults.
 
 NOTE: _format_extra_events() is duplicated in context_tool.py because these
 files are deployed as standalone scripts to the agent host via --functions,
-where they cannot import from each other or from the mng_claude_zygote package.
+where they cannot import from each other or from the mng_claude_changeling package.
 """
 
 import json

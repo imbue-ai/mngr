@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web server for the ClaudeZygoteAgent web interface.
+"""Web server for the ClaudeChangelingAgent web interface.
 
 Serves a web interface where all views (conversations, terminal) are displayed
 in iframes below a persistent navigation header:
