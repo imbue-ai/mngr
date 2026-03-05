@@ -131,6 +131,11 @@ def test_run_export_writes_to_created_streams(temp_output_dir: Path) -> None:
     assert (temp_output_dir / "messages" / "created" / "events.jsonl").exists()
     assert (temp_output_dir / "users" / "created" / "events.jsonl").exists()
 
+    # Created events also appear in updated streams
+    assert (temp_output_dir / "channels" / "updated" / "events.jsonl").exists()
+    assert (temp_output_dir / "messages" / "updated" / "events.jsonl").exists()
+    assert (temp_output_dir / "users" / "updated" / "events.jsonl").exists()
+
     msg_lines = (temp_output_dir / "messages" / "created" / "events.jsonl").read_text().strip().splitlines()
     assert len(msg_lines) == 1
     msg = json.loads(msg_lines[0])
@@ -178,9 +183,10 @@ def test_run_export_unchanged_channels_not_written(temp_output_dir: Path) -> Non
     created_lines = (temp_output_dir / "channels" / "created" / "events.jsonl").read_text().strip().splitlines()
     assert len(created_lines) == 1
 
-    # Updated stream should not exist (no changes)
-    updated_path = temp_output_dir / "channels" / "updated" / "events.jsonl"
-    assert not updated_path.exists()
+    # Updated stream has 1 entry from the initial create (creates also go to updated)
+    # but no additional entry from the second run since data was unchanged
+    updated_lines = (temp_output_dir / "channels" / "updated" / "events.jsonl").read_text().strip().splitlines()
+    assert len(updated_lines) == 1
 
 
 def test_run_export_changed_channels_go_to_updated_stream(temp_output_dir: Path) -> None:
@@ -224,8 +230,9 @@ def test_run_export_changed_channels_go_to_updated_stream(temp_output_dir: Path)
 
     updated_path = temp_output_dir / "channels" / "updated" / "events.jsonl"
     assert updated_path.exists()
+    # 1 from initial create + 1 from actual data change = 2
     updated_lines = updated_path.read_text().strip().splitlines()
-    assert len(updated_lines) == 1
+    assert len(updated_lines) == 2
 
 
 def test_run_export_incremental_resumes_from_latest(temp_output_dir: Path) -> None:

@@ -54,7 +54,9 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
             pass
 
     save_channel_events(settings.output_dir, "created", new_channels)
-    save_channel_events(settings.output_dir, "updated", updated_channels)
+    # Created events also go to updated (a create is logically an update from nothing)
+    all_changed_channels = list(new_channels) + list(updated_channels)
+    save_channel_events(settings.output_dir, "updated", all_changed_channels)
     if new_channels:
         logger.info("Saved %d new channels", len(new_channels))
     if updated_channels:
@@ -68,6 +70,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     new_users = [u for u in fresh_users if u.user_id not in existing_user_ids]
     # Users that already exist but may have changed -- we currently only track new ones
     save_user_events(settings.output_dir, "created", new_users)
+    save_user_events(settings.output_dir, "updated", new_users)
     if new_users:
         logger.info("Saved %d new users", len(new_users))
 
@@ -127,6 +130,7 @@ def _export_single_channel(
 
     if new_messages:
         save_message_events(settings.output_dir, "created", new_messages)
+        save_message_events(settings.output_dir, "updated", new_messages)
         logger.info("  Saved %d new messages from channel %s", len(new_messages), channel_config.name)
     else:
         logger.info("  No new messages in channel %s", channel_config.name)
