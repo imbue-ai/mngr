@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Web server for the ClaudeZygoteAgent web interface.
 
-Serves a simple link-based web interface with:
-- Main page: redirects to the most recent conversation (or shows conversation list if none)
-- Conversations page: links to existing conversations + link to start a new one
+Serves a web interface where all views (conversations, terminal) are displayed
+in iframes below a persistent navigation header:
+- Main page: shows the most recent conversation in an iframe (or conversation list if none)
+- Conversation view: embeds a specific conversation's ttyd in an iframe
+- Conversations page: lists all conversations with links to open them in iframe views
+- Terminal page: embeds the primary agent terminal in an iframe
 - All Agents page: lists agents on this host with their states
 
 The actual terminal sessions are handled by companion ttyd processes
@@ -32,6 +35,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Final
+from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
 # -- Environment and paths --
@@ -209,7 +213,7 @@ def _poll_agent_list_forever() -> None:
 
 _CSS: Final[str] = """
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
     .header {
       display: flex; align-items: center; gap: 12px;
       padding: 8px 16px; background: rgb(26, 26, 46); color: white; height: 48px;
@@ -221,7 +225,11 @@ _CSS: Final[str] = """
       padding: 4px 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2);
     }
     .header a:hover { background: rgba(255,255,255,0.1); color: white; }
+    .header a.active { background: rgba(255,255,255,0.15); color: white; border-color: rgba(255,255,255,0.5); }
     .content { padding: 24px; max-width: 800px; }
+    .iframe-container { flex: 1; }
+    .iframe-container iframe { width: 100%; height: 100%; border: none; }
+    .iframe-layout { display: flex; flex-direction: column; height: 100%; }
     .item-list { list-style: none; margin-top: 16px; }
     .item {
       padding: 12px 16px; background: white; border: 1px solid #ddd;
@@ -249,17 +257,37 @@ _CSS: Final[str] = """
 """
 
 
-def _render_header(agent_name: str) -> str:
+def _render_header(agent_name: str, active: str = "") -> str:
     """Render the common header bar with navigation links."""
+
+    def _nav_link(href: str, label: str, key: str) -> str:
+        cls = ' class="active"' if key == active else ""
+        return f'<a{cls} href="{href}">{label}</a>'
+
     return (
         '<div class="header">'
         f"<h1>{agent_name}</h1>"
         '<div class="header-spacer"></div>'
-        '<a href="conversations">Conversations</a>'
-        '<a href="../agent/">Terminal</a>'
-        '<a href="agents-page">Agents</a>'
-        "</div>"
+        + _nav_link("conversations", "Conversations", "conversations")
+        + _nav_link("terminal", "Terminal", "terminal")
+        + _nav_link("agents-page", "Agents", "agents")
+        + "</div>"
     )
+
+
+def _render_iframe_page(agent_name: str, title: str, iframe_src: str, active: str = "") -> str:
+    """Render a full-height page with header and an iframe filling the remaining space."""
+    escaped_title = _html_escape(title)
+    return f"""<!DOCTYPE html>
+<html>
+<head><title>{escaped_title} - {agent_name}</title><style>{_CSS}</style></head>
+<body class="iframe-layout">
+  {_render_header(agent_name, active=active)}
+  <div class="iframe-container">
+    <iframe src="{_html_escape(iframe_src)}"></iframe>
+  </div>
+</body>
+</html>"""
 
 
 def _render_conversations_page() -> str:
@@ -281,7 +309,7 @@ def _render_conversations_page() -> str:
             f'<span class="item-name">{cid}</span>'
             f'<span class="item-detail">{detail}</span>'
             f"</div>"
-            f'<a class="link-btn" href="../chat/?arg={cid}">Open</a>'
+            f'<a class="link-btn" href="chat?cid={cid}">Open</a>'
             f"</li>\n"
         )
 
@@ -293,9 +321,9 @@ def _render_conversations_page() -> str:
 <html>
 <head><title>{agent_name}</title><style>{_CSS}</style></head>
 <body>
-  {_render_header(agent_name)}
+  {_render_header(agent_name, active="conversations")}
   <div class="content">
-    <a class="link-btn new" href="../chat/?arg=NEW">+ New Conversation</a>
+    <a class="link-btn new" href="chat?cid=NEW">+ New Conversation</a>
     {empty_section}
     <ul class="item-list">{conv_items}</ul>
   </div>
@@ -333,7 +361,7 @@ def _render_agents_page() -> str:
 <html>
 <head><title>All Agents - {agent_name}</title><style>{_CSS}</style></head>
 <body>
-  {_render_header(agent_name)}
+  {_render_header(agent_name, active="agents")}
   <div class="content">
     {empty_section}
     <ul class="item-list">{agent_items}</ul>
@@ -342,12 +370,12 @@ def _render_agents_page() -> str:
 </html>"""
 
 
-def _get_most_recent_conversation_redirect() -> str | None:
-    """Return the redirect URL for the most recent conversation, or None if no conversations exist."""
+def _get_most_recent_conversation_id() -> str | None:
+    """Return the conversation ID of the most recent conversation, or None if none exist."""
     conversations = _read_conversations()
     if not conversations:
         return None
-    return f"../chat/?arg={conversations[0]['conversation_id']}"
+    return conversations[0]["conversation_id"]
 
 
 # -- HTTP Handler --
@@ -362,15 +390,25 @@ class _WebServerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        agent_name = _html_escape(AGENT_NAME or "Agent")
 
         if path == "/" or path == "/index.html":
-            redirect_url = _get_most_recent_conversation_redirect()
-            if redirect_url is not None:
-                self._send_redirect(redirect_url)
+            cid = _get_most_recent_conversation_id()
+            if cid is not None:
+                self._send_html(_render_iframe_page(agent_name, cid, f"../chat/?arg={cid}", active="conversations"))
             else:
                 self._send_html(_render_conversations_page())
+        elif path == "/chat":
+            cid = (query.get("cid") or [""])[0]
+            if not cid:
+                self._send_redirect("conversations")
+            else:
+                self._send_html(_render_iframe_page(agent_name, cid, f"../chat/?arg={cid}", active="conversations"))
         elif path == "/conversations":
             self._send_html(_render_conversations_page())
+        elif path == "/terminal":
+            self._send_html(_render_iframe_page(agent_name, "Terminal", "../agent/", active="terminal"))
         elif path == "/agents-page":
             self._send_html(_render_agents_page())
         else:
