@@ -13,7 +13,9 @@ To inspect raw events for a specific source, read the corresponding log file:
 cat "$MNG_AGENT_STATE_DIR/events/<source>/events.jsonl"
 ```
 
-Where `<source>` is one of: `messages`, `mng_agents`, `scheduled`, `stop`, `conversations`, `monitor`, `claude_transcript`.
+Where `<source>` is one of: `messages`, `mng_agents`, `scheduled`, `stop`, `conversations`, `monitor`.
+
+For the raw Claude transcript (not an event source), use: `cat "$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"`
 
 ## Useful commands for inspecting events
 

@@ -166,7 +166,7 @@ def gather_context() -> str:
 
     Returns context from:
     - New messages from other active conversations (from events/messages/events.jsonl)
-    - New inner monologue entries (from events/claude_transcript/events.jsonl)
+    - New inner monologue entries (from logs/claude_transcript/events.jsonl)
     - New trigger events (from events/scheduled/, mng_agents/, stop/, monitor/)
 
     Call this at the start of each conversation turn for situational awareness.
@@ -183,8 +183,8 @@ def gather_context() -> str:
     sections: list[str] = []
     is_first_call = len(_last_file_sizes) == 0
 
-    # Inner monologue (from events/claude_transcript/events.jsonl)
-    transcript = agent_data_dir / "events" / "claude_transcript" / "events.jsonl"
+    # Inner monologue (from logs/claude_transcript/events.jsonl)
+    transcript = agent_data_dir / "logs" / "claude_transcript" / "events.jsonl"
     if is_first_call:
         recent = _read_tail_lines(transcript, _MAX_TRANSCRIPT_LINES)
         if recent:

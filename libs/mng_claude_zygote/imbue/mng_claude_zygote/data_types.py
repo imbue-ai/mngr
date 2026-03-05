@@ -28,7 +28,8 @@ class MessageRole(NonEmptyStr):
 
 # -- Event log sources --
 # These constants define the source names and corresponding log paths.
-# Each source writes to events/<SOURCE>/events.jsonl.
+# Event sources write to events/<SOURCE>/events.jsonl (proper EventEnvelope format).
+# Log sources write to logs/<SOURCE>/events.jsonl (raw format, not EventEnvelope).
 
 SOURCE_CONVERSATIONS: Final[EventSource] = EventSource("conversations")
 SOURCE_MESSAGES: Final[EventSource] = EventSource("messages")
@@ -37,7 +38,6 @@ SOURCE_MNG_AGENTS: Final[EventSource] = EventSource("mng_agents")
 SOURCE_STOP: Final[EventSource] = EventSource("stop")
 SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_DELIVERY_FAILURES: Final[EventSource] = EventSource("delivery_failures")
-SOURCE_CLAUDE_TRANSCRIPT: Final[EventSource] = EventSource("claude_transcript")
 SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("common_transcript")
 
 
@@ -253,7 +253,7 @@ class WatcherSettings(FrozenModel):
     )
     event_cel_filter: str = Field(
         default=(
-            'source != "claude_transcript" && source != "common_transcript"'
+            'source != "common_transcript"'
             ' && source != "conversations" && source != "delivery_failures"'
             " && ("
             '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'

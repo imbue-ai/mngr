@@ -59,7 +59,7 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(20))
+    rc.check_builtin_exception_raises(_DIR, snapshot(8))
 
 
 # --- Import style ---

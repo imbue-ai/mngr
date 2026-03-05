@@ -140,11 +140,14 @@ def test_provisioning_creates_event_log_directories(
         "mng_agents",
         "stop",
         "monitor",
-        "claude_transcript",
     )
     for source in expected_sources:
         source_dir = agent_state_dir / "events" / source
         assert source_dir.exists(), f"Expected events/{source}/ directory to exist"
+
+    # Log directories
+    claude_transcript_dir = agent_state_dir / "logs" / "claude_transcript"
+    assert claude_transcript_dir.exists(), "Expected logs/claude_transcript/ directory to exist"
 
 
 @pytest.mark.timeout(30)

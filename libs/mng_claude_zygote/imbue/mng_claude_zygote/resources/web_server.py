@@ -17,6 +17,7 @@ Environment:
     MNG_HOST_NAME        - Name of the host this agent runs on
 """
 
+import hashlib
 import html
 import json
 import os
@@ -25,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -76,12 +79,33 @@ def _log(message: str) -> None:
 # -- Server registration --
 
 
+def _make_event_id(data: str) -> str:
+    """Generate a deterministic event ID from content."""
+    return "evt-" + hashlib.sha256(data.encode()).hexdigest()[:32]
+
+
+def _iso_timestamp() -> str:
+    """Return the current UTC time as an ISO 8601 timestamp with nanosecond precision."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
+
+
 def _register_server(server_name: str, port: int) -> None:
-    """Append a server record to servers.jsonl."""
+    """Append a server record to servers/events.jsonl with proper event envelope fields."""
     if SERVERS_JSONL_PATH is None:
         return
     SERVERS_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    record = json.dumps({"server": server_name, "url": f"http://127.0.0.1:{port}"})
+    url = f"http://127.0.0.1:{port}"
+    record = json.dumps(
+        {
+            "timestamp": _iso_timestamp(),
+            "type": "server_registered",
+            "event_id": _make_event_id(f"{server_name}:{url}"),
+            "source": "servers",
+            "server": server_name,
+            "url": url,
+        }
+    )
     with open(SERVERS_JSONL_PATH, "a") as f:
         f.write(record + "\n")
 

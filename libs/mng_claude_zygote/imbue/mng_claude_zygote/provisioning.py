@@ -500,9 +500,9 @@ def create_event_log_directories(
     agent_state_dir: Path,
     settings: ProvisioningSettings,
 ) -> None:
-    """Create the event log directory structure.
+    """Create the event and log directory structure.
 
-    Creates directories for each event source:
+    Creates directories for event sources (events/<source>/):
     - events/conversations/      conversation lifecycle events
     - events/messages/           conversation messages
     - events/scheduled/          scheduled trigger events
@@ -510,9 +510,11 @@ def create_event_log_directories(
     - events/stop/               agent stop events
     - events/monitor/            (future) monitor agent events
     - events/delivery_failures/  event delivery failure notifications
-    - events/claude_transcript/  inner monologue (written by Claude background tasks)
     - events/common_transcript/  agent-agnostic transcript (written by transcript watcher)
     - events/servers/            server registration records
+
+    Creates directories for log sources (logs/<source>/):
+    - logs/claude_transcript/    inner monologue (written by Claude background tasks, raw format)
     """
     for source in (
         "conversations",
@@ -522,7 +524,6 @@ def create_event_log_directories(
         "stop",
         "monitor",
         "delivery_failures",
-        "claude_transcript",
         "common_transcript",
         "servers",
     ):
@@ -533,6 +534,17 @@ def create_event_log_directories(
             hard_timeout=settings.fs_hard_timeout_seconds,
             warn_threshold=settings.fs_warn_threshold_seconds,
             label=f"mkdir events/{source}",
+        )
+
+    # Create log directories for raw/non-envelope data
+    for log_source in ("claude_transcript",):
+        log_dir = agent_state_dir / "logs" / log_source
+        _execute_with_timing(
+            host,
+            f"mkdir -p {shlex.quote(str(log_dir))}",
+            hard_timeout=settings.fs_hard_timeout_seconds,
+            warn_threshold=settings.fs_warn_threshold_seconds,
+            label=f"mkdir logs/{log_source}",
         )
 
 

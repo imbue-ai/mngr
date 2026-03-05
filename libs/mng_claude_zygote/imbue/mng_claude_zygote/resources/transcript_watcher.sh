@@ -2,7 +2,7 @@
 # Transcript watcher for changeling agents.
 #
 # Converts raw Claude Code transcript events from
-# events/claude_transcript/events.jsonl into a common, agent-agnostic
+# logs/claude_transcript/events.jsonl into a common, agent-agnostic
 # format at events/common_transcript/events.jsonl.
 #
 # The common format focuses on semantically important messages (user input,
@@ -27,7 +27,7 @@ set -euo pipefail
 
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
 HOST_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}"
-INPUT_FILE="$AGENT_DATA_DIR/events/claude_transcript/events.jsonl"
+INPUT_FILE="$AGENT_DATA_DIR/logs/claude_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/common_transcript/events.jsonl"
 LOG_FILE="$HOST_DIR/events/logs/transcript_watcher/events.jsonl"
 

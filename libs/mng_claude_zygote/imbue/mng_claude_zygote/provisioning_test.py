@@ -571,10 +571,15 @@ def test_create_event_log_directories_creates_all_source_dirs() -> None:
         "stop",
         "monitor",
         "delivery_failures",
-        "claude_transcript",
         "common_transcript",
+        "servers",
     ):
         assert any(source in c and "mkdir" in c for c in host.executed_commands), f"Missing mkdir for {source}"
+
+    # Also verify log directories are created
+    assert any("claude_transcript" in c and "mkdir" in c for c in host.executed_commands), (
+        "Missing mkdir for logs/claude_transcript"
+    )
 
 
 # -- configure_llm_user_path tests --
@@ -924,7 +929,7 @@ def test_gather_context_first_call_shows_transcript_and_triggers(
     module = _load_fresh_context_tool("gc_transcript")
 
     # Set up transcript
-    transcript_dir = tmp_path / "events" / "claude_transcript"
+    transcript_dir = tmp_path / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
@@ -1105,8 +1110,9 @@ def test_gather_context_first_call_returns_no_context_when_all_empty(
     """Verify gather_context returns 'No context available' when all source dirs are empty."""
     module = _load_fresh_context_tool("gc_all_empty")
     # Create all the log directories but leave them empty (no events.jsonl files)
-    for source in ("claude_transcript", "messages", "scheduled", "mng_agents", "stop", "monitor"):
+    for source in ("messages", "scheduled", "mng_agents", "stop", "monitor"):
         (tmp_path / "events" / source).mkdir(parents=True)
+    (tmp_path / "logs" / "claude_transcript").mkdir(parents=True)
 
     monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(tmp_path))
 
@@ -1121,7 +1127,7 @@ def test_gather_context_incremental_new_inner_monologue(
     """Verify gather_context returns new inner monologue entries on subsequent calls."""
     module = _load_fresh_context_tool("gc_inc_monologue")
 
-    transcript_dir = tmp_path / "events" / "claude_transcript"
+    transcript_dir = tmp_path / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     transcript_file.write_text(_make_event_line("t1", "claude_transcript") + "\n")
@@ -1414,7 +1420,7 @@ def test_extra_context_tool_with_transcript(extra_context_env: tuple[Any, Path])
     """Verify gather_extra_context reads transcript entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(5)]
@@ -1476,7 +1482,7 @@ def test_extra_context_tool_with_empty_transcript(extra_context_env: tuple[Any, 
     """Verify gather_extra_context handles empty transcript file."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     (transcript_dir / "events.jsonl").write_text("")
 
@@ -1518,7 +1524,7 @@ def test_extra_context_tool_transcript_with_many_entries(extra_context_env: tupl
     """Verify gather_extra_context limits transcript to last 50 entries."""
     module, data_dir = extra_context_env
 
-    transcript_dir = data_dir / "events" / "claude_transcript"
+    transcript_dir = data_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True)
     transcript_file = transcript_dir / "events.jsonl"
     lines = [_make_event_line(f"t{i}", "claude_transcript") for i in range(100)]
