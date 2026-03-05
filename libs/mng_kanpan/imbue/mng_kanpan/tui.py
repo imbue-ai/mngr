@@ -673,7 +673,7 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.footer_left_text.set_text(state.steady_footer_text)
 
     if failed:
-        _schedule_next_refresh_after_failure(loop, state)
+        _request_refresh(loop, state, state.auto_refresh_cooldown_seconds)
     else:
         _schedule_next_refresh(loop, state)
 
@@ -862,15 +862,6 @@ def _refresh_display(state: _KanpanState) -> None:
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Schedule the next auto-refresh alarm."""
     loop.set_alarm_in(REFRESH_INTERVAL_SECONDS, _on_auto_refresh_alarm, state)
-
-
-def _schedule_next_refresh_after_failure(loop: MainLoop, state: _KanpanState) -> None:
-    """Schedule a sooner auto-refresh after a failed refresh.
-
-    Uses the auto_refresh_cooldown as the retry interval so transient errors
-    recover in ~1 minute instead of waiting the full 10-minute interval.
-    """
-    loop.set_alarm_in(state.auto_refresh_cooldown_seconds, _on_auto_refresh_alarm, state)
 
 
 def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
