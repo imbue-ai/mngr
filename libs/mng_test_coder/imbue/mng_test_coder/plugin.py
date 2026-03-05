@@ -93,26 +93,19 @@ class TestCoderAgent(ClaudeZygoteAgent):
 def _install_llm_echo_plugin(host: OnlineHostInterface) -> None:
     """Install the llm-echo plugin on the host.
 
-    Uses `llm install llm-echo` to install the plugin into llm's
-    environment so the 'echo' model is available.
+    Tries `llm install llm-echo` which uses pip under the hood to install
+    the plugin into llm's managed environment. This works when llm-echo
+    is available via pip (either from PyPI or a local editable install
+    visible to the host's Python environment).
     """
     logger.info("Installing llm-echo plugin")
 
-    # First try to find the llm-echo package in the monorepo (for development)
-    # If not found, fall back to pip install from PyPI (for production)
     result = host.execute_command(
-        "pip install llm-echo 2>/dev/null || llm install llm-echo",
+        "llm install llm-echo",
         timeout_seconds=120.0,
     )
     if not result.success:
-        # Try installing from the local path if we're in the monorepo
-        logger.warning("Standard install failed, trying local development install")
-        result = host.execute_command(
-            "llm install llm-echo",
-            timeout_seconds=120.0,
-        )
-        if not result.success:
-            raise RuntimeError(f"Failed to install llm-echo: {result.stderr}")
+        raise RuntimeError(f"Failed to install llm-echo: {result.stderr}")
 
     logger.info("llm-echo plugin installed successfully")
 

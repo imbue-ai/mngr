@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,6 +89,19 @@ def _find_agent(agent_name: str) -> dict[str, object] | None:
     return None
 
 
+def _extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:
+    """Extract the model response from mng exec output.
+
+    Filters out mng's "Command succeeded/failed" status lines,
+    returning only the first line of actual model output.
+    """
+    response_lines = [
+        line for line in exec_result.stdout.strip().splitlines() if line and not line.startswith("Command ")
+    ]
+    assert len(response_lines) >= 1, f"No response from model: {exec_result.stdout!r}"
+    return response_lines[0]
+
+
 def _cleanup_agent(agent_name: str) -> None:
     """Destroy an agent and clean up its changeling directory."""
     agent = _find_agent(agent_name)
@@ -101,156 +115,98 @@ def _cleanup_agent(agent_name: str) -> None:
             shutil.rmtree(changeling_dir, ignore_errors=True)
 
 
-@pytest.mark.release
-@pytest.mark.timeout(120)
-def test_deploy_test_coder_and_verify_echo_model() -> None:
-    """Deploy a test-coder changeling and verify the echo model works via mng exec.
+@pytest.fixture
+def deployed_test_coder() -> Generator[dict[str, object], None, None]:
+    """Deploy a test-coder changeling and yield its agent record.
 
-    This is the core end-to-end test:
-    1. Deploy a changeling with --agent-type test-coder
-    2. Verify the echo model is available and returns predictable responses
-    3. Verify the chat settings are configured correctly
-    4. Clean up
+    Handles deployment and cleanup so individual tests only need to
+    exercise the deployed agent.
     """
     agent_name = f"e2e-test-{uuid4().hex}"
 
+    deploy_result = _run_changeling(
+        "deploy",
+        "--agent-type",
+        "test-coder",
+        "--name",
+        agent_name,
+        "--provider",
+        "local",
+        "--no-self-deploy",
+    )
+    assert deploy_result.returncode == 0, (
+        f"Deploy failed:\nstdout: {deploy_result.stdout}\nstderr: {deploy_result.stderr}"
+    )
+
+    agent = _find_agent(agent_name)
+    assert agent is not None, f"Agent {agent_name} not found in mng list"
+
     try:
-        deploy_result = _run_changeling(
-            "deploy",
-            "--agent-type",
-            "test-coder",
-            "--name",
-            agent_name,
-            "--provider",
-            "local",
-            "--no-self-deploy",
-        )
-        assert deploy_result.returncode == 0, (
-            f"Deploy failed:\nstdout: {deploy_result.stdout}\nstderr: {deploy_result.stderr}"
-        )
-
-        agent = _find_agent(agent_name)
-        assert agent is not None, f"Agent {agent_name} not found in mng list"
-
-        # Verify the echo model returns the expected response
-        test_message = "Hello from end-to-end test"
-        exec_result = _run_mng(
-            "exec",
-            agent_name,
-            f'llm -m echo "{test_message}"',
-        )
-        assert exec_result.returncode == 0, (
-            f"llm echo failed:\nstdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
-        )
-        response_lines = [
-            line for line in exec_result.stdout.strip().splitlines() if line and not line.startswith("Command ")
-        ]
-        assert len(response_lines) >= 1, f"No response from echo model: {exec_result.stdout!r}"
-        assert response_lines[0] == f"Echo: {test_message}", f"Unexpected response: {response_lines[0]!r}"
-
-        # Verify the chat settings have the echo model configured
-        work_dir = str(agent["work_dir"])
-        settings_path = Path(work_dir) / ".changelings" / "settings.toml"
-        assert settings_path.exists(), f"Settings file not found at {settings_path}"
-        settings_content = settings_path.read_text()
-        assert 'model = "echo"' in settings_content, f"Echo model not configured in settings:\n{settings_content}"
-
+        yield agent
     finally:
         _cleanup_agent(agent_name)
 
 
 @pytest.mark.release
 @pytest.mark.timeout(120)
-def test_echo_model_with_custom_response_via_env() -> None:
-    """Deploy a test-coder and verify the LLM_ECHO_RESPONSE env var works."""
-    agent_name = f"e2e-test-{uuid4().hex}"
+def test_deploy_test_coder_and_verify_echo_model(deployed_test_coder: dict[str, object]) -> None:
+    """Deploy a test-coder changeling and verify the echo model works via mng exec."""
+    agent_name = str(deployed_test_coder["name"])
 
-    try:
-        deploy_result = _run_changeling(
-            "deploy",
-            "--agent-type",
-            "test-coder",
-            "--name",
-            agent_name,
-            "--provider",
-            "local",
-            "--no-self-deploy",
-        )
-        assert deploy_result.returncode == 0, (
-            f"Deploy failed:\nstdout: {deploy_result.stdout}\nstderr: {deploy_result.stderr}"
-        )
+    # Verify the echo model returns the expected response
+    test_message = "Hello from end-to-end test"
+    exec_result = _run_mng("exec", agent_name, f'llm -m echo "{test_message}"')
+    assert exec_result.returncode == 0, f"llm echo failed:\nstdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
+    assert _extract_response(exec_result) == f"Echo: {test_message}"
 
-        agent = _find_agent(agent_name)
-        assert agent is not None, f"Agent {agent_name} not found"
-
-        custom_response = "I am a test bot and this is my canned response."
-        exec_result = _run_mng(
-            "exec",
-            agent_name,
-            f'LLM_ECHO_RESPONSE="{custom_response}" llm -m echo "anything"',
-        )
-        assert exec_result.returncode == 0, (
-            f"llm echo failed:\nstdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
-        )
-        response_lines = [
-            line for line in exec_result.stdout.strip().splitlines() if line and not line.startswith("Command ")
-        ]
-        assert len(response_lines) >= 1
-        assert response_lines[0] == custom_response, f"Expected custom response, got: {response_lines[0]!r}"
-
-    finally:
-        _cleanup_agent(agent_name)
+    # Verify the chat settings have the echo model configured
+    work_dir = str(deployed_test_coder["work_dir"])
+    settings_path = Path(work_dir) / ".changelings" / "settings.toml"
+    assert settings_path.exists(), f"Settings file not found at {settings_path}"
+    settings_content = settings_path.read_text()
+    assert 'model = "echo"' in settings_content, f"Echo model not configured in settings:\n{settings_content}"
 
 
 @pytest.mark.release
 @pytest.mark.timeout(120)
-def test_echo_model_with_responses_file() -> None:
-    """Deploy a test-coder and verify the LLM_ECHO_RESPONSES_FILE feature."""
-    agent_name = f"e2e-test-{uuid4().hex}"
+def test_echo_model_with_custom_response_via_env(deployed_test_coder: dict[str, object]) -> None:
+    """Verify the LLM_ECHO_RESPONSE env var overrides the default echo behavior."""
+    agent_name = str(deployed_test_coder["name"])
 
-    try:
-        deploy_result = _run_changeling(
-            "deploy",
-            "--agent-type",
-            "test-coder",
-            "--name",
-            agent_name,
-            "--provider",
-            "local",
-            "--no-self-deploy",
-        )
-        assert deploy_result.returncode == 0, (
-            f"Deploy failed:\nstdout: {deploy_result.stdout}\nstderr: {deploy_result.stderr}"
-        )
+    custom_response = "I am a test bot and this is my canned response."
+    exec_result = _run_mng(
+        "exec",
+        agent_name,
+        f'LLM_ECHO_RESPONSE="{custom_response}" llm -m echo "anything"',
+    )
+    assert exec_result.returncode == 0, f"llm echo failed:\nstdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
+    assert _extract_response(exec_result) == custom_response
 
-        agent = _find_agent(agent_name)
-        assert agent is not None, f"Agent {agent_name} not found"
 
-        responses = {"hello": "Hi there! I am a test agent.", "help": "I can help with testing."}
-        responses_json = json.dumps(responses)
-        _run_mng("exec", agent_name, f"echo '{responses_json}' > /tmp/test_responses.json")
+@pytest.mark.release
+@pytest.mark.timeout(120)
+def test_echo_model_with_responses_file(deployed_test_coder: dict[str, object]) -> None:
+    """Verify the LLM_ECHO_RESPONSES_FILE substring-matching feature."""
+    agent_name = str(deployed_test_coder["name"])
 
-        exec_result = _run_mng(
-            "exec",
-            agent_name,
-            'LLM_ECHO_RESPONSES_FILE=/tmp/test_responses.json llm -m echo "hello world"',
-        )
-        assert exec_result.returncode == 0
-        response_lines = [
-            line for line in exec_result.stdout.strip().splitlines() if line and not line.startswith("Command ")
-        ]
-        assert response_lines[0] == "Hi there! I am a test agent.", f"Unexpected response: {response_lines[0]!r}"
+    responses = {"hello": "Hi there! I am a test agent.", "help": "I can help with testing."}
+    responses_json = json.dumps(responses)
+    _run_mng("exec", agent_name, f"echo '{responses_json}' > /tmp/test_responses.json")
 
-        exec_result = _run_mng(
-            "exec",
-            agent_name,
-            'LLM_ECHO_RESPONSES_FILE=/tmp/test_responses.json llm -m echo "something else"',
-        )
-        assert exec_result.returncode == 0
-        response_lines = [
-            line for line in exec_result.stdout.strip().splitlines() if line and not line.startswith("Command ")
-        ]
-        assert response_lines[0] == "Echo: something else", f"Unexpected fallback: {response_lines[0]!r}"
+    # Matching input
+    exec_result = _run_mng(
+        "exec",
+        agent_name,
+        'LLM_ECHO_RESPONSES_FILE=/tmp/test_responses.json llm -m echo "hello world"',
+    )
+    assert exec_result.returncode == 0
+    assert _extract_response(exec_result) == "Hi there! I am a test agent."
 
-    finally:
-        _cleanup_agent(agent_name)
+    # Non-matching input falls back to default echo
+    exec_result = _run_mng(
+        "exec",
+        agent_name,
+        'LLM_ECHO_RESPONSES_FILE=/tmp/test_responses.json llm -m echo "something else"',
+    )
+    assert exec_result.returncode == 0
+    assert _extract_response(exec_result) == "Echo: something else"
