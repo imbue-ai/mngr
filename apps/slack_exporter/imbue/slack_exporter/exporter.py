@@ -75,12 +75,16 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     if new_users:
         logger.info("Saved %d new users", len(new_users))
 
-    # Export messages for each configured channel
+    # Only fetch messages for channels that are new or have changed
+    changed_channel_ids: set[SlackChannelId] = {ch.channel_id for ch in all_changed_channels}
     for channel_config in settings.channels:
+        channel_id = resolve_channel_id(channel_config.name, fresh_channels, channel_id_by_name)
+        if channel_id not in changed_channel_ids:
+            logger.info("Skipping channel %s (unchanged)", channel_config.name)
+            continue
         _export_single_channel(
             channel_config=channel_config,
-            fresh_channels=fresh_channels,
-            channel_id_by_name=channel_id_by_name,
+            channel_id=channel_id,
             state_by_channel_id=state_by_channel_id,
             known_message_keys=known_message_keys,
             settings=settings,
@@ -90,19 +94,13 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
 
 def _export_single_channel(
     channel_config: ChannelConfig,
-    fresh_channels: list[ChannelEvent],
-    channel_id_by_name: dict[SlackChannelName, SlackChannelId],
+    channel_id: SlackChannelId,
     state_by_channel_id: dict[SlackChannelId, ChannelExportState],
     known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]],
     settings: ExporterSettings,
     api_caller: SlackApiCaller,
 ) -> None:
     """Export messages from a single channel."""
-    channel_id = resolve_channel_id(
-        channel_config.name,
-        fresh_channels,
-        channel_id_by_name,
-    )
     logger.info("Exporting channel %s (ID: %s)", channel_config.name, channel_id)
 
     existing_state = state_by_channel_id.get(channel_id)

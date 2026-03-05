@@ -236,6 +236,48 @@ def test_run_export_changed_channels_go_to_updated_stream(temp_output_dir: Path)
     assert len(updated_lines) == 2
 
 
+def test_run_export_skips_message_fetch_for_unchanged_channels(temp_output_dir: Path) -> None:
+    """When a channel hasn't changed, conversations.history should not be called."""
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+    )
+
+    # First run creates channel and fetches messages
+    run_export(
+        settings,
+        api_caller=make_fake_api_caller(
+            {
+                "conversations.list": [
+                    _channel_list_response(channels=[{"id": "C123", "name": "general"}]),
+                ],
+                "users.list": [_user_list_response(members=[])],
+                "conversations.history": [_history_response(messages=[{"ts": "1700000000.000001", "text": "hi"}])],
+            }
+        ),
+    )
+
+    # Second run: channel unchanged, so conversations.history should NOT be called
+    history_call_count = 0
+
+    def tracking_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+        nonlocal history_call_count
+        if method == "conversations.list":
+            return _channel_list_response(channels=[{"id": "C123", "name": "general"}])
+        elif method == "users.list":
+            return _user_list_response(members=[])
+        elif method == "conversations.history":
+            history_call_count += 1
+            return _history_response(messages=[])
+        else:
+            return {"ok": True}
+
+    run_export(settings, api_caller=tracking_caller)
+
+    assert history_call_count == 0
+
+
 def test_run_export_incremental_resumes_from_latest(temp_output_dir: Path) -> None:
     existing_msg = make_message_event(ts="1700000000.000001")
     save_message_events(temp_output_dir, StreamType.CREATED, [existing_msg])
