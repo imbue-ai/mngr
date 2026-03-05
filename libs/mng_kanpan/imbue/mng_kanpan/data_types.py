@@ -108,9 +108,19 @@ class KanpanPluginConfig(PluginConfig):
             return self
         merged_enabled = override.enabled if override.enabled is not None else self.enabled
         merged_commands = {**self.commands, **override.commands}
+        merged_auto_cooldown = (
+            override.auto_refresh_cooldown_seconds
+            if override.auto_refresh_cooldown_seconds is not None
+            else self.auto_refresh_cooldown_seconds
+        )
+        merged_manual_cooldown = (
+            override.manual_refresh_cooldown_seconds
+            if override.manual_refresh_cooldown_seconds is not None
+            else self.manual_refresh_cooldown_seconds
+        )
         return KanpanPluginConfig(
             enabled=merged_enabled,
             commands=merged_commands,
-            auto_refresh_cooldown_seconds=override.auto_refresh_cooldown_seconds,
-            manual_refresh_cooldown_seconds=override.manual_refresh_cooldown_seconds,
+            auto_refresh_cooldown_seconds=merged_auto_cooldown,
+            manual_refresh_cooldown_seconds=merged_manual_cooldown,
         )
