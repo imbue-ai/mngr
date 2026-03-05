@@ -217,7 +217,8 @@ To access your config at runtime, use `mng_ctx.get_plugin_config()`:
 
 ```python
 config = mng_ctx.get_plugin_config("my_plugin", MyPluginConfig)
-# Returns MyPluginConfig with defaults if no config entry exists
+# Returns MyPluginConfig with defaults if no config entry exists.
+# Raises ConfigParseError if the entry exists but has the wrong type.
 ```
 
 ### How hooks receive state

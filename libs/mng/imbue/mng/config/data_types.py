@@ -641,11 +641,15 @@ class MngContext(FrozenModel):
     )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
-        """Get a plugin's typed config, falling back to defaults if absent or wrong type."""
+        """Get a plugin's typed config, falling back to defaults if absent."""
         config = self.config.plugins.get(PluginName(name))
-        if isinstance(config, config_type):
-            return config
-        return config_type()
+        if config is None:
+            return config_type()
+        if not isinstance(config, config_type):
+            raise ConfigParseError(
+                f"Plugin '{name}' config has type {type(config).__name__}, expected {config_type.__name__}"
+            )
+        return config
 
     def get_profile_user_id(self) -> UserId:
         return get_or_create_user_id(self.profile_dir)
