@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from urwid.widget.attr_map import AttrMap
+from urwid.widget.columns import Columns
 from urwid.widget.text import Text
 
 from imbue.mng.primitives import AgentLifecycleState
@@ -20,7 +21,7 @@ from imbue.mng_kanpan.tui import _advance_focus
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
-from imbue.mng_kanpan.tui import _format_agent_line
+from imbue.mng_kanpan.tui import _get_name_cell_markup
 from imbue.mng_kanpan.tui import _is_safe_to_delete
 from imbue.mng_kanpan.tui import _toggle_mark
 from imbue.mng_kanpan.tui import _unmark_all
@@ -113,24 +114,31 @@ def _make_state(entries: tuple[AgentBoardEntry, ...] = ()) -> _KanpanState:
     return state
 
 
+def _text_from_widget(widget: Text) -> str:
+    """Extract plain text content from a single Text widget."""
+    raw = widget.text
+    if isinstance(raw, str):
+        return raw
+    parts: list[str] = []
+    for seg in raw:
+        if isinstance(seg, tuple):
+            parts.append(str(seg[1]))
+        else:
+            parts.append(str(seg))
+    return "".join(parts)
+
+
 def _extract_text(walker: list[object]) -> list[str]:
-    """Extract plain text from all Text widgets in a walker."""
+    """Extract plain text from all Text and Columns widgets in a walker."""
     texts: list[str] = []
     for widget in walker:
         inner = widget.original_widget if isinstance(widget, AttrMap) else widget
-        if not isinstance(inner, Text):
-            continue
-        raw = inner.text
-        if isinstance(raw, str):
-            texts.append(raw)
-        else:
-            parts: list[str] = []
-            for seg in raw:
-                if isinstance(seg, tuple):
-                    parts.append(str(seg[1]))
-                else:
-                    parts.append(str(seg))
-            texts.append("".join(parts))
+        if isinstance(inner, Text):
+            texts.append(_text_from_widget(inner))
+        elif isinstance(inner, Columns):
+            # Columns contains (options, widget) pairs in .contents
+            cell_texts = [_text_from_widget(child) for child, _options in inner.contents if isinstance(child, Text)]
+            texts.append(" ".join(cell_texts))
     return texts
 
 
@@ -184,37 +192,29 @@ def test_is_safe_to_delete_no_pr() -> None:
     assert _is_safe_to_delete(entry) is False
 
 
-# --- _format_agent_line with marks ---
+# --- _get_name_cell_markup with marks ---
 
 
-def test_format_agent_line_no_mark() -> None:
+def test_name_cell_markup_no_mark() -> None:
     entry = _make_entry()
-    parts = _format_agent_line(entry, BoardSection.STILL_COOKING)
-    text = "".join(seg if isinstance(seg, str) else seg[1] for seg in parts)
-    assert text.startswith("  agent-1")
+    result = _get_name_cell_markup(entry)
+    assert isinstance(result, str)
+    assert result.startswith("  agent-1")
 
 
-def test_format_agent_line_delete_mark() -> None:
+def test_name_cell_markup_delete_mark() -> None:
     entry = _make_entry()
-    parts = _format_agent_line(entry, BoardSection.STILL_COOKING, mark=PendingMark.DELETE)
-    # First part should be the mark indicator tuple
-    assert parts[0] == ("mark_delete", "D")
-    text = "".join(seg if isinstance(seg, str) else seg[1] for seg in parts)
-    assert "agent-1" in text
+    result = _get_name_cell_markup(entry, mark=PendingMark.DELETE)
+    assert isinstance(result, list)
+    assert result[0] == ("mark_delete", "D")
+    assert "agent-1" in result[1]
 
 
-def test_format_agent_line_push_mark() -> None:
+def test_name_cell_markup_push_mark() -> None:
     entry = _make_entry(work_dir=Path("/tmp/work"))
-    parts = _format_agent_line(entry, BoardSection.STILL_COOKING, mark=PendingMark.PUSH)
-    assert parts[0] == ("mark_push", "P")
-
-
-def test_format_agent_line_muted_with_mark_flattens_to_gray() -> None:
-    entry = _make_entry(is_muted=True)
-    parts = _format_agent_line(entry, BoardSection.MUTED, mark=PendingMark.DELETE)
-    # Muted section flattens everything to gray
-    assert len(parts) == 1
-    assert parts[0][0] == "muted"
+    result = _get_name_cell_markup(entry, mark=PendingMark.PUSH)
+    assert isinstance(result, list)
+    assert result[0] == ("mark_push", "P")
 
 
 # --- _toggle_mark ---

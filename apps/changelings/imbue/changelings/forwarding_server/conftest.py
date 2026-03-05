@@ -11,7 +11,7 @@ DEFAULT_SERVER_NAME: ServerName = ServerName("web")
 
 def make_agents_json(*agent_ids: AgentId) -> str:
     """Build a JSON string matching `mng list --json` output for the given agent IDs."""
-    return json.dumps({"agents": [{"id": str(aid)} for aid in agent_ids]})
+    return json.dumps({"agents": [{"id": str(agent_id)} for agent_id in agent_ids]})
 
 
 def make_server_log(server: str, url: str) -> str:

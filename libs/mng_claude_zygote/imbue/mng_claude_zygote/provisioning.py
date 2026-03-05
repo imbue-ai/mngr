@@ -575,7 +575,7 @@ def _record_conversation_event(
     agent_state_dir: Path,
     settings: ProvisioningSettings,
     *,
-    cid: str,
+    conversation_id: str,
     model: str,
     tags: dict[str, str] | None = None,
 ) -> None:
@@ -586,7 +586,7 @@ def _record_conversation_event(
         "type": "conversation_created",
         "event_id": f"evt-{uuid4().hex}",
         "source": "conversations",
-        "conversation_id": cid,
+        "conversation_id": conversation_id,
         "model": model,
     }
     if tags:
@@ -602,7 +602,7 @@ def _record_conversation_event(
     )
     events_file = conversations_dir / "events.jsonl"
     event_line = json.dumps(event, separators=(",", ":"))
-    with log_span("Recording conversation event for {}", cid):
+    with log_span("Recording conversation event for {}", conversation_id):
         host.execute_command(
             f"echo {shlex.quote(event_line)} >> {shlex.quote(str(events_file))}",
             timeout_seconds=settings.fs_hard_timeout_seconds,
@@ -668,7 +668,7 @@ def create_system_notifications_conversation(
     model = "echo"
 
     llm_data_dir = agent_state_dir / "llm_data"
-    cid = _inject_conversation(
+    conversation_id = _inject_conversation(
         host,
         settings,
         model=model,
@@ -677,13 +677,18 @@ def create_system_notifications_conversation(
         label="system_notifications",
         llm_user_path=llm_data_dir,
     )
-    if cid is None:
+    if conversation_id is None:
         return
 
     _record_conversation_event(
-        host, agent_state_dir, settings, cid=cid, model=model, tags={"internal": "system_notifications"}
+        host,
+        agent_state_dir,
+        settings,
+        conversation_id=conversation_id,
+        model=model,
+        tags={"internal": "system_notifications"},
     )
-    logger.info("Created system_notifications conversation: cid={}", cid)
+    logger.info("Created system_notifications conversation: conversation_id={}", conversation_id)
 
 
 def create_daily_conversation(
@@ -701,7 +706,7 @@ def create_daily_conversation(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     llm_data_dir = agent_state_dir / "llm_data"
-    cid = _inject_conversation(
+    conversation_id = _inject_conversation(
         host,
         settings,
         model=chat_model,
@@ -710,18 +715,18 @@ def create_daily_conversation(
         label="daily",
         llm_user_path=llm_data_dir,
     )
-    if cid is None:
+    if conversation_id is None:
         return
 
     _record_conversation_event(
         host,
         agent_state_dir,
         settings,
-        cid=cid,
+        conversation_id=conversation_id,
         model=chat_model,
         tags={"daily": today},
     )
-    logger.info("Created daily conversation: cid={} date={}", cid, today)
+    logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)
 
 
 def compute_claude_project_dir_name(work_dir_abs: str) -> str:

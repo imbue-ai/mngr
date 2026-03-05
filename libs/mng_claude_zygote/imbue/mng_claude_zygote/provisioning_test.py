@@ -932,11 +932,11 @@ def test_get_new_lines_returns_empty_when_no_new_data(tmp_path: Path) -> None:
     assert result == []
 
 
-def _make_message_line(event_id: str, cid: str, role: str = "user", content: str = "hello") -> str:
+def _make_message_line(event_id: str, conversation_id: str, role: str = "user", content: str = "hello") -> str:
     return (
         f'{{"timestamp":"2026-01-01T00:00:00Z","type":"message",'
         f'"event_id":"{event_id}","source":"messages",'
-        f'"conversation_id":"{cid}","role":"{role}","content":"{content}"}}'
+        f'"conversation_id":"{conversation_id}","role":"{role}","content":"{content}"}}'
     )
 
 

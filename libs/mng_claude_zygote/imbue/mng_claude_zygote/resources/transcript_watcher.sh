@@ -47,10 +47,10 @@ except Exception as e:
 log() {
     local ts
     ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ")
-    local msg="[$ts] $*"
-    echo "$msg"
+    local message="[$ts] $*"
+    echo "$message"
     mkdir -p "$(dirname "$LOG_FILE")"
-    echo "$msg" >> "$LOG_FILE"
+    echo "$message" >> "$LOG_FILE"
 }
 
 log_warn() {

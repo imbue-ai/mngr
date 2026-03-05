@@ -336,7 +336,7 @@ def _write_notification_event(events_dir: Path, message: str, level: str = "WARN
 _CHAT_NOTIFICATION_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
-def _get_system_notifications_cid(events_dir: Path) -> str | None:
+def _get_system_notifications_conversation_id(events_dir: Path) -> str | None:
     """Read the first conversation_id from events/conversations/events.jsonl.
 
     The system_notifications conversation is always created first during
@@ -355,9 +355,9 @@ def _get_system_notifications_cid(events_dir: Path) -> str | None:
                     continue
                 try:
                     event = json.loads(line)
-                    cid = event.get("conversation_id")
-                    if cid:
-                        return str(cid)
+                    conversation_id = event.get("conversation_id")
+                    if conversation_id:
+                        return str(conversation_id)
                 except (json.JSONDecodeError, KeyError):
                     continue
     except OSError as exc:
@@ -376,8 +376,8 @@ def _send_chat_notification(events_dir: Path, message: str) -> bool:
     Returns True on success, False if ``llm`` is not available or fails.
     This is best-effort: the caller should not depend on success.
     """
-    cid = _get_system_notifications_cid(events_dir)
-    if cid is None:
+    conversation_id = _get_system_notifications_conversation_id(events_dir)
+    if conversation_id is None:
         logger.warning("No system_notifications conversation found, skipping chat notification")
         return False
 
@@ -387,7 +387,7 @@ def _send_chat_notification(events_dir: Path, message: str) -> bool:
                 "llm",
                 "chat",
                 "--cid",
-                cid,
+                conversation_id,
                 "-m",
                 "echo",
                 message,
@@ -444,15 +444,15 @@ def _start_events_subprocess(agent_name: str, cel_filter: str) -> subprocess.Pop
 
 
 def _read_events_from_subprocess(
-    proc: subprocess.Popen[str],
+    process: subprocess.Popen[str],
     event_buffer: list[str],
     buffer_lock: threading.Lock,
     stop_event: threading.Event,
 ) -> None:
     """Read JSONL lines from subprocess stdout into the event buffer (thread target)."""
-    assert proc.stdout is not None
+    assert process.stdout is not None
     try:
-        for line in proc.stdout:
+        for line in process.stdout:
             if stop_event.is_set():
                 break
             stripped = line.strip()
@@ -466,13 +466,13 @@ def _read_events_from_subprocess(
 
 
 def _drain_stderr(
-    proc: subprocess.Popen[str],
+    process: subprocess.Popen[str],
     stop_event: threading.Event,
 ) -> None:
     """Read and log stderr from the subprocess (daemon thread target)."""
-    assert proc.stderr is not None
+    assert process.stderr is not None
     try:
-        for line in proc.stderr:
+        for line in process.stderr:
             if stop_event.is_set():
                 break
             stripped = line.strip()
@@ -535,41 +535,43 @@ def _separate_chat_events(
             continue
 
         role = parsed.get("role", "")
-        cid = parsed.get("conversation_id", "")
+        conversation_id = parsed.get("conversation_id", "")
 
-        if role == "user" and cid:
-            new_user_messages.setdefault(cid, []).append(line)
-        elif role == "assistant" and cid:
-            new_assistant_messages.setdefault(cid, []).append(line)
+        if role == "user" and conversation_id:
+            new_user_messages.setdefault(conversation_id, []).append(line)
+        elif role == "assistant" and conversation_id:
+            new_assistant_messages.setdefault(conversation_id, []).append(line)
         else:
             ready.append(line)
 
     # Release paired messages: user messages first, then assistant messages
-    for cid, assistant_lines in new_assistant_messages.items():
+    for conversation_id, assistant_lines in new_assistant_messages.items():
         # Release any previously held user messages for this conversation
-        if cid in held_user_messages:
-            held_lines, _ = held_user_messages.pop(cid)
+        if conversation_id in held_user_messages:
+            held_lines, _ = held_user_messages.pop(conversation_id)
             ready.extend(held_lines)
         # Release new user messages for this conversation
-        if cid in new_user_messages:
-            ready.extend(new_user_messages.pop(cid))
+        if conversation_id in new_user_messages:
+            ready.extend(new_user_messages.pop(conversation_id))
         # Then the assistant messages
         ready.extend(assistant_lines)
 
     # Release timed-out held messages
-    timed_out_cids = [
-        cid for cid, (_, held_at) in held_user_messages.items() if now - held_at > _CHAT_PAIR_TIMEOUT_SECONDS
+    timed_out_conversation_ids = [
+        conversation_id
+        for conversation_id, (_, held_at) in held_user_messages.items()
+        if now - held_at > _CHAT_PAIR_TIMEOUT_SECONDS
     ]
-    for cid in timed_out_cids:
-        held_lines, _ = held_user_messages.pop(cid)
+    for conversation_id in timed_out_conversation_ids:
+        held_lines, _ = held_user_messages.pop(conversation_id)
         ready.extend(held_lines)
 
     # Hold new user messages that don't have a matching assistant response
-    for cid, user_lines in new_user_messages.items():
-        if cid in held_user_messages:
-            held_user_messages[cid][0].extend(user_lines)
+    for conversation_id, user_lines in new_user_messages.items():
+        if conversation_id in held_user_messages:
+            held_user_messages[conversation_id][0].extend(user_lines)
         else:
-            held_user_messages[cid] = (user_lines, now)
+            held_user_messages[conversation_id] = (user_lines, now)
 
     return ready
 
@@ -850,7 +852,7 @@ def main() -> None:
     stop_event = threading.Event()
     event_buffer: list[str] = []
     buffer_lock = threading.Lock()
-    active_proc: subprocess.Popen[str] | None = None
+    active_process: subprocess.Popen[str] | None = None
 
     # Start the long-lived delivery thread
     delivery_thread = threading.Thread(
@@ -862,12 +864,12 @@ def main() -> None:
 
     try:
         while not stop_event.is_set():
-            active_proc = _start_events_subprocess(agent_name, settings.cel_filter)
+            active_process = _start_events_subprocess(agent_name, settings.cel_filter)
 
             # Reader thread feeds subprocess stdout into the shared buffer
             reader_thread = threading.Thread(
                 target=_read_events_from_subprocess,
-                args=(active_proc, event_buffer, buffer_lock, stop_event),
+                args=(active_process, event_buffer, buffer_lock, stop_event),
                 daemon=True,
             )
             reader_thread.start()
@@ -875,15 +877,15 @@ def main() -> None:
             # Stderr drain thread
             stderr_thread = threading.Thread(
                 target=_drain_stderr,
-                args=(active_proc, stop_event),
+                args=(active_process, stop_event),
                 daemon=True,
             )
             stderr_thread.start()
 
             # Wait for subprocess to exit
-            active_proc.wait()
-            logger.warning("mng events subprocess exited with code {}", active_proc.returncode)
-            active_proc = None
+            active_process.wait()
+            logger.warning("mng events subprocess exited with code {}", active_process.returncode)
+            active_process = None
 
             if stop_event.is_set():
                 break
@@ -895,12 +897,12 @@ def main() -> None:
         logger.info("Event watcher stopping (KeyboardInterrupt)")
     finally:
         stop_event.set()
-        if active_proc is not None and active_proc.poll() is None:
-            active_proc.terminate()
+        if active_process is not None and active_process.poll() is None:
+            active_process.terminate()
             try:
-                active_proc.wait(timeout=5)
+                active_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                active_proc.kill()
+                active_process.kill()
 
 
 if __name__ == "__main__":
