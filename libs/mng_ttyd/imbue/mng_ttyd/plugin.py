@@ -2,8 +2,8 @@ from typing import Any
 
 from imbue.mng import hookimpl
 
-TTYD_WINDOW_NAME = "ttyd"
-TTYD_SERVER_NAME = "ttyd"
+TTYD_WINDOW_NAME = "terminal"
+TTYD_SERVER_NAME = "terminal"
 
 
 def build_ttyd_server_command(ttyd_invocation: str, server_name: str) -> str:
