@@ -827,7 +827,6 @@ def _build_board_widgets(state: _KanpanState) -> SimpleFocusListWalker[AttrMap |
 
     # Compute column widths from all entries (content-aware sizing)
     col_widths = _compute_board_column_widths(snapshot.entries)
-    walker.append(_build_column_header(col_widths))
 
     # Classify entries into sections
     by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
@@ -842,7 +841,10 @@ def _build_board_widgets(state: _KanpanState) -> SimpleFocusListWalker[AttrMap |
         if not entries:
             continue
 
-        if has_content:
+        # Add column header before the first section
+        if not has_content:
+            walker.append(_build_column_header(col_widths))
+        else:
             walker.append(Divider())
 
         walker.append(Text(_format_section_heading(section, len(entries))))
