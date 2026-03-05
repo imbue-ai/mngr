@@ -138,7 +138,7 @@ _BOARD_HEADER_LABELS: dict[str, str] = {
 }
 
 
-class _SelectableColumns(Columns):
+class _SelectableRow(Columns):
     """A Columns widget that is selectable, allowing it to receive focus.
 
     Columns.selectable() checks children rather than _selectable, so we
@@ -744,7 +744,7 @@ def _build_column_header(widths: dict[str, int]) -> Columns:
     return Columns(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
-def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict[str, int]) -> _SelectableColumns:
+def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict[str, int]) -> _SelectableRow:
     """Build a columnar urwid widget for a single agent row.
 
     Muted agents are rendered entirely in gray.
@@ -767,7 +767,7 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
             (widths["ci"], Text(("muted", ci_str))),
             Text(("muted", link_str)),
         ]
-        return _SelectableColumns(cols, dividechars=_COL_DIVIDER_CHARS)
+        return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
 
     state_attr = _get_state_attr(entry)
     state_markup: str | tuple[Hashable, str] = (state_attr, state_str) if state_attr else state_str
@@ -781,7 +781,7 @@ def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict
         (widths["ci"], Text(ci_markup)),
         Text(link_str),
     ]
-    return _SelectableColumns(cols, dividechars=_COL_DIVIDER_CHARS)
+    return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
