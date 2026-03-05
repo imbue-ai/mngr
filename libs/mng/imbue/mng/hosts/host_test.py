@@ -20,7 +20,6 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.host import ONBOARDING_TEXT
 from imbue.mng.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mng.hosts.host import _build_start_agent_shell_command
-from imbue.mng.hosts.host import _build_tmux_send_literal_steps
 from imbue.mng.hosts.host import _is_socket_closed_os_error
 from imbue.mng.hosts.host import _parse_boot_time_output
 from imbue.mng.hosts.host import _parse_uptime_output
@@ -759,68 +758,6 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
     assert "set-hook" in result
     assert "display-popup" in result
     assert "client-attached" in result
-
-
-# =========================================================================
-# Tests for _build_tmux_send_literal_steps
-# =========================================================================
-
-
-def test_build_tmux_send_literal_steps_short_uses_send_keys() -> None:
-    """Short messages should use tmux send-keys -l."""
-    steps = _build_tmux_send_literal_steps("mng-test:0", "hello", Path("/tmp/mng"))
-    assert len(steps) == 1
-    assert "send-keys" in steps[0]
-    assert "-l" in steps[0]
-    assert "hello" in steps[0]
-
-
-def test_build_tmux_send_literal_steps_long_uses_load_buffer() -> None:
-    """Messages >= 1024 chars should use named load-buffer/paste-buffer with cleanup."""
-    long_text = "x" * 1024
-    steps = _build_tmux_send_literal_steps("mng-test:0", long_text, Path("/tmp/mng"))
-    assert len(steps) == 5
-    assert "mkdir -p" in steps[0]
-    assert "printf" in steps[1]
-    assert "load-buffer" in steps[2]
-    assert "-b" in steps[2]
-    assert "paste-buffer" in steps[3]
-    assert "-b" in steps[3]
-    assert "delete-buffer" in steps[4]
-    assert "rm -f" in steps[4]
-
-
-def test_build_tmux_send_literal_steps_threshold_boundary() -> None:
-    """Messages at exactly 1023 chars should use send-keys, 1024 should use load-buffer."""
-    steps_under = _build_tmux_send_literal_steps("mng-test:0", "x" * 1023, Path("/tmp/mng"))
-    assert len(steps_under) == 1
-    assert "send-keys" in steps_under[0]
-
-    steps_at = _build_tmux_send_literal_steps("mng-test:0", "x" * 1024, Path("/tmp/mng"))
-    assert len(steps_at) == 5
-    assert "load-buffer" in steps_at[2]
-
-
-def test_build_start_agent_shell_command_long_command_uses_load_buffer(
-    local_provider: LocalProviderInstance,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """When the agent command is >= 1024 chars, the start command should use load-buffer."""
-    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    long_command = "echo " + "x" * 1024
-    result = _build_start_agent_shell_command(
-        agent=agent,
-        session_name=f"mng-{agent.name}",
-        command=long_command,
-        additional_commands=(),
-        env_shell_cmd="bash",
-        tmux_config_path=Path("/tmp/tmux.conf"),
-        unset_vars=[],
-        host_dir=temp_host_dir,
-    )
-    assert "load-buffer" in result
-    assert "paste-buffer" in result
 
 
 # =========================================================================

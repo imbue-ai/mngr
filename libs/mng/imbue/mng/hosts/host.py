@@ -49,7 +49,6 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import LOCAL_CONNECTOR_NAME
-from imbue.mng.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.offline_host import BaseHost
 from imbue.mng.interfaces.agent import AgentInterface
@@ -2185,41 +2184,6 @@ To reconnect later, run:
 
 This popup won't show again in future sessions."""
 
-@pure
-def _build_tmux_send_literal_steps(
-    tmux_target: str,
-    text: str,
-    host_dir: Path,
-) -> list[str]:
-    """Build shell command steps to send literal text to a tmux pane.
-
-    For short text (< LONG_MESSAGE_THRESHOLD chars), uses ``tmux send-keys -l``.
-    For long text (>= LONG_MESSAGE_THRESHOLD chars), writes to a temp file via
-    printf and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid the
-    tmux "command too long" error.
-
-    The temp file path includes the tmux target to avoid races when multiple
-    agents start concurrently on the same host.
-    """
-    quoted_target = shlex.quote(tmux_target)
-    if len(text) < LONG_MESSAGE_THRESHOLD:
-        return [f"tmux send-keys -t {quoted_target} -l {shlex.quote(text)}"]
-    else:
-        # Include tmux_target in the filename and buffer name to avoid
-        # concurrent overwrites and tmux default-buffer races
-        safe_target = tmux_target.replace("/", "_").replace(":", "_")
-        buffer_name = f"mng-{safe_target}"
-        tmp_path = host_dir / "tmp" / f"tmux-buffer-{safe_target}.txt"
-        quoted_path = shlex.quote(str(tmp_path))
-        quoted_buffer = shlex.quote(buffer_name)
-        return [
-            f"mkdir -p {shlex.quote(str(tmp_path.parent))}",
-            f"printf %s {shlex.quote(text)} > {quoted_path}",
-            f"tmux load-buffer -b {quoted_buffer} {quoted_path}",
-            f"tmux paste-buffer -b {quoted_buffer} -t {quoted_target}",
-            f"tmux delete-buffer -b {quoted_buffer} ; rm -f {quoted_path}",
-        ]
-
 
 @pure
 def _build_start_agent_shell_command(
@@ -2324,7 +2288,7 @@ def _build_start_agent_shell_command(
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        steps.extend(_build_tmux_send_literal_steps(window_target, str(named_cmd.command), host_dir))
+        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} -l {shlex.quote(str(named_cmd.command))}")
         steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
 
     # If we created additional windows, select the first window (the main agent)
@@ -2335,9 +2299,9 @@ def _build_start_agent_shell_command(
     # Send the agent command as literal keys, then Enter to execute.
     # Target window :0 explicitly so this works even after additional windows
     # have been created (which changes the active window).
-    agent_window_target = session_name + ":0"
-    steps.extend(_build_tmux_send_literal_steps(agent_window_target, command, host_dir))
-    steps.append(f"tmux send-keys -t {shlex.quote(agent_window_target)} Enter")
+    agent_window = shlex.quote(session_name + ":0")
+    steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
+    steps.append(f"tmux send-keys -t {agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
