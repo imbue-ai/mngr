@@ -54,20 +54,41 @@ def call_slack_api(
             _LATCHKEY_COMMAND_WARNING_THRESHOLD_SECONDS,
         )
 
-    if result.returncode != 0:
+    return parse_latchkey_response(
+        command_str=" ".join(command),
+        method=method,
+        return_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def parse_latchkey_response(
+    command_str: str,
+    method: str,
+    return_code: int,
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    """Parse and validate the output from a latchkey curl invocation.
+
+    Raises LatchkeyInvocationError on non-zero exit or invalid JSON.
+    Raises SlackApiError if the Slack API returned ok=false.
+    """
+    if return_code != 0:
         raise LatchkeyInvocationError(
-            command=" ".join(command),
-            return_code=result.returncode,
-            stderr=result.stderr,
+            command=command_str,
+            return_code=return_code,
+            stderr=stderr,
         )
 
     try:
-        data: dict[str, Any] = json.loads(result.stdout)
+        data: dict[str, Any] = json.loads(stdout)
     except json.JSONDecodeError as e:
         raise LatchkeyInvocationError(
-            command=" ".join(command),
+            command=command_str,
             return_code=0,
-            stderr=f"Invalid JSON response: {result.stdout[:200]}",
+            stderr=f"Invalid JSON response: {stdout[:200]}",
         ) from e
 
     if not data.get("ok"):

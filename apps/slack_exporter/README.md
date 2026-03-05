@@ -46,12 +46,14 @@ Data is stored in a directory with created/updated streams per type:
 ```
 slack_export/
   channels/created/events.jsonl   -- new channels (first seen)
-  channels/updated/events.jsonl   -- channels whose data changed
+  channels/updated/events.jsonl   -- all channel state changes (includes creates)
   messages/created/events.jsonl   -- new messages
-  messages/updated/events.jsonl   -- (reserved for future message edits)
+  messages/updated/events.jsonl   -- all message state changes (includes creates)
   users/created/events.jsonl      -- new users (first seen)
-  users/updated/events.jsonl      -- (reserved for future user updates)
+  users/updated/events.jsonl      -- all user state changes (includes creates)
 ```
+
+The `created` stream contains only first-seen items. The `updated` stream contains all state changes (including creates, since a create is logically an update from nothing). Subscribe to `created` for lower cardinality, or `updated` for the full change history.
 
 Each line is a self-describing JSON event using the standard EventEnvelope format (with `timestamp`, `type`, `event_id`, `source` fields), plus domain-specific fields and the raw Slack API response.
 
