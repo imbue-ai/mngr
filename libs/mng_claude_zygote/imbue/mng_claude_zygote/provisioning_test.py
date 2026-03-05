@@ -351,28 +351,23 @@ def test_compute_claude_project_dir_name_replaces_dots() -> None:
     assert compute_claude_project_dir_name("/home/user/.changelings/agent") == "-home-user--changelings-agent"
 
 
-def test_setup_memory_directory_creates_both_dirs() -> None:
+def _run_setup_memory(
+    work_dir: str = "/home/user/.changelings/agent",
+) -> StubHost:
+    """Run setup_memory_directory on a StubHost and return the host for inspection."""
     host = StubHost()
-    setup_memory_directory(
-        cast(Any, host),
-        Path("/home/user/.changelings/agent"),
-        "/home/user/.changelings/agent",
-        _DEFAULT_PROVISIONING,
-    )
+    setup_memory_directory(cast(Any, host), Path(work_dir), work_dir, _DEFAULT_PROVISIONING)
+    return host
 
+
+def test_setup_memory_directory_creates_both_dirs() -> None:
+    host = _run_setup_memory()
     assert any("mkdir" in c and "/memory" in c for c in host.executed_commands)
     assert any("mkdir" in c and ".claude/projects" in c for c in host.executed_commands)
 
 
 def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
-    host = StubHost()
-    setup_memory_directory(
-        cast(Any, host),
-        Path("/home/user/.changelings/agent"),
-        "/home/user/.changelings/agent",
-        _DEFAULT_PROVISIONING,
-    )
-
+    host = _run_setup_memory()
     # Must use $HOME (not ~) so tilde expansion works inside quotes
     mkdir_cmds = [c for c in host.executed_commands if "mkdir" in c and ".claude/projects" in c]
     assert len(mkdir_cmds) >= 1
@@ -381,14 +376,7 @@ def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
 
 
 def test_setup_memory_directory_rsyncs_initial_content() -> None:
-    host = StubHost()
-    setup_memory_directory(
-        cast(Any, host),
-        Path("/home/user/.changelings/agent"),
-        "/home/user/.changelings/agent",
-        _DEFAULT_PROVISIONING,
-    )
-
+    host = _run_setup_memory()
     rsync_cmds = [c for c in host.executed_commands if "rsync" in c]
     assert len(rsync_cmds) == 1
     assert "/memory/" in rsync_cmds[0]
@@ -397,28 +385,14 @@ def test_setup_memory_directory_rsyncs_initial_content() -> None:
 
 def test_setup_memory_directory_removes_old_symlink() -> None:
     """Verify that rm -f is used to remove any old symlink before mkdir."""
-    host = StubHost()
-    setup_memory_directory(
-        cast(Any, host),
-        Path("/home/user/.changelings/agent"),
-        "/home/user/.changelings/agent",
-        _DEFAULT_PROVISIONING,
-    )
-
+    host = _run_setup_memory()
     mkdir_cmds = [c for c in host.executed_commands if "rm -f" in c and ".claude/projects" in c]
     assert len(mkdir_cmds) >= 1
 
 
 def test_setup_memory_directory_does_not_use_literal_tilde() -> None:
     """Verify that ~ is never used in paths (it doesn't expand inside single quotes)."""
-    host = StubHost()
-    setup_memory_directory(
-        cast(Any, host),
-        Path("/home/user/project"),
-        "/home/user/project",
-        _DEFAULT_PROVISIONING,
-    )
-
+    host = _run_setup_memory(work_dir="/home/user/project")
     for cmd in host.executed_commands:
         if ".claude/projects" in cmd:
             assert "~" not in cmd, f"Found literal ~ in command (won't expand in quotes): {cmd}"
@@ -430,20 +404,24 @@ def test_build_memory_sync_hooks_config_has_pre_and_post() -> None:
     assert "PostToolUse" in config["hooks"]
 
 
-def test_build_memory_sync_hooks_config_pre_syncs_to_project() -> None:
+def test_build_memory_sync_hooks_config_pre_syncs_work_dir_to_project() -> None:
+    """PreToolUse should rsync FROM work_dir/memory/ TO Claude project memory/."""
     config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
     pre_cmd = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    # Pre hook should sync FROM work_dir TO claude project
-    assert "/home/user/.changelings/agent/memory" in pre_cmd
-    assert "$HOME/.claude/projects/" in pre_cmd
+    # rsync source comes before destination: rsync -a --delete SRC/ DST/
+    work_dir_pos = pre_cmd.index("/home/user/.changelings/agent/memory")
+    project_pos = pre_cmd.index("$HOME/.claude/projects/")
+    assert work_dir_pos < project_pos, "PreToolUse should sync work_dir -> project (work_dir first in rsync args)"
 
 
-def test_build_memory_sync_hooks_config_post_syncs_to_work_dir() -> None:
+def test_build_memory_sync_hooks_config_post_syncs_project_to_work_dir() -> None:
+    """PostToolUse should rsync FROM Claude project memory/ TO work_dir/memory/."""
     config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
     post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    # Post hook should sync FROM claude project TO work_dir
-    assert "/home/user/.changelings/agent/memory" in post_cmd
-    assert "$HOME/.claude/projects/" in post_cmd
+    # rsync source comes before destination: rsync -a --delete SRC/ DST/
+    work_dir_pos = post_cmd.index("/home/user/.changelings/agent/memory")
+    project_pos = post_cmd.index("$HOME/.claude/projects/")
+    assert project_pos < work_dir_pos, "PostToolUse should sync project -> work_dir (project first in rsync args)"
 
 
 # -- Provisioning function tests (using _StubHost) --
