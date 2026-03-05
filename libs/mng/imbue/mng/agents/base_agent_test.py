@@ -142,6 +142,33 @@ def test_lifecycle_state_running_when_expected_process_exists(
 
 
 @pytest.mark.tmux
+def test_lifecycle_state_waiting_when_active_file_removed(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Test that agent transitions from RUNNING to WAITING when active file is removed."""
+    test_agent, session_name = _create_running_agent(local_provider, temp_host_dir, temp_work_dir, 847292)
+
+    try:
+        wait_for(
+            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING,
+            error_message="Expected RUNNING with active file present",
+        )
+
+        # Remove the active file -- should transition to WAITING
+        agent_dir = local_provider.host_dir / "agents" / str(test_agent.id)
+        (agent_dir / "active").unlink()
+
+        wait_for(
+            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+            error_message="Expected WAITING after removing active file",
+        )
+    finally:
+        cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
 def test_is_running_true_when_tmux_session_running(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,

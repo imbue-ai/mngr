@@ -14,6 +14,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.claude_agent import _build_install_command_hint
@@ -621,34 +622,25 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
 def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
 ) -> None:
-    """ClaudeAgent.get_lifecycle_state should return WAITING when permissions_waiting file exists."""
+    """ClaudeAgent.get_lifecycle_state downgrades RUNNING to WAITING when permissions_waiting exists."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
     agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
 
-    with patch.object(type(agent).__mro__[1], "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
-        # Without the file, should stay RUNNING
+    with patch.object(BaseAgent, "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
         assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
 
-        # Create the permissions_waiting file
         (agent._get_agent_dir() / "permissions_waiting").touch()
         assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
 
-
-def test_get_lifecycle_state_does_not_override_non_running_states(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
-) -> None:
-    """ClaudeAgent.get_lifecycle_state should not override non-RUNNING states even when permissions_waiting exists."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
-    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+    # Non-RUNNING states should pass through unchanged
     (agent._get_agent_dir() / "permissions_waiting").touch()
-
     for state in (
         AgentLifecycleState.STOPPED,
         AgentLifecycleState.WAITING,
         AgentLifecycleState.REPLACED,
         AgentLifecycleState.DONE,
     ):
-        with patch.object(type(agent).__mro__[1], "get_lifecycle_state", return_value=state):
+        with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
             assert agent.get_lifecycle_state() == state
 
 
