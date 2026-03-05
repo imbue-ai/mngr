@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from loguru import logger
 
 from imbue.changelings.testing import find_agent
 from imbue.changelings.testing import run_changeling
@@ -63,22 +64,21 @@ def deployed_test_coder() -> Generator[dict[str, object], None, None]:
     agent = find_agent(agent_name)
     assert agent is not None, f"Agent {agent_name} not found in mng list"
 
+    agent_id = str(agent["id"])
     _wait_for_provisioning(str(agent["work_dir"]))
 
     try:
         yield agent
     finally:
-        _cleanup_agent(agent_name)
+        _cleanup_agent(agent_name, agent_id)
 
 
-def _cleanup_agent(agent_name: str) -> None:
+def _cleanup_agent(agent_name: str, agent_id: str) -> None:
     """Destroy an agent and clean up its changeling directory."""
-    agent = find_agent(agent_name)
-    agent_id = str(agent["id"]) if agent else None
+    result = run_mng("destroy", agent_name, "--force", timeout=30.0)
+    if result.returncode != 0:
+        logger.warning("Failed to destroy agent {}: {}", agent_name, result.stderr[:200])
 
-    run_mng("destroy", agent_name, "--force", timeout=30.0)
-
-    if agent_id:
-        changeling_dir = Path.home() / ".changelings" / agent_id
-        if changeling_dir.exists():
-            shutil.rmtree(changeling_dir, ignore_errors=True)
+    changeling_dir = Path.home() / ".changelings" / agent_id
+    if changeling_dir.exists():
+        shutil.rmtree(changeling_dir, ignore_errors=True)
