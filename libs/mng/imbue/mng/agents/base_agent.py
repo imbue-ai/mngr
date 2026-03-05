@@ -369,14 +369,19 @@ class BaseAgent(AgentInterface):
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
         else:
             tmp_path = Path(f"/tmp/mng-msg-buffer-{self.session_name}.txt")
+            buffer_name = f"mng-{self.session_name}"
             self.host.write_text_file(tmp_path, message)
-            load_cmd = f"tmux load-buffer {shlex.quote(str(tmp_path))}"
+            load_cmd = f"tmux load-buffer -b {shlex.quote(buffer_name)} {shlex.quote(str(tmp_path))}"
             result = self.host.execute_command(load_cmd)
             if not result.success:
                 raise SendMessageError(
                     str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                 )
-            paste_cmd = f"tmux paste-buffer -t '{tmux_target}'"
+            paste_cmd = (
+                f"tmux paste-buffer -b {shlex.quote(buffer_name)} -t '{tmux_target}'"
+                f" && tmux delete-buffer -b {shlex.quote(buffer_name)}"
+                f" ; rm -f {shlex.quote(str(tmp_path))}"
+            )
             result = self.host.execute_command(paste_cmd)
             if not result.success:
                 raise SendMessageError(

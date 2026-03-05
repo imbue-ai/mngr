@@ -1033,10 +1033,13 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     assert len(stub.written_files) == 1
     assert stub.written_files[0][1] == long_message
 
-    # Then execute load-buffer and paste-buffer
+    # Then execute load-buffer and paste-buffer (with cleanup)
     assert len(stub.executed_commands) == 2
     assert "load-buffer" in stub.executed_commands[0]
+    assert "-b" in stub.executed_commands[0]
     assert "paste-buffer" in stub.executed_commands[1]
+    assert "delete-buffer" in stub.executed_commands[1]
+    assert "rm -f" in stub.executed_commands[1]
 
 
 def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(

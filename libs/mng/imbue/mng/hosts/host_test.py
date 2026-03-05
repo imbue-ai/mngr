@@ -776,15 +776,18 @@ def test_build_tmux_send_literal_steps_short_uses_send_keys() -> None:
 
 
 def test_build_tmux_send_literal_steps_long_uses_load_buffer() -> None:
-    """Messages >= 1024 chars should use load-buffer/paste-buffer."""
+    """Messages >= 1024 chars should use named load-buffer/paste-buffer with cleanup."""
     long_text = "x" * 1024
     steps = _build_tmux_send_literal_steps("mng-test:0", long_text, Path("/tmp/mng"))
-    assert len(steps) == 4
+    assert len(steps) == 5
     assert "mkdir -p" in steps[0]
     assert "printf" in steps[1]
     assert "load-buffer" in steps[2]
+    assert "-b" in steps[2]
     assert "paste-buffer" in steps[3]
-    assert "send-keys" not in steps[2]
+    assert "-b" in steps[3]
+    assert "delete-buffer" in steps[4]
+    assert "rm -f" in steps[4]
 
 
 def test_build_tmux_send_literal_steps_threshold_boundary() -> None:
@@ -794,7 +797,7 @@ def test_build_tmux_send_literal_steps_threshold_boundary() -> None:
     assert "send-keys" in steps_under[0]
 
     steps_at = _build_tmux_send_literal_steps("mng-test:0", "x" * 1024, Path("/tmp/mng"))
-    assert len(steps_at) == 4
+    assert len(steps_at) == 5
     assert "load-buffer" in steps_at[2]
 
 

@@ -2205,15 +2205,19 @@ def _build_tmux_send_literal_steps(
     if len(text) < LONG_MESSAGE_THRESHOLD:
         return [f"tmux send-keys -t {quoted_target} -l {shlex.quote(text)}"]
     else:
-        # Include tmux_target in the filename to avoid concurrent overwrites
+        # Include tmux_target in the filename and buffer name to avoid
+        # concurrent overwrites and tmux default-buffer races
         safe_target = tmux_target.replace("/", "_").replace(":", "_")
+        buffer_name = f"mng-{safe_target}"
         tmp_path = host_dir / "tmp" / f"tmux-buffer-{safe_target}.txt"
         quoted_path = shlex.quote(str(tmp_path))
+        quoted_buffer = shlex.quote(buffer_name)
         return [
             f"mkdir -p {shlex.quote(str(tmp_path.parent))}",
             f"printf %s {shlex.quote(text)} > {quoted_path}",
-            f"tmux load-buffer {quoted_path}",
-            f"tmux paste-buffer -t {quoted_target}",
+            f"tmux load-buffer -b {quoted_buffer} {quoted_path}",
+            f"tmux paste-buffer -b {quoted_buffer} -t {quoted_target}",
+            f"tmux delete-buffer -b {quoted_buffer} ; rm -f {quoted_path}",
         ]
 
 
