@@ -1,11 +1,13 @@
 import os
 import subprocess
+from collections.abc import Callable
 from collections.abc import Hashable
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import NamedTuple
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -126,14 +128,19 @@ _BUILTIN_COMMANDS: dict[str, CustomCommand] = {
 # All attributes that can appear in agent lines and need focus variants
 _AGENT_LINE_ATTRS = ("state_running", "state_attention", "check_failing", "check_pending", "muted")
 
+# Column layout configuration
+_COL_DIVIDER_CHARS = 2
 
-class _SelectableText(Text):
-    """A Text widget that is selectable, allowing it to receive focus.
 
-    Unlike SelectableIcon, this supports full urwid text markup (colored segments).
+class _SelectableRow(Columns):
+    """A Columns widget that is selectable, allowing it to receive focus.
+
+    Columns.selectable() checks children rather than _selectable, so we
+    must override it explicitly to make the widget focusable in a ListBox.
     """
 
-    _selectable = True
+    def selectable(self) -> bool:
+        return True
 
     def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
         """Pass all keys through (no keys are handled by this widget)."""
@@ -679,7 +686,7 @@ def _get_state_attr(entry: AgentBoardEntry) -> str:
 
     RUNNING gets green, WAITING gets magenta (needs user response).
     Everything else is default (no color). Muted override is handled
-    separately in _format_agent_line.
+    separately in _build_agent_row.
     """
     if entry.state == AgentLifecycleState.RUNNING:
         return "state_running"
@@ -688,63 +695,138 @@ def _get_state_attr(entry: AgentBoardEntry) -> str:
     return ""
 
 
-def _format_check_markup(entry: AgentBoardEntry) -> list[str | tuple[Hashable, str]]:
-    """Build urwid text markup for CI check status.
+def _get_name_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the name column cell."""
+    return f"  {entry.name}"
 
-    Only failing and pending checks get color. Passing checks are shown
-    in default color. Unknown checks are not shown at all.
+
+def _get_state_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the state column cell."""
+    return str(entry.state)
+
+
+def _get_state_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]:
+    """Build urwid text markup for the state column cell.
+
+    RUNNING gets green, WAITING gets magenta. Everything else uses default color.
+    """
+    text = _get_state_cell_text(entry)
+    attr = _get_state_attr(entry)
+    return (attr, text) if attr else text
+
+
+def _get_check_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the CI check status column cell."""
+    if entry.pr is None or entry.pr.check_status == CheckStatus.UNKNOWN:
+        return ""
+    return entry.pr.check_status.lower()
+
+
+def _get_check_cell_markup(entry: AgentBoardEntry) -> str | tuple[Hashable, str]:
+    """Build urwid text markup for a CI check status column cell.
+
+    Only failing and pending checks get color. Passing checks use default color.
     """
     if entry.pr is None or entry.pr.check_status == CheckStatus.UNKNOWN:
-        return []
+        return ""
     check_attr = _CHECK_STATUS_ATTR.get(entry.pr.check_status)
     if check_attr is not None:
-        return ["  CI ", (check_attr, entry.pr.check_status.lower())]
-    # PASSING: show in default color
-    return [f"  CI {entry.pr.check_status.lower()}"]
+        return (check_attr, entry.pr.check_status.lower())
+    return entry.pr.check_status.lower()
 
 
-def _format_push_status(entry: AgentBoardEntry) -> str:
-    """Build text for push status indicator."""
+def _get_push_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the git push status column cell."""
+    if entry.work_dir is None:
+        return ""
     if entry.commits_ahead is None:
-        return "  [not pushed]"
+        return "[not pushed]"
     if entry.commits_ahead == 0:
-        return "  [up to date]"
-    return f"  [{entry.commits_ahead} unpushed]"
+        return "[up to date]"
+    return f"[{entry.commits_ahead} unpushed]"
 
 
-def _format_agent_line(entry: AgentBoardEntry, section: BoardSection) -> list[str | tuple[Hashable, str]]:
-    """Build urwid text markup for a single agent line.
-
-    Shows: name, agent state, push status, PR info or create-PR link.
-    Muted agents show the same information but rendered entirely in gray.
-    """
-    state_attr = _get_state_attr(entry)
-    state_text = str(entry.state)
-    parts: list[str | tuple[Hashable, str]] = [
-        f"  {entry.name:<24}",
-    ]
-    if state_attr:
-        parts.append((state_attr, state_text))
-    else:
-        parts.append(state_text)
-
-    # Push status for local agents
-    if entry.work_dir is not None:
-        parts.append(_format_push_status(entry))
-
+def _get_pr_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the PR column cell."""
     if entry.pr is not None:
-        parts.append(f"  PR #{entry.pr.number}")
-        parts.extend(_format_check_markup(entry))
-        parts.append(f"  {entry.pr.url}")
-    elif entry.create_pr_url is not None:
-        parts.append(f"  create PR: {entry.create_pr_url}")
+        return f"#{entry.pr.number}"
+    return ""
 
-    # For muted agents, flatten everything to gray
+
+def _get_link_cell_text(entry: AgentBoardEntry) -> str:
+    """Get plain text for the link column cell."""
+    if entry.pr is not None:
+        return entry.pr.url
+    if entry.create_pr_url is not None:
+        return entry.create_pr_url
+    return ""
+
+
+class _ColumnDef(NamedTuple):
+    name: str
+    header: str
+    text_fn: Callable[[AgentBoardEntry], str]
+    markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
+    flexible: bool
+
+
+# Single source of truth for all board column definitions (order matters)
+_BOARD_COLUMN_DEFS: list[_ColumnDef] = [
+    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text, flexible=False),
+    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup, flexible=False),
+    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text, flexible=False),
+    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text, flexible=False),
+    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup, flexible=False),
+    _ColumnDef("link", "LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
+]
+
+
+def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[str, int]:
+    """Compute column widths based on content, like tabulate auto-sizing.
+
+    Each column is sized to fit the widest value (or header), with the
+    last column (link) left flexible to fill remaining terminal space.
+    """
+    # For each fixed-width column, take the wider of the header and the widest cell value
+    return {
+        defn.name: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries))
+        for defn in _BOARD_COLUMN_DEFS
+        if not defn.flexible
+    }
+
+
+def _build_column_header(widths: dict[str, int]) -> Columns:
+    """Build the column header row for the board."""
+    cols: list[tuple[int, Text] | Text] = []
+    for defn in _BOARD_COLUMN_DEFS:
+        if defn.flexible:
+            cols.append(Text(defn.header))
+        else:
+            cols.append((widths[defn.name], Text(defn.header)))
+    return Columns(cols, dividechars=_COL_DIVIDER_CHARS)
+
+
+def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict[str, int]) -> _SelectableRow:
+    """Build a columnar urwid widget for a single agent row.
+
+    Muted agents are rendered entirely in gray.
+    """
+    raw_markup = {defn.name: defn.markup_fn(entry) for defn in _BOARD_COLUMN_DEFS}
+
+    # Muted agents: flatten all markup to gray
     if section == BoardSection.MUTED:
-        plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in parts)
-        return [("muted", plain)]
+        cell_markup = {k: ("muted", v[1] if isinstance(v, tuple) else v) for k, v in raw_markup.items()}
+    else:
+        cell_markup = raw_markup
 
-    return parts
+    cols: list[tuple[int, Text] | Text] = []
+    for defn in _BOARD_COLUMN_DEFS:
+        widget = Text(cell_markup[defn.name])
+        if defn.flexible:
+            cols.append(widget)
+        else:
+            cols.append((widths[defn.name], widget))
+    return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
@@ -763,18 +845,21 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
 @pure
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
-) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider], dict[int, AgentBoardEntry]]:
+) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
 
     Returns (walker, index_to_entry) where index_to_entry maps list walker
     indices to the AgentBoardEntry for selectable rows.
     """
     index_to_entry: dict[int, AgentBoardEntry] = {}
-    walker: SimpleFocusListWalker[AttrMap | Text | Divider] = SimpleFocusListWalker([])
+    walker: SimpleFocusListWalker[AttrMap | Text | Divider | Columns] = SimpleFocusListWalker([])
 
     if snapshot is None:
         walker.append(Text("Loading..."))
         return walker, index_to_entry
+
+    # Compute column widths from all entries (content-aware sizing)
+    col_widths = _compute_board_column_widths(snapshot.entries)
 
     # Classify entries into sections
     by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
@@ -789,7 +874,10 @@ def _build_board_widgets(
         if not entries:
             continue
 
-        if has_content:
+        # Add column header before the first section
+        if not has_content:
+            walker.append(_build_column_header(col_widths))
+        else:
             walker.append(Divider())
 
         if section == BoardSection.STILL_COOKING and not snapshot.prs_loaded:
@@ -804,8 +892,7 @@ def _build_board_widgets(
         has_content = True
 
         for entry in entries:
-            markup = _format_agent_line(entry, section)
-            item = _SelectableText(markup)
+            item = _build_agent_row(entry, section, col_widths)
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
             for attr in _AGENT_LINE_ATTRS:

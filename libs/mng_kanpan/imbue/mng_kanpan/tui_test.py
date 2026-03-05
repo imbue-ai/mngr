@@ -1,4 +1,5 @@
 from urwid.widget.attr_map import AttrMap
+from urwid.widget.columns import Columns
 from urwid.widget.text import Text
 
 from imbue.mng.primitives import AgentLifecycleState
@@ -11,24 +12,31 @@ from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 
 
+def _text_from_widget(widget: Text) -> str:
+    """Extract plain text content from a single Text widget."""
+    raw = widget.text
+    if isinstance(raw, str):
+        return raw
+    parts: list[str] = []
+    for seg in raw:
+        if isinstance(seg, tuple):
+            parts.append(str(seg[1]))
+        else:
+            parts.append(str(seg))
+    return "".join(parts)
+
+
 def _extract_text(walker: list[object]) -> list[str]:
-    """Extract plain text from all Text widgets in a walker."""
+    """Extract plain text from all Text and Columns widgets in a walker."""
     texts: list[str] = []
     for widget in walker:
         inner = widget.original_widget if isinstance(widget, AttrMap) else widget
-        if not isinstance(inner, Text):
-            continue
-        raw = inner.text
-        if isinstance(raw, str):
-            texts.append(raw)
-        else:
-            parts: list[str] = []
-            for seg in raw:
-                if isinstance(seg, tuple):
-                    parts.append(str(seg[1]))
-                else:
-                    parts.append(str(seg))
-            texts.append("".join(parts))
+        if isinstance(inner, Text):
+            texts.append(_text_from_widget(inner))
+        elif isinstance(inner, Columns):
+            # Columns contains (options, widget) pairs in .contents
+            cell_texts = [_text_from_widget(child) for child, _options in inner.contents if isinstance(child, Text)]
+            texts.append(" ".join(cell_texts))
     return texts
 
 
