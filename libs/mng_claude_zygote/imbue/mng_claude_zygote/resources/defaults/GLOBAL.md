@@ -10,7 +10,7 @@ This repository defines the configuration, prompts, and skills for all of the ro
 
 - `GLOBAL.md` - this file. Shared instructions for all agent roles
 - `settings.json` - shared Claude Code settings for all agents (symlinked as `.claude/settings.json`).
-- `memory/` - shared memory directory accessible to all agents (symlinked into Claude's project memory).
+- `memory/` - shared memory directory accessible to all agents (synced into Claude's project memory via hooks).
 - `talking/` - the talking agent role (user-facing conversation voice).
     - `talking/PROMPT.md` - prompt for the talking agent (used as the system prompt for the `llm` tool).
     - The talking role CANNOT have `skills/` or `settings.json` because it runs via the `llm` tool, not Claude Code.

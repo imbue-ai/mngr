@@ -44,11 +44,11 @@ from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
 from imbue.mng_claude_zygote.provisioning import compute_claude_project_dir_name
 from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
 from imbue.mng_claude_zygote.provisioning import create_event_log_directories
-from imbue.mng_claude_zygote.provisioning import link_memory_directory
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
+from imbue.mng_claude_zygote.provisioning import setup_memory_directory
 from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_messages
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
@@ -279,21 +279,27 @@ def test_provisioning_creates_symlinks(
 
 
 @pytest.mark.timeout(30)
-def test_provisioning_links_memory_directory(
+@pytest.mark.rsync
+def test_provisioning_syncs_memory_directory(
     temp_git_repo: Path,
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that provisioning creates the memory symlink into Claude project directory."""
-    link_memory_directory(cast(Any, local_shell_host), temp_git_repo, _DEFAULT_PROVISIONING)
-
+    """Verify that provisioning creates both memory dirs and syncs initial content."""
+    abs_work_dir = str(temp_git_repo.resolve())
+    # Create a file in work_dir/memory/ to verify initial sync
     memory_dir = temp_git_repo / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    (memory_dir / "test.md").write_text("hello")
+
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, abs_work_dir, _DEFAULT_PROVISIONING)
+
     assert memory_dir.is_dir(), "memory dir should exist"
 
-    abs_work_dir = str(temp_git_repo.resolve())
     project_dir_name = compute_claude_project_dir_name(abs_work_dir)
     project_memory = Path.home() / ".claude" / "projects" / project_dir_name / "memory"
-    assert project_memory.is_symlink(), "Claude project memory should be a symlink"
-    assert project_memory.resolve() == memory_dir.resolve()
+    assert project_memory.is_dir(), "Claude project memory should be a real directory"
+    assert not project_memory.is_symlink(), "Claude project memory should NOT be a symlink"
+    assert (project_memory / "test.md").read_text() == "hello"
 
 
 # -- Chat script tests --

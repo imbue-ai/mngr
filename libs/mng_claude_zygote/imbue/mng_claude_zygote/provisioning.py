@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import Final
 from uuid import uuid4
 
@@ -735,23 +736,15 @@ def compute_claude_project_dir_name(work_dir_abs: str) -> str:
     return work_dir_abs.replace("/", "-").replace(".", "-")
 
 
-def link_memory_directory(
+def resolve_work_dir_abs(
     host: OnlineHostInterface,
     work_dir: Path,
     settings: ProvisioningSettings,
-) -> None:
-    """Symlink the memory directory into the Claude project memory path.
+) -> str:
+    """Resolve the absolute path of work_dir on the host.
 
-    Creates:
-    - <work_dir>/memory/ (if it doesn't exist)
-    - ~/.claude/projects/<project_name>/memory/ -> <work_dir>/memory/
-
-    This ensures all Claude agents share the same project memory, and that
-    memories are version-controlled in the agent's git repo.
+    Returns the absolute path as a string.
     """
-    memory_dir = work_dir / "memory"
-
-    # Get the absolute path of work_dir on the host
     abs_result = _execute_with_timing(
         host,
         f"cd {shlex.quote(str(work_dir))} && pwd",
@@ -761,33 +754,100 @@ def link_memory_directory(
     )
     if not abs_result.success:
         raise RuntimeError(f"Failed to resolve absolute path of {work_dir}: {abs_result.stderr}")
-    abs_work_dir = abs_result.stdout.strip()
-    project_dir_name = compute_claude_project_dir_name(abs_work_dir)
+    return abs_result.stdout.strip()
 
-    # Create the memory directory
+
+def setup_memory_directory(
+    host: OnlineHostInterface,
+    work_dir: Path,
+    work_dir_abs: str,
+    settings: ProvisioningSettings,
+) -> None:
+    """Set up the memory directory and initial sync into the Claude project memory path.
+
+    Creates:
+    - <work_dir>/memory/ (if it doesn't exist)
+    - ~/.claude/projects/<project_name>/memory/ (real directory, not symlink)
+    - Initial rsync of contents from work_dir/memory/ to claude project memory/
+
+    Memory sync hooks (added separately via build_memory_sync_hooks_config) keep
+    the two directories in sync during agent operation: PreToolUse syncs from the
+    version-controlled work_dir into Claude's project memory, and PostToolUse
+    syncs back so that any memory Claude wrote is captured in version control.
+    """
+    memory_dir = work_dir / "memory"
+    project_dir_name = compute_claude_project_dir_name(work_dir_abs)
+
+    # Create both memory directories.
+    # Remove any existing symlink at the project memory path (from old provisioning)
+    # before creating a real directory.
+    quoted_project_dir_name = shlex.quote(project_dir_name)
+    project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
+    cmd = f"mkdir -p {shlex.quote(str(memory_dir))} && rm -f {project_memory_shell} && mkdir -p {project_memory_shell}"
     _execute_with_timing(
         host,
-        f"mkdir -p {shlex.quote(str(memory_dir))}",
+        cmd,
         hard_timeout=settings.fs_hard_timeout_seconds,
         warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir memory",
+        label="mkdir memory dirs",
     )
 
-    # Create the Claude project directory and symlink memory into it.
-    # Use $HOME instead of ~ because ~ is not expanded inside single quotes
-    # (which shlex.quote produces), but $HOME expands in double quotes.
-    quoted_project_dir_name = shlex.quote(project_dir_name)
-    project_dir_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}'
-    memory_link_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
-
-    cmd = f"mkdir -p {project_dir_shell} && ln -sfn {shlex.quote(str(memory_dir))} {memory_link_shell}"
-    with log_span("Linking memory: $HOME/.claude/projects/{}/memory -> {}", project_dir_name, memory_dir):
+    # Initial sync: copy existing version-controlled memory into Claude's project memory.
+    # Trailing slashes on both paths ensure rsync copies contents, not the directory itself.
+    sync_cmd = f"rsync -a --delete {shlex.quote(str(memory_dir))}/ {project_memory_shell}/"
+    with log_span("Initial memory sync: {} -> $HOME/.claude/projects/{}/memory", memory_dir, project_dir_name):
         result = _execute_with_timing(
             host,
-            cmd,
+            sync_cmd,
             hard_timeout=settings.fs_hard_timeout_seconds,
             warn_threshold=settings.fs_warn_threshold_seconds,
-            label="link memory",
+            label="initial memory sync",
         )
         if not result.success:
-            raise RuntimeError(f"Failed to link memory directory: {result.stderr}")
+            raise RuntimeError(f"Failed to sync memory directory: {result.stderr}")
+
+
+def build_memory_sync_hooks_config(work_dir_abs: str) -> dict[str, Any]:
+    """Build Claude hooks config for syncing memory between work_dir and Claude project memory.
+
+    Returns a hooks config dict with PreToolUse and PostToolUse entries that
+    rsync the memory directory in the appropriate direction:
+    - PreToolUse: work_dir/memory/ -> ~/.claude/projects/<project>/memory/
+      (ensures Claude sees the latest version-controlled memory)
+    - PostToolUse: ~/.claude/projects/<project>/memory/ -> work_dir/memory/
+      (captures any memory Claude wrote back into version control)
+    """
+    project_dir_name = compute_claude_project_dir_name(work_dir_abs)
+    quoted_work_memory = shlex.quote(f"{work_dir_abs}/memory")
+    quoted_project_dir_name = shlex.quote(project_dir_name)
+    project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
+
+    # Pre: sync version-controlled memory INTO Claude's project memory
+    pre_cmd = f"rsync -a --delete {quoted_work_memory}/ {project_memory_shell}/"
+    # Post: sync Claude's project memory BACK to version-controlled memory
+    post_cmd = f"rsync -a --delete {project_memory_shell}/ {quoted_work_memory}/"
+
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": pre_cmd,
+                        }
+                    ],
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": post_cmd,
+                        }
+                    ],
+                }
+            ],
+        }
+    }

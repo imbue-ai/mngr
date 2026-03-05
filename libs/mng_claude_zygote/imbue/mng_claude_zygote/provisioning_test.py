@@ -21,6 +21,7 @@ from imbue.mng_claude_zygote.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
 from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
 from imbue.mng_claude_zygote.provisioning import _is_recursive_plugin_registered
+from imbue.mng_claude_zygote.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_zygote.provisioning import compute_claude_project_dir_name
 from imbue.mng_claude_zygote.provisioning import configure_llm_user_path
 from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
@@ -28,11 +29,12 @@ from imbue.mng_claude_zygote.provisioning import create_daily_conversation
 from imbue.mng_claude_zygote.provisioning import create_event_log_directories
 from imbue.mng_claude_zygote.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_zygote.provisioning import install_llm_toolchain
-from imbue.mng_claude_zygote.provisioning import link_memory_directory
 from imbue.mng_claude_zygote.provisioning import load_zygote_resource
 from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
 from imbue.mng_claude_zygote.provisioning import provision_default_content
 from imbue.mng_claude_zygote.provisioning import provision_llm_tools
+from imbue.mng_claude_zygote.provisioning import resolve_work_dir_abs
+from imbue.mng_claude_zygote.provisioning import setup_memory_directory
 from imbue.mng_claude_zygote.provisioning import validate_talking_role_constraints
 from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
 from imbue.mng_claude_zygote.resources import context_tool as context_tool_module
@@ -349,45 +351,99 @@ def test_compute_claude_project_dir_name_replaces_dots() -> None:
     assert compute_claude_project_dir_name("/home/user/.changelings/agent") == "-home-user--changelings-agent"
 
 
-def test_link_memory_directory_creates_memory_dir() -> None:
+def test_setup_memory_directory_creates_both_dirs() -> None:
     host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
+    setup_memory_directory(
+        cast(Any, host),
+        Path("/home/user/.changelings/agent"),
+        "/home/user/.changelings/agent",
+        _DEFAULT_PROVISIONING,
+    )
 
     assert any("mkdir" in c and "/memory" in c for c in host.executed_commands)
+    assert any("mkdir" in c and ".claude/projects" in c for c in host.executed_commands)
 
 
-def test_link_memory_directory_creates_claude_project_dir_with_home_var() -> None:
+def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
     host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
+    setup_memory_directory(
+        cast(Any, host),
+        Path("/home/user/.changelings/agent"),
+        "/home/user/.changelings/agent",
+        _DEFAULT_PROVISIONING,
+    )
 
     # Must use $HOME (not ~) so tilde expansion works inside quotes
     mkdir_cmds = [c for c in host.executed_commands if "mkdir" in c and ".claude/projects" in c]
-    assert len(mkdir_cmds) == 1
+    assert len(mkdir_cmds) >= 1
     assert "$HOME" in mkdir_cmds[0]
     assert "-home-user--changelings-agent" in mkdir_cmds[0]
 
 
-def test_link_memory_directory_creates_symlink_with_correct_paths() -> None:
+def test_setup_memory_directory_rsyncs_initial_content() -> None:
     host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/.changelings/agent"), _DEFAULT_PROVISIONING)
+    setup_memory_directory(
+        cast(Any, host),
+        Path("/home/user/.changelings/agent"),
+        "/home/user/.changelings/agent",
+        _DEFAULT_PROVISIONING,
+    )
 
-    ln_cmds = [c for c in host.executed_commands if "ln -sfn" in c]
-    assert len(ln_cmds) == 1
-    # Symlink target should be the memory dir
-    assert "/memory" in ln_cmds[0]
-    # Symlink source should use $HOME for the Claude project dir
-    assert "$HOME/.claude/projects/" in ln_cmds[0]
-    assert "-home-user--changelings-agent" in ln_cmds[0]
+    rsync_cmds = [c for c in host.executed_commands if "rsync" in c]
+    assert len(rsync_cmds) == 1
+    assert "/memory/" in rsync_cmds[0]
+    assert "$HOME/.claude/projects/" in rsync_cmds[0]
 
 
-def test_link_memory_directory_does_not_use_literal_tilde() -> None:
+def test_setup_memory_directory_removes_old_symlink() -> None:
+    """Verify that rm -f is used to remove any old symlink before mkdir."""
+    host = StubHost()
+    setup_memory_directory(
+        cast(Any, host),
+        Path("/home/user/.changelings/agent"),
+        "/home/user/.changelings/agent",
+        _DEFAULT_PROVISIONING,
+    )
+
+    mkdir_cmds = [c for c in host.executed_commands if "rm -f" in c and ".claude/projects" in c]
+    assert len(mkdir_cmds) >= 1
+
+
+def test_setup_memory_directory_does_not_use_literal_tilde() -> None:
     """Verify that ~ is never used in paths (it doesn't expand inside single quotes)."""
     host = StubHost()
-    link_memory_directory(cast(Any, host), Path("/home/user/project"), _DEFAULT_PROVISIONING)
+    setup_memory_directory(
+        cast(Any, host),
+        Path("/home/user/project"),
+        "/home/user/project",
+        _DEFAULT_PROVISIONING,
+    )
 
     for cmd in host.executed_commands:
         if ".claude/projects" in cmd:
             assert "~" not in cmd, f"Found literal ~ in command (won't expand in quotes): {cmd}"
+
+
+def test_build_memory_sync_hooks_config_has_pre_and_post() -> None:
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    assert "PreToolUse" in config["hooks"]
+    assert "PostToolUse" in config["hooks"]
+
+
+def test_build_memory_sync_hooks_config_pre_syncs_to_project() -> None:
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    pre_cmd = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    # Pre hook should sync FROM work_dir TO claude project
+    assert "/home/user/.changelings/agent/memory" in pre_cmd
+    assert "$HOME/.claude/projects/" in pre_cmd
+
+
+def test_build_memory_sync_hooks_config_post_syncs_to_work_dir() -> None:
+    config = build_memory_sync_hooks_config("/home/user/.changelings/agent")
+    post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    # Post hook should sync FROM claude project TO work_dir
+    assert "/home/user/.changelings/agent/memory" in post_cmd
+    assert "$HOME/.claude/projects/" in post_cmd
 
 
 # -- Provisioning function tests (using _StubHost) --
@@ -1307,7 +1363,7 @@ def test_install_llm_toolchain_raises_on_plugin_install_failure_live_chat() -> N
         install_llm_toolchain(cast(Any, host), _DEFAULT_PROVISIONING)
 
 
-def test_link_memory_directory_raises_on_resolve_failure() -> None:
+def test_resolve_work_dir_abs_raises_on_failure() -> None:
     """Verify RuntimeError when work_dir resolution fails."""
     host = StubHost(
         command_results={
@@ -1315,18 +1371,18 @@ def test_link_memory_directory_raises_on_resolve_failure() -> None:
         }
     )
     with pytest.raises(RuntimeError, match="Failed to resolve absolute path"):
-        link_memory_directory(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+        resolve_work_dir_abs(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
 
-def test_link_memory_directory_raises_on_link_failure() -> None:
-    """Verify RuntimeError when memory symlink creation fails."""
+def test_setup_memory_directory_raises_on_sync_failure() -> None:
+    """Verify RuntimeError when memory rsync fails."""
     host = StubHost(
         command_results={
-            "ln -sfn": StubCommandResult(success=False, stderr="link failed"),
+            "rsync": StubCommandResult(success=False, stderr="sync failed"),
         }
     )
-    with pytest.raises(RuntimeError, match="Failed to link memory directory"):
-        link_memory_directory(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    with pytest.raises(RuntimeError, match="Failed to sync memory directory"):
+        setup_memory_directory(cast(Any, host), Path("/test/work"), "/test/work", _DEFAULT_PROVISIONING)
 
 
 def test_provision_llm_tools_uses_correct_mode() -> None:
