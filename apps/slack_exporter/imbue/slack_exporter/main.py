@@ -28,14 +28,14 @@ def _parse_channel_spec(spec: str) -> ChannelConfig:
 def main() -> None:
     """Entry point for the slack-exporter CLI."""
     parser = argparse.ArgumentParser(
-        description="Export Slack channel messages to a JSONL file using latchkey for authentication",
+        description="Export Slack channel messages, channels, and users to JSONL files using latchkey",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   slack-exporter
   slack-exporter --channels general random
   slack-exporter --channels "general:2024-01-01" "random"
-  slack-exporter --since 2024-06-01 --output my_export.jsonl
+  slack-exporter --since 2024-06-01 --output-dir my_export
         """,
     )
 
@@ -52,10 +52,10 @@ Examples:
         help="Default oldest date for messages (ISO format, e.g. 2024-01-01). Default: 2024-01-01",
     )
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=Path,
-        default=Path("slack_export.jsonl"),
-        help="Path to JSONL output file (default: slack_export.jsonl)",
+        default=Path("slack_export"),
+        help="Directory for output data (default: slack_export/)",
     )
     parser.add_argument(
         "-v",
@@ -77,7 +77,7 @@ Examples:
     settings = ExporterSettings(
         channels=channel_configs,
         default_oldest=default_oldest,
-        output_path=args.output,
+        output_dir=args.output_dir,
     )
 
     try:

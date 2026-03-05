@@ -17,3 +17,9 @@ class SlackMessageTimestamp(NonEmptyStr):
     """A Slack message timestamp used for pagination (e.g. '1234567890.123456')."""
 
     ...
+
+
+class SlackUserId(NonEmptyStr):
+    """A Slack user ID (e.g. 'U01ABCDEF')."""
+
+    ...

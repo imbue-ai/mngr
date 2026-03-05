@@ -1,97 +1,112 @@
 import json
 from pathlib import Path
 
-from imbue.slack_exporter.data_types import EventKind
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
 from imbue.slack_exporter.primitives import SlackMessageTimestamp
-from imbue.slack_exporter.store import append_records
-from imbue.slack_exporter.store import load_existing_state
+from imbue.slack_exporter.primitives import SlackUserId
+from imbue.slack_exporter.store import load_existing_channels
+from imbue.slack_exporter.store import load_existing_message_state
+from imbue.slack_exporter.store import load_existing_user_ids
+from imbue.slack_exporter.store import save_channels
+from imbue.slack_exporter.store import save_messages
+from imbue.slack_exporter.store import save_users
 from imbue.slack_exporter.testing import make_stored_channel_info
 from imbue.slack_exporter.testing import make_stored_message
+from imbue.slack_exporter.testing import make_stored_user
 
 
-def test_load_existing_state_returns_empty_when_file_does_not_exist(temp_output_path: Path) -> None:
-    state_by_id, id_by_name = load_existing_state(temp_output_path)
-    assert state_by_id == {}
-    assert id_by_name == {}
+def test_load_existing_channels_returns_empty_when_dir_missing(temp_output_dir: Path) -> None:
+    result = load_existing_channels(temp_output_dir)
+    assert result == {}
 
 
-def test_load_existing_state_loads_messages_and_tracks_latest_timestamp(temp_output_path: Path) -> None:
+def test_load_existing_channels_returns_latest_per_id(temp_output_dir: Path) -> None:
+    info1 = make_stored_channel_info("C123", "general")
+    info2 = make_stored_channel_info("C123", "general-renamed")
+    save_channels(temp_output_dir, [info1, info2])
+
+    result = load_existing_channels(temp_output_dir)
+    assert len(result) == 1
+    assert result[SlackChannelId("C123")].channel_name == SlackChannelName("general-renamed")
+
+
+def test_load_existing_message_state_returns_empty_when_missing(temp_output_dir: Path) -> None:
+    state, keys = load_existing_message_state(temp_output_dir)
+    assert state == {}
+    assert keys == set()
+
+
+def test_load_existing_message_state_tracks_latest_timestamp(temp_output_dir: Path) -> None:
     msg1 = make_stored_message(ts="1700000000.000001")
     msg2 = make_stored_message(ts="1700000000.000009")
-    temp_output_path.write_text(msg1.model_dump_json() + "\n" + msg2.model_dump_json() + "\n")
+    save_messages(temp_output_dir, [msg1, msg2])
 
-    state_by_id, id_by_name = load_existing_state(temp_output_path)
+    state, keys = load_existing_message_state(temp_output_dir)
 
-    assert SlackChannelId("C123") in state_by_id
-    state = state_by_id[SlackChannelId("C123")]
-    assert state.latest_message_timestamp == SlackMessageTimestamp("1700000000.000009")
-    assert id_by_name[SlackChannelName("general")] == SlackChannelId("C123")
+    assert SlackChannelId("C123") in state
+    assert state[SlackChannelId("C123")].latest_message_timestamp == SlackMessageTimestamp("1700000000.000009")
+    assert len(keys) == 2
 
 
-def test_load_existing_state_loads_channel_info_records(temp_output_path: Path) -> None:
+def test_load_existing_user_ids_returns_empty_when_missing(temp_output_dir: Path) -> None:
+    result = load_existing_user_ids(temp_output_dir)
+    assert result == set()
+
+
+def test_load_existing_user_ids_returns_stored_ids(temp_output_dir: Path) -> None:
+    user1 = make_stored_user("U111")
+    user2 = make_stored_user("U222")
+    save_users(temp_output_dir, [user1, user2])
+
+    result = load_existing_user_ids(temp_output_dir)
+    assert result == {SlackUserId("U111"), SlackUserId("U222")}
+
+
+def test_save_channels_creates_directory_structure(temp_output_dir: Path) -> None:
     info = make_stored_channel_info()
-    temp_output_path.write_text(info.model_dump_json() + "\n")
+    save_channels(temp_output_dir, [info])
 
-    state_by_id, id_by_name = load_existing_state(temp_output_path)
-
-    assert state_by_id == {}
-    assert id_by_name[SlackChannelName("general")] == SlackChannelId("C123")
-
-
-def test_load_existing_state_skips_malformed_lines(temp_output_path: Path) -> None:
-    msg = make_stored_message()
-    temp_output_path.write_text("not valid json\n" + msg.model_dump_json() + "\n")
-
-    state_by_id, _id_by_name = load_existing_state(temp_output_path)
-    assert SlackChannelId("C123") in state_by_id
-
-
-def test_load_existing_state_handles_multiple_channels(temp_output_path: Path) -> None:
-    msg1 = make_stored_message(channel_id="C123", channel_name="general", ts="1700000000.000001")
-    msg2 = make_stored_message(channel_id="C456", channel_name="random", ts="1700000000.000002")
-    temp_output_path.write_text(msg1.model_dump_json() + "\n" + msg2.model_dump_json() + "\n")
-
-    state_by_id, id_by_name = load_existing_state(temp_output_path)
-
-    assert len(state_by_id) == 2
-    assert id_by_name[SlackChannelName("general")] == SlackChannelId("C123")
-    assert id_by_name[SlackChannelName("random")] == SlackChannelId("C456")
-
-
-def test_append_records_creates_file_and_appends(temp_output_path: Path) -> None:
-    msg = make_stored_message()
-    append_records(temp_output_path, [msg])
-
-    lines = temp_output_path.read_text().strip().splitlines()
+    expected_path = temp_output_dir / "channels" / "events.jsonl"
+    assert expected_path.exists()
+    lines = expected_path.read_text().strip().splitlines()
     assert len(lines) == 1
     parsed = json.loads(lines[0])
-    assert parsed["kind"] == EventKind.MESSAGE
     assert parsed["channel_id"] == "C123"
 
 
-def test_append_records_appends_to_existing_file(temp_output_path: Path) -> None:
+def test_save_messages_creates_directory_structure(temp_output_dir: Path) -> None:
+    msg = make_stored_message()
+    save_messages(temp_output_dir, [msg])
+
+    expected_path = temp_output_dir / "messages" / "events.jsonl"
+    assert expected_path.exists()
+    lines = expected_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+
+
+def test_save_users_creates_directory_structure(temp_output_dir: Path) -> None:
+    user = make_stored_user()
+    save_users(temp_output_dir, [user])
+
+    expected_path = temp_output_dir / "users" / "events.jsonl"
+    assert expected_path.exists()
+    lines = expected_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+
+
+def test_save_appends_to_existing(temp_output_dir: Path) -> None:
     msg1 = make_stored_message(ts="1700000000.000001")
-    append_records(temp_output_path, [msg1])
+    save_messages(temp_output_dir, [msg1])
 
     msg2 = make_stored_message(ts="1700000000.000002")
-    append_records(temp_output_path, [msg2])
+    save_messages(temp_output_dir, [msg2])
 
-    lines = temp_output_path.read_text().strip().splitlines()
+    expected_path = temp_output_dir / "messages" / "events.jsonl"
+    lines = expected_path.read_text().strip().splitlines()
     assert len(lines) == 2
 
 
-def test_append_records_does_nothing_for_empty_list(temp_output_path: Path) -> None:
-    append_records(temp_output_path, [])
-    assert not temp_output_path.exists()
-
-
-def test_append_records_appends_channel_info(temp_output_path: Path) -> None:
-    info = make_stored_channel_info()
-    append_records(temp_output_path, [info])
-
-    lines = temp_output_path.read_text().strip().splitlines()
-    assert len(lines) == 1
-    parsed = json.loads(lines[0])
-    assert parsed["kind"] == EventKind.CHANNEL_INFO
+def test_save_does_nothing_for_empty_list(temp_output_dir: Path) -> None:
+    save_messages(temp_output_dir, [])
+    assert not (temp_output_dir / "messages" / "events.jsonl").exists()

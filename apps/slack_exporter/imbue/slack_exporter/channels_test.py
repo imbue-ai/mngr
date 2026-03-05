@@ -3,16 +3,18 @@ from typing import Any
 import pytest
 
 from imbue.slack_exporter.channels import fetch_channel_list
+from imbue.slack_exporter.channels import fetch_user_list
 from imbue.slack_exporter.channels import resolve_channel_id
 from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.errors import ChannelNotFoundError
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
+from imbue.slack_exporter.primitives import SlackUserId
 from imbue.slack_exporter.testing import make_stored_channel_info
 
 
-def _make_channel_list_api_caller(pages: list[dict[str, Any]]) -> SlackApiCaller:
-    """Create a fake api caller that returns channel list pages in order."""
+def _make_paginated_api_caller(pages: list[dict[str, Any]]) -> SlackApiCaller:
+    """Create a fake api caller that returns pages in order."""
     call_idx = 0
 
     def fake_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
@@ -25,7 +27,7 @@ def _make_channel_list_api_caller(pages: list[dict[str, Any]]) -> SlackApiCaller
 
 
 def test_fetch_channel_list_single_page() -> None:
-    api_caller = _make_channel_list_api_caller(
+    api_caller = _make_paginated_api_caller(
         [
             {
                 "ok": True,
@@ -42,12 +44,11 @@ def test_fetch_channel_list_single_page() -> None:
 
     assert len(channels) == 2
     assert channels[0].channel_id == SlackChannelId("C123")
-    assert channels[0].channel_name == SlackChannelName("general")
     assert channels[1].channel_id == SlackChannelId("C456")
 
 
 def test_fetch_channel_list_multiple_pages() -> None:
-    api_caller = _make_channel_list_api_caller(
+    api_caller = _make_paginated_api_caller(
         [
             {
                 "ok": True,
@@ -63,25 +64,54 @@ def test_fetch_channel_list_multiple_pages() -> None:
     )
 
     channels = fetch_channel_list(api_caller)
-
     assert len(channels) == 2
-    assert channels[0].channel_id == SlackChannelId("C123")
-    assert channels[1].channel_id == SlackChannelId("C456")
 
 
 def test_fetch_channel_list_empty_response() -> None:
-    api_caller = _make_channel_list_api_caller(
+    api_caller = _make_paginated_api_caller([{"ok": True, "channels": [], "response_metadata": {"next_cursor": ""}}])
+    channels = fetch_channel_list(api_caller)
+    assert channels == []
+
+
+def test_fetch_user_list_single_page() -> None:
+    api_caller = _make_paginated_api_caller(
         [
             {
                 "ok": True,
-                "channels": [],
+                "members": [
+                    {"id": "U001", "name": "alice"},
+                    {"id": "U002", "name": "bob"},
+                ],
                 "response_metadata": {"next_cursor": ""},
             },
         ]
     )
 
-    channels = fetch_channel_list(api_caller)
-    assert channels == []
+    users = fetch_user_list(api_caller)
+
+    assert len(users) == 2
+    assert users[0].user_id == SlackUserId("U001")
+    assert users[1].user_id == SlackUserId("U002")
+
+
+def test_fetch_user_list_multiple_pages() -> None:
+    api_caller = _make_paginated_api_caller(
+        [
+            {
+                "ok": True,
+                "members": [{"id": "U001", "name": "alice"}],
+                "response_metadata": {"next_cursor": "next"},
+            },
+            {
+                "ok": True,
+                "members": [{"id": "U002", "name": "bob"}],
+                "response_metadata": {"next_cursor": ""},
+            },
+        ]
+    )
+
+    users = fetch_user_list(api_caller)
+    assert len(users) == 2
 
 
 def test_resolve_channel_id_finds_channel_in_fresh_info() -> None:

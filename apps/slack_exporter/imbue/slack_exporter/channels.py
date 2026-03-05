@@ -4,10 +4,12 @@ from datetime import timezone
 
 from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.data_types import StoredChannelInfo
+from imbue.slack_exporter.data_types import StoredUser
 from imbue.slack_exporter.errors import ChannelNotFoundError
 from imbue.slack_exporter.latchkey import extract_next_cursor
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
+from imbue.slack_exporter.primitives import SlackUserId
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,36 @@ def fetch_channel_list(api_caller: SlackApiCaller) -> list[StoredChannelInfo]:
 
     logger.info("Fetched %d channels from Slack", len(all_channels))
     return all_channels
+
+
+def fetch_user_list(api_caller: SlackApiCaller) -> list[StoredUser]:
+    """Fetch all users from Slack and return them as StoredUser records."""
+    all_users: list[StoredUser] = []
+    cursor: str | None = None
+    now = datetime.now(timezone.utc)
+
+    while True:
+        params: dict[str, str] = {"limit": "200"}
+        if cursor:
+            params["cursor"] = cursor
+
+        data = api_caller("users.list", params)
+
+        for user_raw in data.get("members", []):
+            user = StoredUser(
+                user_id=SlackUserId(user_raw["id"]),
+                fetched_at=now,
+                raw=user_raw,
+            )
+            all_users.append(user)
+
+        next_cursor = extract_next_cursor(data)
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    logger.info("Fetched %d users from Slack", len(all_users))
+    return all_users
 
 
 def resolve_channel_id(
