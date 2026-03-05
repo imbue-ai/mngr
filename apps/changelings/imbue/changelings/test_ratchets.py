@@ -32,7 +32,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(1))
+    rc.check_time_sleep(_DIR, snapshot(0))
 
 
 def test_prevent_global_keyword() -> None:

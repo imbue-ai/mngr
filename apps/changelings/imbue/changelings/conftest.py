@@ -5,7 +5,6 @@ sharing it reuse a single deployed agent, avoiding redundant deploy cycles.
 """
 
 import shutil
-import time
 from collections.abc import Generator
 from pathlib import Path
 from uuid import uuid4
@@ -16,22 +15,7 @@ from loguru import logger
 from imbue.changelings.testing import find_agent
 from imbue.changelings.testing import run_changeling
 from imbue.changelings.testing import run_mng
-
-
-def _wait_for_provisioning(work_dir: str, max_wait_seconds: float = 60.0) -> None:
-    """Wait for changeling provisioning to complete.
-
-    mng create runs provisioning in a background process (forked child)
-    when called with --no-connect. We poll for the .changelings/settings.toml
-    file that TestCoderAgent.provision() writes as its last step.
-    """
-    settings_path = Path(work_dir) / ".changelings" / "settings.toml"
-    deadline = time.monotonic() + max_wait_seconds
-    while time.monotonic() < deadline:
-        if settings_path.exists():
-            return
-        time.sleep(1.0)
-    raise AssertionError(f"Provisioning did not complete within {max_wait_seconds}s (waiting for {settings_path})")
+from imbue.mng.utils.polling import wait_for
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +49,13 @@ def deployed_test_coder() -> Generator[dict[str, object], None, None]:
     assert agent is not None, f"Agent {agent_name} not found in mng list"
 
     agent_id = str(agent["id"])
-    _wait_for_provisioning(str(agent["work_dir"]))
+    settings_path = Path(str(agent["work_dir"])) / ".changelings" / "settings.toml"
+    wait_for(
+        condition=settings_path.exists,
+        timeout=60.0,
+        poll_interval=1.0,
+        error_message=f"Provisioning did not complete within 60s (waiting for {settings_path})",
+    )
 
     try:
         yield agent
