@@ -9,10 +9,6 @@ from typing import Any
 
 from loguru import logger
 from pydantic import Field
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
@@ -26,6 +22,7 @@ from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
+from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import MngError
@@ -488,13 +485,6 @@ def _build_agent_details_from_offline_ref(
     )
 
 
-# retry exactly once if there is a HostConnectionError (hopefully we then simply load the offline version of the host)
-@retry(
-    retry=retry_if_exception_type(HostConnectionError),
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    reraise=True,
-)
 def _collect_and_emit_details_for_host(
     host_ref: DiscoveredHost,
     agent_refs: list[DiscoveredAgent],
@@ -524,9 +514,10 @@ def _collect_and_emit_details_for_host(
 
         # Fall back to per-field collection
         host = provider.get_host(host_ref.host_id)
-    except HostAuthenticationError:
+    except HostConnectionError as e:
+        logger.debug("Host {} unreachable, falling back to offline data: {}", host_ref.host_id, e)
         host = provider.to_offline_host(host_ref.host_id)
-        is_authentication_failure = True
+        is_authentication_failure = isinstance(e, HostAuthenticationError)
 
     # Build host details
     host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
@@ -606,7 +597,7 @@ def _process_host_with_error_handling(
             results_lock,
         )
 
-    except MngError as e:
+    except (MngError, BaseMngError) as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             raise
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
