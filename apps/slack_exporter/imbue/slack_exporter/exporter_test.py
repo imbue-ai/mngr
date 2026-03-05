@@ -52,7 +52,7 @@ def _make_mock_call_slack_api(
         elif method == "conversations.history":
             return history_response
         else:
-            raise ValueError(f"Unexpected method: {method}")
+            raise AssertionError(f"Unexpected method: {method}")
 
     return mock_call_slack_api
 
@@ -191,7 +191,7 @@ def test_run_export_incremental_resumes_from_latest(temp_output_path: Path) -> N
             assert query_params.get("inclusive") == "false"
             return history_response
         else:
-            raise ValueError(f"Unexpected method: {method}")
+            raise AssertionError(f"Unexpected method: {method}")
 
     settings = ExporterSettings(
         channels=(ChannelConfig(name=SlackChannelName("general")),),
