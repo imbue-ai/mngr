@@ -1,6 +1,6 @@
 [project]
 name = "mng"
-version = "0.1.5"
+version = "0.1.6"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.11"
 license = "MIT"
@@ -17,11 +17,11 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.5",
+    "imbue-common==0.1.6",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.5",
+    "concurrency-group==0.1.6",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker and modal because register_guards.py monkeypatches their
