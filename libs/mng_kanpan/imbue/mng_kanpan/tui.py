@@ -733,16 +733,16 @@ class _ColumnDef(NamedTuple):
     header: str
     text_fn: Callable[[AgentBoardEntry], str]
     markup_fn: Callable[[AgentBoardEntry], str | tuple[Hashable, str]]
-    flexible: bool = False
+    flexible: bool
 
 
 # Single source of truth for all board column definitions (order matters)
 _BOARD_COLUMN_DEFS: list[_ColumnDef] = [
-    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text),
-    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup),
-    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text),
-    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text),
-    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup),
+    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text, flexible=False),
+    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup, flexible=False),
+    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text, flexible=False),
+    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text, flexible=False),
+    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup, flexible=False),
     _ColumnDef("link", "LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
 ]
 
