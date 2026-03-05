@@ -41,6 +41,7 @@ class MessageCliOptions(CommonCliOptions):
     exclude: tuple[str, ...]
     stdin: bool
     message_content: str | None
+    provider: tuple[str, ...]
     on_error: str
     start: bool
 
@@ -96,6 +97,11 @@ class MessageCliOptions(CommonCliOptions):
     type=click.Choice(["abort", "continue"], case_sensitive=False),
     default="continue",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
+)
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Message only agents using specified provider (repeatable)",
 )
 @add_common_options
 @click.pass_context
@@ -159,6 +165,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
+            provider_names=opts.provider,
         )
         if result.failed_agents:
             ctx.exit(1)
@@ -173,6 +180,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         all_agents=opts.all_agents,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
+        provider_names=opts.provider,
     )
 
     _emit_output(result, output_opts)

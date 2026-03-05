@@ -60,6 +60,8 @@ def send_message_to_agents(
     on_success: Callable[[str], None] | None = None,
     # Optional callback invoked when message fails (agent_name, error)
     on_error: Callable[[str, str], None] | None = None,
+    # for making this a bit faster
+    provider_names: tuple[str, ...] | None = None,
 ) -> MessageResult:
     """Send a message to agents matching the specified criteria.
 
@@ -78,7 +80,7 @@ def send_message_to_agents(
 
     # Load all agents grouped by host
     with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx)
+        agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx, provider_names=provider_names)
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
