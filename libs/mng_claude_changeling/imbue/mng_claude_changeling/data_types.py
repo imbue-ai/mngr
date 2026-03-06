@@ -12,6 +12,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mng.primitives import AgentLifecycleState
 
 
 class ConversationId(NonEmptyStr):
@@ -79,8 +80,8 @@ class AgentStateTransitionEvent(EventEnvelope):
 
     agent_id: str
     agent_name: str
-    from_state: str
-    to_state: str
+    from_state: AgentLifecycleState
+    to_state: AgentLifecycleState
 
 
 class ChangelingEvent(EventEnvelope):
