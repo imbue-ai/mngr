@@ -45,7 +45,6 @@ from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import AgentNotFoundError
-from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.agent import AgentInterface
@@ -91,7 +90,6 @@ from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
-from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.name_generator import generate_agent_name
 
 
@@ -485,13 +483,9 @@ def create(ctx: click.Context, **kwargs) -> None:
     setup = _setup_create(mng_ctx, output_opts, opts, logging_config)
 
     # Create agent
-    result = _create_agent(mng_ctx, output_opts, opts, setup)
-    if result is not None:
-        create_result, connection_opts = result
-        _post_create(create_result, connection_opts, opts, mng_ctx)
-        _finish_create(create_result, setup, output_opts)
-    else:
-        _finish_create(None, setup, output_opts)
+    create_result, connection_opts = _create_agent(mng_ctx, output_opts, opts, setup)
+    _post_create(create_result, connection_opts, opts, mng_ctx)
+    _finish_create(create_result, setup, output_opts)
 
 
 class _CreateSetup(FrozenModel):
@@ -519,14 +513,6 @@ def _setup_create(
     # Validate that both --message and --message-file are not provided
     if opts.message is not None and opts.message_file is not None:
         raise UserInputError("Cannot provide both --message and --message-file")
-
-    # Early validation: --edit-message cannot be used with background creation
-    # Background creation happens when --no-connect
-    # We check this BEFORE creating the editor session to avoid starting an editor subprocess
-    # that would immediately need to be cleaned up (which causes race conditions and flaky tests)
-    if opts.edit_message:
-        if not opts.connect:
-            raise UserInputError("--edit-message cannot be used with background creation (--no-connect).")
 
     # Read message from file if --message-file is provided (used as initial content for editor if --edit-message)
     initial_message_content: str | None
@@ -581,7 +567,7 @@ def _create_agent(
     output_opts: OutputOptions,
     opts: CreateCliOptions,
     setup: _CreateSetup,
-) -> tuple[CreateAgentResult, ConnectionOptions] | None:
+) -> tuple[CreateAgentResult, ConnectionOptions]:
     """Parse opts, resolve host, create agent."""
     # Parse target host (existing or new)
     target_host = _parse_target_host(
@@ -668,46 +654,13 @@ def _create_agent(
             ),
         )
 
-    # When --no-connect, copy work_dir early (before forking to background) so that
-    # the caller can continue editing locally without changes being copied to the new agent.
-    is_work_dir_created: bool
-    early_created_branch_name: str | None = None
-    if not opts.connect and isinstance(resolved_target_host, OnlineHostInterface):
-        work_dir_result = resolved_target_host.create_agent_work_dir(
-            setup.source_location.host, setup.source_location.path, agent_opts
-        )
-        agent_opts = agent_opts.model_copy_update(
-            to_update(agent_opts.field_ref().target_path, work_dir_result.path),
-        )
-        early_created_branch_name = work_dir_result.created_branch_name
-        is_work_dir_created = True
-    else:
-        is_work_dir_created = False
-
-    # If --no-connect, run api_create in background
-    # Note: --edit-message incompatibility is validated early (before editor creation) to avoid
-    # starting an editor subprocess that would need to be cleaned up
-    if not opts.connect:
-        _create_agent_in_background(
-            setup.source_location,
-            resolved_target_host,
-            agent_opts,
-            mng_ctx,
-            is_work_dir_created,
-            output_opts,
-            created_branch_name=early_created_branch_name,
-        )
-        return None
-
-    # Call the API create function (synchronously)
+    # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
         create_result = api_create(
             source_location=setup.source_location,
             target_host=resolved_target_host,
             agent_options=agent_opts,
             mng_ctx=mng_ctx,
-            create_work_dir=not is_work_dir_created,
-            created_branch_name=early_created_branch_name,
         )
 
         # If --edit-message was used, wait for editor and send the message
@@ -742,7 +695,7 @@ def _post_create(
 
 
 def _finish_create(
-    result: CreateAgentResult | None,
+    result: CreateAgentResult,
     setup: _CreateSetup,
     output_opts: OutputOptions,
 ) -> None:
@@ -752,9 +705,6 @@ def _finish_create(
         setup.editor_session.cleanup()
     if LoggingSuppressor.is_suppressed():
         LoggingSuppressor.disable_and_replay(clear_screen=True)
-
-    if result is None:
-        return
 
     _output_result(result, output_opts)
 
@@ -814,58 +764,6 @@ def _handle_editor_message(
         logger.info("Sending edited message...")
         agent.send_message(edited_message)
         logger.debug("Message sent successfully")
-
-
-def _create_agent_in_background(
-    source_location: HostLocation,
-    target_host: OnlineHostInterface | NewHostOptions,
-    agent_options: CreateAgentOptions,
-    mng_ctx: MngContext,
-    is_work_dir_created: bool,
-    output_opts: OutputOptions,
-    created_branch_name: str | None = None,
-) -> None:
-    """Create an agent in a background process that continues after parent exits.
-
-    This function forks the current process. The parent exits immediately while
-    the child process continues to run api_create() in the background.
-    """
-    pid = os.fork()
-
-    if pid > 0:
-        # Parent process: output message and exit immediately
-        logger.info("Agent creation started in background (PID: {})", pid)
-        logger.info("Agent name: {}", agent_options.name)
-        return
-
-    # Child process: detach from parent and continue
-    try:
-        # Create a new session to detach from parent's terminal
-        os.setsid()
-
-        # Remove console handlers from loguru to prevent "I/O operation on closed file"
-        # errors when the parent's terminal closes. File logging continues to work.
-        remove_console_handlers()
-
-        # Call the API create function
-        create_result = api_create(
-            source_location=source_location,
-            target_host=target_host,
-            agent_options=agent_options,
-            mng_ctx=mng_ctx,
-            create_work_dir=not is_work_dir_created,
-            created_branch_name=created_branch_name,
-        )
-
-        # Output result
-        _output_result(create_result, output_opts)
-
-        # Exit the child process
-        os._exit(0)
-    except MngError as e:
-        # Log the error and exit with non-zero status
-        logger.error("Failed to create agent in background: {}", e)
-        os._exit(1)
 
 
 def _parse_project_name(source_location: HostLocation, opts: CreateCliOptions, mng_ctx: MngContext) -> str:

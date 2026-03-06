@@ -366,8 +366,8 @@ def capture_tmux_pane_contents(session_name: str) -> str:
 def wait_for_agent_session(session_name: str, timeout: float = 15.0) -> None:
     """Wait for an agent's tmux session to appear.
 
-    Use this after creating an agent with --no-connect, which creates agents
-    in a background process that may not have finished yet.
+    Use this after creating an agent with --no-connect in tests that invoke
+    the CLI via subprocess (where the session may take a moment to register).
     """
     wait_for(
         lambda: tmux_session_exists(session_name),
@@ -420,7 +420,7 @@ def create_test_agent_via_cli(
     )
     assert create_result.exit_code == 0, f"Create source failed with: {create_result.output}"
 
-    # --no-connect creates agents in the background, so wait for the session to appear
+    # Wait for the tmux session to appear
     wait_for(
         lambda: tmux_session_exists(session_name),
         timeout=15.0,

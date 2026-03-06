@@ -207,7 +207,7 @@ def test_prevent_pytest_mark_integration() -> None:
 
 
 def test_prevent_os_fork() -> None:
-    rc.check_os_fork(_DIR, snapshot(3))
+    rc.check_os_fork(_DIR, snapshot(2))
 
 
 def test_prevent_direct_subprocess_usage() -> None:

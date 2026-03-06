@@ -702,34 +702,6 @@ def test_edit_message_with_initial_content(
         )
 
 
-def test_edit_message_incompatible_with_background_creation(
-    cli_runner: CliRunner,
-    temp_work_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --edit-message cannot be used with background creation (--no-connect)."""
-    agent_name = f"test-edit-bg-{int(time.time())}"
-
-    result = cli_runner.invoke(
-        create,
-        [
-            "--name",
-            agent_name,
-            "--agent-cmd",
-            "sleep 123456",
-            "--edit-message",
-            "--source",
-            str(temp_work_dir),
-            "--no-connect",
-            "--no-ensure-clean",
-        ],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "--edit-message cannot be used with background creation" in result.output
-
-
 @pytest.mark.tmux
 def test_edit_message_empty_content_does_not_send(
     cli_runner: CliRunner,
