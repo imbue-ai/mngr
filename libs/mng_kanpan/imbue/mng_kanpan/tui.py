@@ -162,12 +162,7 @@ class _SelectableRow(Columns):
 
     Columns.selectable() checks children rather than _selectable, so we
     must override it explicitly to make the widget focusable in a ListBox.
-    Each row tracks its entry and section so it can update its own mark indicator.
     """
-
-    entry: AgentBoardEntry
-    section: BoardSection
-    name_text: Text
 
     def selectable(self) -> bool:
         return True
@@ -175,28 +170,6 @@ class _SelectableRow(Columns):
     def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
         """Pass all keys through (no keys are handled by this widget)."""
         return key
-
-    def set_mark(self, mark_key: str | None) -> None:
-        """Update the name cell to reflect the given mark key (or clear it)."""
-        name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(
-            self.entry, mark_key
-        )
-        if self.section == BoardSection.MUTED:
-            name_markup = _flatten_markup_to_muted(name_markup)
-        self.name_text.set_text(name_markup)
-
-
-def _make_selectable_row(
-    cols: list[tuple[int, Text] | Text],
-    entry: AgentBoardEntry,
-    section: BoardSection,
-    dividechars: int = 0,
-) -> _SelectableRow:
-    """Create a _SelectableRow with entry and section metadata attached."""
-    row = _SelectableRow(cols, dividechars=dividechars)
-    row.entry = entry
-    row.section = section
-    return row
 
 
 class _KanpanState(MutableModel):
@@ -327,13 +300,21 @@ def _is_safe_to_delete(entry: AgentBoardEntry) -> bool:
     return entry.pr is not None and entry.pr.state == PrState.MERGED
 
 
-def _update_row_mark(state: _KanpanState, walker_idx: int, mark: str | None) -> None:
+def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None) -> None:
     """Update the mark indicator on a single row without rebuilding the display."""
     if state.list_walker is None:
         return
+    entry = state.index_to_entry.get(walker_idx)
+    if entry is None:
+        return
+    section = _classify_entry(entry)
+    name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
+    if section == BoardSection.MUTED:
+        name_markup = _flatten_markup_to_muted(name_markup)
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
-    row.set_mark(mark)
+    name_text: Text = row.contents[0][0]
+    name_text.set_text(name_markup)
 
 
 def _toggle_mark(state: _KanpanState, key: str) -> None:
@@ -1030,19 +1011,13 @@ def _build_agent_row(
         cell_markup = raw_markup
 
     cols: list[tuple[int, Text] | Text] = []
-    name_text: Text | None = None
     for defn in _BOARD_COLUMN_DEFS:
         widget = Text(cell_markup[defn.name])
-        if defn.name == "name":
-            name_text = widget
         if defn.flexible:
             cols.append(widget)
         else:
             cols.append((widths[defn.name], widget))
-    row = _make_selectable_row(cols, entry=entry, section=section, dividechars=_COL_DIVIDER_CHARS)
-    if name_text is not None:
-        row.name_text = name_text
-    return row
+    return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
