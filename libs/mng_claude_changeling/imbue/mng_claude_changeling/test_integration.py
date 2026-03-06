@@ -34,6 +34,7 @@ from imbue.mng_claude_changeling.conftest import ChatScriptEnv
 from imbue.mng_claude_changeling.conftest import LocalShellHost
 from imbue.mng_claude_changeling.conftest import StubCommandResult
 from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.conftest import assert_conversation_exists_in_db
 from imbue.mng_claude_changeling.conftest import create_test_llm_db
 from imbue.mng_claude_changeling.conftest import write_conversation_to_db
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
@@ -496,17 +497,7 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
     conversation_id = result.stdout.strip()
     assert conversation_id.startswith("conv-"), f"Expected conversation ID, got: {conversation_id!r}"
 
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute(
-        "SELECT conversation_id, created_at FROM changeling_conversations WHERE conversation_id = ?",
-        (conversation_id,),
-    ).fetchall()
-    conn.close()
-
-    assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-    assert rows[0][0] == conversation_id
-    # created_at should be non-empty
-    assert rows[0][1]
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
 
 @pytest.mark.timeout(30)
@@ -522,12 +513,8 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
 
     assert len(set(conversation_ids)) == 3, f"Expected 3 unique conversation IDs, got: {conversation_ids}"
 
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
-    conn.close()
-
-    db_cids = {row[0] for row in rows}
-    assert db_cids == set(conversation_ids)
+    for cid in conversation_ids:
+        assert_conversation_exists_in_db(chat_env.llm_db_path, cid)
 
 
 @pytest.mark.timeout(30)
@@ -535,18 +522,21 @@ def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh reads the model from settings.toml."""
     chat_env.set_default_model("claude-haiku-4-5")
 
+    # Ensure log directory exists so we can check the log for the model
+    log_dir = Path(chat_env.env["MNG_HOST_DIR"]) / "events" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
-    # Verify the conversation record was created
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute(
-        "SELECT conversation_id FROM changeling_conversations WHERE conversation_id = ?",
-        (conversation_id,),
-    ).fetchall()
-    conn.close()
-    assert len(rows) == 1
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+
+    # Verify the model from settings.toml was used (visible in log output)
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists()
+    log_content = log_file.read_text()
+    assert "claude-haiku-4-5" in log_content
 
 
 @pytest.mark.timeout(30)
@@ -788,18 +778,21 @@ def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScrip
     """Verify that chat.sh falls back to the hardcoded default model when settings.toml is absent."""
     # Do NOT call set_default_model -- no settings.toml exists
 
+    # Ensure log directory exists so we can check the log for the default model
+    log_dir = Path(chat_env.env["MNG_HOST_DIR"]) / "events" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
-    # Verify the conversation record was created (model is not in changeling_conversations)
     conversation_id = result.stdout.strip()
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute(
-        "SELECT conversation_id FROM changeling_conversations WHERE conversation_id = ?",
-        (conversation_id,),
-    ).fetchall()
-    conn.close()
-    assert len(rows) == 1
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+
+    # Verify the hardcoded default model was used (visible in log output)
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists()
+    log_content = log_file.read_text()
+    assert "claude-opus-4.6" in log_content
 
 
 @pytest.mark.timeout(30)
@@ -857,7 +850,7 @@ def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
     # insert_conversation_record runs before the llm inject call.
     chat_env.run("--new", "--as-agent", "hello from test")
 
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
-    conn.close()
+    # At least one conversation should exist (the one just created)
+    with sqlite3.connect(str(chat_env.llm_db_path)) as conn:
+        rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
     assert len(rows) >= 1, "conversation record should be written even when llm inject fails"

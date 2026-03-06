@@ -384,3 +384,13 @@ def write_conversation_to_db(
             (conversation_id, conversation_id, model),
         )
         conn.commit()
+
+
+def assert_conversation_exists_in_db(db_path: Path, conversation_id: str) -> None:
+    """Assert that a conversation record exists in the changeling_conversations table."""
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT conversation_id FROM changeling_conversations WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchall()
+    assert len(rows) == 1, f"Expected conversation {conversation_id} in DB, found {len(rows)} rows"
