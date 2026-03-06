@@ -21,7 +21,8 @@ run_args = "--no-cov -p no:xdist -o addopts="
 retry_count = 0
 # Exclude release tests from the acceptance suite. Exclude docker, modal, rsync, and unison tests
 # because they require infrastructure not available inside Modal sandboxes.
-filters = "-m'not release and not docker and not docker_sdk and not modal and not rsync and not unison'"
+# Also ignore modal provider tests that need Modal auth inside the sandbox.
+filters = "-m'not release and not docker and not docker_sdk and not modal and not rsync and not unison' --ignore=libs/mng/imbue/mng/providers/modal"
 
 [report]
 output_dir = "test-results"
