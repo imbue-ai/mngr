@@ -16,13 +16,13 @@ from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.modal.instance import ModalProviderInstance
 from imbue.mng_schedule.cli.group import add_trigger_options
 from imbue.mng_schedule.cli.group import resolve_positional_name
 from imbue.mng_schedule.cli.group import schedule
 from imbue.mng_schedule.cli.options import ScheduleAddCliOptions
-from imbue.mng_schedule.data_types import MngInstallMode
 from imbue.mng_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mng_schedule.data_types import ScheduledMngCommand
 from imbue.mng_schedule.data_types import VerifyMode
@@ -97,6 +97,7 @@ def auto_fix_create_args(
     """Auto-fix args for a create command to ensure they work as expected.
 
     Adds the following flags if not already present:
+    - --headless: so we never attempt interactive prompts
     - --no-connect: so we don't try to automatically connect
     - --await-ready: to make sure the command actually worked
     - --authorized-key <key>: so you can connect to the host via SSH
@@ -106,6 +107,10 @@ def auto_fix_create_args(
     """
     parts = shlex.split(args) if args else []
     mng_args, passthrough_args = _split_args_at_separator(parts)
+
+    # FIXME: we should check that "--yes" is specified, and add it if not
+    if not _has_flag(mng_args, "--headless"):
+        mng_args.append("--headless")
 
     if not _has_flag(mng_args, "--no-connect", "--connect"):
         mng_args.append("--no-connect")

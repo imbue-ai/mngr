@@ -7,13 +7,16 @@ from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import HostNotFoundError
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.interfaces.data_types import VolumeInfo
 from imbue.mng.interfaces.host import HostInterface
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
@@ -60,17 +63,30 @@ class MockProviderInstance(BaseProviderInstance):
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         return self.mock_agent_data
 
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        for h in self.mock_hosts:
+            if h.id == host or h.get_name() == host:
+                return h
+        raise HostNotFoundError(host)
+
     def stop_host(
         self, host: HostInterface | HostId, create_snapshot: bool = True, timeout_seconds: float = 60.0
     ) -> None:
         raise NotImplementedError()
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        return list(self.mock_hosts)
+    ) -> list[DiscoveredHost]:
+        return [
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=h.get_name(),
+                provider_name=self.name,
+            )
+            for h in self.mock_hosts
+        ]
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
         raise NotImplementedError()

@@ -184,7 +184,7 @@ def run_scheduled_trigger() -> None:
         print("Loading environment variables from secrets env file...")
         for key, value in json.loads(secrets_json_path.read_text()).items():
             if value is not None:
-                print("Setting env var: {}", key)
+                print(f"Setting env var: {key}")
                 os.environ[key] = value
 
     # If auto-merge is enabled, set up GitHub authentication and fetch/merge the

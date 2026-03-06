@@ -25,7 +25,6 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
-from imbue.mng.api.data_types import HostLifecycleOptions
 from imbue.mng.errors import HostNotFoundError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import SnapshotNotFoundError
@@ -33,6 +32,7 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import CpuResources
+from imbue.mng.interfaces.data_types import HostLifecycleOptions
 from imbue.mng.interfaces.data_types import HostResources
 from imbue.mng.interfaces.data_types import PyinfraConnector
 from imbue.mng.interfaces.data_types import SnapshotInfo
@@ -43,6 +43,7 @@ from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.volume import HostVolume
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
@@ -57,6 +58,8 @@ from imbue.mng.providers.docker.host_store import DockerHostStore
 from imbue.mng.providers.docker.host_store import HostRecord
 from imbue.mng.providers.docker.volume import CONTAINER_ENTRYPOINT_CMD
 from imbue.mng.providers.docker.volume import DockerVolume
+from imbue.mng.providers.docker.volume import LABEL_PREFIX
+from imbue.mng.providers.docker.volume import LABEL_PROVIDER
 from imbue.mng.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mng.providers.docker.volume import ensure_state_container
 from imbue.mng.providers.docker.volume import state_volume_name
@@ -97,11 +100,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 # Derived from REQUIRED_HOST_PACKAGES so the two stay in sync.
 DEFAULT_DOCKERFILE_CONTENTS: Final[str] = _build_default_dockerfile()
 
-# Docker label prefix
-LABEL_PREFIX: Final[str] = "com.imbue.mng."
+# Docker label keys (LABEL_PREFIX and LABEL_PROVIDER are imported from volume.py)
 LABEL_HOST_ID: Final[str] = f"{LABEL_PREFIX}host-id"
 LABEL_HOST_NAME: Final[str] = f"{LABEL_PREFIX}host-name"
-LABEL_PROVIDER: Final[str] = f"{LABEL_PREFIX}provider"
 LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 
 # Path where the state volume is mounted inside host containers (when host volume is enabled).
@@ -212,7 +213,7 @@ class DockerProviderInstance(BaseProviderInstance):
         """Get the state volume backed by the singleton state container."""
         user_id = str(self.mng_ctx.get_profile_user_id())
         prefix = self.mng_ctx.config.prefix
-        state_container = ensure_state_container(self._docker_client, prefix, user_id)
+        state_container = ensure_state_container(self._docker_client, prefix, user_id, provider_name=str(self.name))
         return DockerVolume(container=state_container)
 
     @cached_property
@@ -460,7 +461,7 @@ class DockerProviderInstance(BaseProviderInstance):
 # Auto-generated shutdown script for mng Docker host
 # Kills PID 1 to stop the container
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{host_dir_str}/events/logs/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -1139,6 +1140,14 @@ kill -TERM 1
     # Discovery Methods
     # =========================================================================
 
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline representation of the given host for use when it is unreachable."""
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(host_id)
+
+        return self._create_host_from_host_record(host_record)
+
     def get_host(
         self,
         host: HostId | HostName,
@@ -1183,12 +1192,12 @@ kill -TERM 1
 
         raise HostNotFoundError(host)
 
-    def list_hosts(
+    def discover_hosts(
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-    ) -> list[HostInterface]:
-        """List all Docker container hosts."""
+    ) -> list[DiscoveredHost]:
+        """Discover all Docker container hosts."""
         hosts: list[HostInterface] = []
         processed_host_ids: set[HostId] = set()
 
@@ -1256,7 +1265,7 @@ kill -TERM 1
         for h in hosts:
             self._host_by_id_cache[h.id] = h
 
-        return hosts
+        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Docker container.

@@ -10,7 +10,7 @@ What counts as "activity" is highly configurable. Run `mng limit --help` [future
 
 Any of the following can be considered activity:
 
-- user input [future] like keystrokes (terminal and web) and mouse movement (web). Requires accessing the agent via `mng connect` (terminal) or `mng open` [future] (web), or using the `user_activity_tracking_via_web` plugin (enabled by default). See [User Input Tracking](#user-input-tracking) below for details.
+- user input [future] like keystrokes (terminal and web) and mouse movement (web). Requires accessing the agent via `mng connect` (terminal) or using the `user_activity_tracking_via_web` plugin [future]. See [User Input Tracking](#user-input-tracking) below for details.
 - agent output (supported by most agents)
 - active SSH connections
 - agent process being alive
@@ -45,11 +45,11 @@ This means that, if running an untrusted agent, you should only use the "create"
 
 ## User Input Tracking [future]
 
-User input tracking requires either terminal access via `mng connect` or web access via `mng open` [future] (which uses the [user_activity_tracking_via_web plugin](../core_plugins/user_activity_tracking_via_web.md), enabled by default).
+User input tracking requires either terminal access via `mng connect` or web access via the [user_activity_tracking_via_web plugin](../core_plugins/user_activity_tracking_via_web.md), [future]).
 
 `mng connect` reports activity via an SSH heartbeat (writing to `$MNG_HOST_DIR/activity/ssh` every 5 seconds while connected). Keystroke-level tracking that writes to `$MNG_HOST_DIR/activity/user` is planned. [future]
 
-`mng open` [future] opens the agent's URLs in a web browser. For web interfaces, the [user_activity_tracking_via_web plugin](../core_plugins/user_activity_tracking_via_web.md) injects JavaScript that tracks both mouse movements and keystrokes, reporting activity back to the agent in the same way.
+For web interfaces, the ideas is that [user_activity_tracking_via_web plugin](../core_plugins/user_activity_tracking_via_web.md) would inject JavaScript that tracks both mouse movements and keystrokes, reporting activity back to the agent in the same way.
 
 Note that the only "tracking" happening is the most recent timestamp--there is no logging of actual keystrokes or mouse movements, and nothing except the most recent time is stored.
 This mechanism is necessary in practice because you really don't want an agent to stop while you're actively using it.

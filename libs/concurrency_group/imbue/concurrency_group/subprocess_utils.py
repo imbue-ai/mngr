@@ -213,7 +213,7 @@ def run_local_command_modern_version(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=env,
+                env=env if env is not None else os.environ.copy(),
             )
         except (OSError, ValueError) as e:
             raise ProcessSetupError(
@@ -230,8 +230,12 @@ def run_local_command_modern_version(
 
     if trace_output:
         assert trace_on_line_callback, "Must pass trace_on_line_callback"
-        on_complete_line_from_stdout: Callable[[str], None] | None = lambda line: trace_on_line_callback(line, True)
-        on_complete_line_from_stderr: Callable[[str], None] | None = lambda line: trace_on_line_callback(line, False)
+
+        def on_complete_line_from_stdout(line):
+            return trace_on_line_callback(line, True)
+
+        def on_complete_line_from_stderr(line):
+            return trace_on_line_callback(line, False)
     else:
         on_complete_line_from_stdout = None
         on_complete_line_from_stderr = None

@@ -264,10 +264,6 @@ def pull(ctx: click.Context, **kwargs) -> None:
         return
     agent, host = result
 
-    # Only local agents are supported right now
-    if not host.is_local:
-        raise NotImplementedError("Pulling from remote agents is not implemented yet")
-
     emit_info(f"Pulling from agent: {agent.name}", output_opts.output_format)
 
     # Parse uncommitted changes mode

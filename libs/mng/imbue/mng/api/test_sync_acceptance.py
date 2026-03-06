@@ -21,6 +21,7 @@ import pytest
 from imbue.mng.errors import MngError
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import mng_agent_cleanup
 from imbue.mng.utils.testing import run_git_command
 from imbue.mng.utils.testing import run_mng_subprocess
 from imbue.mng.utils.testing import setup_claude_trust_config_for_subprocess
@@ -61,24 +62,22 @@ def created_agent(
 
     Destroys the agent after the test completes.
     """
-    result = run_mng_subprocess(
-        "create",
-        "--disable-plugin",
-        "modal",
-        agent_name,
-        "bash",
-        "--no-connect",
-        "--project",
-        str(repo_path),
-        env=sync_test_env,
-        cwd=repo_path,
-    )
-    assert result.returncode == 0, f"Failed to create agent: {result.stderr}"
+    with mng_agent_cleanup(agent_name, env=sync_test_env, disable_plugins=["modal"]):
+        result = run_mng_subprocess(
+            "create",
+            "--disable-plugin",
+            "modal",
+            agent_name,
+            "bash",
+            "--no-connect",
+            "--project",
+            str(repo_path),
+            env=sync_test_env,
+            cwd=repo_path,
+        )
+        assert result.returncode == 0, f"Failed to create agent: {result.stderr}"
 
-    yield agent_name
-
-    # Cleanup: destroy the agent
-    run_mng_subprocess("destroy", "--disable-plugin", "modal", agent_name, "-f", env=sync_test_env)
+        yield agent_name
 
 
 def _get_agent_work_dir(repo_path: Path, agent_name: str) -> Path:
@@ -106,6 +105,8 @@ def _get_agent_work_dir(repo_path: Path, agent_name: str) -> Path:
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_files_transfers_files_to_agent(
     sync_test_env: dict[str, str],
@@ -135,6 +136,8 @@ def test_push_files_transfers_files_to_agent(
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_files_dry_run_does_not_transfer(
     sync_test_env: dict[str, str],
@@ -168,6 +171,7 @@ def test_push_files_dry_run_does_not_transfer(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_git_transfers_commits_to_agent(
     sync_test_env: dict[str, str],
@@ -212,6 +216,7 @@ def test_push_git_transfers_commits_to_agent(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_git_uncommitted_changes_fail_mode_rejects(
     sync_test_env: dict[str, str],
@@ -244,6 +249,7 @@ def test_push_git_uncommitted_changes_fail_mode_rejects(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_git_uncommitted_changes_stash_mode_preserves_changes(
     sync_test_env: dict[str, str],
@@ -290,6 +296,7 @@ def test_push_git_uncommitted_changes_stash_mode_preserves_changes(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_git_uncommitted_changes_clobber_mode_discards_changes(
     sync_test_env: dict[str, str],
@@ -324,6 +331,7 @@ def test_push_git_uncommitted_changes_clobber_mode_discards_changes(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_git_mirror_mode_overwrites_all_refs(
     sync_test_env: dict[str, str],
@@ -368,6 +376,8 @@ def test_push_git_mirror_mode_overwrites_all_refs(
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_pull_files_transfers_files_from_agent(
     sync_test_env: dict[str, str],
@@ -406,6 +416,7 @@ def test_pull_files_transfers_files_from_agent(
 
 
 @pytest.mark.acceptance
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_pull_git_merges_agent_commits(
     sync_test_env: dict[str, str],
@@ -444,6 +455,8 @@ def test_pull_git_merges_agent_commits(
 
 
 @pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_push_then_pull_round_trips_files(
     sync_test_env: dict[str, str],

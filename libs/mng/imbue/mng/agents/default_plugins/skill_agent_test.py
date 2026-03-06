@@ -6,10 +6,7 @@ import pluggy
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.agents.agent_registry import get_agent_class
-from imbue.mng.agents.agent_registry import get_agent_config_class
 from imbue.mng.agents.agent_registry import list_registered_agent_types
-from imbue.mng.agents.agent_registry import resolve_agent_type
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.code_guardian_agent import CodeGuardianAgent
@@ -21,12 +18,16 @@ from imbue.mng.agents.default_plugins.fixme_fairy_agent import FixmeFairyAgentCo
 from imbue.mng.agents.default_plugins.fixme_fairy_agent import _FIXME_FAIRY_SKILL_CONTENT
 from imbue.mng.agents.default_plugins.fixme_fairy_agent import _SKILL_NAME as FIXME_FAIRY_SKILL_NAME
 from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgent
+from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgentConfig
 from imbue.mng.agents.default_plugins.skill_agent import _install_skill_locally
+from imbue.mng.config.agent_class_registry import get_agent_class
+from imbue.mng.config.agent_config_registry import get_agent_config_class
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.conftest import make_mng_ctx
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
+from imbue.mng.utils.testing import make_mng_ctx
 
 # Each tuple: (type_name, agent_class, config_class, skill_name, skill_content)
 _SKILL_AGENTS = [
@@ -313,3 +314,42 @@ def test_install_skill_locally_auto_approve_installs_without_prompting(
 
         assert skill_path.exists()
         assert skill_path.read_text() == skill_content
+
+
+# -- SkillProvisionedAgentConfig tests --
+
+
+def test_skill_provisioned_agent_config_can_be_instantiated() -> None:
+    """SkillProvisionedAgentConfig can be instantiated with default values."""
+    config = SkillProvisionedAgentConfig()
+    assert config.command == CommandString("claude")
+    assert isinstance(config, ClaudeAgentConfig)
+
+
+def test_skill_provisioned_agent_config_accepts_custom_command() -> None:
+    """SkillProvisionedAgentConfig should accept a custom command override."""
+    config = SkillProvisionedAgentConfig(command=CommandString("custom-agent"))
+    assert config.command == CommandString("custom-agent")
+
+
+# -- Direct _install_skill_locally tests --
+
+
+def test_install_skill_locally_skips_when_content_matches(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_install_skill_locally should skip writing when the existing content matches.
+
+    Note: Path.home() is isolated to a temp directory by the autouse
+    setup_test_mng_env fixture, so this test writes to tmp_path/.claude/,
+    not the real home directory.
+    """
+    skill_path = Path.home() / ".claude" / "skills" / "skip-test-skill" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text("same content")
+    original_mtime = skill_path.stat().st_mtime
+
+    _install_skill_locally("skip-test-skill", "same content", temp_mng_ctx)
+
+    assert skill_path.stat().st_mtime == original_mtime
+    assert skill_path.read_text() == "same content"

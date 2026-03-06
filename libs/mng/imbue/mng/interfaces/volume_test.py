@@ -250,5 +250,5 @@ def test_host_volume_get_agent_volume_write_goes_to_correct_path() -> None:
     vol = InMemoryVolume(files={})
     host_volume = HostVolume(volume=vol)
     agent_volume = host_volume.get_agent_volume(agent_id)
-    agent_volume.write_files({"logs/transcript.jsonl": b"line1\nline2\n"})
-    assert vol.files[f"agents/{agent_id}/logs/transcript.jsonl"] == b"line1\nline2\n"
+    agent_volume.write_files({"logs/claude_transcript/events.jsonl": b"line1\nline2\n"})
+    assert vol.files[f"agents/{agent_id}/logs/claude_transcript/events.jsonl"] == b"line1\nline2\n"

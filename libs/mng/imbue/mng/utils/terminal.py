@@ -27,6 +27,10 @@ class StderrInterceptor(MutableModel):
 
     Use as a context manager to automatically install/restore sys.stderr.
 
+    Structurally compatible with TextIO (ty uses structural subtyping for
+    sys.stderr assignment), so no explicit TextIO inheritance is needed.
+
+
     Falls back to writing directly to the original stderr if the callback
     raises OSError (e.g. broken pipe on the output stream), which avoids
     recursive writes through the interceptor.

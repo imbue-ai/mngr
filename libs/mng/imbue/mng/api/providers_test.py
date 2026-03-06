@@ -2,8 +2,10 @@
 
 import pytest
 
+from imbue.mng.api.providers import _is_backend_enabled
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.api.providers import reset_provider_instances
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import UnknownBackendError
@@ -182,3 +184,60 @@ def test_get_all_provider_instances_provider_names_with_configured_provider(
     provider_names = [str(p.name) for p in providers_local]
     assert "local" in provider_names
     assert "my-filtered-local" not in provider_names
+
+
+def test_reset_provider_instances_clears_tracking(temp_mng_ctx: MngContext) -> None:
+    """reset_provider_instances should clear cached instances so next call rebuilds them."""
+    # Populate the cache by loading providers
+    providers_before = get_all_provider_instances(temp_mng_ctx)
+    assert len(providers_before) > 0
+
+    # Reset should clear the cache
+    reset_provider_instances()
+
+    # Loading again should succeed (rebuilds from scratch)
+    providers_after = get_all_provider_instances(temp_mng_ctx)
+    assert len(providers_after) > 0
+
+
+def test_is_backend_enabled_returns_true_when_no_enabled_backends(temp_mng_ctx: MngContext) -> None:
+    """_is_backend_enabled should return True when enabled_backends is empty (all allowed)."""
+    assert temp_mng_ctx.config.enabled_backends == []
+    assert _is_backend_enabled("local", temp_mng_ctx) is True
+    assert _is_backend_enabled("nonexistent", temp_mng_ctx) is True
+
+
+def test_is_backend_enabled_returns_true_for_listed_backend(temp_mng_ctx: MngContext, mng_test_prefix: str) -> None:
+    """_is_backend_enabled should return True when backend is in enabled_backends."""
+    config = MngConfig(
+        default_host_dir=temp_mng_ctx.config.default_host_dir,
+        prefix=mng_test_prefix,
+        enabled_backends=[ProviderBackendName("local")],
+    )
+    mng_ctx = MngContext(config=config, pm=temp_mng_ctx.pm, profile_dir=temp_mng_ctx.profile_dir)
+    assert _is_backend_enabled("local", mng_ctx) is True
+
+
+def test_is_backend_enabled_returns_false_for_unlisted_backend(temp_mng_ctx: MngContext, mng_test_prefix: str) -> None:
+    """_is_backend_enabled should return False when backend is not in enabled_backends."""
+    config = MngConfig(
+        default_host_dir=temp_mng_ctx.config.default_host_dir,
+        prefix=mng_test_prefix,
+        enabled_backends=[ProviderBackendName("local")],
+    )
+    mng_ctx = MngContext(config=config, pm=temp_mng_ctx.pm, profile_dir=temp_mng_ctx.profile_dir)
+    assert _is_backend_enabled("docker", mng_ctx) is False
+
+
+def test_get_all_provider_instances_excludes_disabled_plugins(temp_mng_ctx: MngContext, mng_test_prefix: str) -> None:
+    """get_all_provider_instances should skip backends in disabled_plugins."""
+    config = MngConfig(
+        default_host_dir=temp_mng_ctx.config.default_host_dir,
+        prefix=mng_test_prefix,
+        disabled_plugins=frozenset(("local",)),
+    )
+    mng_ctx = MngContext(config=config, pm=temp_mng_ctx.pm, profile_dir=temp_mng_ctx.profile_dir)
+    providers = get_all_provider_instances(mng_ctx)
+
+    provider_names = [str(p.name) for p in providers]
+    assert "local" not in provider_names

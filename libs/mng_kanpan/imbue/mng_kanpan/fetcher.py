@@ -8,14 +8,15 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
-from imbue.mng.api.list import load_all_agents_grouped_by_host
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
+from imbue.mng.primitives import default_branch_name
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSnapshot
@@ -49,6 +50,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
 
     # Fetch all PRs from GitHub
     pr_result = fetch_all_prs(cg, cwd=gh_cwd)
+    prs_loaded = pr_result.error is None
     if pr_result.error is not None:
         errors.append(pr_result.error)
     pr_by_branch = _build_pr_branch_index(pr_result.prs)
@@ -64,7 +66,9 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
         commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
-        create_pr_url = _build_create_pr_url(repo_path, branch) if repo_path and branch and pr is None else None
+        create_pr_url = (
+            _build_create_pr_url(repo_path, branch) if prs_loaded and repo_path and branch and pr is None else None
+        )
         entries.append(
             AgentBoardEntry(
                 name=agent.name,
@@ -83,13 +87,14 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     return BoardSnapshot(
         entries=tuple(entries),
         errors=tuple(errors),
+        prs_loaded=prs_loaded,
         fetch_time_seconds=elapsed,
     )
 
 
 def toggle_agent_mute(mng_ctx: MngContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
-    agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
     agent, _host = find_and_maybe_start_agent_by_name_or_id(
         str(agent_name),
         agents_by_host,
@@ -108,7 +113,7 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
     """Load the set of muted agent names from plugin data."""
     muted: set[AgentName] = set()
     try:
-        agents_by_host, _ = load_all_agents_grouped_by_host(mng_ctx)
+        agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
         for _host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
                 plugin_data: dict[str, Any] = agent_ref.certified_data.get("plugin", {}).get(PLUGIN_NAME, {})
@@ -119,7 +124,7 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
     return muted
 
 
-def _find_git_cwd(agents: list[AgentInfo]) -> Path | None:
+def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:
     """Find a local agent work_dir to use as cwd for gh commands.
 
     Returns the first accessible local agent work_dir, or None if no local
@@ -131,11 +136,11 @@ def _find_git_cwd(agents: list[AgentInfo]) -> Path | None:
     return None
 
 
-def _resolve_agent_branch(agent: AgentInfo, cg: ConcurrencyGroup) -> str | None:
+def _resolve_agent_branch(agent: AgentDetails, cg: ConcurrencyGroup) -> str | None:
     """Determine the git branch associated with an agent.
 
     For local agents with an accessible work_dir, reads the branch via git.
-    Falls back to the naming convention mng/<name>-<provider>.
+    Falls back to the naming convention mng/<name>.
     """
     if agent.host.provider_name == LOCAL_PROVIDER_NAME:
         work_dir = agent.work_dir
@@ -146,7 +151,7 @@ def _resolve_agent_branch(agent: AgentInfo, cg: ConcurrencyGroup) -> str | None:
             logger.debug("Could not determine git branch for agent {} at {}", agent.name, work_dir)
 
     # Fallback: naming convention
-    return f"mng/{agent.name}-{agent.host.provider_name}"
+    return default_branch_name(agent.name)
 
 
 def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:

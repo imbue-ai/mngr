@@ -6,8 +6,9 @@
 #   1. Activity tracking: updates $MNG_AGENT_STATE_DIR/activity/agent
 #      whenever the agent is actively processing (indicated by the
 #      $MNG_AGENT_STATE_DIR/active file)
-#   2. Transcript export: periodically exports the conversation transcript
-#      to $MNG_AGENT_STATE_DIR/logs/transcript.jsonl
+#   2. Transcript streaming: launches stream_transcript.sh which watches
+#      all session JSONL files and streams new lines to
+#      $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
@@ -34,33 +35,57 @@ if [ -f "$_MNG_ACT_LOCK" ] && kill -0 "$(cat "$_MNG_ACT_LOCK" 2>/dev/null)" 2>/d
 fi
 
 echo $$ > "$_MNG_ACT_LOCK"
-trap 'rm -f "$_MNG_ACT_LOCK"' EXIT
 
 # Ensure required directories exist
 mkdir -p "$MNG_AGENT_STATE_DIR/activity"
-mkdir -p "$MNG_AGENT_STATE_DIR/logs"
+mkdir -p "$MNG_AGENT_STATE_DIR/events"
 
-EXPORT_SCRIPT="$MNG_HOST_DIR/commands/export_transcript.sh"
+# Configure and source the shared logging library
+_MNG_LOG_TYPE="claude_background_tasks"
+_MNG_LOG_SOURCE="logs/claude_background_tasks"
+_MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/claude_background_tasks/events.jsonl"
+# shellcheck source=mng_log.sh
+source "$MNG_HOST_DIR/commands/mng_log.sh"
+
+# Start transcript streaming in the background
+STREAM_SCRIPT="$MNG_HOST_DIR/commands/stream_transcript.sh"
+_STREAM_PID=""
+if [ -x "$STREAM_SCRIPT" ]; then
+    bash "$STREAM_SCRIPT" &
+    _STREAM_PID=$!
+    log_info "Started transcript streaming (PID: $_STREAM_PID)"
+fi
+
+_cleanup() {
+    # Stop the transcript streaming process
+    if [ -n "$_STREAM_PID" ] && kill -0 "$_STREAM_PID" 2>/dev/null; then
+        kill "$_STREAM_PID" 2>/dev/null
+        wait "$_STREAM_PID" 2>/dev/null || true
+    fi
+    rm -f "$_MNG_ACT_LOCK"
+}
+trap _cleanup EXIT
+
+log_info "Background tasks started for session $SESSION_NAME"
 
 while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
-    # Task 1: Update activity timestamp if agent is actively processing
+    # Update activity timestamp if agent is actively processing
     if [ -f "$MNG_AGENT_STATE_DIR/active" ]; then
         printf '{"time": %d, "source": "activity_updater"}' \
             "$(($(date +%s) * 1000))" > "$MNG_AGENT_STATE_DIR/activity/agent"
     fi
 
-    # Task 2: Export transcript if the export script is available
-    # Uses temp file + mv for atomic replacement so readers never see a truncated file
-    if [ -x "$EXPORT_SCRIPT" ]; then
-        _TRANSCRIPT_TMP="$MNG_AGENT_STATE_DIR/logs/transcript.jsonl.tmp"
-        if "$EXPORT_SCRIPT" > "$_TRANSCRIPT_TMP" 2>/dev/null; then
-            mv "$_TRANSCRIPT_TMP" "$MNG_AGENT_STATE_DIR/logs/transcript.jsonl"
-        else
-            rm -f "$_TRANSCRIPT_TMP"
+    # Restart transcript streaming if it died unexpectedly
+    if [ -n "$_STREAM_PID" ] && ! kill -0 "$_STREAM_PID" 2>/dev/null; then
+        log_warn "Transcript streaming process died, restarting"
+        if [ -x "$STREAM_SCRIPT" ]; then
+            bash "$STREAM_SCRIPT" &
+            _STREAM_PID=$!
+            log_info "Restarted transcript streaming (PID: $_STREAM_PID)"
         fi
     fi
 
     sleep 15
 done
 
-rm -f "$_MNG_ACT_LOCK"
+log_info "Background tasks finished for session $SESSION_NAME (session ended)"

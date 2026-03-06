@@ -15,6 +15,13 @@ from imbue.mng.interfaces.data_types import VolumeFile
 from imbue.mng.interfaces.data_types import VolumeFileType
 from imbue.mng.interfaces.volume import BaseVolume
 
+# Docker label constants shared between volume.py and instance.py.
+# Defined here (the lower-level module) to avoid circular imports.
+LABEL_PREFIX: Final[str] = "com.imbue.mng."
+LABEL_PROVIDER: Final[str] = f"{LABEL_PREFIX}provider"
+STATE_CONTAINER_TYPE_LABEL: Final[str] = f"{LABEL_PREFIX}type"
+STATE_CONTAINER_TYPE_VALUE: Final[str] = "state-container"
+
 # Shell command that keeps PID 1 alive and responds to SIGTERM.
 # Shared between host containers and the state container.
 CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
@@ -38,12 +45,16 @@ def ensure_state_container(
     client: docker.DockerClient,
     prefix: str,
     user_id: str,
+    provider_name: str = "",
 ) -> docker.models.containers.Container:
     """Ensure the singleton state container exists and is running.
 
     Creates a Docker named volume and a small Alpine container that mounts it.
     The container is used as a file server: we exec into it to read/write
     state files (host records, agent data, etc.).
+
+    The provider_name label is added so that the container is discoverable by
+    the same label filter used for host containers (LABEL_PROVIDER).
 
     Returns the container (created or existing).
     """
@@ -59,6 +70,12 @@ def ensure_state_container(
     except docker.errors.NotFound:
         pass
 
+    # Build labels -- always include the type label, and include the provider
+    # label so the container is discoverable by _list_containers().
+    labels: dict[str, str] = {STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}
+    if provider_name:
+        labels[LABEL_PROVIDER] = provider_name
+
     # Create the container with a named volume
     logger.debug("Creating Docker state container: {}", container_name)
     container = client.containers.run(
@@ -67,7 +84,7 @@ def ensure_state_container(
         command=["sh", "-c", CONTAINER_ENTRYPOINT_CMD],
         detach=True,
         volumes={volume_name: {"bind": STATE_VOLUME_MOUNT_PATH, "mode": "rw"}},
-        labels={"com.imbue.mng.type": "state-container"},
+        labels=labels,
         restart_policy={"Name": "unless-stopped"},
     )
     return container

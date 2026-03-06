@@ -40,6 +40,7 @@ def test_message_result_can_add_failed_agent() -> None:
     assert result.failed_agents == [("test-agent", "error message")]
 
 
+@pytest.mark.tmux
 def test_agent_to_cel_context_returns_expected_fields(
     temp_work_dir: Path,
     local_provider: LocalProviderInstance,
@@ -82,6 +83,7 @@ def test_send_message_to_agents_returns_empty_result_when_no_agents_match(
     assert result.failed_agents == []
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_calls_success_callback(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -121,6 +123,7 @@ def test_send_message_to_agents_calls_success_callback(
     assert "message-test" in success_agents
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_fails_for_stopped_agent(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -157,6 +160,7 @@ def test_send_message_to_agents_fails_for_stopped_agent(
     assert "no tmux session" in result.failed_agents[0][1]
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -199,6 +203,7 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     assert len(error_agents) == 0
 
 
+@pytest.mark.tmux
 def test_send_message_to_agents_with_include_filter(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
@@ -246,6 +251,7 @@ def test_send_message_to_agents_with_include_filter(
     assert "filter-test-2" not in result.successful_agents
 
 
+@pytest.mark.tmux
 def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,

@@ -5,9 +5,6 @@ Call register_plugin_test_fixtures(globals()) from a plugin's conftest.py
 to register the standard set of fixtures.
 """
 
-import os
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -21,11 +18,19 @@ import imbue.mng.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.agents.agent_registry import load_agents_from_plugins
 from imbue.mng.agents.agent_registry import reset_agent_registry
+from imbue.mng.config.consts import PROFILES_DIRNAME
+from imbue.mng.config.data_types import MngConfig
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.plugins import hookspecs
+from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
 from imbue.mng.utils.testing import assert_home_is_temp_directory
+from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
+from imbue.mng.utils.testing import isolate_tmux_server
+from imbue.mng.utils.testing import make_mng_ctx
 
 
 @pytest.fixture
@@ -69,38 +74,15 @@ def temp_host_dir(tmp_path: Path) -> Path:
     return host_dir
 
 
-def _kill_isolated_tmux_server(tmux_tmpdir: Path) -> None:
-    """Kill a test-isolated tmux server and clean up its tmpdir."""
-    tmux_tmpdir_str = str(tmux_tmpdir)
-    assert tmux_tmpdir_str.startswith("/tmp/mng-tmux-"), (
-        f"TMUX_TMPDIR safety check failed! Expected /tmp/mng-tmux-* path but got: {tmux_tmpdir_str}. "
-        "Refusing to run 'tmux kill-server' to avoid killing the real tmux server."
-    )
-    socket_path = Path(tmux_tmpdir_str) / f"tmux-{os.getuid()}" / "default"
-    kill_env = os.environ.copy()
-    kill_env.pop("TMUX", None)
-    kill_env["TMUX_TMPDIR"] = tmux_tmpdir_str
-    with ConcurrencyGroup(name="tmux-cleanup") as cg:
-        cg.run_process_to_completion(
-            ("tmux", "-S", str(socket_path), "kill-server"),
-            is_checked_after=False,
-            env=kill_env,
-        )
-    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
+@pytest.fixture
+def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Give each test its own isolated tmux server.
 
-
-@pytest.fixture(autouse=True)
-def _isolate_tmux_server(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Generator[None, None, None]:
-    """Give each test its own isolated tmux server."""
-    tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mng-tmux-", dir="/tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
-    monkeypatch.delenv("TMUX", raising=False)
-
-    yield
-
-    _kill_isolated_tmux_server(tmux_tmpdir)
+    Delegates to the shared isolate_tmux_server() context manager in testing.py.
+    See its docstring for details on the isolation strategy and why /tmp is used.
+    """
+    with isolate_tmux_server(monkeypatch):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -129,14 +111,109 @@ def setup_test_mng_env(
     yield
 
 
+@pytest.fixture
+def cg() -> Generator[ConcurrencyGroup, None, None]:
+    """Provide a ConcurrencyGroup for tests that need to run processes."""
+    with ConcurrencyGroup(name="test") as group:
+        yield group
+
+
+@pytest.fixture
+def setup_git_config(tmp_path: Path) -> None:
+    """Create a .gitconfig in the fake HOME so git commands work.
+
+    Use this fixture for any test that runs git commands.
+    The temp_git_repo fixture depends on this, so you don't need both.
+    """
+    gitconfig = tmp_path / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n")
+
+
+@pytest.fixture
+def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
+    """Create a temporary git repository with an initial commit."""
+    repo_dir = tmp_path / "git_repo"
+    repo_dir.mkdir()
+    init_git_repo(repo_dir)
+    return repo_dir
+
+
+@pytest.fixture
+def mng_test_id() -> str:
+    """Generate a unique test ID for isolation."""
+    return uuid4().hex
+
+
+@pytest.fixture
+def mng_test_prefix(mng_test_id: str) -> str:
+    """Get the test prefix for tmux session names."""
+    return f"mng_{mng_test_id}-"
+
+
+@pytest.fixture
+def mng_test_root_name(mng_test_id: str) -> str:
+    """Get the test root name for config isolation."""
+    return f"mng-test-{mng_test_id}"
+
+
+@pytest.fixture
+def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
+    yield tmp_path
+
+
+@pytest.fixture
+def temp_profile_dir(temp_host_dir: Path) -> Path:
+    """Create a temporary profile directory."""
+    profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
+
+
+@pytest.fixture
+def temp_config(temp_host_dir: Path, mng_test_prefix: str) -> MngConfig:
+    """Create a MngConfig with a temporary host directory."""
+    return MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix, is_error_reporting_enabled=False)
+
+
+@pytest.fixture
+def temp_mng_ctx(
+    temp_config: MngConfig, temp_profile_dir: Path, plugin_manager: pluggy.PluginManager
+) -> Generator[MngContext, None, None]:
+    """Create a MngContext with a temporary host directory."""
+    with ConcurrencyGroup(name="test") as test_cg:
+        yield make_mng_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=test_cg)
+
+
+@pytest.fixture
+def local_provider(temp_host_dir: Path, temp_mng_ctx: MngContext) -> LocalProviderInstance:
+    """Create a LocalProviderInstance with a temporary host directory."""
+    return LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=temp_host_dir,
+        mng_ctx=temp_mng_ctx,
+    )
+
+
 def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     """Register common plugin test fixtures into the given namespace.
 
     Call this from a plugin's conftest.py to get the standard set of fixtures
     needed for testing mng plugins.
     """
+    namespace["cg"] = cg
     namespace["cli_runner"] = cli_runner
+    namespace["local_provider"] = local_provider
+    namespace["mng_test_id"] = mng_test_id
+    namespace["mng_test_prefix"] = mng_test_prefix
+    namespace["mng_test_root_name"] = mng_test_root_name
     namespace["plugin_manager"] = plugin_manager
-    namespace["temp_host_dir"] = temp_host_dir
-    namespace["_isolate_tmux_server"] = _isolate_tmux_server
+    namespace["setup_git_config"] = setup_git_config
     namespace["setup_test_mng_env"] = setup_test_mng_env
+    namespace["temp_config"] = temp_config
+    namespace["temp_git_repo"] = temp_git_repo
+    namespace["temp_host_dir"] = temp_host_dir
+    namespace["temp_mng_ctx"] = temp_mng_ctx
+    namespace["temp_profile_dir"] = temp_profile_dir
+    namespace["tmp_home_dir"] = tmp_home_dir
+    namespace["_isolate_tmux_server"] = _isolate_tmux_server

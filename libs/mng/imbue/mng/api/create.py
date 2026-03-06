@@ -5,14 +5,15 @@ from loguru import logger
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.mng.api.data_types import CreateAgentResult
-from imbue.mng.api.data_types import HostEnvironmentOptions
-from imbue.mng.api.data_types import NewHostOptions
-from imbue.mng.api.data_types import OnBeforeCreateArgs
+from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.interfaces.host import HostEnvironmentOptions
+from imbue.mng.interfaces.host import NewHostOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mng.utils.env_utils import parse_env_file
 
 
@@ -89,7 +90,7 @@ def create(
     # Notify plugins that a new host was created (only for new hosts)
     if is_new_host:
         with log_span("Calling on_host_created hooks"):
-            mng_ctx.pm.hook.on_host_created(host=host)
+            mng_ctx.pm.hook.on_host_created(host=host, mng_ctx=mng_ctx)
 
     # while we are deploying an agent, lock the host:
     with host.lock_cooperatively():
@@ -119,11 +120,11 @@ def create(
 
         # Run provisioning for the agent (hooks, dependency installation, etc.)
         with log_span("Calling on_before_provisioning hooks"):
-            mng_ctx.pm.hook.on_before_provisioning(agent=agent, host=host)
+            mng_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mng_ctx=mng_ctx)
         with log_span("Provisioning agent {}", agent.name):
             host.provision_agent(agent, agent_options, mng_ctx)
         with log_span("Calling on_after_provisioning hooks"):
-            mng_ctx.pm.hook.on_after_provisioning(agent=agent, host=host)
+            mng_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mng_ctx=mng_ctx)
 
         # Send initial message if one is configured
         initial_message = agent.get_initial_message()
@@ -150,6 +151,9 @@ def create(
         # Call on_agent_created hooks to notify plugins about the new agent
         with log_span("Calling on_agent_created hooks"):
             mng_ctx.pm.hook.on_agent_created(agent=result.agent, host=result.host)
+
+        # Emit discovery events for the host and newly created agent
+        emit_discovery_events_for_host(mng_ctx.config, host)
 
     return result
 

@@ -50,20 +50,29 @@ pythonpath = [
   "libs/*",
 ]
 testpaths = [
+  "test_meta_ratchets.py",
   "apps/*",
   "libs/*",
   "scripts",
 ]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov=imbue.imbue_common",
   "--cov=imbue.mng_opencode",
   "--cov=imbue.mng_pair",
   "--cov=imbue.mng_schedule",
+  "--cov=imbue.mng_ttyd",
   "--cov=imbue.mng_tutor",
+  "--cov=imbue.mng_claude_changeling",
+  "--cov=imbue.mng_elena_code",
   "--cov=imbue.mng_kanpan",
+  "--cov=imbue.mng_recursive",
+  "--cov=imbue.mng_changeling_chat",
+  "--cov=imbue.mng_test_coder",
   "--cov=imbue.changelings",
+  "--cov=imbue.slack_exporter",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
@@ -125,7 +134,7 @@ extra-paths = ["scripts"]
 [tool.coverage.run]
 source = ["imbue"]
 parallel = true
-concurrency = ["multiprocessing"]
+concurrency = ["multiprocessing", "thread"]
 omit = [
     "*_test.py",
     "test_*.py",
@@ -133,12 +142,14 @@ omit = [
     "*/conftest.py",
     # Test utility modules contain helpers only used by tests
     "*/utils/testing.py",
+    "*/utils/plugin_testing.py",
     "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
     # Modal provider requires network access for testing
     "libs/mng/imbue/mng/providers/modal/*",
     # Docker provider requires a Docker daemon for testing
     "libs/mng/imbue/mng/providers/docker/instance.py",
     "libs/mng/imbue/mng/providers/docker/volume.py",
+    "libs/mng/imbue/mng/providers/docker/testing.py",
     # Changeling deploy modules run on Modal and require infrastructure to test
     "apps/changelings/imbue/changelings/deploy/cron_runner.py",
     "apps/changelings/imbue/changelings/deploy/remote_runner.py",
@@ -169,30 +180,26 @@ layers = [
     "imbue.mng.agents",
     "imbue.mng.providers",
     "imbue.mng.hosts",
+    "imbue.mng.plugins",
     "imbue.mng.interfaces",
     "imbue.mng.config",
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
 ]
-ignore_imports = [
-    "imbue.mng.hosts.test_host -> imbue.mng.providers.local.instance",
-    "imbue.mng.cli.test_create -> imbue.mng.main",
-    "imbue.mng.utils.logging_test -> imbue.mng.config.data_types",
-    "imbue.mng.utils.testing -> imbue.mng.providers.local.instance",
-    "imbue.mng.utils.testing -> imbue.mng.config.data_types",
-]
 
 [[tool.importlinter.contracts]]
 name = "changelings layers contract"
 type = "layers"
 layers = [
-    "imbue.changelings.main",
+    "imbue.changelings.desktop_client",
     "imbue.changelings.cli",
-    "imbue.changelings.deploy",
+    "imbue.changelings.deployment",
+    "imbue.changelings.forwarding_server",
+    "imbue.changelings.core",
+    "imbue.changelings.interfaces",
     "imbue.changelings.config",
-    "imbue.changelings.mng_commands",
-    "imbue.changelings.data_types",
     "imbue.changelings.errors",
+    "imbue.changelings.utils",
     "imbue.changelings.primitives",
 ]

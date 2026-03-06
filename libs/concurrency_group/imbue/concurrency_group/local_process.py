@@ -139,7 +139,10 @@ class RunningProcess:
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
         queue: Queue[BaseException | None] = Queue(maxsize=1)
-        on_initialized = lambda maybe_exception: queue.put_nowait(maybe_exception)
+
+        def on_initialized(maybe_exception):
+            return queue.put_nowait(maybe_exception)
+
         self._thread = ObservableThread(
             target=lambda: context.run(self.run, {**kwargs, "on_initialization_complete": on_initialized}),
             name=self._get_name(),

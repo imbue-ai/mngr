@@ -1,14 +1,18 @@
 """Tests for CLI list command helpers."""
 
+import json
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
+from typing import Any
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import make_test_agent_info
+from imbue.mng.api.list import ListResult
 from imbue.mng.cli.list import _StreamingHumanRenderer
 from imbue.mng.cli.list import _StreamingTemplateEmitter
 from imbue.mng.cli.list import _compute_column_widths
@@ -18,19 +22,21 @@ from imbue.mng.cli.list import _format_streaming_header_row
 from imbue.mng.cli.list import _format_value_as_string
 from imbue.mng.cli.list import _get_field_value
 from imbue.mng.cli.list import _get_header_label
-from imbue.mng.cli.list import _get_sortable_value
 from imbue.mng.cli.list import _is_streaming_eligible
 from imbue.mng.cli.list import _parse_slice_spec
 from imbue.mng.cli.list import _render_format_template
 from imbue.mng.cli.list import _should_use_streaming_mode
-from imbue.mng.cli.list import _sort_agents
+from imbue.mng.cli.list import _sort_agents_by_cel
 from imbue.mng.cli.list import list_command
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
+from imbue.mng.utils.cel_utils import compile_cel_sort_keys
+from imbue.mng.utils.testing import make_test_agent_details
 
 
 def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:
@@ -160,21 +166,21 @@ def test_format_value_as_string_snapshot_uses_name() -> None:
 
 def test_get_field_value_simple_field() -> None:
     """_get_field_value should extract simple field."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "name")
     assert result == "test-agent"
 
 
 def test_get_field_value_nested_field() -> None:
     """_get_field_value should extract nested field."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "host.name")
     assert result == "test-host"
 
 
 def test_get_field_value_provider_name() -> None:
     """_get_field_value should extract host.provider_name."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "host.provider_name")
     assert result == "local"
 
@@ -186,7 +192,7 @@ def test_get_field_value_list_index_first() -> None:
         _create_test_snapshot("snap-second", 1),
         _create_test_snapshot("snap-third", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[0]")
     assert result == "snap-first"
 
@@ -198,7 +204,7 @@ def test_get_field_value_list_index_last() -> None:
         _create_test_snapshot("snap-second", 1),
         _create_test_snapshot("snap-third", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[-1]")
     assert result == "snap-third"
 
@@ -210,7 +216,7 @@ def test_get_field_value_list_index_middle() -> None:
         _create_test_snapshot("snap-second", 1),
         _create_test_snapshot("snap-third", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[1]")
     assert result == "snap-second"
 
@@ -222,7 +228,7 @@ def test_get_field_value_list_slice_first_n() -> None:
         _create_test_snapshot("snap-second", 1),
         _create_test_snapshot("snap-third", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[:2]")
     assert result == "snap-first, snap-second"
 
@@ -234,7 +240,7 @@ def test_get_field_value_list_slice_last_n() -> None:
         _create_test_snapshot("snap-second", 1),
         _create_test_snapshot("snap-third", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[-2:]")
     assert result == "snap-second, snap-third"
 
@@ -247,7 +253,7 @@ def test_get_field_value_list_slice_range() -> None:
         _create_test_snapshot("snap-2", 2),
         _create_test_snapshot("snap-3", 3),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[1:3]")
     assert result == "snap-1, snap-2"
 
@@ -255,28 +261,28 @@ def test_get_field_value_list_slice_range() -> None:
 def test_get_field_value_list_index_out_of_bounds() -> None:
     """_get_field_value should return empty string for out of bounds index."""
     snapshots = [_create_test_snapshot("snap-only", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[5]")
     assert result == ""
 
 
 def test_get_field_value_list_empty() -> None:
     """_get_field_value should return empty string for empty list with index."""
-    agent = make_test_agent_info(snapshots=[])
+    agent = make_test_agent_details(snapshots=[])
     result = _get_field_value(agent, "host.snapshots[0]")
     assert result == ""
 
 
 def test_get_field_value_list_empty_slice() -> None:
     """_get_field_value should return empty string for empty list with slice."""
-    agent = make_test_agent_info(snapshots=[])
+    agent = make_test_agent_details(snapshots=[])
     result = _get_field_value(agent, "host.snapshots[:3]")
     assert result == ""
 
 
 def test_get_field_value_bracket_on_non_list() -> None:
     """_get_field_value should return empty string for bracket on non-list field."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "host.name[0]")
     # host.name is a string, but we explicitly exclude strings from bracket indexing
     # for clearer behavior (strings would return single characters which is confusing)
@@ -285,14 +291,14 @@ def test_get_field_value_bracket_on_non_list() -> None:
 
 def test_get_field_value_invalid_field() -> None:
     """_get_field_value should return empty string for invalid field."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "nonexistent")
     assert result == ""
 
 
 def test_get_field_value_invalid_nested_field() -> None:
     """_get_field_value should return empty string for invalid nested field."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "host.nonexistent")
     assert result == ""
 
@@ -300,7 +306,7 @@ def test_get_field_value_invalid_nested_field() -> None:
 def test_get_field_value_invalid_slice_syntax() -> None:
     """_get_field_value should return empty string for invalid slice syntax."""
     snapshots = [_create_test_snapshot("snap-only", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[abc]")
     assert result == ""
 
@@ -308,7 +314,7 @@ def test_get_field_value_invalid_slice_syntax() -> None:
 def test_get_field_value_too_many_colons_in_slice() -> None:
     """_get_field_value should return empty string for too many colons in slice."""
     snapshots = [_create_test_snapshot("snap-only", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[1:2:3:4]")
     assert result == ""
 
@@ -324,7 +330,7 @@ def test_get_field_value_step_zero_returns_empty() -> None:
         _create_test_snapshot("snap-0", 0),
         _create_test_snapshot("snap-1", 1),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     # [::0] is invalid in Python - slice step cannot be zero
     result = _get_field_value(agent, "host.snapshots[::0]")
     assert result == ""
@@ -333,7 +339,7 @@ def test_get_field_value_step_zero_returns_empty() -> None:
 def test_get_field_value_empty_brackets_returns_empty() -> None:
     """_get_field_value should return empty string for empty brackets []."""
     snapshots = [_create_test_snapshot("snap-0", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[]")
     assert result == ""
 
@@ -341,7 +347,7 @@ def test_get_field_value_empty_brackets_returns_empty() -> None:
 def test_get_field_value_multiple_brackets_returns_empty() -> None:
     """_get_field_value should return empty string for multiple brackets [0][1]."""
     snapshots = [_create_test_snapshot("snap-0", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[0][0]")
     assert result == ""
 
@@ -353,7 +359,7 @@ def test_get_field_value_reverse_slice() -> None:
         _create_test_snapshot("snap-1", 1),
         _create_test_snapshot("snap-2", 2),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[::-1]")
     assert result == "snap-2, snap-1, snap-0"
 
@@ -366,7 +372,7 @@ def test_get_field_value_negative_slice_bounds() -> None:
         _create_test_snapshot("snap-2", 2),
         _create_test_snapshot("snap-3", 3),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[-3:-1]")
     assert result == "snap-1, snap-2"
 
@@ -379,7 +385,7 @@ def test_get_field_value_slice_with_step() -> None:
         _create_test_snapshot("snap-2", 2),
         _create_test_snapshot("snap-3", 3),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[::2]")
     assert result == "snap-0, snap-2"
 
@@ -390,7 +396,7 @@ def test_get_field_value_whitespace_in_brackets() -> None:
         _create_test_snapshot("snap-0", 0),
         _create_test_snapshot("snap-1", 1),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[ 0 ]")
     assert result == "snap-0"
 
@@ -398,7 +404,7 @@ def test_get_field_value_whitespace_in_brackets() -> None:
 def test_get_field_value_float_index_returns_empty() -> None:
     """_get_field_value should return empty string for float index [1.5]."""
     snapshots = [_create_test_snapshot("snap-0", 0)]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     result = _get_field_value(agent, "host.snapshots[1.5]")
     assert result == ""
 
@@ -409,7 +415,7 @@ def test_get_field_value_slice_beyond_list_length() -> None:
         _create_test_snapshot("snap-0", 0),
         _create_test_snapshot("snap-1", 1),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     # Slice [0:100] on a 2-element list should return both elements
     result = _get_field_value(agent, "host.snapshots[0:100]")
     assert result == "snap-0, snap-1"
@@ -421,7 +427,7 @@ def test_get_field_value_slice_no_match_returns_empty() -> None:
         _create_test_snapshot("snap-0", 0),
         _create_test_snapshot("snap-1", 1),
     ]
-    agent = make_test_agent_info(snapshots=snapshots)
+    agent = make_test_agent_details(snapshots=snapshots)
     # Slice [10:20] on a 2-element list should return empty
     result = _get_field_value(agent, "host.snapshots[10:20]")
     assert result == ""
@@ -446,116 +452,107 @@ def test_parse_slice_spec_negative_start_and_stop() -> None:
 
 def test_get_field_value_host_plugin_top_level() -> None:
     """_get_field_value should access host plugin data via dict key traversal."""
-    agent = make_test_agent_info(host_plugin={"aws": {"iam_user": "admin"}})
+    agent = make_test_agent_details(host_plugin={"aws": {"iam_user": "admin"}})
     result = _get_field_value(agent, "host.plugin.aws.iam_user")
     assert result == "admin"
 
 
 def test_get_field_value_host_plugin_nested() -> None:
     """_get_field_value should access nested host plugin data."""
-    agent = make_test_agent_info(host_plugin={"monitoring": {"endpoint": "https://example.com", "enabled": True}})
+    agent = make_test_agent_details(host_plugin={"monitoring": {"endpoint": "https://example.com", "enabled": True}})
     result = _get_field_value(agent, "host.plugin.monitoring.endpoint")
     assert result == "https://example.com"
 
 
 def test_get_field_value_host_plugin_missing_plugin_name() -> None:
     """_get_field_value should return empty for nonexistent plugin name."""
-    agent = make_test_agent_info(host_plugin={})
+    agent = make_test_agent_details(host_plugin={})
     result = _get_field_value(agent, "host.plugin.nonexistent.field")
     assert result == ""
 
 
 def test_get_field_value_host_plugin_missing_field() -> None:
     """_get_field_value should return empty for nonexistent field within plugin."""
-    agent = make_test_agent_info(host_plugin={"aws": {"iam_user": "admin"}})
+    agent = make_test_agent_details(host_plugin={"aws": {"iam_user": "admin"}})
     result = _get_field_value(agent, "host.plugin.aws.nonexistent")
     assert result == ""
 
 
 def test_get_field_value_host_plugin_whole_dict() -> None:
     """_get_field_value should format a dict value when accessing a plugin namespace."""
-    agent = make_test_agent_info(host_plugin={"aws": {"iam_user": "admin"}})
+    agent = make_test_agent_details(host_plugin={"aws": {"iam_user": "admin"}})
     result = _get_field_value(agent, "host.plugin.aws")
     assert result == "iam_user=admin"
 
 
 # =============================================================================
-# Tests for _get_sortable_value with host plugin dict access
+# Tests for _sort_agents_by_cel
 # =============================================================================
 
 
-def test_get_sortable_value_host_plugin_field() -> None:
-    """_get_sortable_value should return raw value for host plugin field."""
-    agent = make_test_agent_info(host_plugin={"aws": {"iam_user": "admin"}})
-    result = _get_sortable_value(agent, "host.plugin.aws.iam_user")
-    assert result == "admin"
-
-
-def test_get_sortable_value_host_plugin_missing() -> None:
-    """_get_sortable_value should return None for nonexistent host plugin field."""
-    agent = make_test_agent_info(host_plugin={})
-    result = _get_sortable_value(agent, "host.plugin.nonexistent.field")
-    assert result is None
-
-
-# =============================================================================
-# Tests for _get_sortable_value
-# =============================================================================
-
-
-def test_get_sortable_value_simple_field() -> None:
-    """_get_sortable_value should return raw value for simple field."""
-    agent = make_test_agent_info()
-    result = _get_sortable_value(agent, "name")
-    assert result == AgentName("test-agent")
-
-
-def test_get_sortable_value_nested_field() -> None:
-    """_get_sortable_value should return raw value for nested field."""
-    agent = make_test_agent_info()
-    result = _get_sortable_value(agent, "host.name")
-    assert result == "test-host"
-
-
-def test_get_sortable_value_provider_name() -> None:
-    """_get_sortable_value should extract host.provider_name."""
-    agent = make_test_agent_info()
-    result = _get_sortable_value(agent, "host.provider_name")
-    assert result == "local"
-
-
-def test_get_sortable_value_invalid_field() -> None:
-    """_get_sortable_value should return None for invalid field."""
-    agent = make_test_agent_info()
-    result = _get_sortable_value(agent, "nonexistent")
-    assert result is None
-
-
-# =============================================================================
-# Tests for _sort_agents
-# =============================================================================
-
-
-def test_sort_agents_by_name_ascending() -> None:
-    """_sort_agents should sort by name in ascending order."""
+def test_sort_agents_by_cel_ascending() -> None:
+    """_sort_agents_by_cel should sort by name ascending."""
     agents = [
-        make_test_agent_info(name="charlie"),
-        make_test_agent_info(name="alpha"),
-        make_test_agent_info(name="bravo"),
+        make_test_agent_details(name="charlie"),
+        make_test_agent_details(name="alpha"),
+        make_test_agent_details(name="bravo"),
     ]
-    result = _sort_agents(agents, "name", reverse=False)
+    compiled = compile_cel_sort_keys("name")
+    result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["alpha", "bravo", "charlie"]
 
 
-def test_sort_agents_by_name_descending() -> None:
-    """_sort_agents should sort by name in descending order."""
+def test_sort_agents_by_cel_descending() -> None:
+    """_sort_agents_by_cel should sort by name descending."""
     agents = [
-        make_test_agent_info(name="alpha"),
-        make_test_agent_info(name="charlie"),
-        make_test_agent_info(name="bravo"),
+        make_test_agent_details(name="alpha"),
+        make_test_agent_details(name="charlie"),
+        make_test_agent_details(name="bravo"),
     ]
-    result = _sort_agents(agents, "name", reverse=True)
+    compiled = compile_cel_sort_keys("name desc")
+    result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["charlie", "bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_multiple_keys() -> None:
+    """_sort_agents_by_cel should sort by multiple keys with mixed directions."""
+    agents = [
+        make_test_agent_details(name="alpha", state=AgentLifecycleState.STOPPED),
+        make_test_agent_details(name="bravo", state=AgentLifecycleState.RUNNING),
+        make_test_agent_details(name="charlie", state=AgentLifecycleState.RUNNING),
+    ]
+    # Sort by state ascending (RUNNING before STOPPED), then name descending
+    compiled = compile_cel_sort_keys("state, name desc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["charlie", "bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_empty_list() -> None:
+    """_sort_agents_by_cel should return empty list for empty input."""
+    compiled = compile_cel_sort_keys("name")
+    result = _sort_agents_by_cel([], compiled)
+    assert result == []
+
+
+def test_sort_agents_by_cel_no_keys() -> None:
+    """_sort_agents_by_cel should return agents unchanged when no sort keys."""
+    agents = [
+        make_test_agent_details(name="bravo"),
+        make_test_agent_details(name="alpha"),
+    ]
+    result = _sort_agents_by_cel(agents, [])
+    assert [str(a.name) for a in result] == ["bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_nested_field() -> None:
+    """_sort_agents_by_cel should sort by nested host fields via CEL."""
+    agents = [
+        make_test_agent_details(name="agent-b", provider_name=ProviderInstanceName("docker")),
+        make_test_agent_details(name="agent-a", provider_name=ProviderInstanceName("aws")),
+    ]
+    compiled = compile_cel_sort_keys("host.provider")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["agent-a", "agent-b"]
 
 
 # =============================================================================
@@ -575,7 +572,7 @@ def test_format_streaming_header_row_uses_custom_labels() -> None:
 
 def test_format_streaming_agent_row_extracts_field_values() -> None:
     """_format_streaming_agent_row should extract and format agent field values."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     fields = ["name", "host.provider_name"]
     widths = _compute_column_widths(fields, 120)
     result = _format_streaming_agent_row(agent, fields, widths)
@@ -619,7 +616,7 @@ def test_streaming_renderer_non_tty_no_ansi_codes() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name", "state"], is_tty=False, output=captured)
     renderer.start()
-    renderer(make_test_agent_info())
+    renderer(make_test_agent_details())
     renderer.finish()
 
     output = captured.getvalue()
@@ -643,7 +640,7 @@ def test_streaming_renderer_tty_shows_count_after_agent() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
-    renderer(make_test_agent_info())
+    renderer(make_test_agent_details())
 
     output = captured.getvalue()
     assert "(1 found)" in output
@@ -672,7 +669,7 @@ def test_streaming_renderer_thread_safety() -> None:
     agent_count = 20
     threads: list[threading.Thread] = []
     for idx in range(agent_count):
-        agent = make_test_agent_info(name=f"agent-{idx}")
+        agent = make_test_agent_details(name=f"agent-{idx}")
         thread = threading.Thread(target=renderer, args=(agent,))
         threads.append(thread)
 
@@ -695,7 +692,7 @@ def test_streaming_renderer_custom_fields() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name", "type"], is_tty=False, output=captured)
     renderer.start()
-    renderer(make_test_agent_info())
+    renderer(make_test_agent_details())
     renderer.finish()
 
     output = captured.getvalue()
@@ -711,10 +708,10 @@ def test_streaming_renderer_limit_caps_output() -> None:
     renderer.limit = 2
     renderer.start()
 
-    renderer(make_test_agent_info(name="agent-1"))
-    renderer(make_test_agent_info(name="agent-2"))
-    renderer(make_test_agent_info(name="agent-3"))
-    renderer(make_test_agent_info(name="agent-4"))
+    renderer(make_test_agent_details(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-2"))
+    renderer(make_test_agent_details(name="agent-3"))
+    renderer(make_test_agent_details(name="agent-4"))
 
     renderer.finish()
 
@@ -734,9 +731,9 @@ def test_streaming_renderer_no_limit_shows_all() -> None:
     renderer = _create_streaming_renderer(fields=["name"], is_tty=False, output=captured)
     renderer.start()
 
-    renderer(make_test_agent_info(name="agent-1"))
-    renderer(make_test_agent_info(name="agent-2"))
-    renderer(make_test_agent_info(name="agent-3"))
+    renderer(make_test_agent_details(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-2"))
+    renderer(make_test_agent_details(name="agent-3"))
 
     renderer.finish()
 
@@ -751,7 +748,7 @@ def test_streaming_renderer_tty_erases_status_on_finish() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
-    renderer(make_test_agent_info())
+    renderer(make_test_agent_details())
     renderer.finish()
 
     output = captured.getvalue()
@@ -764,9 +761,9 @@ def test_streaming_renderer_warning_stays_below_new_agents() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
-    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-1"))
     renderer.emit_warning("WARNING: bad thing\n")
-    renderer(make_test_agent_info(name="agent-2"))
+    renderer(make_test_agent_details(name="agent-2"))
     renderer.finish()
 
     output = captured.getvalue()
@@ -779,7 +776,7 @@ def test_streaming_renderer_emit_warning_non_tty() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=False, output=captured)
     renderer.start()
-    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-1"))
     renderer.emit_warning("WARNING: something\n")
     renderer.finish()
 
@@ -794,7 +791,7 @@ def test_streaming_renderer_warning_before_any_agents() -> None:
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
     renderer.emit_warning("WARNING: early warning\n")
-    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-1"))
     renderer.finish()
 
     output = captured.getvalue()
@@ -809,10 +806,10 @@ def test_streaming_renderer_multiple_warnings_stay_at_bottom() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
-    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-1"))
     renderer.emit_warning("WARNING: first\n")
     renderer.emit_warning("WARNING: second\n")
-    renderer(make_test_agent_info(name="agent-2"))
+    renderer(make_test_agent_details(name="agent-2"))
     renderer.finish()
 
     output = captured.getvalue()
@@ -831,11 +828,11 @@ def test_streaming_renderer_warnings_interleaved_with_agents() -> None:
     captured = StringIO()
     renderer = _create_streaming_renderer(fields=["name"], is_tty=True, output=captured)
     renderer.start()
-    renderer(make_test_agent_info(name="agent-1"))
+    renderer(make_test_agent_details(name="agent-1"))
     renderer.emit_warning("WARNING: first\n")
-    renderer(make_test_agent_info(name="agent-2"))
+    renderer(make_test_agent_details(name="agent-2"))
     renderer.emit_warning("WARNING: second\n")
-    renderer(make_test_agent_info(name="agent-3"))
+    renderer(make_test_agent_details(name="agent-3"))
     renderer.finish()
 
     output = captured.getvalue()
@@ -941,70 +938,70 @@ def test_is_streaming_eligible_explicit_sort_disables() -> None:
 
 def test_render_format_template_simple_field() -> None:
     """_render_format_template should expand a simple field."""
-    agent = make_test_agent_info(name="my-agent")
+    agent = make_test_agent_details(name="my-agent")
     result = _render_format_template("{name}", agent)
     assert result == "my-agent"
 
 
 def test_render_format_template_multiple_fields() -> None:
     """_render_format_template should expand multiple fields."""
-    agent = make_test_agent_info(name="my-agent", state=AgentLifecycleState.RUNNING)
+    agent = make_test_agent_details(name="my-agent", state=AgentLifecycleState.RUNNING)
     result = _render_format_template("{name} {state}", agent)
     assert result == "my-agent RUNNING"
 
 
 def test_render_format_template_nested_field() -> None:
     """_render_format_template should expand nested fields with dot notation."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _render_format_template("{host.name}", agent)
     assert result == "test-host"
 
 
 def test_render_format_template_nested_host_field() -> None:
     """_render_format_template should resolve nested host fields."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _render_format_template("{host.provider_name}", agent)
     assert result == "local"
 
 
 def test_render_format_template_unknown_field() -> None:
     """_render_format_template should resolve unknown fields to empty string."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _render_format_template("{nonexistent}", agent)
     assert result == ""
 
 
 def test_render_format_template_format_spec() -> None:
     """_render_format_template should support format specifications."""
-    agent = make_test_agent_info(name="hi")
+    agent = make_test_agent_details(name="hi")
     result = _render_format_template("{name:>10}", agent)
     assert result == "        hi"
 
 
 def test_render_format_template_literal_braces() -> None:
     """_render_format_template should handle escaped braces."""
-    agent = make_test_agent_info(name="my-agent")
+    agent = make_test_agent_details(name="my-agent")
     result = _render_format_template("{{literal}} {name}", agent)
     assert result == "{literal} my-agent"
 
 
 def test_render_format_template_empty_template() -> None:
     """_render_format_template should handle empty template."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _render_format_template("", agent)
     assert result == ""
 
 
 def test_render_format_template_literal_text_only() -> None:
     """_render_format_template should handle template with no fields."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _render_format_template("just text", agent)
     assert result == "just text"
 
 
 def test_render_format_template_tab_separator() -> None:
     """_render_format_template should handle tab characters in templates."""
-    agent = make_test_agent_info(name="my-agent", state=AgentLifecycleState.STOPPED)
+    agent = make_test_agent_details(name="my-agent", state=AgentLifecycleState.STOPPED)
     result = _render_format_template("{name}\t{state}", agent)
     assert result == "my-agent\tSTOPPED"
 
@@ -1023,9 +1020,9 @@ def test_emit_template_output() -> None:
 
     # Multiple agents produce one line each
     agents = [
-        make_test_agent_info(name="agent-alpha"),
-        make_test_agent_info(name="agent-bravo"),
-        make_test_agent_info(name="agent-charlie"),
+        make_test_agent_details(name="agent-alpha"),
+        make_test_agent_details(name="agent-bravo"),
+        make_test_agent_details(name="agent-charlie"),
     ]
     captured = StringIO()
     _emit_template_output(agents, "{name}", output=captured)
@@ -1047,7 +1044,7 @@ def test_streaming_template_emitter_writes_formatted_line() -> None:
     captured = StringIO()
     emitter = _StreamingTemplateEmitter(format_template="{name}\t{state}", output=captured)
 
-    agent = make_test_agent_info(name="my-agent", state=AgentLifecycleState.RUNNING)
+    agent = make_test_agent_details(name="my-agent", state=AgentLifecycleState.RUNNING)
     emitter(agent)
 
     output = captured.getvalue()
@@ -1059,9 +1056,9 @@ def test_streaming_template_emitter_multiple_agents() -> None:
     captured = StringIO()
     emitter = _StreamingTemplateEmitter(format_template="{name}", output=captured)
 
-    emitter(make_test_agent_info(name="agent-one"))
-    emitter(make_test_agent_info(name="agent-two"))
-    emitter(make_test_agent_info(name="agent-three"))
+    emitter(make_test_agent_details(name="agent-one"))
+    emitter(make_test_agent_details(name="agent-two"))
+    emitter(make_test_agent_details(name="agent-three"))
 
     lines = captured.getvalue().strip().split("\n")
     assert len(lines) == 3
@@ -1075,9 +1072,9 @@ def test_streaming_template_emitter_limit_caps_output() -> None:
     captured = StringIO()
     emitter = _StreamingTemplateEmitter(format_template="{name}", output=captured, limit=2)
 
-    emitter(make_test_agent_info(name="agent-one"))
-    emitter(make_test_agent_info(name="agent-two"))
-    emitter(make_test_agent_info(name="agent-three"))
+    emitter(make_test_agent_details(name="agent-one"))
+    emitter(make_test_agent_details(name="agent-two"))
+    emitter(make_test_agent_details(name="agent-three"))
 
     lines = captured.getvalue().strip().split("\n")
     assert len(lines) == 2
@@ -1091,7 +1088,7 @@ def test_streaming_template_emitter_thread_safety() -> None:
     emitter = _StreamingTemplateEmitter(format_template="{name}", output=captured)
 
     agent_count = 50
-    agents = [make_test_agent_info(name=f"agent-{i}") for i in range(agent_count)]
+    agents = [make_test_agent_details(name=f"agent-{i}") for i in range(agent_count)]
 
     threads = [threading.Thread(target=emitter, args=(agent,)) for agent in agents]
     for thread in threads:
@@ -1153,14 +1150,14 @@ def test_get_header_label_returns_uppercased_field_for_unknown_fields() -> None:
 
 def test_get_field_value_formats_host_tags_as_key_value_pairs() -> None:
     """_get_field_value should format host.tags dict as 'key=value' pairs."""
-    agent = make_test_agent_info(host_tags={"project": "mng"})
+    agent = make_test_agent_details(host_tags={"project": "mng"})
     result = _get_field_value(agent, "host.tags")
     assert result == "project=mng"
 
 
 def test_get_field_value_returns_empty_for_empty_tags() -> None:
     """_get_field_value should return empty string for empty tags."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "host.tags")
     assert result == ""
 
@@ -1259,21 +1256,21 @@ def test_label_option_rejects_invalid_format(
 
 def test_get_field_value_formats_labels_as_key_value_pairs() -> None:
     """_get_field_value should format labels dict as 'key=value' pairs."""
-    agent = make_test_agent_info(labels={"project": "mng"})
+    agent = make_test_agent_details(labels={"project": "mng"})
     result = _get_field_value(agent, "labels")
     assert result == "project=mng"
 
 
 def test_get_field_value_returns_empty_for_empty_labels() -> None:
     """_get_field_value should return empty string for empty labels."""
-    agent = make_test_agent_info()
+    agent = make_test_agent_details()
     result = _get_field_value(agent, "labels")
     assert result == ""
 
 
 def test_get_field_value_formats_multiple_labels() -> None:
     """_get_field_value should format multiple labels as comma-separated pairs."""
-    agent = make_test_agent_info(labels={"project": "mng", "env": "prod"})
+    agent = make_test_agent_details(labels={"project": "mng", "env": "prod"})
     result = _get_field_value(agent, "labels")
     # Dict ordering is guaranteed in Python 3.7+ so we can check exact output
     assert "project=mng" in result
@@ -1282,13 +1279,319 @@ def test_get_field_value_formats_multiple_labels() -> None:
 
 def test_get_field_value_accesses_specific_label() -> None:
     """_get_field_value should access a specific label via dot notation."""
-    agent = make_test_agent_info(labels={"project": "mng", "env": "prod"})
+    agent = make_test_agent_details(labels={"project": "mng", "env": "prod"})
     result = _get_field_value(agent, "labels.project")
     assert result == "mng"
 
 
 def test_get_field_value_returns_empty_for_missing_label() -> None:
     """_get_field_value should return empty for a label key that does not exist."""
-    agent = make_test_agent_info(labels={"project": "mng"})
+    agent = make_test_agent_details(labels={"project": "mng"})
     result = _get_field_value(agent, "labels.nonexistent")
     assert result == ""
+
+
+# =============================================================================
+# Fake api_list_agents for CLI-level list command output formatting tests
+# =============================================================================
+
+
+class FakeApiListAgents:
+    """Replacement for api_list_agents that returns pre-built agents.
+
+    When the list command calls api_list_agents, this callable returns a
+    ListResult containing the pre-configured agents. If the caller passes
+    an on_agent callback (streaming mode), agents are delivered via that
+    callback as well.
+    """
+
+    def __init__(self, agents: list[AgentDetails]) -> None:
+        self.agents = agents
+
+    def __call__(self, **kwargs: Any) -> ListResult:
+        result = ListResult(agents=list(self.agents))
+        on_agent: Callable[[AgentDetails], None] | None = kwargs.get("on_agent")
+        if on_agent is not None:
+            for agent in self.agents:
+                on_agent(agent)
+        return result
+
+
+def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentDetails]) -> None:
+    """Replace api_list_agents with a fake that returns the given agents."""
+    monkeypatch.setattr("imbue.mng.cli.list.api_list_agents", FakeApiListAgents(agents))
+
+
+# =============================================================================
+# CLI-level tests: list_command output formatting with monkeypatched agents
+# =============================================================================
+
+
+def test_list_command_json_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json should emit JSON with agent data."""
+    agents = [
+        make_test_agent_details(name="alpha", state=AgentLifecycleState.RUNNING),
+        make_test_agent_details(name="bravo", state=AgentLifecycleState.STOPPED),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert len(output["agents"]) == 2
+    names = [a["name"] for a in output["agents"]]
+    assert "alpha" in names
+    assert "bravo" in names
+
+
+def test_list_command_jsonl_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format jsonl should emit one JSON line per agent."""
+    agents = [
+        make_test_agent_details(name="agent-one"),
+        make_test_agent_details(name="agent-two"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "jsonl"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    parsed_names = {json.loads(line)["name"] for line in lines}
+    assert parsed_names == {"agent-one", "agent-two"}
+
+
+def test_list_command_human_format_table_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format human --sort name should emit a table with default fields."""
+    agents = [
+        make_test_agent_details(name="my-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    # Default human format includes NAME, STATE, HOST, PROVIDER headers
+    assert "NAME" in result.output
+    assert "STATE" in result.output
+    assert "my-agent" in result.output
+    assert "RUNNING" in result.output
+
+
+def test_list_command_human_format_custom_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --fields name,type --sort name should show only specified columns."""
+    agents = [
+        make_test_agent_details(name="field-test"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--fields", "name,type", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "NAME" in result.output
+    assert "TYPE" in result.output
+    assert "field-test" in result.output
+    assert "generic" in result.output
+    # Should not contain default fields that were not requested
+    assert "PROVIDER" not in result.output
+
+
+def test_list_command_template_format_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format '{name}\\t{state}' should produce template-expanded lines."""
+    agents = [
+        make_test_agent_details(name="tpl-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "{name}\\t{state}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "tpl-agent\tRUNNING" in result.output
+
+
+def test_list_command_json_format_with_sort(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json --sort name should sort agents ascending."""
+    agents = [
+        make_test_agent_details(name="zeta"),
+        make_test_agent_details(name="alpha"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    names = [a["name"] for a in output["agents"]]
+    assert names == ["alpha", "zeta"]
+
+
+def test_list_command_json_format_with_limit(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format json --sort name --limit 1 should return only one agent."""
+    agents = [
+        make_test_agent_details(name="first"),
+        make_test_agent_details(name="second"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json", "--sort", "name", "--limit", "1"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert len(output["agents"]) == 1
+
+
+def test_list_command_jsonl_format_with_limit(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format jsonl --limit 1 should emit at most one JSONL line."""
+    agents = [
+        make_test_agent_details(name="first"),
+        make_test_agent_details(name="second"),
+        make_test_agent_details(name="third"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "jsonl", "--limit", "1"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 1
+
+
+def test_list_command_template_format_with_sort_falls_back_to_batch(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --format template --sort name should use batch mode and sort."""
+    agents = [
+        make_test_agent_details(name="zz-last"),
+        make_test_agent_details(name="aa-first"),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "{name}", "--sort", "name"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 2
+    assert lines[0] == "aa-first"
+    assert lines[1] == "zz-last"
+
+
+def test_list_command_human_streaming_with_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list (default human, no sort) should use streaming mode and show agents."""
+    agents = [
+        make_test_agent_details(name="stream-agent", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        [],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "stream-agent" in result.output
+    assert "NAME" in result.output
+
+
+# =============================================================================
+# Tests for --headless CLI flag
+# =============================================================================
+
+
+def test_headless_flag_is_accepted_by_list_command(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--headless flag should be accepted by the list command without errors."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--headless"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0

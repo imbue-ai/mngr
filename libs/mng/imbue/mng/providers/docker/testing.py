@@ -1,15 +1,43 @@
 from collections.abc import Generator
 from pathlib import Path
 
+import docker
 import docker.errors
+import docker.models.containers
 
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.docker.config import DockerProviderConfig
 from imbue.mng.providers.docker.instance import DockerProviderInstance
+from imbue.mng.providers.docker.volume import state_volume_name
 from imbue.mng.providers.local.volume import LocalVolume
 from imbue.mng.utils.testing import get_short_random_string
+
+
+def remove_docker_container_and_volume(
+    client: docker.DockerClient,
+    container: docker.models.containers.Container,
+) -> None:
+    """Remove a Docker container and its backing volume (if any).
+
+    The state container's backing Docker volume has the same name as the
+    container.  The container must be removed first because Docker refuses
+    to remove volumes that are still mounted.
+
+    Errors are silently ignored so that cleanup proceeds on a best-effort
+    basis.
+    """
+    name = container.name or ""
+    try:
+        container.remove(force=True)
+    except docker.errors.DockerException:
+        pass
+    if name:
+        try:
+            client.volumes.get(name).remove(force=True)
+        except (docker.errors.NotFound, docker.errors.DockerException):
+            pass
 
 
 def make_docker_provider(mng_ctx: MngContext, name: str = "test-docker") -> DockerProviderInstance:
@@ -46,10 +74,10 @@ def make_docker_provider_with_cleanup(
 
     try:
         cg = mng_ctx.concurrency_group
-        hosts = provider.list_hosts(cg, include_destroyed=True)
-        for host in hosts:
+        discovered = provider.discover_hosts(cg, include_destroyed=True)
+        for host in discovered:
             try:
-                provider.destroy_host(host, delete_snapshots=True)
+                provider.destroy_host(host.host_id, delete_snapshots=True)
             except (MngError, docker.errors.DockerException, OSError):
                 pass
     except (MngError, docker.errors.DockerException, OSError):
@@ -57,11 +85,18 @@ def make_docker_provider_with_cleanup(
 
     try:
         for container in provider._list_containers():
-            try:
-                container.remove(force=True)
-            except docker.errors.DockerException:
-                pass
+            remove_docker_container_and_volume(provider._docker_client, container)
     except (MngError, docker.errors.DockerException):
+        pass
+
+    # Remove the Docker named volume backing the state container (in case
+    # the state container was already removed above but the volume was not).
+    try:
+        user_id = str(mng_ctx.get_profile_user_id())
+        prefix = mng_ctx.config.prefix
+        vol_name = state_volume_name(prefix, user_id)
+        provider._docker_client.volumes.get(vol_name).remove(force=True)
+    except (docker.errors.NotFound, docker.errors.DockerException, OSError, MngError):
         pass
 
     try:

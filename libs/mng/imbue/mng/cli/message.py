@@ -41,6 +41,7 @@ class MessageCliOptions(CommonCliOptions):
     exclude: tuple[str, ...]
     stdin: bool
     message_content: str | None
+    provider: tuple[str, ...]
     on_error: str
     start: bool
 
@@ -97,6 +98,11 @@ class MessageCliOptions(CommonCliOptions):
     default="continue",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
 )
+@optgroup.option(
+    "--provider",
+    multiple=True,
+    help="Message only agents using specified provider (repeatable)",
+)
 @add_common_options
 @click.pass_context
 def message(ctx: click.Context, **kwargs) -> None:
@@ -132,7 +138,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         raise UserInputError("Cannot specify both agent names and --all")
 
     # Get message content
-    message_content = _get_message_content(opts.message_content, ctx)
+    message_content = _get_message_content(opts.message_content, ctx, is_interactive=mng_ctx.is_interactive)
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -159,6 +165,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
+            provider_names=opts.provider,
         )
         if result.failed_agents:
             ctx.exit(1)
@@ -173,22 +180,30 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         all_agents=opts.all_agents,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
+        provider_names=opts.provider,
     )
 
     _emit_output(result, output_opts)
 
     if result.failed_agents:
+        if output_opts.output_format == OutputFormat.HUMAN:
+            failed_names = " ".join(name for name, _error in result.failed_agents)
+            write_human_line("Failed agents: {}", failed_names)
         ctx.exit(1)
 
 
-def _get_message_content(message_option: str | None, ctx: click.Context) -> str:
+def _get_message_content(message_option: str | None, ctx: click.Context, is_interactive: bool) -> str:
     """Get the message content from option, stdin, or editor."""
     if message_option is not None:
         return message_option
 
-    # Check if stdin has data (not a tty)
+    # Check if stdin has piped data (not a tty)
     if not sys.stdin.isatty():
         return sys.stdin.read()
+
+    # In headless mode, we cannot open an editor
+    if not is_interactive:
+        raise UserInputError("No message provided and running in headless mode (use --message to provide one)")
 
     # Interactive mode: open editor
     message_from_editor = click.edit()

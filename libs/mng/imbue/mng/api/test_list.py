@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.list import AgentErrorInfo
@@ -13,17 +14,15 @@ from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
-from imbue.mng.api.list import _agent_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents
-from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import CpuResources
-from imbue.mng.interfaces.data_types import HostInfo
+from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostResources
-from imbue.mng.interfaces.data_types import SSHInfo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -33,7 +32,9 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.utils.cel_utils import compile_cel_filters
+from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import tmux_session_cleanup
 
 # =============================================================================
@@ -109,14 +110,14 @@ def test_list_result_defaults_to_empty_lists() -> None:
     assert result.errors == []
 
 
-def test_agent_to_cel_context_basic_fields() -> None:
-    """Test that _agent_to_cel_context converts basic AgentInfo fields."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_basic_fields() -> None:
+    """Test that agent_details_to_cel_context converts basic AgentDetails fields."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -125,10 +126,10 @@ def test_agent_to_cel_context_basic_fields() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["resource_type"] == "agent"
     assert context["type"] == "claude"
@@ -138,14 +139,14 @@ def test_agent_to_cel_context_basic_fields() -> None:
     assert "age" in context
 
 
-def test_agent_to_cel_context_with_runtime() -> None:
-    """Test that _agent_to_cel_context includes runtime when available."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_runtime() -> None:
+    """Test that agent_details_to_cel_context includes runtime when available."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -155,23 +156,23 @@ def test_agent_to_cel_context_with_runtime() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         runtime_seconds=123.45,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["runtime"] == 123.45
 
 
-def test_agent_to_cel_context_with_activity_time() -> None:
-    """Test that _agent_to_cel_context computes idle from activity times."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_activity_time() -> None:
+    """Test that agent_details_to_cel_context computes idle from activity times."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
     activity_time = datetime.now(timezone.utc)
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -181,24 +182,24 @@ def test_agent_to_cel_context_with_activity_time() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         user_activity_time=activity_time,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     # Idle should be computed and be very small (just computed)
     assert "idle" in context
     assert context["idle"] >= 0
 
 
-def test_agent_to_cel_context_with_state() -> None:
-    """Test that _agent_to_cel_context flattens state enum to lowercase string."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_state() -> None:
+    """Test that agent_details_to_cel_context flattens state enum to lowercase string."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -207,22 +208,22 @@ def test_agent_to_cel_context_with_state() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.STOPPED,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["state"] == AgentLifecycleState.STOPPED.value
 
 
 def test_apply_cel_filters_with_include_filter() -> None:
     """Test that _apply_cel_filters includes matching agents."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("my-agent"),
         type="claude",
@@ -231,7 +232,7 @@ def test_apply_cel_filters_with_include_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -239,19 +240,19 @@ def test_apply_cel_filters_with_include_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
 def test_apply_cel_filters_with_non_matching_include() -> None:
     """Test that _apply_cel_filters excludes non-matching agents."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("other-agent"),
         type="claude",
@@ -260,7 +261,7 @@ def test_apply_cel_filters_with_non_matching_include() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -268,19 +269,19 @@ def test_apply_cel_filters_with_non_matching_include() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is False
 
 
 def test_apply_cel_filters_with_exclude_filter() -> None:
     """Test that _apply_cel_filters excludes matching agents."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("excluded-agent"),
         type="claude",
@@ -289,7 +290,7 @@ def test_apply_cel_filters_with_exclude_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -297,19 +298,19 @@ def test_apply_cel_filters_with_exclude_filter() -> None:
         exclude_filters=('name == "excluded-agent"',),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is False
 
 
 def test_apply_cel_filters_with_state_filter() -> None:
     """Test filtering by lifecycle state."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -318,7 +319,7 @@ def test_apply_cel_filters_with_state_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -326,19 +327,19 @@ def test_apply_cel_filters_with_state_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
 def test_apply_cel_filters_with_host_provider_filter() -> None:
     """Test filtering by host provider using dot notation."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -347,7 +348,7 @@ def test_apply_cel_filters_with_host_provider_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -355,7 +356,7 @@ def test_apply_cel_filters_with_host_provider_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
@@ -373,6 +374,7 @@ def test_list_agents_returns_empty_when_no_agents(
     assert result.errors == []
 
 
+@pytest.mark.tmux
 def test_list_agents_with_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -385,27 +387,10 @@ def test_list_agents_with_agent(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent first
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847291",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847291"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # Now list agents
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
         assert len(result.agents) >= 1
@@ -413,6 +398,7 @@ def test_list_agents_with_agent(
         assert AgentName(agent_name) in agent_names
 
 
+@pytest.mark.tmux
 def test_list_agents_with_include_filter(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -425,27 +411,10 @@ def test_list_agents_with_include_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 938274",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 938274"
         )
-        assert create_result.exit_code == 0
 
-        # List with filter that matches
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             include_filters=(f'name == "{agent_name}"',),
@@ -456,6 +425,7 @@ def test_list_agents_with_include_filter(
         assert result.agents[0].name == AgentName(agent_name)
 
 
+@pytest.mark.tmux
 def test_list_agents_with_exclude_filter(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -468,27 +438,10 @@ def test_list_agents_with_exclude_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 726485",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 726485"
         )
-        assert create_result.exit_code == 0
 
-        # List with filter that excludes the agent
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             exclude_filters=(f'name == "{agent_name}"',),
@@ -499,6 +452,7 @@ def test_list_agents_with_exclude_filter(
         assert AgentName(agent_name) not in agent_names
 
 
+@pytest.mark.tmux
 def test_list_agents_with_callbacks(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -510,40 +464,22 @@ def test_list_agents_with_callbacks(
     agent_name = f"test-callback-{int(time.time())}"
     session_name = f"{mng_test_prefix}{agent_name}"
 
-    agents_received: list[AgentInfo] = []
+    agents_received: list[AgentDetails] = []
 
-    def on_agent(agent: AgentInfo) -> None:
+    def on_agent(agent: AgentDetails) -> None:
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 619274",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 619274"
         )
-        assert create_result.exit_code == 0
 
-        # List with callback
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             on_agent=on_agent,
             is_streaming=False,
         )
 
-        # Callback should have been called for each agent
         assert len(agents_received) == len(result.agents)
         if result.agents:
             assert agents_received[0].name == result.agents[0].name
@@ -565,19 +501,19 @@ def test_list_agents_with_error_behavior_continue(
 
 
 # =============================================================================
-# Extended HostInfo Field Tests
+# Extended HostDetails Field Tests
 # =============================================================================
 
 
-def test_agent_to_cel_context_with_host_state() -> None:
-    """Test that _agent_to_cel_context includes host.state field."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_host_state() -> None:
+    """Test that agent_details_to_cel_context includes host.state field."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         state=HostState.RUNNING,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -586,24 +522,24 @@ def test_agent_to_cel_context_with_host_state() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["state"] == HostState.RUNNING.value
 
 
-def test_agent_to_cel_context_with_host_resources() -> None:
-    """Test that _agent_to_cel_context includes host.resource fields."""
+def test_agent_details_to_cel_context_with_host_resources() -> None:
+    """Test that agent_details_to_cel_context includes host.resource fields."""
     resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
         resource=resources,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -612,17 +548,17 @@ def test_agent_to_cel_context_with_host_resources() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["resource"]["memory_gb"] == 16.0
     assert context["host"]["resource"]["disk_gb"] == 100.0
 
 
-def test_agent_to_cel_context_with_host_ssh() -> None:
-    """Test that _agent_to_cel_context includes host.ssh fields."""
+def test_agent_details_to_cel_context_with_host_ssh() -> None:
+    """Test that agent_details_to_cel_context includes host.ssh fields."""
     ssh_info = SSHInfo(
         user="root",
         host="example.com",
@@ -630,13 +566,13 @@ def test_agent_to_cel_context_with_host_ssh() -> None:
         key_path=Path("/keys/id_rsa"),
         command="ssh -i /keys/id_rsa -p 22 root@example.com",
     )
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("docker"),
         ssh=ssh_info,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -645,10 +581,10 @@ def test_agent_to_cel_context_with_host_ssh() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["ssh"]["user"] == "root"
     assert context["host"]["ssh"]["host"] == "example.com"
@@ -657,13 +593,13 @@ def test_agent_to_cel_context_with_host_ssh() -> None:
 
 def test_apply_cel_filters_with_host_state_filter() -> None:
     """Test filtering by host.state."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         state=HostState.RUNNING,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -672,7 +608,7 @@ def test_apply_cel_filters_with_host_state_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -680,7 +616,7 @@ def test_apply_cel_filters_with_host_state_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
@@ -688,13 +624,13 @@ def test_apply_cel_filters_with_host_state_filter() -> None:
 def test_apply_cel_filters_with_host_resource_filter() -> None:
     """Test filtering by host.resource.memory_gb."""
     resources = HostResources(cpu=CpuResources(count=8), memory_gb=32.0, disk_gb=500.0)
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
         resource=resources,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -703,7 +639,7 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -711,22 +647,22 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
-def test_agent_to_cel_context_with_host_lock_fields() -> None:
-    """Test that _agent_to_cel_context includes host.is_locked and host.locked_time fields."""
+def test_agent_details_to_cel_context_with_host_lock_fields() -> None:
+    """Test that agent_details_to_cel_context includes host.is_locked and host.locked_time fields."""
     lock_time = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         is_locked=True,
         locked_time=lock_time,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -735,25 +671,25 @@ def test_agent_to_cel_context_with_host_lock_fields() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["is_locked"] is True
     assert context["host"]["locked_time"] is not None
 
 
-def test_agent_to_cel_context_with_host_not_locked() -> None:
-    """Test that _agent_to_cel_context includes is_locked=False when no lock file exists."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_host_not_locked() -> None:
+    """Test that agent_details_to_cel_context includes is_locked=False when no lock file exists."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         is_locked=False,
         locked_time=None,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -762,10 +698,10 @@ def test_agent_to_cel_context_with_host_not_locked() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["is_locked"] is False
     assert context["host"]["locked_time"] is None
@@ -773,14 +709,14 @@ def test_agent_to_cel_context_with_host_not_locked() -> None:
 
 def test_apply_cel_filters_with_host_is_locked_filter() -> None:
     """Test filtering by host.is_locked."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         is_locked=True,
         locked_time=datetime.now(timezone.utc),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -789,7 +725,7 @@ def test_apply_cel_filters_with_host_is_locked_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -797,21 +733,21 @@ def test_apply_cel_filters_with_host_is_locked_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
 def test_apply_cel_filters_with_host_uptime_filter() -> None:
     """Test filtering by host.uptime_seconds."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
         # More than a day (86400 seconds)
         uptime_seconds=100000.0,
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -820,7 +756,7 @@ def test_apply_cel_filters_with_host_uptime_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     # Filter for hosts running more than a day (86400 seconds)
@@ -829,20 +765,20 @@ def test_apply_cel_filters_with_host_uptime_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
 def test_apply_cel_filters_with_host_tags_filter() -> None:
     """Test filtering by host.tags."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
         tags={"env": "production", "team": "ml"},
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -851,7 +787,7 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -859,7 +795,7 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
@@ -869,14 +805,14 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
 # =============================================================================
 
 
-def test_agent_to_cel_context_with_idle_mode() -> None:
-    """Test that _agent_to_cel_context includes idle_mode field."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_idle_mode() -> None:
+    """Test that agent_details_to_cel_context includes idle_mode field."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -886,22 +822,22 @@ def test_agent_to_cel_context_with_idle_mode() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         idle_mode=IdleMode.AGENT.value,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["idle_mode"] == IdleMode.AGENT.value
 
 
-def test_agent_to_cel_context_with_idle_seconds() -> None:
-    """Test that _agent_to_cel_context includes idle_seconds field."""
-    host_info = HostInfo(
+def test_agent_details_to_cel_context_with_idle_seconds() -> None:
+    """Test that agent_details_to_cel_context includes idle_seconds field."""
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -911,22 +847,22 @@ def test_agent_to_cel_context_with_idle_seconds() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         idle_seconds=300.5,
-        host=host_info,
+        host=host_details,
     )
 
-    context = _agent_to_cel_context(agent_info)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["idle_seconds"] == 300.5
 
 
 def test_apply_cel_filters_with_idle_mode_filter() -> None:
     """Test filtering by idle_mode."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -936,7 +872,7 @@ def test_apply_cel_filters_with_idle_mode_filter() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         idle_mode=IdleMode.USER.value,
-        host=host_info,
+        host=host_details,
     )
 
     include_filters, exclude_filters = compile_cel_filters(
@@ -944,19 +880,19 @@ def test_apply_cel_filters_with_idle_mode_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
 def test_apply_cel_filters_with_idle_seconds_filter() -> None:
     """Test filtering by idle_seconds."""
-    host_info = HostInfo(
+    host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("local"),
     )
-    agent_info = AgentInfo(
+    agent_details = AgentDetails(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         type="claude",
@@ -966,7 +902,7 @@ def test_apply_cel_filters_with_idle_seconds_filter() -> None:
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         idle_seconds=600.0,
-        host=host_info,
+        host=host_details,
     )
 
     # Filter for agents idle more than 5 minutes (300 seconds)
@@ -975,11 +911,12 @@ def test_apply_cel_filters_with_idle_seconds_filter() -> None:
         exclude_filters=(),
     )
 
-    result = _apply_cel_filters(agent_info, include_filters, exclude_filters)
+    result = _apply_cel_filters(agent_details, include_filters, exclude_filters)
 
     assert result is True
 
 
+@pytest.mark.tmux
 def test_list_agents_populates_idle_mode(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -992,38 +929,20 @@ def test_list_agents_populates_idle_mode(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 123456",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 123456"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List agents and check idle_mode is populated
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
-        # Find our agent
         our_agent = next((a for a in result.agents if a.name == AgentName(agent_name)), None)
         assert our_agent is not None, f"Agent {agent_name} not found in list"
 
-        # idle_mode should be populated (default is "agent")
         assert our_agent.idle_mode is not None
         assert our_agent.idle_mode == IdleMode.IO.value
 
 
+@pytest.mark.tmux
 def test_list_agents_populates_lock_fields_for_online_host(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -1036,24 +955,9 @@ def test_list_agents_populates_lock_fields_for_online_host(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 847292",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 847292"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
         result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
 
@@ -1066,6 +970,7 @@ def test_list_agents_populates_lock_fields_for_online_host(
         assert our_agent.host.is_locked is False
 
 
+@pytest.mark.tmux
 def test_list_agents_streaming_with_callback(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -1077,48 +982,28 @@ def test_list_agents_streaming_with_callback(
     agent_name = f"test-stream-{int(time.time())}"
     session_name = f"{mng_test_prefix}{agent_name}"
 
-    agents_received: list[AgentInfo] = []
+    agents_received: list[AgentDetails] = []
 
-    def on_agent(agent: AgentInfo) -> None:
+    def on_agent(agent: AgentDetails) -> None:
         agents_received.append(agent)
 
     with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 519283",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 519283"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List with streaming mode and callback
         result = list_agents(
             mng_ctx=temp_mng_ctx,
             on_agent=on_agent,
             is_streaming=True,
         )
 
-        # Callback should have been called for each agent
         assert len(agents_received) >= 1
         assert len(agents_received) == len(result.agents)
 
-        # The agent we created should be in the results
         agent_names = [a.name for a in agents_received]
         assert AgentName(agent_name) in agent_names
 
-        # Result object should also be populated
         result_names = [a.name for a in result.agents]
         assert AgentName(agent_name) in result_names
 
@@ -1127,9 +1012,9 @@ def test_list_agents_streaming_returns_empty_when_no_agents(
     temp_mng_ctx: MngContext,
 ) -> None:
     """Test that streaming list_agents returns empty result when no agents exist."""
-    agents_received: list[AgentInfo] = []
+    agents_received: list[AgentDetails] = []
 
-    def on_agent(agent: AgentInfo) -> None:
+    def on_agent(agent: AgentDetails) -> None:
         agents_received.append(agent)
 
     result = list_agents(
@@ -1156,6 +1041,7 @@ def test_list_agents_streaming_with_error_behavior_continue(
     assert isinstance(result, ListResult)
 
 
+@pytest.mark.tmux
 def test_list_agents_with_provider_names_filter(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -1168,33 +1054,15 @@ def test_list_agents_with_provider_names_filter(
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
-        # Create an agent on the local provider
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--agent-cmd",
-                "sleep 234567",
-                "--source",
-                str(temp_work_dir),
-                "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
+        create_test_agent_via_cli(
+            cli_runner, temp_work_dir, mng_test_prefix, plugin_manager, agent_name, agent_cmd="sleep 234567"
         )
-        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
 
-        # List agents filtering to local provider - should find the agent
         result = list_agents(mng_ctx=temp_mng_ctx, provider_names=("local",), is_streaming=False)
 
         agent_names = [a.name for a in result.agents]
         assert AgentName(agent_name) in agent_names
 
-        # List agents filtering to nonexistent provider - should not find any agents
         result_empty = list_agents(mng_ctx=temp_mng_ctx, provider_names=("nonexistent",), is_streaming=False)
 
         assert len(result_empty.agents) == 0

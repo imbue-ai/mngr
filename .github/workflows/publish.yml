@@ -67,6 +67,12 @@ jobs:
       - name: Build mng-opencode
         run: pyproject-build libs/mng_opencode -o dist/
 
+      - name: Build mng-kanpan
+        run: pyproject-build libs/mng_kanpan -o dist/
+
+      - name: Build mng-tutor
+        run: pyproject-build libs/mng_tutor -o dist/
+
       - name: Publish packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

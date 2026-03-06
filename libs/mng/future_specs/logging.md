@@ -7,7 +7,7 @@ How mng handles logging and output.
 mng separates three distinct concerns:
 1. **Command Results**: Structured data output (to stdout)
 2. **Console Logging**: Diagnostic information shown during execution (to stderr)
-3. **File Logging**: Persistent diagnostic logs for debugging (to `~/.mng/logs/`)
+3. **File Logging**: Persistent diagnostic logs in JSONL event envelope format (to `events/<source>/events.jsonl`)
 
 ## Command Results vs Logging
 
@@ -25,10 +25,48 @@ mng separates three distinct concerns:
 - Suppressed by `-q/--quiet`
 
 **File Logging** captures detailed diagnostic information:
-- Saved to `~/.mng/logs/<timestamp>-<pid>.json`
-- Structured JSON format for easy parsing
+- Saved to `events/<source>/events.jsonl` (e.g., `~/.mng/events/logs/mng/events.jsonl` for the mng CLI)
+- Uses the standard event envelope format (same as all other events in the system)
 - Level controlled by config (default: DEBUG)
-- Includes: timestamp, command, args, execution trace, errors
+- Each log line is a self-describing JSON object with envelope fields
+
+## Log Format
+
+Both Python and bash emit flat JSON with the same top-level field names. The envelope fields (`timestamp`, `type`, `event_id`, `source`, `level`, `message`, `pid`) are at the top level in both, so a single parser works for all log lines. Python logs include additional fields (function, line, module, etc.) that bash logs don't have.
+
+### Bash example (envelope fields only)
+
+```json
+{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"event_watcher","event_id":"evt-a1b2c3d4...","source":"event_watcher","level":"INFO","message":"Started watching","pid":12345}
+```
+
+### Python example (envelope fields + loguru metadata)
+
+```json
+{"timestamp":"2026-03-01T12:00:00.123456789Z","type":"mng","event_id":"evt-a1b2c3d4...","source":"mng","level":"INFO","message":"Created agent","pid":12345,"command":"create","function":"create_agent","line":42,"module":"api.create","logger_name":"imbue.mng.api.create","file_name":"create.py","file_path":"/path/to/create.py","elapsed_seconds":0.012,"exception":null,"process_name":"MainProcess","thread_name":"MainThread","thread_id":140106487883584,"extra":{"host":"my-host"}}
+```
+
+### All fields
+
+Shared (present in both Python and bash):
+- `timestamp`: ISO 8601 with nanosecond precision in UTC
+- `type`: Program/component name (e.g., `mng`, `event_watcher`, `stop_hook`)
+- `event_id`: Unique identifier (e.g., `evt-a1b2c3d4e5f67890a1b2c3d4e5f67890`)
+- `source`: Matches the folder under `events/`
+- `level`: Log level string (`TRACE`, `DEBUG`, `BUILD`, `INFO`, `WARNING`, `ERROR`)
+- `message`: The log message text
+- `pid`: Process ID
+
+Optional shared:
+- `command`: CLI subcommand (present for `mng` and `changelings`)
+
+Python-only (from loguru):
+- `function`, `line`, `module`, `logger_name`: Source code location
+- `file_name`, `file_path`: Source file
+- `elapsed_seconds`: Time since logger was first used
+- `exception`: Exception info object (null when no exception)
+- `process_name`, `thread_name`, `thread_id`: Process and thread info
+- `extra`: Dict of context from `logger.contextualize()` or `logger.bind()`
 
 ## Configuration
 
@@ -44,10 +82,7 @@ file_level = "DEBUG"
 console_level = "BUILD"
 
 # Where logs are stored (relative to data root if relative)
-log_dir = "logs"
-
-# Maximum number of log files to keep
-max_log_files = 1000
+log_dir = "events"
 
 # Maximum size of each log file before rotation
 max_log_size_mb = 10
@@ -79,34 +114,13 @@ CLI flags override config settings:
 ### Location
 
 Logs are stored at:
-- `~/.mng/logs/` by default
+- `~/.mng/events/<source>/events.jsonl` by default (e.g., `~/.mng/events/logs/mng/events.jsonl`)
 - Configurable via `logging.log_dir` in config
 - If relative, resolved relative to data root (`default_host_dir` or `~/.mng`)
 
-### Naming
-
-Log files are named: `<timestamp>-<pid>.json`
-- Example: `20231215-143022-12345.json`
-- Timestamp: YYYYMMDD-HHMMSS
-- PID: Process ID of the mng invocation
-
 ### Rotation
 
-Logs are rotated based on two criteria:
-1. **Size**: When a log file exceeds `max_log_size_mb`, it's rotated
-2. **Count**: When total files exceed `max_log_files`, oldest are removed
-
-Oldest logs are identified by least-recently-modified time.
-
-### Format
-
-Logs are structured JSON (one JSON object per line) containing:
-- `timestamp`: ISO 8601 timestamp
-- `level`: Log level (TRACE, DEBUG, BUILD, INFO, WARN, ERROR)
-- `message`: Log message
-- `name`: Logger name (module)
-- `function`: Function name
-- Additional context fields as needed
+Logs are rotated when the file exceeds `max_log_size_mb`. The rotation is handled by the custom JSONL file sink (not loguru's built-in rotation, since we use a callable sink to bypass loguru's colorizer). Rotated files are renamed with a numeric suffix (e.g., `events.jsonl.1`, `events.jsonl.2`).
 
 ## Sensitive Data
 

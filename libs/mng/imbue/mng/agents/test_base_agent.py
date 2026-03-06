@@ -5,6 +5,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngContext
@@ -195,6 +197,7 @@ def test_base_agent_set_is_start_on_boot(
     assert agent.get_is_start_on_boot() is True
 
 
+@pytest.mark.tmux
 def test_base_agent_is_running_false_when_no_tmux_session(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
@@ -208,6 +211,7 @@ def test_base_agent_is_running_false_when_no_tmux_session(
     assert result is False
 
 
+@pytest.mark.tmux
 def test_base_agent_get_lifecycle_state_stopped(
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,

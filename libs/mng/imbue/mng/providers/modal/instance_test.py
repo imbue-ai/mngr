@@ -310,9 +310,11 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
     """
     # The expired_credentials_modal_provider raises AuthError when _get_modal_app is
     # called, simulating expired/invalid credentials.
-    # list_hosts is decorated with @handle_modal_auth_error
+    # discover_hosts is decorated with @handle_modal_auth_error
     with pytest.raises(ModalAuthError) as exc_info:
-        expired_credentials_modal_provider.list_hosts(cg=expired_credentials_modal_provider.mng_ctx.concurrency_group)
+        expired_credentials_modal_provider.discover_hosts(
+            cg=expired_credentials_modal_provider.mng_ctx.concurrency_group
+        )
 
     # Verify the error message contains helpful information
     error_message = str(exc_info.value)
@@ -322,7 +324,7 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
 
 
 # =============================================================================
-# list_hosts and stopped host tests (unit tests with mocked volume)
+# discover_hosts and stopped host tests (unit tests with mocked volume)
 # =============================================================================
 
 
@@ -432,10 +434,10 @@ def test_list_all_host_records_skips_non_json_files(
         assert mock_read.call_count == 1
 
 
-def test_list_hosts_includes_running_sandboxes_without_host_records(
+def test_discover_hosts_includes_running_sandboxes_without_host_records(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """list_hosts should include running sandboxes even if host record hasn't propagated."""
+    """discover_hosts should include running sandboxes even if host record hasn't propagated."""
     host_id = HostId.generate()
 
     # Mock _list_sandboxes to return a sandbox
@@ -449,22 +451,23 @@ def test_list_hosts_includes_running_sandboxes_without_host_records(
     # Mock _create_host_from_sandbox to return a mock host
     mock_host = MagicMock()
     mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),
         patch.object(modal_provider, "_list_all_host_records", return_value=[]),
         patch.object(modal_provider, "_create_host_from_sandbox", return_value=mock_host),
     ):
-        hosts = modal_provider.list_hosts(cg=modal_provider.mng_ctx.concurrency_group)
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mng_ctx.concurrency_group)
 
     assert len(hosts) == 1
-    assert hosts[0].id == host_id
+    assert hosts[0].host_id == host_id
 
 
-def test_list_hosts_returns_stopped_hosts_with_snapshots(
+def test_discover_hosts_returns_stopped_hosts_with_snapshots(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """list_hosts should return stopped hosts (no sandbox, has snapshots)."""
+    """discover_hosts should return stopped hosts (no sandbox, has snapshots)."""
     host_id = HostId.generate()
     snapshot = _make_snapshot_record("initial")
     host_record = _make_host_record(host_id, snapshots=[snapshot])
@@ -474,22 +477,23 @@ def test_list_hosts_returns_stopped_hosts_with_snapshots(
     # Mock _create_host_from_host_record to return a mock host
     mock_host = MagicMock()
     mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[]),
         patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
         patch.object(modal_provider, "_create_host_from_host_record", return_value=mock_host),
     ):
-        hosts = modal_provider.list_hosts(cg=modal_provider.mng_ctx.concurrency_group)
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mng_ctx.concurrency_group)
 
     assert len(hosts) == 1
-    assert hosts[0].id == host_id
+    assert hosts[0].host_id == host_id
 
 
-def test_list_hosts_excludes_destroyed_hosts_by_default(
+def test_discover_hosts_excludes_destroyed_hosts_by_default(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """list_hosts should exclude destroyed hosts (no sandbox, no snapshots) by default."""
+    """discover_hosts should exclude destroyed hosts (no sandbox, no snapshots) by default."""
     host_id = HostId.generate()
     # Host record with no snapshots = destroyed
     host_record = _make_host_record(host_id, snapshots=[])
@@ -498,37 +502,38 @@ def test_list_hosts_excludes_destroyed_hosts_by_default(
         patch.object(modal_provider, "_list_sandboxes", return_value=[]),
         patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
     ):
-        hosts = modal_provider.list_hosts(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=False)
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=False)
 
     assert len(hosts) == 0
 
 
-def test_list_hosts_includes_destroyed_hosts_when_requested(
+def test_discover_hosts_includes_destroyed_hosts_when_requested(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """list_hosts(include_destroyed=True) should include destroyed hosts."""
+    """discover_hosts(include_destroyed=True) should include destroyed hosts."""
     host_id = HostId.generate()
     # Host record with no snapshots = destroyed
     host_record = _make_host_record(host_id, snapshots=[])
 
     mock_host = MagicMock()
     mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[]),
         patch.object(modal_provider, "_list_all_host_records", return_value=[host_record]),
         patch.object(modal_provider, "_create_host_from_host_record", return_value=mock_host),
     ):
-        hosts = modal_provider.list_hosts(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=True)
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=True)
 
     assert len(hosts) == 1
-    assert hosts[0].id == host_id
+    assert hosts[0].host_id == host_id
 
 
-def test_list_hosts_prefers_running_sandbox_over_host_record(
+def test_discover_hosts_prefers_running_sandbox_over_host_record(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """list_hosts should use sandbox for running hosts, not host record."""
+    """discover_hosts should use sandbox for running hosts, not host record."""
     host_id = HostId.generate()
     snapshot = _make_snapshot_record("initial")
     host_record = _make_host_record(host_id, snapshots=[snapshot])
@@ -542,6 +547,7 @@ def test_list_hosts_prefers_running_sandbox_over_host_record(
 
     mock_host = MagicMock()
     mock_host.id = host_id
+    mock_host.get_name.return_value = HostName("test-host")
 
     with (
         patch.object(modal_provider, "_list_sandboxes", return_value=[mock_sandbox]),
@@ -549,7 +555,7 @@ def test_list_hosts_prefers_running_sandbox_over_host_record(
         patch.object(modal_provider, "_create_host_from_sandbox", return_value=mock_host) as mock_from_sandbox,
         patch.object(modal_provider, "_create_host_from_host_record") as mock_from_record,
     ):
-        hosts = modal_provider.list_hosts(cg=modal_provider.mng_ctx.concurrency_group)
+        hosts = modal_provider.discover_hosts(cg=modal_provider.mng_ctx.concurrency_group)
 
     assert len(hosts) == 1
     # Should use sandbox, not host record
@@ -1626,14 +1632,14 @@ def test_list_running_host_ids_skips_sandboxes_without_host_id_tag(
 
 
 # =============================================================================
-# Tests for load_agent_refs (optimized modal implementation)
+# Tests for discover_hosts_and_agents (optimized modal implementation)
 # =============================================================================
 
 
-def test_load_agent_refs_returns_agents_from_volume_data(
+def test_discover_hosts_and_agents_returns_agents_from_volume_data(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """load_agent_refs builds HostReference->AgentReference map from volume data."""
+    """discover_hosts_and_agents builds DiscoveredHost->DiscoveredAgent map from volume data."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     snapshot = _make_snapshot_record("initial")
@@ -1648,7 +1654,7 @@ def test_load_agent_refs_returns_agents_from_volume_data(
             return_value=([host_record], {host_id: agent_data}),
         ),
     ):
-        result = modal_provider.load_agent_refs(cg=modal_provider.mng_ctx.concurrency_group)
+        result = modal_provider.discover_hosts_and_agents(cg=modal_provider.mng_ctx.concurrency_group)
 
     assert len(result) == 1
     host_ref = next(iter(result.keys()))
@@ -1661,10 +1667,10 @@ def test_load_agent_refs_returns_agents_from_volume_data(
     assert agent_refs[0].agent_id == agent_id
 
 
-def test_load_agent_refs_excludes_destroyed_hosts_by_default(
+def test_discover_hosts_and_agents_excludes_destroyed_hosts_by_default(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """load_agent_refs excludes destroyed hosts (no sandbox, no snapshots) by default."""
+    """discover_hosts_and_agents excludes destroyed hosts (no sandbox, no snapshots) by default."""
     host_id = HostId.generate()
     host_record = _make_host_record(host_id, snapshots=[])
 
@@ -1672,15 +1678,17 @@ def test_load_agent_refs_excludes_destroyed_hosts_by_default(
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
         patch.object(modal_provider, "_list_all_host_and_agent_records", return_value=([host_record], {})),
     ):
-        result = modal_provider.load_agent_refs(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=False)
+        result = modal_provider.discover_hosts_and_agents(
+            cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=False
+        )
 
     assert len(result) == 0
 
 
-def test_load_agent_refs_includes_destroyed_hosts_when_requested(
+def test_discover_hosts_and_agents_includes_destroyed_hosts_when_requested(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """load_agent_refs includes destroyed hosts when include_destroyed=True."""
+    """discover_hosts_and_agents includes destroyed hosts when include_destroyed=True."""
     host_id = HostId.generate()
     host_record = _make_host_record(host_id, snapshots=[])
 
@@ -1688,15 +1696,17 @@ def test_load_agent_refs_includes_destroyed_hosts_when_requested(
         patch.object(modal_provider, "_list_running_host_ids", return_value=set()),
         patch.object(modal_provider, "_list_all_host_and_agent_records", return_value=([host_record], {})),
     ):
-        result = modal_provider.load_agent_refs(cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=True)
+        result = modal_provider.discover_hosts_and_agents(
+            cg=modal_provider.mng_ctx.concurrency_group, include_destroyed=True
+        )
 
     assert len(result) == 1
 
 
-def test_load_agent_refs_includes_running_hosts_from_host_records(
+def test_discover_hosts_and_agents_includes_running_hosts_from_host_records(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """load_agent_refs includes running hosts (sandbox exists + host record exists)."""
+    """discover_hosts_and_agents includes running hosts (sandbox exists + host record exists)."""
     host_id = HostId.generate()
     host_record = _make_host_record(host_id, host_name="running-host", snapshots=[])
 
@@ -1704,7 +1714,7 @@ def test_load_agent_refs_includes_running_hosts_from_host_records(
         patch.object(modal_provider, "_list_running_host_ids", return_value={host_id}),
         patch.object(modal_provider, "_list_all_host_and_agent_records", return_value=([host_record], {})),
     ):
-        result = modal_provider.load_agent_refs(cg=modal_provider.mng_ctx.concurrency_group)
+        result = modal_provider.discover_hosts_and_agents(cg=modal_provider.mng_ctx.concurrency_group)
 
     # Running host (sandbox exists) should be included even without snapshots
     assert len(result) == 1
@@ -1712,17 +1722,17 @@ def test_load_agent_refs_includes_running_hosts_from_host_records(
     assert host_ref.host_id == host_id
 
 
-def test_load_agent_refs_ignores_running_sandbox_without_host_record(
+def test_discover_hosts_and_agents_ignores_running_sandbox_without_host_record(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """load_agent_refs does not create entries for sandboxes that have no host record."""
+    """discover_hosts_and_agents does not create entries for sandboxes that have no host record."""
     orphan_host_id = HostId.generate()
 
     with (
         patch.object(modal_provider, "_list_running_host_ids", return_value={orphan_host_id}),
         patch.object(modal_provider, "_list_all_host_and_agent_records", return_value=([], {})),
     ):
-        result = modal_provider.load_agent_refs(cg=modal_provider.mng_ctx.concurrency_group)
+        result = modal_provider.discover_hosts_and_agents(cg=modal_provider.mng_ctx.concurrency_group)
 
     assert len(result) == 0
 

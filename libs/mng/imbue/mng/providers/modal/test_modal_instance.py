@@ -15,6 +15,8 @@ from imbue.mng.providers.modal.instance import ModalProviderInstance
 from imbue.mng.providers.modal.volume import ModalVolume
 from imbue.mng.utils.polling import wait_for
 
+pytestmark = [pytest.mark.modal]
+
 # Placeholder for the agent parameter in on_agent_created calls.
 # The method doesn't use the agent, but the type signature requires AgentInterface.
 _UNUSED_AGENT: AgentInterface = None  # ty: ignore[invalid-assignment]
@@ -131,14 +133,14 @@ def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
-def test_list_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
-    """Created host should appear in list_hosts."""
+def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
+    """Created host should appear in discover_hosts."""
     host = None
     try:
         host = real_modal_provider.create_host(HostName("test-host"))
 
-        hosts = real_modal_provider.list_hosts(cg=real_modal_provider.mng_ctx.concurrency_group)
-        host_ids = [h.id for h in hosts]
+        hosts = real_modal_provider.discover_hosts(cg=real_modal_provider.mng_ctx.concurrency_group)
+        host_ids = [h.host_id for h in hosts]
         assert host.id in host_ids
 
     finally:
@@ -615,7 +617,7 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
     try:
         host = real_modal_provider.create_host(
             HostName("test-cidr"),
-            build_args=[f"--dockerfile={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
+            build_args=[f"--file={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
         )
 
         # curl to a public IP should fail because it's outside the allowlist
@@ -671,7 +673,7 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
     try:
         host = real_modal_provider.create_host(
             HostName("test-offline"),
-            build_args=[f"--dockerfile={dockerfile}", "--offline"],
+            build_args=[f"--file={dockerfile}", "--offline"],
         )
 
         # curl to a public IP should fail because all outbound traffic is blocked

@@ -19,11 +19,11 @@ from imbue.concurrency_group.test_utils import wait_interval
 
 def test_run_background_simple_command() -> None:
     """Test running a simple echo command in background."""
-    proc = run_background(["echo", "hello world"])
+    process = run_background(["echo", "hello world"])
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     assert stdout.strip() == "hello world"
     assert stderr == ""
 
@@ -31,9 +31,9 @@ def test_run_background_simple_command() -> None:
 def test_run_background_with_queue() -> None:
     """Test that output is properly sent to the queue."""
     output_queue: Queue[tuple[str, bool]] = Queue()
-    proc = run_background(["echo", "test output"], output_queue=output_queue)
+    process = run_background(["echo", "test output"], output_queue=output_queue)
 
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
     # Read from queue
     line, is_stdout = output_queue.get(timeout=1.0)
@@ -44,16 +44,16 @@ def test_run_background_with_queue() -> None:
     with pytest.raises(Empty):
         output_queue.get(block=False)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
 
 
 def test_run_background_multiline_output() -> None:
     """Test background process with multiple lines of output."""
-    proc = run_background(["sh", "-c", "echo 'line1'; echo 'line2'; echo 'line3'"])
+    process = run_background(["sh", "-c", "echo 'line1'; echo 'line2'; echo 'line3'"])
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     lines = stdout.strip().split("\n")
     assert len(lines) == 3
     assert lines[0] == "line1"
@@ -63,11 +63,11 @@ def test_run_background_multiline_output() -> None:
 
 def test_run_background_mixed_stdout_stderr() -> None:
     """Test background process that writes to both stdout and stderr."""
-    proc = run_background(["sh", "-c", "echo 'stdout line'; echo 'stderr line' >&2"])
+    process = run_background(["sh", "-c", "echo 'stdout line'; echo 'stderr line' >&2"])
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     assert stdout.strip() == "stdout line"
     assert stderr.strip() == "stderr line"
 
@@ -78,7 +78,7 @@ def test_run_background_real_time_queue() -> None:
     start_time = monotonic()
 
     # Command that outputs with delays
-    proc = run_background(["sh", "-c", "echo 'immediate'; sleep 0.1; echo 'delayed'"], output_queue=output_queue)
+    process = run_background(["sh", "-c", "echo 'immediate'; sleep 0.1; echo 'delayed'"], output_queue=output_queue)
 
     # Get first line immediately
     line1, is_stdout1 = output_queue.get(timeout=0.2)
@@ -88,7 +88,7 @@ def test_run_background_real_time_queue() -> None:
     line2, is_stdout2 = output_queue.get(timeout=0.5)
     time2 = monotonic() - start_time
 
-    proc.wait(timeout=1.0)
+    process.wait(timeout=1.0)
 
     assert line1 == "immediate\n"
     assert is_stdout1
@@ -98,77 +98,77 @@ def test_run_background_real_time_queue() -> None:
     assert is_stdout2
     assert time2 > 0.08  # Second line should come after delay
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
 
 
 def test_run_background_poll_and_is_finished() -> None:
     """Test polling and checking if process is finished."""
     # Fast command
-    proc = run_background(["echo", "quick"])
+    process = run_background(["echo", "quick"])
 
     # Initially might still be running
     wait_interval(0.01)
 
     # Wait for completion
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
     # After wait, should be finished
-    assert proc.is_finished()
-    assert proc.poll() == 0
-    assert proc.returncode == 0
+    assert process.is_finished()
+    assert process.poll() == 0
+    assert process.returncode == 0
 
 
 def test_run_background_long_running_poll() -> None:
     """Test polling a long-running process."""
-    proc = run_background(["sleep", "0.2"])
+    process = run_background(["sleep", "0.2"])
 
     # Should not be finished immediately
-    assert not proc.is_finished()
-    assert proc.poll() is None
-    assert proc.returncode is None
+    assert not process.is_finished()
+    assert process.poll() is None
+    assert process.returncode is None
 
     # Wait for completion
-    proc.wait(timeout=2.0)
+    process.wait(timeout=2.0)
 
     # Should be finished now
-    assert proc.is_finished()
-    assert proc.poll() == 0
-    assert proc.returncode == 0
+    assert process.is_finished()
+    assert process.poll() == 0
+    assert process.returncode == 0
 
 
 def test_run_background_terminate() -> None:
     """Test terminating a background process."""
-    proc = run_background(["sleep", "10"])
+    process = run_background(["sleep", "10"])
 
     # Process should be running
     wait_interval(0.1)
-    assert not proc.is_finished()
+    assert not process.is_finished()
 
     # Terminate it
-    proc.terminate(force_kill_seconds=2.0)
+    process.terminate(force_kill_seconds=2.0)
 
     # Should be terminated now
-    assert proc.is_finished()
+    assert process.is_finished()
     # Return code will be non-zero due to termination
-    assert proc.returncode != 0
+    assert process.returncode != 0
 
 
 def test_run_background_wait_timeout() -> None:
     """Test that wait() properly times out."""
-    proc = run_background(["sleep", "10"])
+    process = run_background(["sleep", "10"])
 
     start_time = monotonic()
     with pytest.raises(TimeoutExpired):  # subprocess.TimeoutExpired
-        proc.wait(timeout=0.1)
+        process.wait(timeout=0.1)
 
     elapsed = monotonic() - start_time
     assert elapsed < 0.5  # Should timeout quickly
 
     # Process should still be running
-    assert not proc.is_finished()
+    assert not process.is_finished()
 
     # Clean up
-    proc.terminate()
+    process.terminate()
 
 
 def test_run_background_with_cwd() -> None:
@@ -180,34 +180,34 @@ def test_run_background_with_cwd() -> None:
         (tmpdir_path / "test1.txt").touch()
         (tmpdir_path / "test2.txt").touch()
 
-        proc = run_background(["ls"], cwd=tmpdir_path)
+        process = run_background(["ls"], cwd=tmpdir_path)
 
-        stdout, stderr = proc.wait_and_read(timeout=5.0)
+        stdout, stderr = process.wait_and_read(timeout=5.0)
 
-        assert proc.returncode == 0
+        assert process.returncode == 0
         assert "test1.txt" in stdout
         assert "test2.txt" in stdout
 
 
 def test_run_background_non_zero_exit() -> None:
     """Test background process with non-zero exit code."""
-    proc = run_background(["sh", "-c", "echo 'error message' >&2; exit 42"])
+    process = run_background(["sh", "-c", "echo 'error message' >&2; exit 42"])
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 42
+    assert process.returncode == 42
     assert stdout == ""
     assert stderr.strip() == "error message"
 
 
 def test_run_background_non_zero_exit_with_checked_output() -> None:
     """Test background process with non-zero exit code."""
-    proc = run_background(["sh", "-c", "echo 'error message' >&2; exit 42"], is_checked=True)
+    process = run_background(["sh", "-c", "echo 'error message' >&2; exit 42"], is_checked=True)
     with pytest.raises(ProcessError):
-        proc.wait()
+        process.wait()
 
-    stdout, stderr = proc.read_stdout(), proc.read_stderr()
-    assert proc.returncode == 42
+    stdout, stderr = process.read_stdout(), process.read_stderr()
+    assert process.returncode == 42
     assert stdout == ""
     assert stderr.strip() == "error message"
 
@@ -222,11 +222,11 @@ def test_run_background_shutdown_event() -> None:
     """Test using shutdown event to interrupt background process."""
     shutdown_event = Event()
 
-    proc = run_background(["sleep", "10"], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
+    process = run_background(["sleep", "10"], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
 
     # Let it run briefly
     wait_interval(0.05)
-    assert not proc.is_finished()
+    assert not process.is_finished()
 
     # Trigger shutdown
     shutdown_event.set()
@@ -235,8 +235,8 @@ def test_run_background_shutdown_event() -> None:
     wait_interval(0.3)
 
     # Process should be terminated
-    assert proc.is_finished()
-    assert proc.returncode != 0
+    assert process.is_finished()
+    assert process.returncode != 0
 
 
 def test_run_background_compound_shutdown_event() -> None:
@@ -246,7 +246,7 @@ def test_run_background_compound_shutdown_event() -> None:
     compound_event = CompoundEvent([event1, event2])
 
     # RemoteRunningProcess lets shutdown_event be a ReadOnlyEvent, including CompoundEvent, but RunningProcess only allows MutableEvent
-    proc: RunningProcess = run_background(
+    process: RunningProcess = run_background(
         ["sleep", "10"],
         shutdown_event=compound_event,  # type: ignore[arg-type]
         shutdown_timeout_sec=0.2,
@@ -254,7 +254,7 @@ def test_run_background_compound_shutdown_event() -> None:
 
     # Let it run briefly
     wait_interval(0.05)
-    assert not proc.is_finished()
+    assert not process.is_finished()
 
     # Trigger one of the compound events
     event2.set()
@@ -263,36 +263,36 @@ def test_run_background_compound_shutdown_event() -> None:
     wait_interval(0.3)
 
     # Process should be terminated
-    assert proc.is_finished()
-    assert proc.returncode != 0
+    assert process.is_finished()
+    assert process.returncode != 0
 
 
 def test_run_background_read_methods() -> None:
     """Test read_stdout and read_stderr methods."""
-    proc = run_background(["sh", "-c", "echo 'stdout1'; echo 'stderr1' >&2; echo 'stdout2'; echo 'stderr2' >&2"])
+    process = run_background(["sh", "-c", "echo 'stdout1'; echo 'stderr1' >&2; echo 'stdout2'; echo 'stderr2' >&2"])
 
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
-    stdout = proc.read_stdout()
-    stderr = proc.read_stderr()
+    stdout = process.read_stdout()
+    stderr = process.read_stderr()
 
     assert "stdout1" in stdout
     assert "stdout2" in stdout
     assert "stderr1" in stderr
     assert "stderr2" in stderr
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
 
 
 def test_run_background_get_queue() -> None:
     """Test get_queue method returns the correct queue."""
     custom_queue: Queue[tuple[str, bool]] = Queue()
-    proc = run_background(["echo", "test"], output_queue=custom_queue)
+    process = run_background(["echo", "test"], output_queue=custom_queue)
 
     # get_queue should return our custom queue
-    assert proc.get_queue() is custom_queue
+    assert process.get_queue() is custom_queue
 
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
     # Output should be in our custom queue
     line, is_stdout = custom_queue.get(timeout=1.0)
@@ -302,19 +302,19 @@ def test_run_background_get_queue() -> None:
 
 def test_run_background_concurrent_processes() -> None:
     """Test running multiple background processes concurrently."""
-    procs = []
+    processes = []
 
     # Start multiple processes
     for i in range(3):
-        proc = run_background(["sh", "-c", f"sleep 0.{i}; echo 'Process {i}'"])
-        procs.append(proc)
+        process = run_background(["sh", "-c", f"sleep 0.{i}; echo 'Process {i}'"])
+        processes.append(process)
 
     # Wait for all to complete
     results = []
-    for i, proc in enumerate(procs):
-        stdout, stderr = proc.wait_and_read(timeout=5.0)
+    for i, process in enumerate(processes):
+        stdout, stderr = process.wait_and_read(timeout=5.0)
         results.append((i, stdout.strip()))
-        assert proc.returncode == 0
+        assert process.returncode == 0
 
     # Verify all processes completed successfully
     for i, output in results:
@@ -324,13 +324,13 @@ def test_run_background_concurrent_processes() -> None:
 def test_run_background_large_output() -> None:
     """Test handling of large output."""
     # Generate ~100KB of output
-    proc = run_background(
+    process = run_background(
         ["sh", "-c", 'for i in $(seq 1 2000); do echo "Line $i - This is a longer line to increase output size"; done']
     )
 
-    stdout, stderr = proc.wait_and_read(timeout=10.0)
+    stdout, stderr = process.wait_and_read(timeout=10.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     lines = stdout.strip().split("\n")
     assert len(lines) == 2000
     assert lines[0] == "Line 1 - This is a longer line to increase output size"
@@ -341,9 +341,9 @@ def test_run_background_queue_ordering() -> None:
     """Test that queue preserves output order."""
     output_queue: Queue[tuple[str, bool]] = Queue()
 
-    proc = run_background(["sh", "-c", 'for i in 1 2 3 4 5; do echo "Line $i"; done'], output_queue=output_queue)
+    process = run_background(["sh", "-c", 'for i in 1 2 3 4 5; do echo "Line $i"; done'], output_queue=output_queue)
 
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
     # Read all lines from queue
     lines = []
@@ -360,11 +360,11 @@ def test_run_background_queue_ordering() -> None:
 
 def test_run_background_empty_output() -> None:
     """Test process with no output."""
-    proc = run_background(["true"])
+    process = run_background(["true"])
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     assert stdout == ""
     assert stderr == ""
 
@@ -372,11 +372,11 @@ def test_run_background_empty_output() -> None:
 def test_run_background_timeout_parameter() -> None:
     """Test that the timeout parameter is passed to the underlying process."""
     # This should timeout because sleep takes longer than timeout
-    proc = run_background(["sleep", "10"], timeout=0.1)
+    process = run_background(["sleep", "10"], timeout=0.1)
 
     # The process should fail due to timeout
     start_time = monotonic()
-    return_code = proc.wait(timeout=1.0)
+    return_code = process.wait(timeout=1.0)
     elapsed = monotonic() - start_time
 
     # Should have timed out quickly
@@ -389,11 +389,11 @@ def test_run_background_interleaved_stdout_stderr() -> None:
     output_queue: Queue[tuple[str, bool]] = Queue()
 
     # Command that interleaves stdout and stderr
-    proc = run_background(
+    process = run_background(
         ["sh", "-c", "echo 'out1'; echo 'err1' >&2; echo 'out2'; echo 'err2' >&2"], output_queue=output_queue
     )
 
-    proc.wait(timeout=5.0)
+    process.wait(timeout=5.0)
 
     # Collect all output
     output = []
@@ -415,11 +415,11 @@ def test_run_background_partial_line_handling() -> None:
     output_queue: Queue[tuple[str, bool]] = Queue()
 
     # Command that outputs without newline at the end
-    proc = run_background(["sh", "-c", "printf 'no newline'"], output_queue=output_queue)
+    process = run_background(["sh", "-c", "printf 'no newline'"], output_queue=output_queue)
 
-    stdout, stderr = proc.wait_and_read(timeout=5.0)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-    assert proc.returncode == 0
+    assert process.returncode == 0
     assert stdout == "no newline"
 
     queue_items = []
@@ -434,7 +434,7 @@ def test_run_background_partial_line_handling() -> None:
 
 def test_run_background_thread_safety() -> None:
     """Test that RunningProcess is thread-safe for concurrent access."""
-    proc = run_background(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 0.02; done"])
+    process = run_background(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 0.02; done"])
 
     results: dict[str, list] = {"poll": [], "is_finished": [], "stdout": [], "stderr": []}
     errors: list[Exception] = []
@@ -442,7 +442,7 @@ def test_run_background_thread_safety() -> None:
     def poll_thread() -> None:
         try:
             for _ in range(5):
-                results["poll"].append(proc.poll())
+                results["poll"].append(process.poll())
                 wait_interval(0.02)
         except Exception as e:
             errors.append(e)
@@ -450,7 +450,7 @@ def test_run_background_thread_safety() -> None:
     def check_thread() -> None:
         try:
             for _ in range(5):
-                results["is_finished"].append(proc.is_finished())
+                results["is_finished"].append(process.is_finished())
                 wait_interval(0.02)
         except Exception as e:
             errors.append(e)
@@ -458,8 +458,8 @@ def test_run_background_thread_safety() -> None:
     def read_thread() -> None:
         try:
             for _ in range(3):
-                results["stdout"].append(proc.read_stdout())
-                results["stderr"].append(proc.read_stderr())
+                results["stdout"].append(process.read_stdout())
+                results["stderr"].append(process.read_stderr())
                 wait_interval(0.03)
         except Exception as e:
             errors.append(e)
@@ -475,20 +475,20 @@ def test_run_background_thread_safety() -> None:
         t.start()
 
     # Wait for process and threads
-    proc.wait(timeout=2.0)
+    process.wait(timeout=2.0)
 
     for t in threads:
         t.join()
 
     # Check no errors occurred
     assert len(errors) == 0
-    assert proc.returncode == 0
+    assert process.returncode == 0
 
 
 def test_run_background_shutdown_event_already_set() -> None:
     shutdown_event = Event()
     shutdown_event.set()
-    proc = run_background(["sleep", "10"], shutdown_event=shutdown_event)
-    proc.wait(timeout=2.0)
-    assert proc.is_finished()
-    assert proc.returncode != 0
+    process = run_background(["sleep", "10"], shutdown_event=shutdown_event)
+    process.wait(timeout=2.0)
+    assert process.is_finished()
+    assert process.returncode != 0

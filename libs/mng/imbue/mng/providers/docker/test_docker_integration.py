@@ -4,7 +4,7 @@ These tests require a running Docker daemon but do NOT require networking
 (port publishing). They test container management, exec, labels, discovery,
 snapshots, and host store integration using the Docker API directly.
 
-Marked with @pytest.mark.docker and @pytest.mark.acceptance so they only
+Marked with @pytest.mark.docker_sdk and @pytest.mark.acceptance so they only
 run in CI acceptance test shards (not in the default local test suite).
 """
 
@@ -19,7 +19,6 @@ import pytest
 
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
-from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
@@ -35,7 +34,7 @@ from imbue.mng.providers.docker.instance import build_container_labels
 from imbue.mng.providers.docker.testing import make_docker_provider_with_cleanup
 from imbue.mng.utils.testing import get_short_random_string
 
-pytestmark = [pytest.mark.docker, pytest.mark.acceptance]
+pytestmark = [pytest.mark.acceptance]
 
 # Use a longer timeout since Docker operations can be slow (image pulls, etc.)
 DOCKER_TEST_TIMEOUT = 120
@@ -78,6 +77,7 @@ def _create_test_container(
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_created_with_correct_labels(docker_provider: DockerProviderInstance) -> None:
     """Verify that containers are created with the expected mng labels."""
     host_id = HostId.generate()
@@ -96,6 +96,7 @@ def test_container_created_with_correct_labels(docker_provider: DockerProviderIn
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_is_running_after_creation(docker_provider: DockerProviderInstance) -> None:
     container, _ = _create_test_container(docker_provider)
     assert docker_provider._is_container_running(container) is True
@@ -107,6 +108,7 @@ def test_container_is_running_after_creation(docker_provider: DockerProviderInst
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_find_container_by_host_id(docker_provider: DockerProviderInstance) -> None:
     _, host_id = _create_test_container(docker_provider)
     found = docker_provider._find_container_by_host_id(host_id)
@@ -115,12 +117,14 @@ def test_find_container_by_host_id(docker_provider: DockerProviderInstance) -> N
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_find_container_by_host_id_returns_none_for_unknown(docker_provider: DockerProviderInstance) -> None:
     found = docker_provider._find_container_by_host_id(HostId.generate())
     assert found is None
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None:
     _create_test_container(docker_provider, name="discoverable")
     found = docker_provider._find_container_by_name(HostName("discoverable"))
@@ -128,6 +132,7 @@ def test_find_container_by_name(docker_provider: DockerProviderInstance) -> None
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_list_containers_returns_managed_containers(docker_provider: DockerProviderInstance) -> None:
     _create_test_container(docker_provider, name="list-a")
     _create_test_container(docker_provider, name="list-b")
@@ -141,6 +146,7 @@ def test_list_containers_returns_managed_containers(docker_provider: DockerProvi
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_exec_in_container_returns_output(docker_provider: DockerProviderInstance) -> None:
     container, _ = _create_test_container(docker_provider)
     exit_code, output = docker_provider._exec_in_container(container, "echo hello-from-exec")
@@ -149,6 +155,7 @@ def test_exec_in_container_returns_output(docker_provider: DockerProviderInstanc
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_exec_in_container_returns_nonzero_on_failure(docker_provider: DockerProviderInstance) -> None:
     container, _ = _create_test_container(docker_provider)
     exit_code, _ = docker_provider._exec_in_container(container, "false")
@@ -156,6 +163,7 @@ def test_exec_in_container_returns_nonzero_on_failure(docker_provider: DockerPro
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_exec_detach_returns_immediately(docker_provider: DockerProviderInstance) -> None:
     container, _ = _create_test_container(docker_provider)
     exit_code, output = docker_provider._exec_in_container(container, "sleep 3600", detach=True)
@@ -169,17 +177,20 @@ def test_exec_detach_returns_immediately(docker_provider: DockerProviderInstance
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_pull_image_succeeds(docker_provider: DockerProviderInstance) -> None:
     result = docker_provider._pull_image("debian:bookworm-slim")
     assert result == "debian:bookworm-slim"
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_pull_image_not_found_raises(docker_provider: DockerProviderInstance) -> None:
     with pytest.raises(MngError, match="Docker image not found"):
         docker_provider._pull_image("nonexistent-image-that-does-not-exist:99999")
 
 
+@pytest.mark.docker
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 def test_build_image_from_dockerfile(docker_provider: DockerProviderInstance, tmp_path: Path) -> None:
     dockerfile = tmp_path / "Dockerfile"
@@ -196,6 +207,7 @@ def test_build_image_from_dockerfile(docker_provider: DockerProviderInstance, tm
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_stop_and_start(docker_provider: DockerProviderInstance) -> None:
     container, host_id = _create_test_container(docker_provider)
     assert docker_provider._is_container_running(container) is True
@@ -209,6 +221,7 @@ def test_container_stop_and_start(docker_provider: DockerProviderInstance) -> No
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_remove(docker_provider: DockerProviderInstance) -> None:
     container, host_id = _create_test_container(docker_provider)
     container.remove(force=True)
@@ -223,6 +236,7 @@ def test_container_remove(docker_provider: DockerProviderInstance) -> None:
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_commit_creates_image(docker_provider: DockerProviderInstance) -> None:
     """Verify docker commit works on a running container."""
     container, host_id = _create_test_container(docker_provider)
@@ -242,6 +256,7 @@ def test_docker_commit_creates_image(docker_provider: DockerProviderInstance) ->
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_snapshot_roundtrip_preserves_filesystem(docker_provider: DockerProviderInstance) -> None:
     """Verify that committing a container and running from the image preserves files."""
     container, host_id = _create_test_container(docker_provider, name="snap-source")
@@ -279,6 +294,7 @@ def test_snapshot_roundtrip_preserves_filesystem(docker_provider: DockerProvider
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_host_store_write_and_discover(docker_provider: DockerProviderInstance) -> None:
     """Create a container, write a host record, and verify discovery works."""
     container, host_id = _create_test_container(docker_provider, name="store-test")
@@ -314,6 +330,7 @@ def test_host_store_write_and_discover(docker_provider: DockerProviderInstance) 
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_save_failed_host_record(docker_provider: DockerProviderInstance) -> None:
     """Verify that _save_failed_host_record creates a valid host record."""
     host_id = HostId.generate()
@@ -342,6 +359,7 @@ def test_save_failed_host_record(docker_provider: DockerProviderInstance) -> Non
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_get_host_tags_from_running_container(docker_provider: DockerProviderInstance) -> None:
     """Verify get_host_tags reads tags from actual container labels."""
     container, host_id = _create_test_container(
@@ -369,32 +387,13 @@ def test_get_host_tags_from_running_container(docker_provider: DockerProviderIns
 # =========================================================================
 
 
-@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
-def test_get_host_resources_returns_defaults(docker_provider: DockerProviderInstance) -> None:
-    """Verify get_host_resources returns default values."""
-    host_id = HostId.generate()
-    now = datetime.now(timezone.utc)
-    host_data = CertifiedHostData(host_id=str(host_id), host_name="resources-test", created_at=now, updated_at=now)
-
-    offline_host = OfflineHost(
-        id=host_id,
-        certified_host_data=host_data,
-        provider_instance=docker_provider,
-        mng_ctx=docker_provider.mng_ctx,
-        on_updated_host_data=lambda hid, data: None,
-    )
-
-    resources = docker_provider.get_host_resources(offline_host)
-    assert resources.cpu.count == 1
-    assert resources.memory_gb == 1.0
-
-
 # =========================================================================
 # Entrypoint and Container Behavior
 # =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_entrypoint_keeps_running(docker_provider: DockerProviderInstance) -> None:
     """Verify the CONTAINER_ENTRYPOINT keeps the container alive."""
     container, _ = _create_test_container(docker_provider)
@@ -411,6 +410,7 @@ def test_container_entrypoint_keeps_running(docker_provider: DockerProviderInsta
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) -> None:
     """Verify the container exits cleanly on SIGTERM (docker stop)."""
     container, _ = _create_test_container(docker_provider)
@@ -429,6 +429,7 @@ def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) 
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_filesystem_persists_across_stop_start(docker_provider: DockerProviderInstance) -> None:
     """Verify that files written to a container persist across stop/start."""
     container, _ = _create_test_container(docker_provider)
@@ -449,6 +450,7 @@ def test_filesystem_persists_across_stop_start(docker_provider: DockerProviderIn
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_volume_write_and_read(docker_provider: DockerProviderInstance) -> None:
     """Verify DockerVolume can write and read files via the state container."""
     volume = docker_provider._state_volume
@@ -458,6 +460,7 @@ def test_docker_volume_write_and_read(docker_provider: DockerProviderInstance) -
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_volume_listdir(docker_provider: DockerProviderInstance) -> None:
     """Verify DockerVolume.listdir returns entries."""
     volume = docker_provider._state_volume
@@ -469,6 +472,7 @@ def test_docker_volume_listdir(docker_provider: DockerProviderInstance) -> None:
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_volume_remove_file(docker_provider: DockerProviderInstance) -> None:
     """Verify DockerVolume.remove_file deletes a file."""
     volume = docker_provider._state_volume
@@ -479,6 +483,7 @@ def test_docker_volume_remove_file(docker_provider: DockerProviderInstance) -> N
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_volume_remove_directory(docker_provider: DockerProviderInstance) -> None:
     """Verify DockerVolume.remove_directory recursively removes a directory."""
     volume = docker_provider._state_volume

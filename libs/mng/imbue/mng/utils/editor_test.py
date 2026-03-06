@@ -58,22 +58,16 @@ def test_get_editor_command_falls_back_to_default_when_no_env_vars(
 
 def test_editor_session_create_with_no_initial_content() -> None:
     """Test creating a session with no initial content."""
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         assert session.temp_file_path.exists()
         assert session.temp_file_path.read_text() == ""
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_create_with_initial_content() -> None:
     """Test creating a session with initial content."""
-    session = EditorSession.create(initial_content="Hello World")
-    try:
+    with EditorSession.create(initial_content="Hello World") as session:
         assert session.temp_file_path.exists()
         assert session.temp_file_path.read_text() == "Hello World"
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_start_raises_if_already_started(
@@ -83,22 +77,16 @@ def test_editor_session_start_raises_if_already_started(
     """Test that start() raises if session was already started."""
     # Use a long-running script so the process doesn't exit immediately
     monkeypatch.setenv("EDITOR", str(long_running_editor))
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         with pytest.raises(UserInputError, match="already started"):
             session.start()
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_is_running_returns_false_before_start() -> None:
     """Test that is_running() returns False before session is started."""
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         assert session.is_running() is False
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_is_running_returns_true_when_process_running(
@@ -108,22 +96,16 @@ def test_editor_session_is_running_returns_true_when_process_running(
     """Test that is_running() returns True when process is running."""
     # Use a long-running script so the process stays running
     monkeypatch.setenv("EDITOR", str(long_running_editor))
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         assert session.is_running() is True
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_wait_for_result_raises_if_not_started() -> None:
     """Test that wait_for_result() raises if session not started."""
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         with pytest.raises(UserInputError, match="not started"):
             session.wait_for_result()
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_wait_for_result_returns_content_on_success(
@@ -132,16 +114,13 @@ def test_editor_session_wait_for_result_returns_content_on_success(
     """Test that wait_for_result() returns content when editor exits successfully."""
     # Use 'true' which exits immediately with code 0
     monkeypatch.setenv("EDITOR", "true")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         # Write content to temp file before starting
         # (simulates what the user would do in the editor)
         session.temp_file_path.write_text("Edited content")
         session.start()
         result = session.wait_for_result()
         assert result == "Edited content"
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_wait_for_result_returns_none_on_non_zero_exit(
@@ -150,13 +129,10 @@ def test_editor_session_wait_for_result_returns_none_on_non_zero_exit(
     """Test that wait_for_result() returns None when editor exits with error."""
     # Use 'false' which exits with code 1
     monkeypatch.setenv("EDITOR", "false")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         result = session.wait_for_result()
         assert result is None
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_wait_for_result_returns_none_on_empty_content(
@@ -165,14 +141,11 @@ def test_editor_session_wait_for_result_returns_none_on_empty_content(
     """Test that wait_for_result() returns None when content is empty."""
     # Use 'true' which exits with code 0 but doesn't modify the file
     monkeypatch.setenv("EDITOR", "true")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         # File is empty by default after create
         session.start()
         result = session.wait_for_result()
         assert result is None
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_wait_for_result_strips_trailing_whitespace(
@@ -181,15 +154,12 @@ def test_editor_session_wait_for_result_strips_trailing_whitespace(
     """Test that wait_for_result() strips trailing whitespace."""
     # Use 'true' which exits with code 0 but doesn't modify the file
     monkeypatch.setenv("EDITOR", "true")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         # Write content with trailing whitespace
         session.temp_file_path.write_text("Content with whitespace  \n\n")
         session.start()
         result = session.wait_for_result()
         assert result == "Content with whitespace"
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_cleanup_removes_temp_file() -> None:
@@ -210,8 +180,7 @@ def test_editor_session_cleanup_terminates_running_process(
     """Test that cleanup() terminates a running editor process."""
     # Use a long-running script so the process stays running
     monkeypatch.setenv("EDITOR", str(long_running_editor))
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         # Verify process is running
         assert session.is_running() is True
@@ -219,10 +188,6 @@ def test_editor_session_cleanup_terminates_running_process(
         session.cleanup()
         # Process should no longer be running
         assert session.is_running() is False
-    finally:
-        # Cleanup already done, but make sure temp file is gone
-        if session.temp_file_path.exists():
-            session.temp_file_path.unlink()
 
 
 def test_editor_session_cleanup_handles_stubborn_process(
@@ -238,8 +203,7 @@ sleep 100
     script_path = _create_executable_script(tmp_path, "stubborn_editor.sh", script_content)
 
     monkeypatch.setenv("EDITOR", str(script_path))
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         # Verify process is running
         assert session.is_running() is True
@@ -247,9 +211,6 @@ sleep 100
         session.cleanup()
         # Process should no longer be running (was killed)
         assert session.is_running() is False
-    finally:
-        if session.temp_file_path.exists():
-            session.temp_file_path.unlink()
 
 
 def test_editor_session_is_finished_returns_false_before_wait(
@@ -257,13 +218,10 @@ def test_editor_session_is_finished_returns_false_before_wait(
 ) -> None:
     """Test that is_finished() returns False before waiting for result."""
     monkeypatch.setenv("EDITOR", "true")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         # Process might have finished but we haven't called wait_for_result yet
         assert session.is_finished() is False
-    finally:
-        session.cleanup()
 
 
 def test_editor_session_is_finished_returns_true_after_wait(
@@ -271,10 +229,7 @@ def test_editor_session_is_finished_returns_true_after_wait(
 ) -> None:
     """Test that is_finished() returns True after waiting for result."""
     monkeypatch.setenv("EDITOR", "true")
-    session = EditorSession.create()
-    try:
+    with EditorSession.create() as session:
         session.start()
         session.wait_for_result()
         assert session.is_finished() is True
-    finally:
-        session.cleanup()

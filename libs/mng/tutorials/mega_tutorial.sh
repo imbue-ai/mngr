@@ -78,15 +78,15 @@ mng create my-task --in modal --edit-message
 ## SPECIFYING DATA FOR THE AGENT
 
 # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
-mng create my-task --context /path/to/some/other/project
+mng create my-task --source-path /path/to/some/other/project
 
 # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
 mng create my-task --project my-project
 
-# mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as context.
+# mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mng create my-task --context /tmp/my_random_folder --agent-command python -- script.py
+mng create my-task --source-path /tmp/my_random_folder --agent-command python -- script.py
 
 # however, if you do use git, mng makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -153,10 +153,10 @@ mng create my-task --in modal --build-arg cpu=4 --build-arg memory=16 --build-ar
 # (-b is an alternative forms of --build-arg; see "mng create --help" for all provider-specific build args)
 # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
 
-# the most important build args for Modal are probably "--dockerfile" and "--context-dir",
+# the most important build args for Modal are probably "--file" and "--context-dir",
 # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
 # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
-mng create my-task --in modal --build-args "dockerfile=./Dockerfile.agent context-dir=./agent-context"
+mng create my-task --in modal --build-args "file=./Dockerfile.agent context-dir=./agent-context"
 # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
 # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
 # that command also demonstrates how to pass multiple build args in a single --build-args string (instead of using multiple --build-arg flags)
@@ -249,14 +249,14 @@ mng create my-task --label team=backend --tag env=staging
 ## CREATING AND USING AGENTS PROGRAMMATICALLY
 
 # mng is very much meant to be used for scripting and automation, so nothing requires interactivity.
-# if you want to be sure that interactivity is disabled, you can use the --headless flag: [future]
+# if you want to be sure that interactivity is disabled, you can use the --headless flag:
 mng create my-task --headless
 
-# or you can set that option in your config so that it always applies: [future]
-mng config set headless True
+# or you can set that option in your config so that it always applies:
+mng config set headless true
 
-# or you can set it as an environment variable: [future]
-export MNG_HEADLESS=True
+# or you can set it as an environment variable:
+export MNG_HEADLESS=true
 
 # *all* mng options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
 mng config set commands.create.in modal
@@ -310,13 +310,6 @@ mng --help
 
 
 ##############################################################################
-# OPENING AGENTS IN THE BROWSER
-#   Some agents expose web interfaces. "mng open" launches them in your
-#   browser, so you can interact with agents visually.
-##############################################################################
-
-
-##############################################################################
 # PUSHING FILES TO AGENTS
 #   Push local files or git commits to a running agent. This is how you
 #   sync your local changes to an agent's workspace.
@@ -341,13 +334,6 @@ mng --help
 # STARTING AND STOPPING AGENTS
 #   Stopped agents can be restarted, and running agents can be stopped to
 #   free resources. Stopping can optionally create a snapshot for later.
-##############################################################################
-
-
-##############################################################################
-# RENAMING AGENTS
-#   Rename an agent to something more descriptive, or to avoid name
-#   collisions.
 ##############################################################################
 
 
@@ -380,6 +366,13 @@ mng --help
 
 
 ##############################################################################
+# RENAMING AGENTS
+#   Rename an agent to something more descriptive, or to avoid name
+#   collisions.
+##############################################################################
+
+
+##############################################################################
 # MANAGING AGENT LIMITS
 #   Configure idle timeouts, activity tracking, permissions, and other
 #   runtime limits for agents and hosts.
@@ -395,8 +388,8 @@ mng --help
 
 
 ##############################################################################
-# VIEWING LOGS
-#   View log files for agents and hosts. Useful for debugging and
+# VIEWING EVENTS AND LOGS
+#   View event stream and log files for agents and hosts. Useful for debugging and
 #   monitoring what your agents are up to.
 ##############################################################################
 
@@ -486,23 +479,9 @@ mng --help
 
 
 ##############################################################################
-# RUNNING AGENTS LOCALLY
-#   The simplest and fastest option. Agents run directly on your machine
-#   with no isolation overhead. Best for trusted agents and quick tasks.
-##############################################################################
-
-
-##############################################################################
 # IDLE DETECTION AND TIMEOUTS
 #   Automatically pause or stop agents when they go idle to save resources.
 #   Configure what counts as "activity" and how long to wait.
-##############################################################################
-
-
-##############################################################################
-# PERMISSIONS
-#   Grant agents specific capabilities (like network access or filesystem
-#   writes) and revoke them. Permissions are enforced by plugins.
 ##############################################################################
 
 
@@ -535,13 +514,6 @@ mng --help
 
 
 ##############################################################################
-# DEVCONTAINER HOOKS
-#   Use devcontainer lifecycle hooks (onCreateCommand, postStartCommand,
-#   etc.) to customize agent environments during provisioning.
-##############################################################################
-
-
-##############################################################################
 # UPLOADING FILES AND RUNNING SETUP COMMANDS
 #   Upload files, append to configs, create directories, and run setup
 #   commands on agent hosts during creation or via re-provisioning.
@@ -549,9 +521,9 @@ mng --help
 
 
 ##############################################################################
-# TROUBLESHOOTING
-#   Common problems and how to fix them. Debugging with logs, verbose
-#   output, and exec. What to do when agents crash or hosts won't start.
+# ADVANCED WORKFLOWS
+#   Complex multi-agent setups, custom scripts, and integrations with other
+#   tools and platforms. Examples of building agent orchestration, custom dashboards, and more.
 ##############################################################################
 
 
@@ -561,3 +533,9 @@ mng --help
 #   that make working with mng faster and more pleasant.
 ##############################################################################
 
+
+##############################################################################
+# TROUBLESHOOTING
+#   Common problems and how to fix them. Debugging with logs, verbose
+#   output, and exec. What to do when agents crash or hosts won't start.
+##############################################################################

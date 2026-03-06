@@ -16,12 +16,14 @@ import modal
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.conftest import register_modal_test_volume
 from imbue.mng.primitives import HostState
 from imbue.mng.providers.modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mng.providers.modal.routes.deployment import deploy_function
 from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import get_short_random_string
+from imbue.mng.utils.testing import register_modal_test_volume
+
+pytestmark = [pytest.mark.modal]
 
 # =============================================================================
 # Acceptance tests (require Modal network access)

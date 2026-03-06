@@ -172,10 +172,6 @@ def push(ctx: click.Context, **kwargs) -> None:
         return
     agent, host = result
 
-    # Only local agents are supported right now
-    if not host.is_local:
-        raise NotImplementedError("Pushing to remote agents is not implemented yet")
-
     emit_info(f"Pushing to agent: {agent.name}", output_opts.output_format)
 
     # Parse uncommitted changes mode

@@ -16,7 +16,6 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
-from typing import cast
 
 from loguru import logger
 from paramiko import SSHException
@@ -37,8 +36,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.agents.agent_registry import resolve_agent_type
-from imbue.mng.agents.base_agent import BaseAgent
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
@@ -51,6 +49,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import LOCAL_CONNECTOR_NAME
+from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.offline_host import BaseHost
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import CertifiedHostData
@@ -67,11 +66,13 @@ from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentReference
 from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import default_branch_name
+from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
 from imbue.mng.utils.git_utils import get_git_author_info
@@ -503,7 +504,7 @@ class Host(BaseHost, OnlineHostInterface):
         joined_dirs = " ".join(f"'{str(p)}'" for p in paths)
         self.execute_command(f"mkdir -p {joined_dirs}")
 
-    def _get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
@@ -849,7 +850,7 @@ class Host(BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def get_agent_references(self) -> list[AgentReference]:
+    def discover_agents(self) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -869,7 +870,7 @@ class Host(BaseHost, OnlineHostInterface):
                 dir_listing = self._list_directory(agents_dir)
 
             with log_span("Listing agent files from dir for host {}", self.id):
-                agent_refs: list[AgentReference] = []
+                agent_refs: list[DiscoveredAgent] = []
                 for dir_name in dir_listing:
                     agent_dir = agents_dir / dir_name
                     if self._is_directory(agent_dir):
@@ -886,7 +887,7 @@ class Host(BaseHost, OnlineHostInterface):
                                 "Could not load agent reference from {} because json was invalid: {}", data_path, e
                             )
                             continue
-                        ref = self._validate_and_create_agent_reference(data)
+                        ref = self._validate_and_create_discovered_agent(data)
                         if ref is not None:
                             agent_refs.append(ref)
 
@@ -908,7 +909,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_type = AgentTypeName(data["type"])
         resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
-        return cast(type[BaseAgent], resolved.agent_class)(
+        return resolved.agent_class(
             id=AgentId(data["id"]),
             name=AgentName(data["name"]),
             agent_type=agent_type,
@@ -962,9 +963,16 @@ class Host(BaseHost, OnlineHostInterface):
 
         self._mkdir(target_path)
 
-        # Track generated work directories at the host level
+        # Track generated work directories at the host level.
+        # When running in-place, actively remove from generated_work_dirs in case
+        # a previous agent had registered this path (e.g., a worktree agent created
+        # this directory, then the user ran --in-place from it). Without this removal,
+        # GC would treat the directory as orphaned and delete it after the in-place
+        # agent is destroyed.
         if is_generated_work_dir:
             self._add_generated_work_dir(target_path)
+        else:
+            self._remove_generated_work_dir(target_path)
 
         created_branch_name: str | None = None
 
@@ -1073,6 +1081,7 @@ class Host(BaseHost, OnlineHostInterface):
                     result = self.execute_command(f"git init --bare {shlex.quote(str(target_path / '.git'))}")
                     if not result.success:
                         raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
+                    add_safe_directory_on_remote(self, target_path)
 
             self._git_push_to_target(source_host, source_path, target_path)
 
@@ -1126,13 +1135,13 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target using git push --mirror."""
         self._warn_if_submodules_detected(source_host, source_path)
-        target_ssh_info = self._get_ssh_connection_info()
+        target_ssh_info = self.get_ssh_connection_info()
 
         if target_ssh_info is None:
             if source_host.is_local:
                 git_url = str(target_path / ".git")
             else:
-                source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+                source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
                 if source_ssh_info is None:
                     raise MngError("Cannot determine SSH connection info for remote source host")
                 user, hostname, port, key_path = source_ssh_info
@@ -1316,7 +1325,7 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = "rsync: local to local"
         elif source_host.is_local and not self.is_local:
             # Local to remote
-            target_ssh_info = self._get_ssh_connection_info()
+            target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
             user, hostname, port, key_path = target_ssh_info
             rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
@@ -1324,7 +1333,7 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
         elif not source_host.is_local and self.is_local:
             # Remote to local
-            source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
             user, hostname, port, key_path = source_ssh_info
             rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
@@ -1332,9 +1341,9 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
         else:
             # Remote to remote: sync via local temp directory as intermediary
-            source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
-            target_ssh_info = self._get_ssh_connection_info()
+            target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
 
             src_user, src_hostname, src_port, src_key_path = source_ssh_info
@@ -1433,10 +1442,9 @@ class Host(BaseHost, OnlineHostInterface):
             return options.git.new_branch_name
 
         agent_name = options.name or AgentName("agent")
-        provider_name = self.provider_instance.name
         branch_prefix = options.git.new_branch_prefix if options.git else "mng/"
 
-        return f"{branch_prefix}{agent_name}-{provider_name}"
+        return default_branch_name(agent_name, prefix=branch_prefix)
 
     def create_agent_state(
         self,
@@ -1445,7 +1453,7 @@ class Host(BaseHost, OnlineHostInterface):
         created_branch_name: str | None = None,
     ) -> AgentInterface:
         """Create the agent state directory and return the agent."""
-        agent_id = AgentId.generate()
+        agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
         agent_type = options.agent_type or AgentTypeName("claude")
         with log_span(
@@ -1457,11 +1465,11 @@ class Host(BaseHost, OnlineHostInterface):
             resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
             state_dir = self.host_dir / "agents" / str(agent_id)
-            self._mkdirs([state_dir, state_dir / "logs"])
+            self._mkdirs([state_dir, state_dir / "events"])
 
             create_time = datetime.now(timezone.utc)
 
-            agent = cast(type[BaseAgent], resolved.agent_class)(
+            agent = resolved.agent_class(
                 id=agent_id,
                 name=agent_name,
                 agent_type=agent_type,
@@ -1550,6 +1558,7 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars["MNG_AGENT_NAME"] = str(agent.name)
         env_vars["MNG_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNG_AGENT_WORK_DIR"] = str(agent.work_dir)
+        env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
 
         # 2. Add programmatic defaults
         env_vars["GIT_BASE_BRANCH"] = (options.git.base_branch if options.git else None) or ""
@@ -1577,25 +1586,10 @@ class Host(BaseHost, OnlineHostInterface):
         logger.debug("Wrote env vars", count=len(env_vars), path=str(env_path))
 
     def _build_source_env_commands(self, agent: AgentInterface) -> list[str]:
-        """Build shell commands that source host and agent env files.
-
-        Returns a list of shell commands that:
-        1. Set 'set -a' to auto-export all sourced variables
-        2. Source host env if it exists (host env first)
-        3. Source agent env if it exists (agent can override host)
-        4. Restore with 'set +a'
-
-        The caller is responsible for joining these appropriately.
-        """
+        """Build shell commands that source host and agent env files."""
         host_env_path = self.host_dir / "env"
         agent_env_path = self.get_agent_env_path(agent)
-
-        return [
-            "set -a",
-            f"[ -f {shlex.quote(str(host_env_path))} ] && . {shlex.quote(str(host_env_path))} || true",
-            f"[ -f {shlex.quote(str(agent_env_path))} ] && . {shlex.quote(str(agent_env_path))} || true",
-            "set +a",
-        ]
+        return build_source_env_shell_commands(host_env_path, agent_env_path)
 
     def _build_source_env_prefix(self, agent: AgentInterface) -> str:
         """Build a shell prefix that sources host and agent env files if they exist."""
@@ -2281,11 +2275,10 @@ def _build_start_agent_shell_command(
         )
         steps.append(f"tmux set-hook -t {quoted_session} client-attached[99] {shlex.quote(hook_value)}")
 
-    # Send the agent command as literal keys, then Enter to execute
-    steps.append(f"tmux send-keys -t {shlex.quote(session_name)} -l {shlex.quote(command)}")
-    steps.append(f"tmux send-keys -t {shlex.quote(session_name)} Enter")
-
-    # Create additional windows for each additional command
+    # Create additional windows BEFORE sending the agent command. This
+    # ensures all windows exist before the agent starts, preventing a race
+    # where a fast-exiting agent command destroys the session before
+    # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
         window_target = f"{session_name}:{window_name}"
@@ -2300,8 +2293,16 @@ def _build_start_agent_shell_command(
         steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
 
     # If we created additional windows, select the first window (the main agent)
+    # before sending the agent command
     if additional_commands:
         steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
+
+    # Send the agent command as literal keys, then Enter to execute.
+    # Target window :0 explicitly so this works even after additional windows
+    # have been created (which changes the active window).
+    agent_window = shlex.quote(session_name + ":0")
+    steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
+    steps.append(f"tmux send-keys -t {agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content

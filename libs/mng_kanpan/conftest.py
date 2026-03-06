@@ -1,6 +1,6 @@
-"""Project-level conftest for mng-pankan.
+"""Project-level conftest for mng-kanpan.
 
-When running tests from libs/mng_pankan/, this conftest provides the common pytest hooks
+When running tests from libs/mng_kanpan/, this conftest provides the common pytest hooks
 that would otherwise come from the monorepo root conftest.py (which is not discovered
 when pytest runs from a subdirectory).
 

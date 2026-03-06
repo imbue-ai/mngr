@@ -49,7 +49,7 @@ SECONDARY_COMMANDS = {
     "config",
     "gc",
     "limit",
-    "logs",
+    "events",
     "message",
     "provision",
     "plugin",

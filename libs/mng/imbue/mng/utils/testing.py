@@ -1,11 +1,14 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 from collections.abc import Generator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -18,13 +21,30 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 from loguru import logger
+from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.cli.create import create as create_command
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
+from imbue.mng.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.data_types import HostDetails
+from imbue.mng.interfaces.data_types import SnapshotInfo
+from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentLifecycleState
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
+from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
+from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.polling import wait_for
 
@@ -34,6 +54,67 @@ TEST_ENV_PREFIX: Final[str] = "mng_test-"
 # Pattern to match test environment names: mng_test-YYYY-MM-DD-HH-MM-SS
 # The name may have additional suffixes (like user_id)
 TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mng_test-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})")
+
+# =============================================================================
+# Resource tracking lists for cleanup verification
+# =============================================================================
+
+# Track test IDs used by this worker/process for cleanup verification.
+# Each xdist worker is a separate process with isolated memory, so this
+# list only contains IDs from tests run by THIS worker.
+worker_test_ids: list[str] = []
+
+# Track Modal app names that were created during tests for cleanup verification.
+# This enables detection of leaked apps that weren't properly cleaned up.
+worker_modal_app_names: list[str] = []
+
+# Track Modal volume names that were created during tests for cleanup verification.
+# Unlike Modal Apps, volumes are global to the account (not app-specific), so they
+# must be tracked and cleaned up separately.
+worker_modal_volume_names: list[str] = []
+
+# Track Modal environment names that were created during tests for cleanup verification.
+# Modal environments are used to scope all resources (apps, volumes, sandboxes) to a
+# specific user.
+worker_modal_environment_names: list[str] = []
+
+
+def register_modal_test_app(app_name: str) -> None:
+    """Register a Modal app name for cleanup verification.
+
+    Call this when creating a Modal app during tests to enable leak detection.
+    The app_name should match the name used when creating the Modal app.
+    """
+    if app_name not in worker_modal_app_names:
+        worker_modal_app_names.append(app_name)
+
+
+def register_modal_test_volume(volume_name: str) -> None:
+    """Register a Modal volume name for cleanup verification.
+
+    Call this when creating a Modal volume during tests to enable leak detection.
+    The volume_name should match the name used when creating the Modal volume.
+    """
+    if volume_name not in worker_modal_volume_names:
+        worker_modal_volume_names.append(volume_name)
+
+
+def register_modal_test_environment(environment_name: str) -> None:
+    """Register a Modal environment name for cleanup verification.
+
+    Call this when creating a Modal environment during tests to enable leak detection.
+    The environment_name should match the name used when creating resources in that environment.
+    """
+    if environment_name not in worker_modal_environment_names:
+        worker_modal_environment_names.append(environment_name)
+
+
+class ModalSubprocessTestEnv(FrozenModel):
+    """Environment configuration for Modal subprocess tests."""
+
+    env: dict[str, str] = Field(description="Environment variables for the subprocess")
+    prefix: str = Field(description="The mng prefix for test isolation")
+    host_dir: Path = Field(description="Path to the temporary host directory")
 
 
 def generate_test_environment_name() -> str:
@@ -56,6 +137,40 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+
+
+@contextmanager
+def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Give a test its own isolated tmux server.
+
+    Creates a per-test TMUX_TMPDIR under /tmp so the test gets its own
+    tmux server socket. On teardown, kills the isolated server and
+    cleans up the tmpdir.
+
+    Uses /tmp directly (not pytest's tmp_path) because tmux sockets are
+    Unix domain sockets with a ~104-byte path length limit on macOS.
+    """
+    tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mng-tmux-", dir="/tmp"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
+    monkeypatch.delenv("TMUX", raising=False)
+
+    yield
+
+    tmux_tmpdir_str = str(tmux_tmpdir)
+    assert tmux_tmpdir_str.startswith("/tmp/mng-tmux-"), (
+        "TMUX_TMPDIR safety check failed! Expected /tmp/mng-tmux-* path but got: {}. "
+        "Refusing to run 'tmux kill-server' to avoid killing the real tmux server.".format(tmux_tmpdir_str)
+    )
+    socket_path = Path(tmux_tmpdir_str) / "tmux-{}".format(os.getuid()) / "default"
+    kill_env = os.environ.copy()
+    kill_env.pop("TMUX", None)
+    kill_env["TMUX_TMPDIR"] = tmux_tmpdir_str
+    subprocess.run(
+        ["tmux", "-S", str(socket_path), "kill-server"],
+        capture_output=True,
+        env=kill_env,
+    )
+    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
 def assert_home_is_temp_directory() -> None:
@@ -208,18 +323,40 @@ def cleanup_tmux_session(session_name: str) -> None:
 
 
 @contextmanager
-def tmux_session_cleanup(session_name: str) -> Generator[str, None, None]:
+def tmux_session_cleanup(session_name: str) -> Generator[None, None, None]:
     """Context manager that cleans up a tmux session and all its processes on exit."""
     try:
-        yield session_name
+        yield
     finally:
         cleanup_tmux_session(session_name)
 
 
+@contextmanager
+def mng_agent_cleanup(
+    agent_name: str,
+    *,
+    env: dict[str, str] | None = None,
+    disable_plugins: Sequence[str] = (),
+) -> Generator[None, None, None]:
+    """Context manager that destroys a mng agent on exit (via subprocess)."""
+    try:
+        yield
+    finally:
+        args = ["destroy", agent_name, "--force"]
+        for plugin in disable_plugins:
+            args.extend(["--disable-plugin", plugin])
+        run_mng_subprocess(*args, env=env)
+
+
 def capture_tmux_pane_contents(session_name: str) -> str:
-    """Capture the contents of a tmux session's pane and return as a string."""
+    """Capture the contents of a tmux session's pane via local subprocess.
+
+    This is the local-only variant for test code that doesn't have a host object.
+    For the host-based version (works over SSH), use
+    imbue.mng.hosts.tmux.capture_tmux_pane_content.
+    """
     result = subprocess.run(
-        ["tmux", "capture-pane", "-t", session_name, "-p"],
+        shlex.split(build_tmux_capture_pane_command(session_name)),
         capture_output=True,
         text=True,
     )
@@ -303,14 +440,69 @@ def make_local_provider(
     )
 
 
-def make_mng_ctx(default_host_dir: Path, prefix: str) -> MngContext:
-    """Create a MngContext with the given default_host_dir, prefix, and a basic plugin manager."""
-    config = MngConfig(default_host_dir=default_host_dir, prefix=prefix, is_error_reporting_enabled=False)
-    pm = pluggy.PluginManager("mng")
-    # Create a profile directory in the default_host_dir
-    profile_dir = default_host_dir / PROFILES_DIRNAME / uuid4().hex
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    return MngContext(config=config, pm=pm, profile_dir=profile_dir)
+def make_mng_ctx(
+    config: MngConfig,
+    pm: pluggy.PluginManager,
+    profile_dir: Path,
+    *,
+    is_interactive: bool = False,
+    is_auto_approve: bool = False,
+    concurrency_group: ConcurrencyGroup,
+) -> MngContext:
+    """Create a MngContext with the given parameters.
+
+    Use this directly in tests that need non-default settings (e.g., interactive mode).
+    Most tests should use the temp_mng_ctx fixture instead.
+    """
+    return MngContext(
+        config=config,
+        pm=pm,
+        profile_dir=profile_dir,
+        is_interactive=is_interactive,
+        is_auto_approve=is_auto_approve,
+        concurrency_group=concurrency_group,
+    )
+
+
+def make_test_agent_details(
+    name: str = "test-agent",
+    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    create_time: datetime | None = None,
+    snapshots: list[SnapshotInfo] | None = None,
+    host_plugin: dict | None = None,
+    host_tags: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+    host_id: HostId | None = None,
+    provider_name: ProviderInstanceName | None = None,
+    ssh: SSHInfo | None = None,
+) -> AgentDetails:
+    """Create a real AgentDetails for testing.
+
+    Shared helper used across test files to avoid duplicating AgentDetails
+    construction logic. Accepts optional overrides for commonly varied fields.
+    """
+    host_details = HostDetails(
+        id=host_id or HostId.generate(),
+        name="test-host",
+        provider_name=provider_name or ProviderInstanceName("local"),
+        snapshots=snapshots or [],
+        state=HostState.RUNNING,
+        plugin=host_plugin or {},
+        tags=host_tags or {},
+        ssh=ssh,
+    )
+    return AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName(name),
+        type="generic",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/tmp/test"),
+        create_time=create_time or datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=state,
+        labels=labels or {},
+        host=host_details,
+    )
 
 
 def init_git_repo(path: Path, initial_commit: bool = True) -> None:
@@ -759,7 +951,7 @@ AllowUsers {current_user}
     sshd_config_path.write_text(sshd_config)
 
     # Start sshd
-    proc = subprocess.Popen(
+    process = subprocess.Popen(
         [sshd_path, "-D", "-f", str(sshd_config_path), "-e"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -777,9 +969,64 @@ AllowUsers {current_user}
 
     finally:
         # Stop sshd
-        proc.send_signal(signal.SIGTERM)
+        process.send_signal(signal.SIGTERM)
         try:
-            proc.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            process.kill()
+            process.wait()
+
+
+# =============================================================================
+# Discovery event test factories
+# =============================================================================
+
+
+def make_test_discovered_agent() -> DiscoveredAgent:
+    """Create a DiscoveredAgent with random IDs and realistic certified_data for testing."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName(f"test-agent-{uuid4().hex}")
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=agent_id,
+        agent_name=agent_name,
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "id": str(agent_id),
+            "name": str(agent_name),
+            "type": "claude",
+            "command": "claude --model sonnet",
+            "work_dir": "/tmp/test",
+            "start_on_boot": False,
+            "labels": {},
+            "permissions": [],
+        },
+    )
+
+
+def make_test_discovered_host() -> DiscoveredHost:
+    """Create a DiscoveredHost with random IDs for testing."""
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName(f"test-host-{uuid4().hex}"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def write_discovery_snapshot_to_path(events_path: Path, agent_names: Sequence[str]) -> None:
+    """Write a DISCOVERY_FULL event to a JSONL file for testing completion and event replay."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    agents = [
+        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
+        for i, name in enumerate(agent_names)
+    ]
+    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    event = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-snapshot",
+        "source": "mng/discovery",
+        "agents": agents,
+        "hosts": hosts,
+    }
+    events_path.write_text(json.dumps(event) + "\n")

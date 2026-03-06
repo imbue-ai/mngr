@@ -8,7 +8,7 @@ The agent name can be determined by stripping the $MNG_PREFIX env var from the n
 
 The state of the agent is based on whether the expected `command` is running inside the first pane for the tmux session.
 
-By convention, the agent directory also contains a subdirectory for `logs/`.
+By convention, the agent directory also contains a subdirectory for `events/`.
 
 The agent directory should also include an `env` file with any environment variable overrides for this agent (it will be sourced after the host-level `env` file).
 

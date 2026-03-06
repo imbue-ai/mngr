@@ -1,10 +1,14 @@
+import json
 import re
 import shutil
 import string
 import sys
+import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import nullcontext
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from typing import Final
@@ -18,25 +22,31 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
+from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import ErrorInfo
+from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents as api_list_agents
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
-from imbue.mng.cli.completion_writer import write_cli_completions_cache
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import render_format_template
 from imbue.mng.cli.output_helpers import write_human_line
-from imbue.mng.cli.watch_mode import run_watch_loop
+from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.interfaces.data_types import AgentInfo
+from imbue.mng.errors import MngError
+from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.cel_utils import build_cel_context
+from imbue.mng.utils.cel_utils import compile_cel_sort_keys
+from imbue.mng.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mng.utils.terminal import ANSI_DIM_GRAY
 from imbue.mng.utils.terminal import ANSI_ERASE_LINE
 from imbue.mng.utils.terminal import ANSI_ERASE_TO_END
@@ -118,10 +128,10 @@ class ListCliOptions(CommonCliOptions):
     stdin: bool
     fields: str | None
     sort: str
-    sort_order: str
     limit: int | None
     watch: int | None
     on_error: str
+    stream: bool
 
 
 @click.command(name="list")
@@ -189,25 +199,25 @@ class ListCliOptions(CommonCliOptions):
 @optgroup.option(
     "--sort",
     default="create_time",
-    help="Sort by field (supports nested fields like host.name); enables sorted (non-streaming) output [default: create_time]",
-)
-@optgroup.option(
-    "--sort-order",
-    type=click.Choice(["asc", "desc"], case_sensitive=False),
-    default="asc",
-    help="Sort order [default: asc]",
+    help="Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time]",
 )
 @optgroup.option(
     "--limit",
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
 )
-@optgroup.group("Watch Mode")
+@optgroup.group("Watch / Stream Mode")
 @optgroup.option(
     "-w",
     "--watch",
     type=int,
     help="Continuously watch and update status at specified interval (seconds)",
+)
+@optgroup.option(
+    "--stream",
+    is_flag=True,
+    help="Stream discovery events as JSONL. Outputs a full snapshot, then tails the event file for updates. "
+    "Periodically re-polls to catch any missed changes.",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -308,10 +318,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if opts.remote:
         exclude_filters.append('host.provider == "local"')
 
-    # --sort FIELD: Sort by any available field [default: create_time]
-    # --sort-order ORDER: Sort order (asc, desc) [default: asc]
-    sort_field = opts.sort
-    sort_reverse = opts.sort_order.lower() == "desc"
+    # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
+    compiled_sort_keys = compile_cel_sort_keys(opts.sort)
 
     # --limit N: Limit number of results returned
     # NOTE: The limit is applied after fetching results. The full list is still retrieved
@@ -326,6 +334,24 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
+    if opts.stream:
+        # Stream mode emits unfiltered snapshots for state reconstruction,
+        # so filtering and sorting options are not supported
+        is_any_filter_set = bool(include_filters_tuple or exclude_filters_tuple or provider_names or limit)
+        if is_any_filter_set:
+            raise click.UsageError(
+                "--stream emits unfiltered snapshots and cannot be combined with "
+                "--include, --exclude, --running, --stopped, --local, --remote, "
+                "--provider, --project, --label, --tag, or --limit"
+            )
+        if opts.watch:
+            raise click.UsageError("--stream and --watch cannot be used together")
+        _list_stream(
+            mng_ctx=mng_ctx,
+            error_behavior=error_behavior,
+        )
+        return
+
     if output_opts.output_format == OutputFormat.JSONL:
         _list_jsonl(
             ctx,
@@ -339,12 +365,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         )
         return
 
-    # Determine if --sort or --sort-order was explicitly set by the user (vs using the default)
+    # Determine if --sort was explicitly set by the user (vs using the default)
     sort_source = ctx.get_parameter_source("sort")
-    sort_order_source = ctx.get_parameter_source("sort_order")
-    is_sort_explicit = (sort_source is not None and sort_source != click.core.ParameterSource.DEFAULT) or (
-        sort_order_source is not None and sort_order_source != click.core.ParameterSource.DEFAULT
-    )
+    is_sort_explicit = sort_source is not None and sort_source != click.core.ParameterSource.DEFAULT
 
     # Template output path: if --format is a template string, use streaming when possible, batch otherwise
     if format_template is not None:
@@ -391,8 +414,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         exclude_filters=exclude_filters_tuple,
         provider_names=provider_names,
         error_behavior=error_behavior,
-        sort_field=sort_field,
-        sort_reverse=sort_reverse,
+        compiled_sort_keys=compiled_sort_keys,
         limit=limit,
         fields=fields,
         format_template=format_template,
@@ -400,10 +422,11 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
 
     if opts.watch:
         try:
-            run_watch_loop(
-                iteration_fn=lambda: _run_list_iteration(iteration_params, ctx),
-                interval_seconds=opts.watch,
-                on_error_continue=True,
+            _list_watch_with_stream(
+                iteration_params=iteration_params,
+                ctx=ctx,
+                mng_ctx=mng_ctx,
+                max_interval_seconds=opts.watch,
             )
         except KeyboardInterrupt:
             logger.info("\nWatch mode stopped")
@@ -517,7 +540,7 @@ class _LimitedJsonlEmitter(MutableModel):
     count: int = 0
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         with self._lock:
             if self.limit is not None and self.count >= self.limit:
                 return
@@ -534,7 +557,7 @@ class _StreamingTemplateEmitter(MutableModel):
     _lock: Lock = PrivateAttr(default_factory=Lock)
     _count: int = PrivateAttr(default=0)
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         line = _render_format_template(self.format_template, agent)
         with self._lock:
             if self.limit is not None and self._count >= self.limit:
@@ -621,7 +644,7 @@ class _StreamingHumanRenderer(MutableModel):
 
             self.output.flush()
 
-    def __call__(self, agent: AgentInfo) -> None:
+    def __call__(self, agent: AgentDetails) -> None:
         """Handle a single agent result (on_agent callback)."""
         with self._lock:
             if self.limit is not None and self._count >= self.limit:
@@ -728,7 +751,7 @@ def _format_streaming_header_row(fields: Sequence[str], column_widths: dict[str,
 
 
 @pure
-def _format_streaming_agent_row(agent: AgentInfo, fields: Sequence[str], column_widths: dict[str, int]) -> str:
+def _format_streaming_agent_row(agent: AgentDetails, fields: Sequence[str], column_widths: dict[str, int]) -> str:
     """Format a single agent as a streaming output row."""
     parts: list[str] = []
     for field in fields:
@@ -751,8 +774,8 @@ class _ListIterationParams(BaseModel):
     exclude_filters: tuple[str, ...]
     provider_names: tuple[str, ...] | None
     error_behavior: ErrorBehavior
-    sort_field: str
-    sort_reverse: bool
+    # Compiled CEL sort keys: list of (program, is_descending) pairs
+    compiled_sort_keys: list[tuple[Any, bool]]
     limit: int | None
     fields: list[str] | None
     format_template: str | None = None
@@ -774,7 +797,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             logger.warning("{}: {}", error.exception_type, error.message)
 
     # Apply sorting to results
-    agents_to_display = _sort_agents(result.agents, params.sort_field, params.sort_reverse)
+    agents_to_display = _sort_agents_by_cel(result.agents, params.compiled_sort_keys)
 
     # Apply limit to results (after sorting)
     if params.limit is not None:
@@ -812,7 +835,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         ctx.exit(1)
 
 
-def _emit_json_output(agents: list[AgentInfo], errors: list[ErrorInfo]) -> None:
+def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:
     """Emit JSON output with all agents."""
     agents_data = [agent.model_dump(mode="json") for agent in agents]
     errors_data = [error.model_dump(mode="json") for error in errors]
@@ -823,7 +846,7 @@ def _emit_json_output(agents: list[AgentInfo], errors: list[ErrorInfo]) -> None:
     emit_final_json(output_data)
 
 
-def _emit_jsonl_agent(agent: AgentInfo) -> None:
+def _emit_jsonl_agent(agent: AgentDetails) -> None:
     """Emit a single agent as a JSONL line (streaming callback)."""
     agent_data = agent.model_dump(mode="json")
     emit_final_json(agent_data)
@@ -835,7 +858,7 @@ def _emit_jsonl_error(error: ErrorInfo) -> None:
     emit_final_json(error_data)
 
 
-def _emit_human_output(agents: list[AgentInfo], fields: list[str] | None = None) -> None:
+def _emit_human_output(agents: list[AgentDetails], fields: list[str] | None = None) -> None:
     """Emit human-readable table output with optional field selection."""
     if not agents:
         return
@@ -865,7 +888,7 @@ def _emit_human_output(agents: list[AgentInfo], fields: list[str] | None = None)
     write_human_line("\n" + table)
 
 
-def _emit_template_output(agents: list[AgentInfo], template: str, output: Any) -> None:
+def _emit_template_output(agents: list[AgentDetails], template: str, output: Any) -> None:
     """Emit template-formatted output, one line per agent."""
     for agent in agents:
         line = _render_format_template(template, agent)
@@ -932,55 +955,53 @@ def _format_value_as_string(value: Any) -> str:
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
-def _get_sortable_value(agent: AgentInfo, field: str) -> Any:
-    """Extract a field value from an AgentInfo object for sorting.
+class _CelSortKeyExtractor:
+    """Extracts a sort key from an (agent, cel_context) pair for a single CEL expression."""
 
-    Returns the raw value (not string-formatted) for proper sorting behavior.
-    Supports nested fields like "host.name".
-    """
-    # Handle nested fields (e.g., "host.name")
-    # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
-    parts = field.split(".")
-    value: Any = agent
+    program: Any
+    is_descending: bool
 
-    try:
-        for part in parts:
-            # Strip any bracket notation for sorting (use base field only)
-            base_part = part.split("[")[0]
-            if hasattr(value, base_part):
-                value = getattr(value, base_part)
-            elif isinstance(value, dict) and base_part in value:
-                value = value[base_part]
-            else:
-                return None
-        return value
-    except (AttributeError, KeyError):
-        return None
-
-
-class _AgentSortKey:
-    """Callable class for sorting agents by a field (avoids inline function definitions)."""
-
-    sort_field: str
-
-    def __call__(self, agent: AgentInfo) -> tuple[int, Any]:
-        value = _get_sortable_value(agent, self.sort_field)
+    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, str]:
+        _, ctx = pair
+        value = evaluate_cel_sort_key(self.program, ctx)
         if value is None:
-            return (1, "")
-        if hasattr(value, "value"):
-            value = value.value
-        return (0, str(value))
+            # For ascending: (1, "") puts None at end
+            # For descending (reverse=True): (0, "") puts None at end
+            return (1, "") if not self.is_descending else (0, "")
+        return (0, str(value)) if not self.is_descending else (1, str(value))
 
 
-def _sort_agents(agents: list[AgentInfo], sort_field: str, reverse: bool) -> list[AgentInfo]:
-    """Sort a list of agents by the specified field."""
-    key = _AgentSortKey()
-    key.sort_field = sort_field
-    return sorted(agents, key=key, reverse=reverse)
+def _sort_agents_by_cel(
+    agents: list[AgentDetails],
+    compiled_sort_keys: Sequence[tuple[Any, bool]],
+) -> list[AgentDetails]:
+    """Sort agents using compiled CEL sort key expressions.
+
+    Supports multiple sort keys with per-key direction (asc/desc).
+    Uses stable multi-pass sorting: sorts by each key in reverse order
+    of significance so the most significant key dominates.
+    """
+    if not compiled_sort_keys or not agents:
+        return agents
+
+    # Precompute CEL contexts once for all agents
+    cel_contexts = [build_cel_context(agent_details_to_cel_context(agent)) for agent in agents]
+
+    # Pair agents with their precomputed contexts for sorting
+    paired: list[tuple[AgentDetails, dict[str, Any]]] = list(zip(agents, cel_contexts, strict=True))
+
+    # Sort by each key in reverse order of significance (stable sort preserves earlier orderings)
+    for program, is_descending in reversed(compiled_sort_keys):
+        extractor = _CelSortKeyExtractor()
+        extractor.program = program
+        extractor.is_descending = is_descending
+        paired.sort(key=extractor, reverse=is_descending)
+
+    return [agent for agent, _ in paired]
 
 
-def _get_field_value(agent: AgentInfo, field: str) -> str:
-    """Extract a field value from an AgentInfo object and return as string.
+def _get_field_value(agent: AgentDetails, field: str) -> str:
+    """Extract a field value from an AgentDetails object and return as string.
 
     Supports nested fields like "host.name" and list slicing syntax like
     "host.snapshots[0]" or "host.snapshots[:3]".
@@ -1035,11 +1056,11 @@ def _get_field_value(agent: AgentInfo, field: str) -> str:
 
 
 @pure
-def _render_format_template(template: str, agent: AgentInfo) -> str:
+def _render_format_template(template: str, agent: AgentDetails) -> str:
     """Expand a str.format()-style template using agent field values.
 
     Pre-resolves field names via _get_field_value() (which supports nested
-    attribute access and bracket notation on AgentInfo), then delegates
+    attribute access and bracket notation on AgentDetails), then delegates
     template expansion to the shared render_format_template helper.
     """
     # Pre-resolve all referenced field names using the agent-specific field resolver
@@ -1067,6 +1088,8 @@ Supports filtering, sorting, and multiple output formats.""",
         ("List agents with a specific host tag", "mng list --tag env=prod"),
         ("List agents as JSON", "mng list --format json"),
         ("Filter with CEL expression", "mng list --include 'name.contains(\"prod\")'"),
+        ("Sort by name descending", "mng list --sort 'name desc'"),
+        ("Sort by multiple fields", "mng list --sort 'state, name asc, create_time desc'"),
     ),
     additional_sections=(
         (
@@ -1174,3 +1197,282 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 # Add pager-enabled help option to the list command
 add_pager_help_option(list_command)
+
+
+# === Watch Mode (stream-backed) ===
+
+
+def _list_watch_with_stream(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    mng_ctx: MngContext,
+    max_interval_seconds: int,
+) -> None:
+    """Watch mode backed by the discovery event stream.
+
+    Does an initial full list and display, then monitors the discovery events
+    file for changes. When a change is detected (from create, destroy, etc.),
+    re-polls immediately. Also re-polls at max_interval_seconds as a safety net.
+    """
+    logger.info("Starting watch mode (stream-backed): refreshing on changes or every {} seconds", max_interval_seconds)
+    logger.info("Press Ctrl+C to stop")
+
+    events_path = get_discovery_events_path(mng_ctx.config)
+
+    # Initial display
+    _run_list_iteration(iteration_params, ctx)
+
+    # Tail the events file and re-render when changes arrive.
+    # Use a stop_event to allow clean shutdown on KeyboardInterrupt.
+    stop_event = threading.Event()
+    try:
+        _run_watch_loop_with_event_tailing(
+            iteration_params=iteration_params,
+            ctx=ctx,
+            events_path=events_path,
+            max_interval_seconds=max_interval_seconds,
+            stop_event=stop_event,
+        )
+    finally:
+        stop_event.set()
+
+
+def _run_watch_loop_with_event_tailing(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+) -> None:
+    """Repeatedly refresh the list display, triggered by event file changes or a timeout."""
+    _run_event_driven_watch(
+        events_path=events_path,
+        max_interval_seconds=max_interval_seconds,
+        stop_event=stop_event,
+        on_refresh=lambda: _refresh_watch_display(iteration_params, ctx),
+    )
+
+
+def _refresh_watch_display(
+    iteration_params: _ListIterationParams,
+    ctx: click.Context,
+) -> None:
+    """Run a single refresh cycle for watch mode."""
+    logger.info("\nRefreshing...")
+    try:
+        _run_list_iteration(iteration_params, ctx)
+    except MngError as e:
+        logger.error("Error in watch iteration (continuing): {}", e)
+
+
+def _poll_events_file_for_changes(
+    events_path: Path,
+    watched_size: int,
+    changed_flag: threading.Event,
+    stop_event: threading.Event,
+    max_polls: int,
+) -> None:
+    """Poll the events file until its size changes or stop_event is set."""
+    current_size = watched_size
+    for _ in range(max_polls):
+        if stop_event.is_set() or changed_flag.is_set():
+            return
+        try:
+            if events_path.exists():
+                new_size = events_path.stat().st_size
+                if new_size != current_size:
+                    changed_flag.set()
+                    return
+        except OSError as e:
+            logger.trace("OSError while polling events file: {}", e)
+        stop_event.wait(timeout=0.1)
+
+
+def _run_event_driven_watch(
+    events_path: Path,
+    max_interval_seconds: int,
+    stop_event: threading.Event,
+    on_refresh: Callable[[], None],
+) -> None:
+    """Run the watch loop, calling on_refresh each time the events file changes or the interval elapses."""
+    for _ in range(100_000):
+        if stop_event.is_set():
+            break
+
+        last_size = events_path.stat().st_size if events_path.exists() else 0
+        is_changed = threading.Event()
+
+        watcher = threading.Thread(
+            target=_poll_events_file_for_changes,
+            args=(events_path, last_size, is_changed, stop_event, max_interval_seconds * 10),
+            daemon=True,
+        )
+        watcher.start()
+
+        is_changed.wait(timeout=float(max_interval_seconds))
+        stop_event_was_set = stop_event.is_set()
+        watcher.join(timeout=2.0)
+
+        if stop_event_was_set:
+            break
+
+        on_refresh()
+
+
+# === Stream Mode ===
+
+_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+
+
+def _stream_emit_line(
+    line: str,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Parse and emit a single JSONL line to stdout, deduplicating by event_id."""
+    stripped = line.strip()
+    if not stripped:
+        return
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.trace("Skipped malformed JSONL line in discovery event stream")
+        return
+    event_id = data.get("event_id")
+    with emit_lock:
+        if event_id and event_id in emitted_event_ids:
+            return
+        if event_id:
+            emitted_event_ids.add(event_id)
+        sys.stdout.write(stripped + "\n")
+        sys.stdout.flush()
+
+
+def _stream_tail_events_file(
+    events_path: Path,
+    initial_offset: int,
+    stop_event: threading.Event,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+) -> None:
+    """Poll the events file for new content written by other mng processes."""
+    current_offset = initial_offset
+    while not stop_event.is_set():
+        try:
+            if events_path.exists():
+                file_size = events_path.stat().st_size
+                # Handle file truncation (reset to start)
+                if file_size < current_offset:
+                    current_offset = 0
+                if file_size > current_offset:
+                    with open(events_path) as f:
+                        f.seek(current_offset)
+                        new_content = f.read()
+                        current_offset = f.tell()
+                    for line in new_content.splitlines():
+                        if stop_event.is_set():
+                            break
+                        _stream_emit_line(line, emitted_event_ids, emit_lock)
+        except OSError as e:
+            logger.trace("OSError while tailing discovery events file: {}", e)
+        stop_event.wait(timeout=1.0)
+
+
+def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered list to trigger a full discovery snapshot event.
+
+    The snapshot is written as a side effect of api_list_agents when the listing is
+    unfiltered and error-free. This function exists to trigger that side effect
+    explicitly (e.g. for stream mode's periodic re-polls).
+    """
+    api_list_agents(
+        mng_ctx=mng_ctx,
+        is_streaming=False,
+        error_behavior=error_behavior,
+    )
+
+
+def _list_stream(
+    mng_ctx: MngContext,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """Stream discovery events to stdout as JSONL.
+
+    Snapshots are always unfiltered so they can be used for state reconstruction.
+
+    1. Emit from the latest cached snapshot on disk (instant, if available)
+    2. Run a full sync in the background to update the event stream
+    3. Tail the events file for new events written by the background sync or other processes
+    4. Periodically re-poll (unfiltered) and write new full snapshots
+    """
+    events_path = get_discovery_events_path(mng_ctx.config)
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+
+    # Phase 1: emit from the latest cached snapshot on disk (fast path)
+    has_cached_snapshot = False
+    if events_path.exists():
+        snapshot_offset = find_latest_full_snapshot_offset(events_path)
+        if snapshot_offset > 0:
+            has_cached_snapshot = True
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
+
+    # Record the current file position for tailing
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
+
+    # Phase 2: start tailing the events file for new events
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=_stream_tail_events_file,
+        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock),
+        daemon=True,
+    )
+    tail.start()
+
+    # Phase 3: run the initial full sync
+    # If we had a cached snapshot, run this in the background so the user sees results immediately.
+    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+    if has_cached_snapshot:
+        initial_sync = threading.Thread(
+            target=_write_unfiltered_full_snapshot_logged,
+            args=(mng_ctx, error_behavior),
+            daemon=True,
+        )
+        initial_sync.start()
+    else:
+        _write_unfiltered_full_snapshot_logged(mng_ctx, error_behavior)
+        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        if events_path.exists():
+            snapshot_offset = find_latest_full_snapshot_offset(events_path)
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
+
+    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
+            if stop_event.is_set():
+                break
+            try:
+                _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+                # The tail thread will pick up the new snapshot and emit it
+            except (MngError, OSError) as e:
+                logger.warning("Stream poll failed (continuing): {}", e)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)
+
+
+def _write_unfiltered_full_snapshot_logged(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered full snapshot, logging any errors instead of raising."""
+    try:
+        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write discovery snapshot: {}", e)

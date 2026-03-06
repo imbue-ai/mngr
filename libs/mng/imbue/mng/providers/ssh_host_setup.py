@@ -264,7 +264,7 @@ def build_start_volume_sync_command(
     Returns a shell command string that can be executed via sh -c.
     """
     script_path = f"{mng_host_dir}/commands/volume_sync.sh"
-    log_path = f"{mng_host_dir}/logs/volume_sync.log"
+    log_path = f"{mng_host_dir}/events/logs/volume_sync.log"
 
     # The sync script content (simple loop)
     sync_script = f"#!/bin/sh\nwhile true; do sync {volume_mount_path} 2>/dev/null; sleep 60; done\n"
@@ -272,7 +272,7 @@ def build_start_volume_sync_command(
 
     script_lines = [
         f"mkdir -p '{mng_host_dir}/commands'",
-        f"mkdir -p '{mng_host_dir}/logs'",
+        f"mkdir -p '{mng_host_dir}/events/logs'",
         f"printf '%s' '{escaped_script}' > '{script_path}'",
         f"chmod +x '{script_path}'",
         f"nohup '{script_path}' > '{log_path}' 2>&1 &",
@@ -293,24 +293,31 @@ def build_start_activity_watcher_command(
 
     This command:
     1. Creates the commands directory
-    2. Writes the activity watcher script to the host
-    3. Makes it executable
-    4. Starts it in the background with nohup
+    2. Writes the shared logging library (mng_log.sh) to the host
+    3. Writes the activity watcher script to the host
+    4. Makes both executable
+    5. Starts the activity watcher in the background with nohup
 
     Returns a shell command string that can be executed via sh -c.
     """
+    log_lib_content = load_resource_script("mng_log.sh")
     script_content = load_resource_script("activity_watcher.sh")
 
     # Escape single quotes in script content
+    escaped_log_lib = log_lib_content.replace("'", "'\"'\"'")
     escaped_script = script_content.replace("'", "'\"'\"'")
 
+    log_lib_path = f"{mng_host_dir}/commands/mng_log.sh"
     script_path = f"{mng_host_dir}/commands/activity_watcher.sh"
-    log_path = f"{mng_host_dir}/logs/activity_watcher.log"
+    log_path = f"{mng_host_dir}/events/logs/activity_watcher.log"
 
     script_lines = [
-        # Create commands and logs directories
+        # Create commands and events directories
         f"mkdir -p '{mng_host_dir}/commands'",
-        f"mkdir -p '{mng_host_dir}/logs'",
+        f"mkdir -p '{mng_host_dir}/events/logs'",
+        # Write the shared logging library
+        f"printf '%s' '{escaped_log_lib}' > '{log_lib_path}'",
+        f"chmod +x '{log_lib_path}'",
         # Write the activity watcher script
         f"printf '%s' '{escaped_script}' > '{script_path}'",
         # Make it executable

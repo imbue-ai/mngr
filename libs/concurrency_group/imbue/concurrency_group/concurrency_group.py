@@ -416,16 +416,19 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         When `is_checked_by_group` is True, the process will be checked for failure when the concurrency group exits
         or whenever its methods are called.
         """
-        process_factory = lambda: run_background(
-            command,
-            cwd=Path(cwd) if cwd is not None else None,
-            env=env,
-            is_checked=is_checked_by_group,
-            timeout=timeout,
-            shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
-            process_class=RunningProcessWithOnLineCallback,
-            process_class_kwargs={"on_line_callback": on_output},
-        )
+
+        def process_factory():
+            return run_background(
+                command,
+                cwd=Path(cwd) if cwd is not None else None,
+                env=env,
+                is_checked=is_checked_by_group,
+                timeout=timeout,
+                shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
+                process_class=RunningProcessWithOnLineCallback,
+                process_class_kwargs={"on_line_callback": on_output},
+            )
+
         return self.start_background_process_from_factory(process_factory)
 
     def run_process_to_completion(

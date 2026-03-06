@@ -13,6 +13,16 @@ from imbue.mng_schedule.cli.add import check_safe_create_command
 class TestAutoFixCreateArgs:
     """Tests for auto_fix_create_args."""
 
+    def test_adds_headless_when_missing(self) -> None:
+        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
+        parts = shlex.split(result)
+        assert "--headless" in parts
+
+    def test_skips_headless_when_already_present(self) -> None:
+        result = auto_fix_create_args("my-agent --headless", "trigger-1", ssh_public_key=None)
+        parts = shlex.split(result)
+        assert parts.count("--headless") == 1
+
     def test_adds_no_connect_when_missing(self) -> None:
         result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
         parts = shlex.split(result)

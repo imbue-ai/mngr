@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from typing import assert_never
 
 from loguru import logger
@@ -11,18 +12,20 @@ from loguru import logger
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.data_types import GcResult
+from imbue.mng.api.discovery_events import emit_host_destroyed
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import BuildCacheInfo
-from imbue.mng.interfaces.data_types import HostInfo
 from imbue.mng.interfaces.data_types import LogFileInfo
 from imbue.mng.interfaces.data_types import SizeBytes
 from imbue.mng.interfaces.data_types import WorkDirInfo
+from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import ErrorBehavior
@@ -124,7 +127,8 @@ def gc_work_dirs(
 ) -> None:
     """Garbage collect orphaned work directories."""
     for provider_instance in providers:
-        for host in provider_instance.list_hosts(cg=mng_ctx.concurrency_group):
+        for host_ref in provider_instance.discover_hosts(cg=mng_ctx.concurrency_group):
+            host = provider_instance.get_host(host_ref.host_id)
             if not isinstance(host, OnlineHostInterface):
                 # Skip offline hosts - can't query them
                 logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
@@ -160,15 +164,11 @@ def gc_machines(
     """Garbage collect idle machines and delete old offline host records."""
     for provider in providers:
         try:
-            hosts = provider.list_hosts(include_destroyed=True, cg=provider.mng_ctx.concurrency_group)
+            host_refs = provider.discover_hosts(include_destroyed=True, cg=provider.mng_ctx.concurrency_group)
 
-            for host in hosts:
+            for host_ref in host_refs:
                 try:
-                    host_info = HostInfo(
-                        id=host.id,
-                        name=str(host.id),
-                        provider_name=provider.name,
-                    )
+                    host = provider.get_host(host_ref.host_id)
 
                     # Handle offline hosts
                     # all we care about is that they have no agents (or is failed/crashed/destroyed),
@@ -180,7 +180,8 @@ def gc_machines(
                             seconds_since_stopped is not None
                             and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
                         ):
-                            if len(host.get_agent_references()) == 0 or host.get_state() in (
+                            agent_refs = host.discover_agents()
+                            if len(agent_refs) == 0 or host.get_state() in (
                                 HostState.FAILED,
                                 HostState.CRASHED,
                                 HostState.DESTROYED,
@@ -192,7 +193,12 @@ def gc_machines(
                                     #  someone else starts it, you might have a host that is running but is untracked
                                     #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
                                     provider.delete_host(host)
-                                result.machines_deleted.append(host_info)
+                                    emit_host_destroyed(
+                                        mng_ctx.config,
+                                        host_ref.host_id,
+                                        [ref.agent_id for ref in agent_refs],
+                                    )
+                                result.machines_deleted.append(host_ref)
                         # no matter what we're done--the rest of the logic only applies to online hosts
                         continue
 
@@ -202,32 +208,34 @@ def gc_machines(
 
                     try:
                         # Only consider online hosts with no agents
-                        agent_refs = host.get_agent_references()
+                        agent_refs = host.discover_agents()
                         if len(agent_refs) > 0:
                             continue
+                        host_to_destroy: HostInterface = host
                     except HostAuthenticationError:
                         # hosts that fail to authenticate should be destroyed--we assume all hosts are reachable
                         logger.warning("Failed to authenticate with host during GC, destroying: {}", host.id)
-                        host = host.to_offline_host()
+                        host_to_destroy = host.to_offline_host()
                     except HostConnectionError as e:
                         # we skip hosts that suddenly appear offline for now--it's hard to tell exactly what happened
                         logger.warning("Failed to connect to host {} during gc, skipping: {}", host.id, e)
                         continue
 
                     if not dry_run:
-                        mng_ctx.pm.hook.on_before_host_destroy(host=host)
-                        provider.destroy_host(host)
-                        mng_ctx.pm.hook.on_host_destroyed(host=host)
+                        mng_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
+                        provider.destroy_host(host_to_destroy)
+                        mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
+                        emit_host_destroyed(mng_ctx.config, host_ref.host_id, [])
 
-                    result.machines_destroyed.append(host_info)
+                    result.machines_destroyed.append(host_ref)
 
                 except MngError as e:
-                    error_msg = f"Failed to check/destroy host {host.id}: {e}"
+                    error_msg = f"Failed to check/destroy host {host_ref.host_id}: {e}"
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
 
         except MngError as e:
-            error_msg = f"Failed to list hosts for provider {provider.name}: {e}"
+            error_msg = f"Failed to discover hosts for provider {provider.name}: {e}"
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
 
@@ -245,20 +253,20 @@ def gc_snapshots(
             continue
 
         try:
-            hosts = provider.list_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group)
+            host_refs = provider.discover_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group)
 
-            for host in hosts:
+            for host_ref in host_refs:
                 try:
-                    snapshots = provider.list_snapshots(host)
+                    snapshots = provider.list_snapshots(host_ref.host_id)
 
                     for snapshot in snapshots:
                         if not dry_run:
-                            provider.delete_snapshot(host, snapshot.id)
+                            provider.delete_snapshot(host_ref.host_id, snapshot.id)
 
                         result.snapshots_destroyed.append(snapshot)
 
                 except MngError as e:
-                    error_msg = f"Failed to cleanup snapshots for host {host.id}: {e}"
+                    error_msg = f"Failed to cleanup snapshots for host {host_ref.host_id}: {e}"
                     result.errors.append(error_msg)
                     _handle_error(error_msg, error_behavior, exc=e)
 
@@ -286,9 +294,9 @@ def gc_volumes(
 
             # Get volumes that are currently attached to hosts
             active_volume_ids = set()
-            for host in provider.list_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group):
+            for host_ref in provider.discover_hosts(include_destroyed=False, cg=provider.mng_ctx.concurrency_group):
                 for volume in all_volumes:
-                    if volume.host_id == host.id:
+                    if volume.host_id == host_ref.host_id:
                         active_volume_ids.add(volume.volume_id)
 
             # Identify orphaned volumes
@@ -312,6 +320,9 @@ def gc_volumes(
             _handle_error(error_msg, error_behavior, exc=e)
 
 
+_LOG_MAX_AGE_DAYS: Final[int] = 30
+
+
 def gc_logs(
     mng_ctx: MngContext,
     providers: Sequence[ProviderInstanceInterface],
@@ -319,28 +330,52 @@ def gc_logs(
     error_behavior: ErrorBehavior,
     result: GcResult,
 ) -> None:
-    """Garbage collect old log files."""
-    # Construct logs directory from config
+    """Garbage collect old rotated log files.
+
+    Only targets the events/logs/ subdirectory (diagnostic logs), not the
+    broader events/ directory which may contain non-log event data.
+
+    Only deletes rotated log files (e.g., events.jsonl.1, events.jsonl.2)
+    that are older than 30 days. The current log file (events.jsonl) is
+    never deleted.
+    """
+    # Construct the logs subdirectory: events/logs/
     log_dir = mng_ctx.config.logging.log_dir
     if not log_dir.is_absolute():
-        logs_dir = mng_ctx.config.default_host_dir.expanduser() / log_dir
+        events_dir = mng_ctx.config.default_host_dir.expanduser() / log_dir
     else:
-        logs_dir = log_dir
-    logs_dir = logs_dir.expanduser()
+        events_dir = log_dir
+    events_dir = events_dir.expanduser()
 
+    # Only clean the logs/ subdirectory within events/
+    logs_dir = events_dir / "logs"
     if not logs_dir.exists():
         logger.trace("Skipped logs directory {} (does not exist)", logs_dir)
         return
+
+    now = datetime.now(timezone.utc)
 
     for log_file in logs_dir.rglob("*"):
         if not log_file.is_file():
             continue
 
+        # Only delete rotated files (e.g., events.jsonl.1, events.jsonl.2).
+        # Never delete the current log file (events.jsonl) or other non-rotated files.
+        if not _is_rotated_log_file(log_file):
+            continue
+
         try:
             stat = log_file.stat()
             file_size = SizeBytes(stat.st_size)
-            created_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
-            log_file_info = LogFileInfo(path=log_file, size_bytes=file_size, created_at=created_at)
+            modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+
+            # Only delete files older than the max age (based on last modification)
+            age_days = (now - modified_at).days
+            if age_days < _LOG_MAX_AGE_DAYS:
+                logger.trace("Skipped log file {} (only {} days old)", log_file, age_days)
+                continue
+
+            log_file_info = LogFileInfo(path=log_file, size_bytes=file_size, created_at=modified_at)
 
             if not dry_run:
                 log_file.unlink()
@@ -351,6 +386,23 @@ def gc_logs(
             error_msg = f"Failed to delete log {log_file}: {e}"
             result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
+
+
+@pure
+def _is_rotated_log_file(path: Path) -> bool:
+    """Check if a file is a rotated log file (e.g., events.jsonl.1, events.jsonl.2).
+
+    Rotated files are created by the JSONL file sink when the current log file
+    exceeds max_size_bytes. They have a numeric suffix appended to the original
+    filename (e.g., events.jsonl.1, events.jsonl.2).
+    """
+    name = path.name
+    # Check for pattern: <basename>.<N> where N is a positive integer
+    last_dot = name.rfind(".")
+    if last_dot == -1:
+        return False
+    suffix = name[last_dot + 1 :]
+    return suffix.isdigit()
 
 
 def gc_build_cache(

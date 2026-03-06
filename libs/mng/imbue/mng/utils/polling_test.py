@@ -42,6 +42,21 @@ def test_poll_for_value_polls_until_value_available() -> None:
     assert poll_count == 3
 
 
+def test_poll_for_value_succeeds_on_final_check_after_timeout() -> None:
+    """poll_for_value should do one final check after timeout and return value if available."""
+    call_count = 0
+
+    def producer() -> str | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            return "late-value"
+        return None
+
+    value, poll_count, elapsed = poll_for_value(producer, timeout=0.1, poll_interval=0.05)
+    assert value == "late-value"
+
+
 def test_poll_for_value_returns_non_string_types() -> None:
     value, poll_count, _ = poll_for_value(lambda: 42, timeout=1.0)
 

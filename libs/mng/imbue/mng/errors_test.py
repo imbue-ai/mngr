@@ -5,6 +5,8 @@ from click.testing import CliRunner
 
 from imbue.mng.errors import AgentNotFoundError
 from imbue.mng.errors import AgentNotFoundOnHostError
+from imbue.mng.errors import AgentStartError
+from imbue.mng.errors import HostDataSchemaError
 from imbue.mng.errors import HostNameConflictError
 from imbue.mng.errors import HostNotFoundError
 from imbue.mng.errors import HostNotRunningError
@@ -13,6 +15,7 @@ from imbue.mng.errors import ImageNotFoundError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import ProviderInstanceNotFoundError
 from imbue.mng.errors import ProviderNotAuthorizedError
+from imbue.mng.errors import SendMessageError
 from imbue.mng.errors import SnapshotNotFoundError
 from imbue.mng.errors import SnapshotsNotSupportedError
 from imbue.mng.errors import TagLimitExceededError
@@ -244,3 +247,33 @@ def test_mng_error_displays_single_error_prefix_via_click() -> None:
     assert result.output.startswith("Error: ")
     assert "Error: Error:" not in result.output
     assert "Agent not found: test-agent" in result.output
+
+
+def test_host_data_schema_error_includes_path_and_fix() -> None:
+    """HostDataSchemaError should include data path and fix instructions."""
+    error = HostDataSchemaError("/tmp/host/data.json", "field 'x' missing")
+    assert "/tmp/host/data.json" in str(error)
+    assert "incompatible schema" in str(error)
+    assert "rm /tmp/host/data.json" in str(error)
+    assert error.data_path == "/tmp/host/data.json"
+    assert error.validation_error == "field 'x' missing"
+    assert error.user_help_text is not None
+    assert "field 'x' missing" in error.user_help_text
+
+
+def test_send_message_error_includes_agent_and_reason() -> None:
+    """SendMessageError should include agent name and reason."""
+    error = SendMessageError("my-agent", "tmux session not found")
+    assert error.agent_name == "my-agent"
+    assert error.reason == "tmux session not found"
+    assert "my-agent" in str(error)
+    assert "tmux session not found" in str(error)
+
+
+def test_agent_start_error_includes_agent_and_reason() -> None:
+    """AgentStartError should include agent name and reason."""
+    error = AgentStartError("my-agent", "session already exists")
+    assert error.agent_name == "my-agent"
+    assert error.reason == "session already exists"
+    assert "my-agent" in str(error)
+    assert "session already exists" in str(error)

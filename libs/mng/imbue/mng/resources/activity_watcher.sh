@@ -34,6 +34,19 @@ if [ -z "$HOST_DATA_DIR" ]; then
     exit 1
 fi
 
+# Configure and source the shared logging library
+_MNG_LOG_TYPE="activity_watcher"
+_MNG_LOG_SOURCE="logs/activity_watcher"
+_MNG_LOG_FILE="$HOST_DATA_DIR/events/logs/activity_watcher/events.jsonl"
+# shellcheck source=mng_log.sh
+source "$HOST_DATA_DIR/commands/mng_log.sh"
+
+# Write to both stdout and the JSONL log file
+log() {
+    echo "$*"
+    log_info "$*"
+}
+
 DATA_JSON_PATH="$HOST_DATA_DIR/data.json"
 HOST_LOCK_PATH="$HOST_DATA_DIR/host_lock"
 BOOT_ACTIVITY_PATH="$HOST_DATA_DIR/activity/boot"
@@ -253,14 +266,15 @@ get_max_activity_mtime() {
 }
 
 main() {
-    echo "Activity watcher starting for $HOST_DATA_DIR"
-    echo "Data JSON path: $DATA_JSON_PATH"
-    echo "Boot activity path: $BOOT_ACTIVITY_PATH"
-    echo "Shutdown script path: $SHUTDOWN_SCRIPT"
-    echo "Check interval: $CHECK_INTERVAL seconds"
+    log "Activity watcher starting for $HOST_DATA_DIR"
+    log "Data JSON path: $DATA_JSON_PATH"
+    log "Boot activity path: $BOOT_ACTIVITY_PATH"
+    log "Shutdown script path: $SHUTDOWN_SCRIPT"
+    log "Check interval: $CHECK_INTERVAL seconds"
 
     while true; do
         echo "--- Activity watcher check at $(date) ---"
+        log_debug "Activity watcher check"
 
         # Log current state for debugging
         if [ -f "$DATA_JSON_PATH" ]; then
@@ -300,12 +314,13 @@ main() {
         if check_max_host_age; then
             # Call shutdown script if it exists
             if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                echo "Calling shutdown script due to max host age: $SHUTDOWN_SCRIPT"
+                log "Calling shutdown script due to max host age: $SHUTDOWN_SCRIPT"
                 "$SHUTDOWN_SCRIPT"
                 # Exit after calling shutdown (the script should handle the actual shutdown)
                 exit 0
             else
                 echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
+                log_warn "Shutdown script not found or not executable"
                 # Continue monitoring in case the script appears later
             fi
         fi
@@ -314,13 +329,14 @@ main() {
         # If the prefix is configured and no sessions with that prefix exist,
         # the host should be stopped (not just paused) since all agents are gone.
         if ! has_running_agent_sessions; then
-            echo "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
+            log "No agent tmux sessions found with prefix '$(get_tmux_session_prefix)'"
             if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                echo "Calling shutdown script with STOPPED (no agents running): $SHUTDOWN_SCRIPT"
+                log "Calling shutdown script with STOPPED (no agents running): $SHUTDOWN_SCRIPT"
                 "$SHUTDOWN_SCRIPT" STOPPED
                 exit 0
             else
                 echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
+                log_warn "Shutdown script not found or not executable"
             fi
         fi
 
@@ -363,16 +379,17 @@ main() {
 
         # Check if we're past the idle deadline
         if [ "$current_time" -ge "$idle_deadline" ]; then
-            echo "Host is idle (last activity: $max_mtime, deadline: $idle_deadline, now: $current_time)"
+            log "Host is idle (last activity: $max_mtime, deadline: $idle_deadline, now: $current_time)"
 
             # Call shutdown script if it exists
             if [ -x "$SHUTDOWN_SCRIPT" ]; then
-                echo "Calling shutdown script: $SHUTDOWN_SCRIPT"
+                log "Calling shutdown script: $SHUTDOWN_SCRIPT"
                 "$SHUTDOWN_SCRIPT"
                 # Exit after calling shutdown (the script should handle the actual shutdown)
                 exit 0
             else
                 echo "Shutdown script not found or not executable: $SHUTDOWN_SCRIPT"
+                log_warn "Shutdown script not found or not executable"
                 # Continue monitoring in case the script appears later
             fi
         fi

@@ -1,14 +1,20 @@
+import subprocess
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
+from typing import cast
 
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.common import compute_idle_seconds
 from imbue.mng.hosts.common import determine_lifecycle_state
 from imbue.mng.hosts.common import get_descendant_process_names
 from imbue.mng.hosts.common import resolve_expected_process_name
 from imbue.mng.hosts.common import timestamp_to_datetime
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
@@ -153,3 +159,45 @@ def test_resolve_expected_process_name_for_bare_command() -> None:
     config = MngConfig.model_construct(agent_types={})
     result = resolve_expected_process_name("unknown", CommandString("sleep"), config)
     assert result == "sleep"
+
+
+# =========================================================================
+# add_safe_directory_on_remote tests
+# =========================================================================
+
+
+def _get_safe_directories(tmp_path: Path) -> list[str]:
+    """Read safe.directory entries from the gitconfig in the test HOME."""
+    gitconfig = tmp_path / ".gitconfig"
+    if not gitconfig.exists():
+        return []
+    result = subprocess.run(
+        ["git", "config", "--global", "--get-all", "safe.directory"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return result.stdout.strip().splitlines()
+
+
+def test_add_safe_directory_on_remote_adds_entry_for_non_local_host(tmp_path: Path) -> None:
+    """Test that add_safe_directory_on_remote writes to gitconfig for non-local hosts."""
+    host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    target_path = Path("/some/agent/workdir")
+
+    add_safe_directory_on_remote(host, target_path)
+
+    safe_dirs = _get_safe_directories(tmp_path)
+    assert str(target_path) in safe_dirs
+
+
+def test_add_safe_directory_on_remote_is_noop_for_local_host(tmp_path: Path) -> None:
+    """Test that add_safe_directory_on_remote does nothing for local hosts."""
+    host = cast(OnlineHostInterface, FakeHost(is_local=True))
+    target_path = Path("/some/agent/workdir")
+
+    add_safe_directory_on_remote(host, target_path)
+
+    safe_dirs = _get_safe_directories(tmp_path)
+    assert str(target_path) not in safe_dirs

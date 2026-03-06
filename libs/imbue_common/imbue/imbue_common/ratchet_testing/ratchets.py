@@ -1,16 +1,22 @@
 import ast
 import re
 import subprocess
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Final
+
+from importlinter.application.use_cases import create_report
+from importlinter.application.use_cases import read_user_options
+from importlinter.configuration import configure
+from importlinter.contracts.layers import LayersContract
+from importlinter.domain.contract import registry as contract_registry
 
 from imbue.imbue_common.pure import pure
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import LineNumber
 from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
-from imbue.imbue_common.ratchet_testing.core import _get_chunk_commit_date
+from imbue.imbue_common.ratchet_testing.core import _get_ast_nodes_by_type
 from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
-from imbue.imbue_common.ratchet_testing.core import _parse_file_ast
 
 TEST_FILE_PATTERNS: Final[tuple[str, ...]] = ("*_test.py", "test_*.py")
 
@@ -24,32 +30,28 @@ def find_if_elif_without_else(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        if_nodes = nodes_by_type.get(ast.If, [])
 
         visited_if_nodes: set[int] = set()
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.If):
-                if id(node) not in visited_if_nodes and _has_elif_without_else(node):
-                    _mark_if_chain_as_visited(node, visited_if_nodes)
+        for node in if_nodes:
+            assert isinstance(node, ast.If)
+            if id(node) not in visited_if_nodes and _has_elif_without_else(node):
+                _mark_if_chain_as_visited(node, visited_if_nodes)
 
-                    start_line = LineNumber(node.lineno)
-                    end_line = LineNumber(_get_if_chain_end_line(node))
+                start_line = LineNumber(node.lineno)
+                end_line = LineNumber(_get_if_chain_end_line(node))
 
-                    commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
+                chunk = RatchetMatchChunk(
+                    file_path=file_path,
+                    matched_content=f"if/elif chain at line {start_line}",
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+                chunks.append(chunk)
 
-                    chunk = RatchetMatchChunk(
-                        file_path=file_path,
-                        matched_content=f"if/elif chain at line {start_line}",
-                        start_line=start_line,
-                        end_line=end_line,
-                        last_modified_date=commit_date,
-                    )
-                    chunks.append(chunk)
-
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -155,25 +157,24 @@ def find_init_methods_in_non_exception_classes(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        class_def_nodes = nodes_by_type.get(ast.ClassDef, [])
 
         # Build a map of class names to their base classes
         class_bases: dict[str, list[str]] = {}
         class_nodes: dict[str, ast.ClassDef] = {}
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                bases = []
-                for base in node.bases:
-                    if isinstance(base, ast.Name):
-                        bases.append(base.id)
-                    elif isinstance(base, ast.Attribute):
-                        # Handle cases like module.ClassName
-                        bases.append(base.attr)
-                class_bases[node.name] = bases
-                class_nodes[node.name] = node
+        for node in class_def_nodes:
+            assert isinstance(node, ast.ClassDef)
+            bases = []
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    bases.append(base.id)
+                elif isinstance(base, ast.Attribute):
+                    # Handle cases like module.ClassName
+                    bases.append(base.attr)
+            class_bases[node.name] = bases
+            class_nodes[node.name] = node
 
         # Check each class for __init__ methods
         for class_name, class_node in class_nodes.items():
@@ -186,18 +187,15 @@ def find_init_methods_in_non_exception_classes(
                         start_line = LineNumber(item.lineno)
                         end_line = LineNumber(item.end_lineno if item.end_lineno else item.lineno)
 
-                        commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
-
                         chunk = RatchetMatchChunk(
                             file_path=file_path,
                             matched_content=f"__init__ method in non-Exception/Error class '{class_name}'",
                             start_line=start_line,
                             end_line=end_line,
-                            last_modified_date=commit_date,
                         )
                         chunks.append(chunk)
 
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -238,33 +236,30 @@ def find_inline_functions(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        func_def_nodes = nodes_by_type.get(ast.FunctionDef, [])
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                for inner_node in ast.walk(node):
-                    if inner_node is not node and isinstance(inner_node, ast.FunctionDef):
-                        # Skip decorator wrapper functions that use @functools.wraps
-                        if _has_functools_wraps_decorator(inner_node):
-                            continue
+        for node in func_def_nodes:
+            assert isinstance(node, ast.FunctionDef)
+            # Walk within each FunctionDef to find nested functions
+            for inner_node in ast.walk(node):
+                if inner_node is not node and isinstance(inner_node, ast.FunctionDef):
+                    # Skip decorator wrapper functions that use @functools.wraps
+                    if _has_functools_wraps_decorator(inner_node):
+                        continue
 
-                        start_line = LineNumber(inner_node.lineno)
-                        end_line = LineNumber(inner_node.end_lineno if inner_node.end_lineno else inner_node.lineno)
+                    start_line = LineNumber(inner_node.lineno)
+                    end_line = LineNumber(inner_node.end_lineno if inner_node.end_lineno else inner_node.lineno)
 
-                        commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
+                    chunk = RatchetMatchChunk(
+                        file_path=file_path,
+                        matched_content=f"inline function '{inner_node.name}' at line {start_line}",
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
+                    chunks.append(chunk)
 
-                        chunk = RatchetMatchChunk(
-                            file_path=file_path,
-                            matched_content=f"inline function '{inner_node.name}' at line {start_line}",
-                            start_line=start_line,
-                            end_line=end_line,
-                            last_modified_date=commit_date,
-                        )
-                        chunks.append(chunk)
-
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -279,41 +274,50 @@ def find_underscore_imports(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        import_from_nodes = nodes_by_type.get(ast.ImportFrom, [])
+        import_nodes = nodes_by_type.get(ast.Import, [])
 
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.ImportFrom, ast.Import)):
-                underscore_names: list[str] = []
+        for node in import_from_nodes:
+            assert isinstance(node, ast.ImportFrom)
+            underscore_names: list[str] = []
+            if node.names:
+                for alias in node.names:
+                    if alias.name.startswith("_"):
+                        underscore_names.append(alias.name)
 
-                if isinstance(node, ast.ImportFrom):
-                    if node.names:
-                        for alias in node.names:
-                            if alias.name.startswith("_"):
-                                underscore_names.append(alias.name)
+            if underscore_names:
+                start_line = LineNumber(node.lineno)
+                end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
 
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith("_"):
-                            underscore_names.append(alias.name)
+                chunk = RatchetMatchChunk(
+                    file_path=file_path,
+                    matched_content=f"import of underscore-prefixed name(s): {', '.join(underscore_names)}",
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+                chunks.append(chunk)
 
-                if underscore_names:
-                    start_line = LineNumber(node.lineno)
-                    end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
+        for node in import_nodes:
+            assert isinstance(node, ast.Import)
+            underscore_names_import: list[str] = []
+            for alias in node.names:
+                if alias.name.startswith("_"):
+                    underscore_names_import.append(alias.name)
 
-                    commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
+            if underscore_names_import:
+                start_line = LineNumber(node.lineno)
+                end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
 
-                    chunk = RatchetMatchChunk(
-                        file_path=file_path,
-                        matched_content=f"import of underscore-prefixed name(s): {', '.join(underscore_names)}",
-                        start_line=start_line,
-                        end_line=end_line,
-                        last_modified_date=commit_date,
-                    )
-                    chunks.append(chunk)
+                chunk = RatchetMatchChunk(
+                    file_path=file_path,
+                    matched_content=f"import of underscore-prefixed name(s): {', '.join(underscore_names_import)}",
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+                chunks.append(chunk)
 
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -333,44 +337,41 @@ def find_cast_usages(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        import_from_nodes = nodes_by_type.get(ast.ImportFrom, [])
 
         # Check if 'cast' is imported from typing
         has_cast_import = False
         cast_alias = "cast"
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.module == "typing":
-                    for alias in node.names:
-                        if alias.name == "cast":
-                            has_cast_import = True
-                            cast_alias = alias.asname if alias.asname else "cast"
-                            break
+        for node in import_from_nodes:
+            assert isinstance(node, ast.ImportFrom)
+            if node.module == "typing":
+                for alias in node.names:
+                    if alias.name == "cast":
+                        has_cast_import = True
+                        cast_alias = alias.asname if alias.asname else "cast"
+                        break
 
         if not has_cast_import:
             continue
 
         # Find all calls to cast()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name) and node.func.id == cast_alias:
-                    start_line = LineNumber(node.lineno)
-                    end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
+        call_nodes = nodes_by_type.get(ast.Call, [])
+        for node in call_nodes:
+            assert isinstance(node, ast.Call)
+            if isinstance(node.func, ast.Name) and node.func.id == cast_alias:
+                start_line = LineNumber(node.lineno)
+                end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
 
-                    commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
+                chunk = RatchetMatchChunk(
+                    file_path=file_path,
+                    matched_content=f"cast() usage at line {start_line}",
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+                chunks.append(chunk)
 
-                    chunk = RatchetMatchChunk(
-                        file_path=file_path,
-                        matched_content=f"cast() usage at line {start_line}",
-                        start_line=start_line,
-                        end_line=end_line,
-                        last_modified_date=commit_date,
-                    )
-                    chunks.append(chunk)
-
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -391,31 +392,27 @@ def find_assert_isinstance_usages(
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
-        tree = _parse_file_ast(file_path)
-        if tree is None:
-            continue
+        nodes_by_type = _get_ast_nodes_by_type(file_path)
+        assert_nodes = nodes_by_type.get(ast.Assert, [])
 
         # Find all 'assert isinstance(...)' statements
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assert):
-                # Check if the test is an isinstance() call
-                if isinstance(node.test, ast.Call):
-                    if isinstance(node.test.func, ast.Name) and node.test.func.id == "isinstance":
-                        start_line = LineNumber(node.lineno)
-                        end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
+        for node in assert_nodes:
+            assert isinstance(node, ast.Assert)
+            # Check if the test is an isinstance() call
+            if isinstance(node.test, ast.Call):
+                if isinstance(node.test.func, ast.Name) and node.test.func.id == "isinstance":
+                    start_line = LineNumber(node.lineno)
+                    end_line = LineNumber(node.end_lineno if node.end_lineno else node.lineno)
 
-                        commit_date = _get_chunk_commit_date(file_path, start_line, end_line)
+                    chunk = RatchetMatchChunk(
+                        file_path=file_path,
+                        matched_content=f"assert isinstance() at line {start_line}",
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
+                    chunks.append(chunk)
 
-                        chunk = RatchetMatchChunk(
-                            file_path=file_path,
-                            matched_content=f"assert isinstance() at line {start_line}",
-                            start_line=start_line,
-                            end_line=end_line,
-                            last_modified_date=commit_date,
-                        )
-                        chunks.append(chunk)
-
-    sorted_chunks = sorted(chunks, key=lambda c: c.last_modified_date, reverse=True)
+    sorted_chunks = sorted(chunks, key=lambda c: (str(c.file_path), c.start_line))
     return tuple(sorted_chunks)
 
 
@@ -465,6 +462,60 @@ def check_no_ruff_errors(project_root: Path) -> None:
             "=" * 80,
         ]
 
+        raise AssertionError("\n".join(failure_message))
+
+
+_TEST_MODULE_GLOBS: Final[tuple[str, ...]] = (
+    "*_test",
+    "test_*",
+    "conftest",
+    "testing",
+    "plugin_testing",
+)
+
+
+def _is_test_module(module_path: str) -> bool:
+    """Check if an import-linter module path refers to a test module."""
+    last_segment = module_path.rsplit(".", 1)[-1]
+    return any(fnmatch(last_segment, pattern) for pattern in _TEST_MODULE_GLOBS)
+
+
+def check_no_import_lint_errors(project_root: Path, contract_name: str = "mng layers contract") -> None:
+    """Run import-linter and raise AssertionError if any production code violations are found.
+
+    Uses import-linter's Python API to get structured results, then filters
+    out violations where every importer in the chain is a test module.
+    Only production code violations cause failure.
+
+    Only checks the contract matching contract_name; other contracts are skipped.
+    """
+    configure()
+    contract_registry.register(LayersContract, name="layers")
+    config_filename = str(project_root / "pyproject.toml")
+    user_options = read_user_options(config_filename=config_filename)
+    # Filter to only the requested contract to avoid failures from unrelated
+    # contracts whose modules may not be present in this worktree.
+    user_options.contracts_options = [opt for opt in user_options.contracts_options if opt["name"] == contract_name]
+    report = create_report(user_options)
+
+    production_violations: list[str] = []
+    for _contract, check in report.get_contracts_and_checks():
+        if check.kept:
+            continue
+        for dep in check.metadata.get("invalid_dependencies", []):
+            for route in dep["routes"]:
+                first_link = route["chain"][0]
+                importer = first_link["importer"]
+                if not _is_test_module(importer):
+                    imported = first_link["imported"]
+                    production_violations.append(f"  {importer} -> {imported}")
+
+    if production_violations:
+        failure_message = [
+            f"import-linter found {len(production_violations)} production code layer violation(s):",
+            "",
+            *production_violations,
+        ]
         raise AssertionError("\n".join(failure_message))
 
 

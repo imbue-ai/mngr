@@ -1,36 +1,44 @@
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Generator
+from typing import cast
 from uuid import uuid4
 
+import docker
+import docker.errors
 import pluggy
 import psutil
 import pytest
 import toml
 from click.testing import CliRunner
-from pydantic import Field
 from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mng.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.agents.agent_registry import load_agents_from_plugins
 from imbue.mng.agents.agent_registry import reset_agent_registry
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.hosts.host import Host
 from imbue.mng.plugins import hookspecs
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
+from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
+from imbue.mng.providers.docker.volume import LABEL_PROVIDER
+from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.modal.backend import ModalProviderBackend
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
+from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import assert_home_is_temp_directory
 from imbue.mng.utils.testing import cleanup_tmux_session
 from imbue.mng.utils.testing import delete_modal_apps_in_environment
@@ -40,6 +48,12 @@ from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
+from imbue.mng.utils.testing import isolate_tmux_server
+from imbue.mng.utils.testing import make_mng_ctx
+from imbue.mng.utils.testing import worker_modal_app_names
+from imbue.mng.utils.testing import worker_modal_environment_names
+from imbue.mng.utils.testing import worker_modal_volume_names
+from imbue.mng.utils.testing import worker_test_ids
 
 # The urwid import above triggers creation of deprecated module aliases.
 # These are the deprecated module aliases that urwid 3.x creates for backwards
@@ -83,10 +97,9 @@ _ = SimpleFocusListWalker
 _remove_deprecated_urwid_module_aliases()
 
 
-# Track test IDs used by this worker/process for cleanup verification.
-# Each xdist worker is a separate process with isolated memory, so this
-# list only contains IDs from tests run by THIS worker.
-_worker_test_ids: list[str] = []
+# =============================================================================
+# Non-autouse fixtures
+# =============================================================================
 
 
 @pytest.fixture
@@ -104,7 +117,7 @@ def mng_test_id() -> str:
     test isolation and easy cleanup of test resources (e.g., tmux sessions).
     """
     test_id = uuid4().hex
-    _worker_test_ids.append(test_id)
+    worker_test_ids.append(test_id)
     return test_id
 
 
@@ -147,121 +160,6 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def _isolate_tmux_server(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Generator[None, None, None]:
-    """Give each test its own isolated tmux server.
-
-    This fixture:
-    - Creates a per-test TMUX_TMPDIR under /tmp so each test gets its own
-      tmux server socket, preventing xdist workers from racing on the shared
-      default tmux server.
-    - Unsets TMUX so tmux commands connect to the isolated server (via
-      TMUX_TMPDIR) rather than the real server.
-    - On teardown, kills the isolated tmux server and cleans up the tmpdir.
-
-    IMPORTANT: We use /tmp directly instead of pytest's tmp_path because
-    tmux sockets are Unix domain sockets, which have a ~104-byte path
-    length limit on macOS. Pytest's tmp_path lives under
-    /private/var/folders/.../pytest-of-.../... which is already ~80+ bytes,
-    leaving no room for tmux's tmux-$UID/default suffix. When the path
-    exceeds the limit, tmux silently falls back to the default socket,
-    defeating isolation entirely (and potentially killing production
-    tmux servers during test cleanup).
-    """
-    tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mng-tmux-", dir="/tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
-    # Unset TMUX so tmux commands during the test connect to the isolated
-    # server (via TMUX_TMPDIR) rather than the real server. When TMUX is
-    # set (because we're running inside a tmux session), tmux uses it to
-    # find the current server, overriding TMUX_TMPDIR.
-    monkeypatch.delenv("TMUX", raising=False)
-
-    yield
-
-    # Kill the test's isolated tmux server to clean up any leaked sessions
-    # or processes. We must use -S with the explicit socket path because:
-    # 1. The TMUX env var (set when running inside tmux) tells tmux to
-    #    connect to the CURRENT server, overriding TMUX_TMPDIR entirely.
-    #    Without -S, kill-server would kill the real tmux server.
-    # 2. We also unset TMUX in the env as a belt-and-suspenders measure.
-    tmux_tmpdir_str = str(tmux_tmpdir)
-    assert tmux_tmpdir_str.startswith("/tmp/mng-tmux-"), (
-        f"TMUX_TMPDIR safety check failed! Expected /tmp/mng-tmux-* path but got: {tmux_tmpdir_str}. "
-        "Refusing to run 'tmux kill-server' to avoid killing the real tmux server."
-    )
-    socket_path = Path(tmux_tmpdir_str) / f"tmux-{os.getuid()}" / "default"
-    kill_env = os.environ.copy()
-    kill_env.pop("TMUX", None)
-    kill_env["TMUX_TMPDIR"] = tmux_tmpdir_str
-    subprocess.run(
-        ["tmux", "-S", str(socket_path), "kill-server"],
-        capture_output=True,
-        env=kill_env,
-    )
-
-    # Clean up the tmpdir we created outside of pytest's tmp_path.
-    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
-
-
-@pytest.fixture(autouse=True)
-def setup_test_mng_env(
-    tmp_home_dir: Path,
-    temp_host_dir: Path,
-    mng_test_prefix: str,
-    mng_test_root_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-    _isolate_tmux_server: None,
-) -> Generator[None, None, None]:
-    """Set up environment variables for all tests.
-
-    This autouse fixture ensures:
-    - HOME points to tmp_path (not the real ~/)
-    - MNG_HOST_DIR points to tmp_path/.mng (not ~/.mng)
-    - MNG_PREFIX uses a unique test ID for isolation
-    - MNG_ROOT_NAME prevents loading project config (.mng/settings.toml)
-    - TMUX_TMPDIR gives each test its own tmux server (via _isolate_tmux_server)
-
-    By setting HOME to tmp_path, tests cannot accidentally read or modify
-    files in the real home directory. This protects files like ~/.claude.json.
-    """
-    # before we nuke our home directory, we need to load the right token from the real home directory
-    modal_toml_path = Path(os.path.expanduser("~/.modal.toml"))
-    if modal_toml_path.exists():
-        for value in toml.load(modal_toml_path).values():
-            if value.get("active", ""):
-                monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
-                monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
-                break
-    if not os.environ.get("MODAL_TOKEN_ID") or not os.environ.get("MODAL_TOKEN_SECRET"):
-        # check if we have "release" mark enabled:
-        if "release" in getattr(pytest, "current_test_marks", []):
-            raise Exception(
-                "No active Modal token found in ~/.modal.toml for release tests. Please ensure you have an active token configured or set the env vars"
-            )
-
-    isolate_home(tmp_home_dir, monkeypatch)
-    monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
-    monkeypatch.setenv("MNG_COMPLETION_CACHE_DIR", str(temp_host_dir))
-    monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
-    monkeypatch.setenv("MNG_ROOT_NAME", mng_test_root_name)
-
-    # Unison derives its config directory from $HOME. Since we override HOME
-    # above, unison tries to create its config dir inside tmp_path, which
-    # fails because the expected parent directories don't exist. The UNISON
-    # env var overrides this to a path we control.
-    unison_dir = tmp_home_dir / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
-
-    # Safety check: verify Path.home() is in a temp directory.
-    # If this fails, tests could accidentally modify the real home directory.
-    assert_home_is_temp_directory()
-
-    yield
-
-
-@pytest.fixture
 def setup_git_config(tmp_path: Path) -> None:
     """Create a .gitconfig in the fake HOME so git commands work.
 
@@ -283,13 +181,40 @@ def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
 
     Use this fixture for any test that needs a git repository.
     """
-    # Create the repo directory
     repo_dir = tmp_path / "git_repo"
     repo_dir.mkdir()
 
     init_git_repo(repo_dir)
 
     return repo_dir
+
+
+@pytest.fixture
+def disable_remote_providers_for_subprocesses(
+    project_config_dir: Path, monkeypatch: pytest.MonkeyPatch, temp_git_repo: Path
+) -> Path:
+    """Disable the Modal and Docker providers for subprocesses spawned during a test.
+
+    Writes a settings.local.toml inside a temporary git repo's config directory
+    and chdir's into that repo. Spawned subprocesses inherit the CWD, so the
+    config loader's upward directory walk finds the settings file.
+
+    Use this when a test spawns a child process that runs ``mng`` commands
+    and would otherwise fail because Modal credentials are not available in
+    the test environment, or would create Docker state containers that leak.
+    """
+    settings_path = project_config_dir / "settings.local.toml"
+    settings_path.write_text("[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n")
+    monkeypatch.chdir(temp_git_repo)
+    return settings_path
+
+
+@pytest.fixture
+def temp_work_dir(tmp_path: Path) -> Path:
+    """Create a temporary work_dir directory for agents."""
+    work_dir = tmp_path / "work_dir"
+    work_dir.mkdir()
+    return work_dir
 
 
 @pytest.fixture
@@ -306,26 +231,6 @@ def project_config_dir(temp_git_repo: Path, mng_test_root_name: str) -> Path:
 
 
 @pytest.fixture
-def disable_modal_for_subprocesses(
-    project_config_dir: Path, monkeypatch: pytest.MonkeyPatch, temp_git_repo: Path
-) -> Path:
-    """Disable the Modal provider for subprocesses spawned during a test.
-
-    Writes a settings.local.toml inside a temporary git repo's config directory
-    and chdir's into that repo. Spawned subprocesses inherit the CWD, so the
-    config loader's upward directory walk finds the settings file.
-
-    Use this when a test spawns a child process that runs ``mng`` commands
-    and would otherwise fail because Modal credentials are not available in
-    the test environment.
-    """
-    settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
-    monkeypatch.chdir(temp_git_repo)
-    return project_config_dir
-
-
-@pytest.fixture
 def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a temporary git repository and chdir into it.
 
@@ -335,14 +240,6 @@ def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> P
     """
     monkeypatch.chdir(temp_git_repo)
     return temp_git_repo
-
-
-@pytest.fixture
-def temp_work_dir(tmp_path: Path) -> Path:
-    """Create a temporary work_dir directory for agents."""
-    work_dir = tmp_path / "work_dir"
-    work_dir.mkdir()
-    return work_dir
 
 
 @pytest.fixture
@@ -365,30 +262,6 @@ def temp_config(temp_host_dir: Path, mng_test_prefix: str) -> MngConfig:
     return MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix, is_error_reporting_enabled=False)
 
 
-def make_mng_ctx(
-    config: MngConfig,
-    pm: pluggy.PluginManager,
-    profile_dir: Path,
-    *,
-    is_interactive: bool = False,
-    is_auto_approve: bool = False,
-    concurrency_group: ConcurrencyGroup,
-) -> MngContext:
-    """Create a MngContext with the given parameters.
-
-    Use this directly in tests that need non-default settings (e.g., interactive mode).
-    Most tests should use the temp_mng_ctx fixture instead.
-    """
-    return MngContext(
-        config=config,
-        pm=pm,
-        profile_dir=profile_dir,
-        is_interactive=is_interactive,
-        is_auto_approve=is_auto_approve,
-        concurrency_group=concurrency_group,
-    )
-
-
 @pytest.fixture
 def temp_mng_ctx(
     temp_config: MngConfig, temp_profile_dir: Path, plugin_manager: pluggy.PluginManager
@@ -400,19 +273,6 @@ def temp_mng_ctx(
     cg = ConcurrencyGroup(name="test")
     with cg:
         yield make_mng_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=cg)
-
-
-@pytest.fixture
-def interactive_mng_ctx(
-    temp_config: MngConfig, temp_profile_dir: Path, plugin_manager: pluggy.PluginManager
-) -> Generator[MngContext, None, None]:
-    """Create an interactive MngContext with a temporary host directory.
-
-    Use this fixture when testing code paths that require is_interactive=True.
-    """
-    cg = ConcurrencyGroup(name="test-interactive")
-    with cg:
-        yield make_mng_ctx(temp_config, plugin_manager, temp_profile_dir, is_interactive=True, concurrency_group=cg)
 
 
 @pytest.fixture
@@ -441,200 +301,9 @@ def cli_runner() -> CliRunner:
     return CliRunner()
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_WORKSPACE_PACKAGES = (
-    _REPO_ROOT / "libs" / "imbue_common",
-    _REPO_ROOT / "libs" / "concurrency_group",
-    _REPO_ROOT / "libs" / "mng",
-)
-
-
-@pytest.fixture
-def isolated_mng_venv(tmp_path: Path) -> Path:
-    """Create a temporary venv with mng installed for subprocess-based tests.
-
-    Returns the venv directory. Use `venv / "bin" / "mng"` to run mng
-    commands, or `venv / "bin" / "python"` for the interpreter.
-
-    This fixture is useful for tests that install/uninstall packages and
-    need full isolation from the main workspace venv.
-    """
-    venv_dir = tmp_path / "isolated-venv"
-
-    install_args: list[str] = []
-    for pkg in _WORKSPACE_PACKAGES:
-        install_args.extend(["-e", str(pkg)])
-
-    cg = ConcurrencyGroup(name="isolated-venv-setup")
-    with cg:
-        cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
-        cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", str(venv_dir / "bin" / "python"), *install_args)
-        )
-
-    return venv_dir
-
-
-@pytest.fixture(autouse=True)
-def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with mng hookspecs and local backend only.
-
-    This fixture only loads the local provider backend, not modal. This ensures
-    tests don't depend on Modal credentials being available.
-
-    Also loads external plugins via setuptools entry points to match the behavior
-    of load_config(). This ensures that external plugins like mng_opencode are
-    discovered and registered.
-
-    This fixture also resets the module-level plugin manager singleton to ensure
-    test isolation.
-    """
-    # Reset the module-level plugin manager singleton before each test
-    imbue.mng.main.reset_plugin_manager()
-
-    # Clear the registries to ensure clean state
-    reset_backend_registry()
-    reset_agent_registry()
-
-    pm = pluggy.PluginManager("mng")
-    pm.add_hookspecs(hookspecs)
-    pm.load_setuptools_entrypoints("mng")
-
-    # Only register the local backend, not modal
-    # This prevents tests from depending on Modal credentials
-    # This also loads the provider configs since backends and configs are registered together
-    load_local_backend_only(pm)
-
-    # Load other registries (agents)
-    load_agents_from_plugins(pm)
-
-    yield pm
-
-    # Reset after the test as well
-    imbue.mng.main.reset_plugin_manager()
-    reset_backend_registry()
-    reset_agent_registry()
-
-    # Clean up Modal app contexts to prevent async cleanup errors
-    ModalProviderBackend.reset_app_registry()
-
-
-# =============================================================================
-# Session Cleanup - Detect and clean up leaked test resources
-# =============================================================================
-
-
-def _get_tmux_sessions_with_prefix(prefix: str) -> list[str]:
-    """Get tmux sessions matching the given prefix."""
-    try:
-        result = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return []
-        sessions = [s.strip() for s in result.stdout.splitlines() if s.strip()]
-        return [s for s in sessions if s.startswith(prefix)]
-    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-        return []
-
-
-def _kill_tmux_sessions(sessions: list[str]) -> None:
-    """Kill the specified tmux sessions and all their processes."""
-    for session in sessions:
-        cleanup_tmux_session(session)
-
-
-def _is_xdist_worker_process(proc: psutil.Process) -> bool:
-    """Check if a process is a pytest-xdist worker process."""
-    try:
-        cmdline = proc.cmdline()
-        cmdline_str = " ".join(cmdline)
-        # xdist workers are python processes running pytest with gw* identifiers
-        return "pytest" in cmdline_str.lower() and "gw" in cmdline_str
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
-
-
-def _format_process_info(proc: psutil.Process) -> str:
-    """Format process information for error messages."""
-    try:
-        cmdline = proc.cmdline()[:5]
-        return f"  PID {proc.pid}: {proc.name()} - {' '.join(cmdline)}"
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return f"  PID {proc.pid}: <process info unavailable>"
-
-
-def _is_alive_non_zombie(proc: psutil.Process) -> bool:
-    """Check if a process is alive and not a zombie."""
-    try:
-        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
-
-
-# Track Modal app names that were created during tests for cleanup verification.
-# This enables detection of leaked apps that weren't properly cleaned up.
-_worker_modal_app_names: list[str] = []
-
-
-def register_modal_test_app(app_name: str) -> None:
-    """Register a Modal app name for cleanup verification.
-
-    Call this when creating a Modal app during tests to enable leak detection.
-    The app_name should match the name used when creating the Modal app.
-    """
-    if app_name not in _worker_modal_app_names:
-        _worker_modal_app_names.append(app_name)
-
-
-# Track Modal volume names that were created during tests for cleanup verification.
-# This enables detection of leaked volumes that weren't properly cleaned up.
-# Unlike Modal Apps, volumes are global to the account (not app-specific), so they
-# must be tracked and cleaned up separately.
-_worker_modal_volume_names: list[str] = []
-
-
-def register_modal_test_volume(volume_name: str) -> None:
-    """Register a Modal volume name for cleanup verification.
-
-    Call this when creating a Modal volume during tests to enable leak detection.
-    The volume_name should match the name used when creating the Modal volume.
-    """
-    if volume_name not in _worker_modal_volume_names:
-        _worker_modal_volume_names.append(volume_name)
-
-
-# Track Modal environment names that were created during tests for cleanup verification.
-# This enables detection of leaked environments that weren't properly cleaned up.
-# Modal environments are used to scope all resources (apps, volumes, sandboxes) to a
-# specific user.
-_worker_modal_environment_names: list[str] = []
-
-
-def register_modal_test_environment(environment_name: str) -> None:
-    """Register a Modal environment name for cleanup verification.
-
-    Call this when creating a Modal environment during tests to enable leak detection.
-    The environment_name should match the name used when creating resources in that environment.
-    """
-    if environment_name not in _worker_modal_environment_names:
-        _worker_modal_environment_names.append(environment_name)
-
-
 # =============================================================================
 # Modal subprocess test environment fixture (session-scoped)
 # =============================================================================
-
-
-class ModalSubprocessTestEnv(FrozenModel):
-    """Environment configuration for Modal subprocess tests."""
-
-    env: dict[str, str] = Field(description="Environment variables for the subprocess")
-    prefix: str = Field(description="The mng prefix for test isolation")
-    host_dir: Path = Field(description="Path to the temporary host directory")
 
 
 @pytest.fixture(scope="session")
@@ -733,6 +402,264 @@ def modal_subprocess_env(
     yield ModalSubprocessTestEnv(env=env, prefix=prefix, host_dir=host_dir)
 
 
+# =============================================================================
+# Autouse fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Give each test its own isolated tmux server.
+
+    Delegates to the shared isolate_tmux_server() context manager in testing.py.
+    See its docstring for details on the isolation strategy and why /tmp is used.
+    """
+    with isolate_tmux_server(monkeypatch):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def setup_test_mng_env(
+    tmp_home_dir: Path,
+    temp_host_dir: Path,
+    mng_test_prefix: str,
+    mng_test_root_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_tmux_server: None,
+) -> Generator[None, None, None]:
+    """Set up environment variables for all tests.
+
+    This autouse fixture ensures:
+    - HOME points to tmp_path (not the real ~/)
+    - MNG_HOST_DIR points to tmp_path/.mng (not ~/.mng)
+    - MNG_PREFIX uses a unique test ID for isolation
+    - MNG_ROOT_NAME prevents loading project config (.mng/settings.toml)
+    - TMUX_TMPDIR gives each test its own tmux server (via _isolate_tmux_server)
+
+    By setting HOME to tmp_path, tests cannot accidentally read or modify
+    files in the real home directory. This protects files like ~/.claude.json.
+    """
+    # before we nuke our home directory, we need to load the right token from the real home directory
+    modal_toml_path = Path(os.path.expanduser("~/.modal.toml"))
+    if modal_toml_path.exists():
+        for value in toml.load(modal_toml_path).values():
+            if value.get("active", ""):
+                monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
+                monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
+                break
+    if not os.environ.get("MODAL_TOKEN_ID") or not os.environ.get("MODAL_TOKEN_SECRET"):
+        # check if we have "release" mark enabled:
+        if "release" in getattr(pytest, "current_test_marks", []):
+            raise Exception(
+                "No active Modal token found in ~/.modal.toml for release tests. Please ensure you have an active token configured or set the env vars"
+            )
+
+    isolate_home(tmp_home_dir, monkeypatch)
+    monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
+    monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
+    monkeypatch.setenv("MNG_ROOT_NAME", mng_test_root_name)
+
+    # Unison derives its config directory from $HOME. Since we override HOME
+    # above, unison tries to create its config dir inside tmp_path, which
+    # fails because the expected parent directories don't exist. The UNISON
+    # env var overrides this to a path we control.
+    unison_dir = tmp_home_dir / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
+
+    # Safety check: verify Path.home() is in a temp directory.
+    # If this fails, tests could accidentally modify the real home directory.
+    assert_home_is_temp_directory()
+
+    yield
+
+
+@pytest.fixture
+def local_host(local_provider: LocalProviderInstance) -> Host:
+    """Create a local Host via the local provider.
+
+    This fixture eliminates the repeated pattern of:
+        host = local_provider.create_host(HostName("localhost"))
+
+    Use this when tests need a Host instance for creating agents,
+    executing commands, etc. The local provider always returns a Host
+    (the concrete OnlineHostInterface implementation).
+    """
+    host = local_provider.create_host(HostName("localhost"))
+    return cast(Host, host)
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_WORKSPACE_PACKAGES = (
+    _REPO_ROOT / "libs" / "imbue_common",
+    _REPO_ROOT / "libs" / "concurrency_group",
+    _REPO_ROOT / "libs" / "mng",
+)
+
+
+@pytest.fixture
+def isolated_mng_venv(tmp_path: Path) -> Path:
+    """Create a temporary venv with mng installed for subprocess-based tests.
+
+    Returns the venv directory. Use ``venv / "bin" / "mng"`` to run mng
+    commands, or ``venv / "bin" / "python"`` for the interpreter.
+
+    Writes a ``uv-receipt.toml`` so that ``require_uv_tool_receipt()``
+    recognises this venv as a uv-tool-managed installation.
+
+    This fixture is useful for tests that install/uninstall packages and
+    need full isolation from the main workspace venv.
+
+    To avoid network access (and the flakiness that comes with it), we
+    export mng's pinned deps from the lockfile via ``uv export``, then
+    install them with ``--no-deps`` (uses uv cache, no resolution or
+    network needed).
+    """
+    venv_dir = tmp_path / "isolated-venv"
+
+    workspace_install_args: list[str] = []
+    for pkg in _WORKSPACE_PACKAGES:
+        workspace_install_args.extend(["-e", str(pkg)])
+
+    python_path = str(venv_dir / "bin" / "python")
+
+    cg = ConcurrencyGroup(name="isolated-venv-setup")
+    with cg:
+        # Export mng's pinned transitive deps from the lockfile (no editable/comment lines)
+        export_result = cg.run_process_to_completion(
+            ("uv", "export", "--package", "mng", "--no-hashes", "--frozen"),
+            cwd=_REPO_ROOT,
+        )
+        reqs_file = tmp_path / "pinned-deps.txt"
+        reqs_file.write_text(
+            "\n".join(
+                line for line in export_result.stdout.splitlines() if line and not line.startswith(("#", " ", "-e"))
+            )
+        )
+
+        cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
+        # Install pinned deps from cache (no resolution or network needed)
+        cg.run_process_to_completion(
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", "-r", str(reqs_file))
+        )
+        # Install workspace packages as editable (no-deps since deps are already installed)
+        cg.run_process_to_completion(
+            ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
+        )
+
+    # Write a uv-receipt.toml so plugin add/remove recognise this as a
+    # uv-tool-managed venv (the receipt lives at sys.prefix root).
+    receipt_content = (
+        '[tool]\nrequirements = [{ name = "mng" }]\n'
+        "entrypoints = [\n"
+        f'    {{ name = "mng", install-path = "{venv_dir / "bin" / "mng"}", from = "mng" }},\n'
+        "]\n"
+    )
+    (venv_dir / "uv-receipt.toml").write_text(receipt_content)
+
+    return venv_dir
+
+
+@pytest.fixture(autouse=True)
+def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
+    """Create a plugin manager with mng hookspecs and local backend only.
+
+    This fixture only loads the local provider backend, not modal. This ensures
+    tests don't depend on Modal credentials being available.
+
+    Also loads external plugins via setuptools entry points to match the behavior
+    of load_config(). This ensures that external plugins like mng_opencode are
+    discovered and registered.
+
+    This fixture also resets the module-level plugin manager singleton to ensure
+    test isolation.
+    """
+    # Reset the module-level plugin manager singleton before each test
+    imbue.mng.main.reset_plugin_manager()
+
+    # Clear the registries to ensure clean state
+    reset_backend_registry()
+    reset_agent_registry()
+
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    pm.load_setuptools_entrypoints("mng")
+
+    # Only register the local backend, not modal
+    # This prevents tests from depending on Modal credentials
+    # This also loads the provider configs since backends and configs are registered together
+    load_local_backend_only(pm)
+
+    # Load other registries (agents)
+    load_agents_from_plugins(pm)
+
+    yield pm
+
+    # Reset after the test as well
+    imbue.mng.main.reset_plugin_manager()
+    reset_backend_registry()
+    reset_agent_registry()
+
+    # Clean up Modal app contexts to prevent async cleanup errors
+    ModalProviderBackend.reset_app_registry()
+
+
+# =============================================================================
+# Session Cleanup - Detect and clean up leaked test resources
+# =============================================================================
+
+
+def _get_tmux_sessions_with_prefix(prefix: str) -> list[str]:
+    """Get tmux sessions matching the given prefix."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        sessions = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+        return [s for s in sessions if s.startswith(prefix)]
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        return []
+
+
+def _kill_tmux_sessions(sessions: list[str]) -> None:
+    """Kill the specified tmux sessions and all their processes."""
+    for session in sessions:
+        cleanup_tmux_session(session)
+
+
+def _is_xdist_worker_process(process: psutil.Process) -> bool:
+    """Check if a process is a pytest-xdist worker process."""
+    try:
+        cmdline = process.cmdline()
+        cmdline_str = " ".join(cmdline)
+        # xdist workers are python processes running pytest with gw* identifiers
+        return "pytest" in cmdline_str.lower() and "gw" in cmdline_str
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+
+def _format_process_info(process: psutil.Process) -> str:
+    """Format process information for error messages."""
+    try:
+        cmdline = process.cmdline()[:5]
+        return f"  PID {process.pid}: {process.name()} - {' '.join(cmdline)}"
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return f"  PID {process.pid}: <process info unavailable>"
+
+
+def _is_alive_non_zombie(process: psutil.Process) -> bool:
+    """Check if a process is alive and not a zombie."""
+    try:
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+
 def _get_leaked_modal_apps() -> list[tuple[str, str]]:
     """Get Modal apps that were registered and are still running.
 
@@ -741,7 +668,7 @@ def _get_leaked_modal_apps() -> list[tuple[str, str]]:
 
     Uses 'uv run modal app list --json' to query the current state of all apps.
     """
-    if not _worker_modal_app_names:
+    if not worker_modal_app_names:
         return []
 
     try:
@@ -763,7 +690,7 @@ def _get_leaked_modal_apps() -> list[tuple[str, str]]:
             state = app.get("State", "")
 
             # Check if this app was created by our tests and is not stopped
-            if app_name in _worker_modal_app_names and state != "stopped":
+            if app_name in worker_modal_app_names and state != "stopped":
                 leaked.append((app_id, app_name))
 
         return leaked
@@ -802,7 +729,7 @@ def _get_leaked_modal_volumes() -> list[str]:
 
     Uses 'uv run modal volume list --json' to query the current state of all volumes.
     """
-    if not _worker_modal_volume_names:
+    if not worker_modal_volume_names:
         return []
 
     try:
@@ -822,7 +749,7 @@ def _get_leaked_modal_volumes() -> list[str]:
             volume_name = volume.get("Name", "")
 
             # Check if this volume was created by our tests
-            if volume_name in _worker_modal_volume_names:
+            if volume_name in worker_modal_volume_names:
                 leaked.append(volume_name)
 
         return leaked
@@ -861,7 +788,7 @@ def _get_leaked_modal_environments() -> list[str]:
 
     Uses 'uv run modal environment list --json' to query the current state of all environments.
     """
-    if not _worker_modal_environment_names:
+    if not worker_modal_environment_names:
         return []
 
     try:
@@ -881,7 +808,7 @@ def _get_leaked_modal_environments() -> list[str]:
             env_name = env.get("name", "")
 
             # Check if this environment was created by our tests
-            if env_name in _worker_modal_environment_names:
+            if env_name in worker_modal_environment_names:
                 leaked.append(env_name)
 
         return leaked
@@ -912,6 +839,122 @@ def _delete_modal_environments(environment_names: list[str]) -> None:
             pass
 
 
+def _get_stale_docker_state_containers(max_age_seconds: int = 3600) -> list[tuple[str, str]]:
+    """Get Docker state containers from tests that are older than max_age_seconds.
+
+    Returns a list of (container_id, container_name) tuples for state containers
+    that appear to originate from tests and are older than the threshold.
+    This catches containers leaked by crashed or interrupted test runs.
+
+    A state container is considered test-originated if any of:
+    - Its provider label starts with "docker-test-" (from make_docker_provider_with_cleanup), or
+    - Its name starts with "mng_test-" (from generate_test_environment_name), or
+    - Its name contains a test prefix pattern (mng_ followed by a hex UUID, as
+      generated by the autouse mng_test_prefix fixture).
+    """
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return []
+
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}",
+                ]
+            },
+        )
+    except docker.errors.DockerException:
+        client.close()
+        return []
+
+    now = datetime.now(timezone.utc)
+    stale: list[tuple[str, str]] = []
+
+    for container in containers:
+        labels = container.labels or {}
+        provider_name = labels.get(LABEL_PROVIDER, "")
+        container_name = container.name or ""
+
+        # Identify test-originated state containers by either:
+        # 1. Provider label starting with "docker-test-" (SDK-based tests)
+        # 2. Container name starting with "mng_" followed by a hex UUID
+        #    (subprocess tests that use the autouse mng_test_prefix fixture)
+        # 3. Container name starting with "mng_test-" (subprocess tests that
+        #    use generate_test_environment_name)
+        is_test_container = (
+            provider_name.startswith("docker-test-")
+            or container_name.startswith("mng_test-")
+            or _looks_like_test_prefix(container_name)
+        )
+        if not is_test_container:
+            continue
+
+        # Check age via container creation time
+        try:
+            container.reload()
+            created_str = container.attrs.get("Created", "")
+            if not created_str:
+                continue
+            # Docker returns ISO format with nanosecond precision
+            created_str = created_str.split(".")[0] + "+00:00"
+            created = datetime.fromisoformat(created_str)
+            age_seconds = (now - created).total_seconds()
+            if age_seconds > max_age_seconds:
+                stale.append((container.id, container.name or ""))
+        except (ValueError, KeyError, docker.errors.DockerException):
+            continue
+
+    client.close()
+    return stale
+
+
+def _looks_like_test_prefix(container_name: str) -> bool:
+    """Check if a container name starts with a test prefix pattern.
+
+    Test prefixes follow the format 'mng_{hex32}-' where {hex32} is a
+    32-character hex string (uuid4().hex). For example:
+    'mng_22921e597952421296c8973d922f2eb3-docker-state-...'
+    """
+    if not container_name.startswith("mng_"):
+        return False
+    # Extract the part after 'mng_' up to the first '-'
+    rest = container_name[4:]
+    dash_idx = rest.find("-")
+    if dash_idx != 32:
+        return False
+    hex_part = rest[:32]
+    return all(c in "0123456789abcdef" for c in hex_part)
+
+
+def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
+    """Force-remove the specified Docker containers and their backing volumes.
+
+    Takes a list of (container_id, container_name) tuples. Uses the shared
+    remove_docker_container_and_volume helper which removes the container
+    first, then removes the backing Docker volume (same name as the container).
+    """
+    if not containers:
+        return
+
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return
+
+    try:
+        for container_id, _name in containers:
+            try:
+                container = client.containers.get(container_id)
+                remove_docker_container_and_volume(client, container)
+            except (docker.errors.DockerException, docker.errors.NotFound):
+                pass
+    finally:
+        client.close()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def session_cleanup() -> Generator[None, None, None]:
     """Session-scoped fixture to detect and clean up leaked test resources.
@@ -923,9 +966,12 @@ def session_cleanup() -> Generator[None, None, None]:
     3. Leftover Modal apps created by this worker's tests
     4. Leftover Modal volumes created by this worker's tests
     5. Leftover Modal environments created by this worker's tests
+    6. Stale Docker state containers from tests (older than 1 hour)
 
     If any leaked resources are found:
-    - An error is raised to fail the test suite
+    - An error is raised to fail the test suite (except for stale Docker
+      containers, which are silently cleaned up since they may be from
+      other sessions)
     - The resources are killed as a last-ditch cleanup measure
 
     Tests should always clean up after themselves! This is just a safety net.
@@ -966,7 +1012,7 @@ def session_cleanup() -> Generator[None, None, None]:
     # the default tmux server as a fallback safety net -- it would only
     # catch leaks if a test somehow bypassed the per-test TMUX_TMPDIR.
     leftover_sessions: list[str] = []
-    for test_id in _worker_test_ids:
+    for test_id in worker_test_ids:
         prefix = f"mng_{test_id}-"
         sessions = _get_tmux_sessions_with_prefix(prefix)
         leftover_sessions.extend(sessions)
@@ -1008,10 +1054,16 @@ def session_cleanup() -> Generator[None, None, None]:
             "Tests should delete their Modal environments before completing.\n" + "\n".join(env_info)
         )
 
-    # 6. Clean up leaked resources (last-ditch safety measure)
-    for proc in leftover_processes:
+    # 6. Check for stale Docker state containers from tests (older than 1 hour).
+    # These are containers that were leaked by crashed or interrupted test runs.
+    # We don't fail the test suite for these (they may be from other sessions),
+    # but we do clean them up.
+    stale_docker_containers = _get_stale_docker_state_containers(max_age_seconds=3600)
+
+    # 7. Clean up leaked resources (last-ditch safety measure)
+    for process in leftover_processes:
         try:
-            proc.kill()
+            process.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
 
@@ -1019,8 +1071,9 @@ def session_cleanup() -> Generator[None, None, None]:
     _stop_modal_apps(leftover_apps)
     _delete_modal_volumes(leftover_volumes)
     _delete_modal_environments(leftover_environments)
+    _remove_docker_containers(stale_docker_containers)
 
-    # 7. Fail the test suite if any issues were found
+    # 8. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"

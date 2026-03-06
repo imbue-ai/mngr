@@ -111,7 +111,7 @@ def test_parse_pr() -> None:
         "title": "Add feature X",
         "state": "OPEN",
         "url": "https://github.com/org/repo/pull/42",
-        "headRefName": "mng/my-agent-local",
+        "headRefName": "mng/my-agent",
         "statusCheckRollup": [
             {"status": "COMPLETED", "conclusion": "SUCCESS"},
         ],
@@ -121,7 +121,7 @@ def test_parse_pr() -> None:
     assert pr.title == "Add feature X"
     assert pr.state == PrState.OPEN
     assert pr.url == "https://github.com/org/repo/pull/42"
-    assert pr.head_branch == "mng/my-agent-local"
+    assert pr.head_branch == "mng/my-agent"
     assert pr.check_status == CheckStatus.PASSING
     assert pr.is_draft is False
 
@@ -132,7 +132,7 @@ def test_parse_pr_draft() -> None:
         "title": "WIP feature",
         "state": "OPEN",
         "url": "https://github.com/org/repo/pull/99",
-        "headRefName": "mng/wip-local",
+        "headRefName": "mng/wip",
         "statusCheckRollup": [],
         "isDraft": True,
     }
@@ -147,7 +147,7 @@ def test_parse_pr_merged_with_no_checks() -> None:
         "title": "Fix bug",
         "state": "MERGED",
         "url": "https://github.com/org/repo/pull/10",
-        "headRefName": "mng/fix-bug-local",
+        "headRefName": "mng/fix-bug",
         "statusCheckRollup": [],
     }
     pr = _parse_pr(raw)

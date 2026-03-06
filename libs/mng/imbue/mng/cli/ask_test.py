@@ -7,9 +7,11 @@ from click.testing import CliRunner
 
 import imbue.mng.cli.ask as ask_module
 from imbue.mng.cli.ask import ClaudeBackendInterface
+from imbue.mng.cli.ask import _accumulate_chunks
 from imbue.mng.cli.ask import _build_ask_context
 from imbue.mng.cli.ask import _execute_response
 from imbue.mng.cli.ask import _extract_text_delta
+from imbue.mng.cli.ask import _show_command_summary
 from imbue.mng.cli.ask import ask
 from imbue.mng.errors import MngError
 from imbue.mng.primitives import OutputFormat
@@ -231,3 +233,111 @@ def test_no_query_json_output(
     result = cli_runner.invoke(ask, ["--format", "json"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0
     assert '"commands"' in result.output
+
+
+# =============================================================================
+# Additional tests for _extract_text_delta edge cases
+# =============================================================================
+
+
+def test_extract_text_delta_event_not_dict() -> None:
+    """_extract_text_delta should return None when event is not a dict."""
+    event = json.dumps({"type": "stream_event", "event": "not_a_dict"})
+    assert _extract_text_delta(event) is None
+
+
+def test_extract_text_delta_non_text_delta_type() -> None:
+    """_extract_text_delta should return None when delta type is not text_delta."""
+    event = json.dumps(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "input_json_delta", "partial_json": "{}"},
+            },
+        }
+    )
+    assert _extract_text_delta(event) is None
+
+
+def test_extract_text_delta_delta_not_dict() -> None:
+    """_extract_text_delta should return None when delta is not a dict."""
+    event = json.dumps(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": "not_a_dict",
+            },
+        }
+    )
+    assert _extract_text_delta(event) is None
+
+
+def test_extract_text_delta_text_not_string() -> None:
+    """_extract_text_delta should return None when text is not a string."""
+    event = json.dumps(
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": 42},
+            },
+        }
+    )
+    assert _extract_text_delta(event) is None
+
+
+# =============================================================================
+# Tests for _accumulate_chunks
+# =============================================================================
+
+
+def test_accumulate_chunks_joins_all_chunks() -> None:
+    """_accumulate_chunks should join all chunks into a single string."""
+    chunks = iter(["Hello ", "world", "!"])
+    result = _accumulate_chunks(chunks)
+    assert result == "Hello world!"
+
+
+def test_accumulate_chunks_empty_iterator() -> None:
+    """_accumulate_chunks should return empty string for empty iterator."""
+    chunks = iter([])
+    result = _accumulate_chunks(chunks)
+    assert result == ""
+
+
+def test_accumulate_chunks_single_chunk() -> None:
+    """_accumulate_chunks should work with a single chunk."""
+    chunks = iter(["Hello"])
+    result = _accumulate_chunks(chunks)
+    assert result == "Hello"
+
+
+# =============================================================================
+# Tests for _show_command_summary
+# =============================================================================
+
+
+def test_show_command_summary_human(capsys: pytest.CaptureFixture[str]) -> None:
+    """_show_command_summary should output command list in HUMAN format."""
+    _show_command_summary(OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Available mng commands" in captured.out
+    assert "mng ask" in captured.out
+
+
+def test_show_command_summary_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """_show_command_summary should output JSON in JSON format."""
+    _show_command_summary(OutputFormat.JSON)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert "commands" in data
+
+
+def test_show_command_summary_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    """_show_command_summary should output JSONL in JSONL format."""
+    _show_command_summary(OutputFormat.JSONL)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["event"] == "commands"

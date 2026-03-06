@@ -266,7 +266,9 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
     if resource_type == "work_dir":
         return f"{action} work directory: {resource.path}"
     if resource_type == "machine":
-        return f"{action} machine: {resource.name} ({resource.provider_name})"
+        return f"{action} machine: {resource.host_name} ({resource.provider_name})"
+    if resource_type == "machine_record":
+        return f"{action} machine record: {resource.host_name} ({resource.provider_name})"
     if resource_type == "snapshot":
         return f"{action} snapshot: {resource.name}"
     if resource_type == "volume":

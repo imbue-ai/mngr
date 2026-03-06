@@ -409,7 +409,10 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     set_nested_value(doc, key, parsed_value)
 
     # Validate the resulting config before saving
-    parse_config(dict(doc.unwrap()), disabled_plugins=mng_ctx.config.disabled_plugins)
+    parse_config(
+        dict(doc.unwrap()),
+        disabled_plugins=mng_ctx.config.disabled_plugins,
+    )
 
     # Save the config
     save_config_file(config_path, doc)

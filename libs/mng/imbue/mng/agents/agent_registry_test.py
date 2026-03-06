@@ -5,16 +5,16 @@ from typing import Any
 import pytest
 from pydantic import Field
 
-from imbue.mng.agents.agent_registry import ResolvedAgentType
-from imbue.mng.agents.agent_registry import get_agent_class
-from imbue.mng.agents.agent_registry import get_agent_config_class
 from imbue.mng.agents.agent_registry import list_registered_agent_types
-from imbue.mng.agents.agent_registry import register_agent_config
-from imbue.mng.agents.agent_registry import resolve_agent_type
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.codex_agent import CodexAgentConfig
+from imbue.mng.config.agent_class_registry import get_agent_class
+from imbue.mng.config.agent_config_registry import ResolvedAgentType
+from imbue.mng.config.agent_config_registry import get_agent_config_class
+from imbue.mng.config.agent_config_registry import register_agent_config
+from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.errors import ConfigParseError

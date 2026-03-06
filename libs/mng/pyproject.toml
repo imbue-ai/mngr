@@ -1,6 +1,6 @@
 [project]
 name = "mng"
-version = "0.1.4"
+version = "0.1.6"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.11"
 license = "MIT"
@@ -17,16 +17,19 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.4",
+    "imbue-common==0.1.6",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.4",
+    "concurrency-group==0.1.6",
     "coolname>=3.0.0",
     "cryptography>=42.0",
-    "docker>=7.0",
+    # pinning docker and modal because register_guards.py monkeypatches their
+    # internal methods for test resource guards; new versions may move or rename them.
+    # modal is also pinned because more recent versions break how we gather build logs.
+    # See here for an attempt to fix, but it is not confirmed working: https://github.com/imbue-ai/mng/pull/325
+    "docker==7.1.0",
     "dockerfile-parse>=2.0.0",
-    # pinning for now because more recent versions break how we gather build logs. See here for an attempt to fix, but it is not confirmed working: https://github.com/imbue-ai/mng/pull/325
     "modal==1.3.1",
     "packaging>=21.0",
     "pydantic>=2.0",
@@ -35,6 +38,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyinfra>=3.0",
     "pluggy>=1.5.0",
+    "pygtail>=0.14.0",
     "tabulate>=0.9.0",
     "tenacity>=8.0",
     "tomlkit>=0.12.0",
@@ -54,7 +58,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/utils/testing.py"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/utils/testing.py", "**/utils/plugin_testing.py"]
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
@@ -72,6 +76,7 @@ junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
   "-n 4",
+  "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov-report=term-missing",
   "--cov-report=html",
@@ -94,11 +99,30 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
+  "*/testing/*",
   "*/utils/testing.py",
-  "imbue/mng/providers/modal/*",
-  "imbue/mng/providers/docker/instance.py",
-  "imbue/mng/providers/docker/volume.py",
-  "imbue/mng/providers/docker/testing.py",
+  "*/utils/plugin_testing.py",
+  "*/utils/mock_provider.py",
+  "*/providers/modal/*",
+  "*/providers/docker/instance.py",
+  "*/providers/docker/volume.py",
+  "*/providers/docker/testing.py",
+]
+
+[tool.coverage.report]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/testing/*",
+  "*/utils/testing.py",
+  "*/utils/plugin_testing.py",
+  "*/utils/mock_provider.py",
+  "*/providers/modal/*",
+  "*/providers/docker/instance.py",
+  "*/providers/docker/volume.py",
+  "*/providers/docker/testing.py",
 ]
 
 [tool.inline-snapshot]

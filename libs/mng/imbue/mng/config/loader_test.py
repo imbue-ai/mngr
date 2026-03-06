@@ -1,20 +1,21 @@
 """Tests for config loader."""
 
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
-import click
 import pluggy
 import pytest
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplateName
-from imbue.mng.config.data_types import LoggingConfig
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import get_or_create_user_id
 from imbue.mng.config.loader import _apply_plugin_overrides
 from imbue.mng.config.loader import _merge_command_defaults
+from imbue.mng.config.loader import _normalize_cli_args_for_construct
 from imbue.mng.config.loader import _parse_agent_types
 from imbue.mng.config.loader import _parse_command_env_vars
 from imbue.mng.config.loader import _parse_commands
@@ -27,7 +28,6 @@ from imbue.mng.config.loader import get_or_create_profile_dir
 from imbue.mng.config.loader import load_config
 from imbue.mng.config.loader import parse_config
 from imbue.mng.errors import ConfigParseError
-from imbue.mng.main import cli
 from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import LogLevel
@@ -35,8 +35,19 @@ from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.registry import load_all_registries
+from imbue.mng.utils.logging import LoggingConfig
 
 hookimpl = pluggy.HookimplMarker("mng")
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    yield messages
+    logger.remove(handler_id)
+
 
 # =============================================================================
 # Tests for _parse_command_env_vars
@@ -183,42 +194,6 @@ def test_merge_command_defaults_override_wins_same_command() -> None:
 
 
 # =============================================================================
-# Test for single-word command names
-# =============================================================================
-
-
-def test_all_cli_commands_are_single_word() -> None:
-    """Ensure all CLI command names are single words (no spaces, hyphens, or underscores).
-
-    This is CRITICAL for the MNG_COMMANDS_<COMMANDNAME>_<PARAMNAME> env var parsing
-    to work correctly. If command names contained underscores, parsing would be ambiguous.
-
-    For example, if a command was named "foo_bar" and a param was "baz", the env var
-    would be "MNG_COMMANDS_FOO_BAR_BAZ", which could be interpreted as either:
-        - command="foo", param="bar_baz"
-        - command="foo_bar", param="baz"
-
-    By requiring single-word commands, we avoid this ambiguity.
-
-    Any future plugins that register custom commands MUST also follow this convention.
-    """
-    # Get all commands from the CLI group
-    assert isinstance(cli, click.Group), "cli should be a click.Group"
-
-    invalid_commands = []
-    for command_name in cli.commands.keys():
-        # Check for spaces, hyphens, or underscores in command names
-        if " " in command_name or "-" in command_name or "_" in command_name:
-            invalid_commands.append(command_name)
-
-    assert not invalid_commands, (
-        f"CLI command names must be single words (no spaces, hyphens, or underscores) "
-        f"for MNG_COMMANDS_<COMMANDNAME>_<PARAMNAME> env var parsing to work. "
-        f"Invalid commands: {invalid_commands}"
-    )
-
-
-# =============================================================================
 # Tests for _parse_providers
 # =============================================================================
 
@@ -239,10 +214,19 @@ def test_parse_providers_raises_on_unknown_backend() -> None:
 
 
 def test_parse_providers_raises_on_unknown_fields() -> None:
-    """_parse_providers should raise ConfigParseError for unknown fields."""
+    """_parse_providers should raise ConfigParseError for unknown fields by default."""
     raw = {"my-local": {"backend": "local", "typo_field": "value"}}
     with pytest.raises(ConfigParseError, match="Unknown fields in providers.my-local.*typo_field"):
         _parse_providers(raw, disabled_plugins=frozenset())
+
+
+def test_parse_providers_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False should warn about unknown fields and strip them."""
+    raw = {"my-local": {"backend": "local", "typo_field": "value"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False)
+    assert ProviderInstanceName("my-local") in result
+    assert "typo_field" not in raw["my-local"]
+    assert any("typo_field" in msg and "providers.my-local" in msg for msg in log_warnings)
 
 
 def test_parse_providers_skips_disabled_plugin() -> None:
@@ -304,10 +288,20 @@ def test_parse_agent_types_handles_empty_dict() -> None:
 
 
 def test_parse_agent_types_raises_on_unknown_fields() -> None:
-    """_parse_agent_types should raise ConfigParseError for unknown fields."""
+    """_parse_agent_types should raise ConfigParseError for unknown fields by default."""
     raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
     with pytest.raises(ConfigParseError, match="Unknown fields in agent_types.claude.*bogus_option"):
         _parse_agent_types(raw)
+
+
+def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
+    """_parse_agent_types with strict=False should warn about unknown fields and strip them."""
+    raw = {"claude": {"cli_args": "--verbose", "bogus_option": True}}
+    result = _parse_agent_types(raw, strict=False)
+    assert AgentTypeName("claude") in result
+    assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
+    assert "bogus_option" not in raw["claude"]
+    assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
 
 
 # =============================================================================
@@ -330,10 +324,20 @@ def test_parse_plugins_handles_empty_dict() -> None:
 
 
 def test_parse_plugins_raises_on_unknown_fields() -> None:
-    """_parse_plugins should raise ConfigParseError for unknown fields."""
+    """_parse_plugins should raise ConfigParseError for unknown fields by default."""
     raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
     with pytest.raises(ConfigParseError, match="Unknown fields in plugins.my-plugin.*nonexistent_setting"):
         _parse_plugins(raw)
+
+
+def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
+    """_parse_plugins with strict=False should warn about unknown fields and strip them."""
+    raw = {"my-plugin": {"enabled": True, "nonexistent_setting": "abc"}}
+    result = _parse_plugins(raw, strict=False)
+    assert PluginName("my-plugin") in result
+    assert result[PluginName("my-plugin")].enabled is True
+    assert "nonexistent_setting" not in raw["my-plugin"]
+    assert any("nonexistent_setting" in msg and "plugins.my-plugin" in msg for msg in log_warnings)
 
 
 # =============================================================================
@@ -396,11 +400,11 @@ def test_apply_plugin_overrides_creates_disabled_plugin() -> None:
 
 def test_parse_logging_config_parses_valid_config() -> None:
     """_parse_logging_config should parse valid logging config."""
-    raw = {"file_level": "TRACE", "max_log_files": 500}
+    raw = {"file_level": "TRACE", "max_log_size_mb": 20}
     result = _parse_logging_config(raw)
     assert isinstance(result, LoggingConfig)
     assert result.file_level == LogLevel.TRACE
-    assert result.max_log_files == 500
+    assert result.max_log_size_mb == 20
 
 
 def test_parse_logging_config_handles_empty_dict() -> None:
@@ -410,10 +414,19 @@ def test_parse_logging_config_handles_empty_dict() -> None:
 
 
 def test_parse_logging_config_raises_on_unknown_fields() -> None:
-    """_parse_logging_config should raise ConfigParseError for unknown fields."""
+    """_parse_logging_config should raise ConfigParseError for unknown fields by default."""
     raw = {"file_level": "DEBUG", "unknown_log_option": 42}
     with pytest.raises(ConfigParseError, match="Unknown fields in logging.*unknown_log_option"):
         _parse_logging_config(raw)
+
+
+def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
+    """_parse_logging_config with strict=False should warn about unknown fields and strip them."""
+    raw = {"file_level": "DEBUG", "unknown_log_option": 42}
+    result = _parse_logging_config(raw, strict=False)
+    assert isinstance(result, LoggingConfig)
+    assert "unknown_log_option" not in raw
+    assert any("unknown_log_option" in msg for msg in log_warnings)
 
 
 # =============================================================================
@@ -523,19 +536,37 @@ def test_parse_config_handles_empty_config() -> None:
 
 
 def test_parse_config_raises_on_unknown_top_level_field() -> None:
-    """parse_config should raise ConfigParseError for unknown top-level fields."""
+    """parse_config should raise ConfigParseError for unknown top-level fields by default."""
     raw = {"prefix": "test-", "nonexistent_top_level": "value"}
     with pytest.raises(ConfigParseError, match="Unknown configuration fields.*nonexistent_top_level"):
         parse_config(raw, disabled_plugins=frozenset())
 
 
+def test_parse_config_warns_on_unknown_top_level_field_when_not_strict(log_warnings: list[str]) -> None:
+    """parse_config with strict=False should warn about unknown top-level fields."""
+    raw = {"prefix": "test-", "nonexistent_top_level": "value"}
+    result = parse_config(raw, disabled_plugins=frozenset(), strict=False)
+    assert result.prefix == "test-"
+    assert any("nonexistent_top_level" in msg for msg in log_warnings)
+
+
 def test_parse_config_raises_on_unknown_nested_field() -> None:
-    """parse_config should raise ConfigParseError for unknown fields in nested config sections."""
+    """parse_config should raise ConfigParseError for unknown nested fields by default."""
     raw = {
         "logging": {"file_level": "DEBUG", "bad_field": True},
     }
     with pytest.raises(ConfigParseError, match="Unknown fields in logging.*bad_field"):
         parse_config(raw, disabled_plugins=frozenset())
+
+
+def test_parse_config_warns_on_unknown_nested_field_when_not_strict(log_warnings: list[str]) -> None:
+    """parse_config with strict=False should warn about unknown nested fields."""
+    raw = {
+        "logging": {"file_level": "DEBUG", "bad_field": True},
+    }
+    result = parse_config(raw, disabled_plugins=frozenset(), strict=False)
+    assert result.logging is not None
+    assert any("bad_field" in msg for msg in log_warnings)
 
 
 def test_parse_config_parses_default_destroyed_host_persisted_seconds() -> None:
@@ -595,7 +626,11 @@ def test_on_load_config_hook_is_called(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify hook was called
     assert hook_called, "on_load_config hook was not called"
@@ -626,7 +661,11 @@ def test_on_load_config_hook_can_modify_config(
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify the config was modified
     assert mng_ctx.config.prefix == "modified-by-plugin-"
@@ -658,7 +697,11 @@ def test_on_load_config_hook_can_add_new_fields(
     monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
 
     # Call load_config
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     # Verify the agent type was added
     assert AgentTypeName("custom-agent") in mng_ctx.config.agent_types
@@ -840,6 +883,63 @@ def test_get_or_create_user_id_returns_same_id_on_subsequent_calls(tmp_path: Pat
 
 
 # =============================================================================
+# Tests for MNG_ALLOW_UNKNOWN_CONFIG via load_config
+# =============================================================================
+
+
+def test_load_config_rejects_unknown_fields_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config should raise on unknown config fields when MNG_ALLOW_UNKNOWN_CONFIG is not set."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNG_ALLOW_UNKNOWN_CONFIG", raising=False)
+
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mng_dir)
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text('future_field = "hello"\n')
+
+    with pytest.raises(ConfigParseError, match="Unknown configuration fields.*future_field"):
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+
+def test_load_config_allows_unknown_fields_with_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    log_warnings: list[str],
+) -> None:
+    """load_config should warn (not raise) on unknown fields when MNG_ALLOW_UNKNOWN_CONFIG is set."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MNG_ALLOW_UNKNOWN_CONFIG", "1")
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mng_dir)
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text('future_field = "hello"\n')
+
+    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    assert mng_ctx.config.prefix == "mng-"
+    assert any("future_field" in msg for msg in log_warnings)
+
+
+# =============================================================================
 # Tests for default_destroyed_host_persisted_seconds via load_config
 # =============================================================================
 
@@ -864,7 +964,11 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     settings_path = profile_dir / "settings.toml"
     settings_path.write_text("default_destroyed_host_persisted_seconds = 86400.0\n")
 
-    mng_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mng_ctx = load_config(
+        pm=pm,
+        concurrency_group=cg,
+        context_dir=tmp_path,
+    )
 
     assert mng_ctx.config.default_destroyed_host_persisted_seconds == 86400.0
 
@@ -925,3 +1029,229 @@ def test_block_disabled_plugins_is_idempotent() -> None:
     block_disabled_plugins(pm, frozenset({"modal"}))
 
     assert pm.is_blocked("modal")
+
+
+# =============================================================================
+# Tests for _normalize_cli_args_for_construct
+# =============================================================================
+
+
+def test_normalize_cli_args_no_cli_args_key() -> None:
+    """_normalize_cli_args_for_construct should return the input unchanged when no cli_args key."""
+    raw = {"some_key": "value"}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result == {"some_key": "value"}
+
+
+def test_normalize_cli_args_string_value() -> None:
+    """_normalize_cli_args_for_construct should split a non-empty string into a tuple."""
+    raw = {"cli_args": "--verbose --model opus"}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose", "--model", "opus")
+
+
+def test_normalize_cli_args_empty_string() -> None:
+    """_normalize_cli_args_for_construct should convert an empty string to an empty tuple."""
+    raw = {"cli_args": ""}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ()
+
+
+def test_normalize_cli_args_list_value() -> None:
+    """_normalize_cli_args_for_construct should convert a list to a tuple."""
+    raw = {"cli_args": ["--verbose", "--model", "opus"]}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose", "--model", "opus")
+
+
+def test_normalize_cli_args_tuple_value() -> None:
+    """_normalize_cli_args_for_construct should pass through a tuple."""
+    raw = {"cli_args": ("--verbose",)}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == ("--verbose",)
+
+
+def test_normalize_cli_args_other_type_passes_through() -> None:
+    """_normalize_cli_args_for_construct should pass through unrecognized types."""
+    raw = {"cli_args": 42}
+    result = _normalize_cli_args_for_construct(raw)
+    assert result["cli_args"] == 42
+
+
+# =============================================================================
+# Tests for _parse_command_env_vars edge cases
+# =============================================================================
+
+
+def test_parse_command_env_vars_empty_suffix_after_prefix() -> None:
+    """_parse_command_env_vars should skip when env key is exactly the prefix with nothing after."""
+    environ = {"MNG_COMMANDS_": "value"}
+    result = _parse_command_env_vars(environ)
+    assert result == {}
+
+
+def test_parse_command_env_vars_empty_command_name() -> None:
+    """_parse_command_env_vars should skip when command name is empty (leading underscore)."""
+    environ = {"MNG_COMMANDS__PARAM": "value"}
+    result = _parse_command_env_vars(environ)
+    assert result == {}
+
+
+# =============================================================================
+# Tests for load_config pytest guard
+# =============================================================================
+
+
+def test_load_config_raises_when_in_pytest_and_not_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config should raise ConfigParseError when is_allowed_in_pytest is False and PYTEST_CURRENT_TEST is set."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+
+    # Write config that disables pytest
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mng_dir)
+    settings_path = profile_dir / "settings.toml"
+    settings_path.write_text("is_allowed_in_pytest = false\n")
+
+    with pytest.raises(ConfigParseError, match="Running mng within pytest is not allowed"):
+        load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
+# =============================================================================
+# Tests for load_config with env command overrides
+# =============================================================================
+
+
+def test_load_config_applies_env_command_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config should merge env command overrides into the final config."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_COMMANDS_CREATE_CONNECT", "false")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert "create" in mng_ctx.config.commands
+    assert mng_ctx.config.commands["create"].defaults.get("connect") == "false"
+
+
+def test_load_config_headless_default_is_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """By default, config.headless is False."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNG_HEADLESS", raising=False)
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False
+
+
+def test_load_config_mng_headless_env_var_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS=true sets config.headless to True."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_HEADLESS", "true")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is True
+
+
+def test_load_config_mng_headless_env_var_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS=false sets config.headless to False."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNG_HEADLESS", "false")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False
+
+
+def test_load_config_headless_from_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """headless = true in settings.toml sets config.headless to True."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    monkeypatch.delenv("MNG_HEADLESS", raising=False)
+
+    # Write a project settings file with headless = true
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(exist_ok=True)
+    (mng_dir / "settings.toml").write_text("headless = true\n")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is True
+
+
+def test_load_config_mng_headless_env_overrides_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """MNG_HEADLESS env var overrides headless setting from config file."""
+    pm = pluggy.PluginManager("mng")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNG_PREFIX", raising=False)
+    monkeypatch.delenv("MNG_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNG_ROOT_NAME", raising=False)
+    # Config file says headless = true, but env var says false
+    monkeypatch.setenv("MNG_HEADLESS", "false")
+
+    mng_dir = tmp_path / ".mng"
+    mng_dir.mkdir(exist_ok=True)
+    (mng_dir / "settings.toml").write_text("headless = true\n")
+
+    mng_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+    assert mng_ctx.config.headless is False

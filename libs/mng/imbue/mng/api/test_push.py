@@ -9,9 +9,9 @@ from imbue.mng.api.push import push_files
 from imbue.mng.api.push import push_git
 from imbue.mng.api.sync import RemoteGitContext
 from imbue.mng.api.sync import UncommittedChangesError
-from imbue.mng.api.test_fixtures import FakeAgent
-from imbue.mng.api.test_fixtures import FakeHost
-from imbue.mng.api.test_fixtures import SyncTestContext
+from imbue.mng.api.testing import FakeAgent
+from imbue.mng.api.testing import FakeHost
+from imbue.mng.api.testing import SyncTestContext
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import UncommittedChangesMode
@@ -45,6 +45,7 @@ def push_ctx(tmp_path: Path) -> SyncTestContext:
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_fail_mode_with_no_uncommitted_changes_succeeds(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -99,6 +100,7 @@ def test_push_files_fail_mode_with_uncommitted_changes_raises_error(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_clobber_mode_overwrites_agent_changes(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -123,6 +125,7 @@ def test_push_files_clobber_mode_overwrites_agent_changes(
     assert result.destination_path == push_ctx.agent_dir
 
 
+@pytest.mark.rsync
 def test_push_files_clobber_mode_when_only_agent_has_changes(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -148,6 +151,7 @@ def test_push_files_clobber_mode_when_only_agent_has_changes(
     assert (push_ctx.agent_dir / "host_only.txt").read_text() == "host file"
 
 
+@pytest.mark.rsync
 def test_push_files_clobber_mode_with_delete_flag_removes_agent_only_files(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -178,6 +182,7 @@ def test_push_files_clobber_mode_with_delete_flag_removes_agent_only_files(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_stash_mode_stashes_changes_and_leaves_stashed(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -207,6 +212,7 @@ def test_push_files_stash_mode_stashes_changes_and_leaves_stashed(
     assert (push_ctx.agent_dir / "host_file.txt").read_text() == "host content"
 
 
+@pytest.mark.rsync
 def test_push_files_stash_mode_stashes_untracked_files(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -236,6 +242,7 @@ def test_push_files_stash_mode_stashes_untracked_files(
     assert (push_ctx.agent_dir / "host_file.txt").read_text() == "host content"
 
 
+@pytest.mark.rsync
 def test_push_files_stash_mode_with_no_uncommitted_changes_does_not_stash(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -266,6 +273,7 @@ def test_push_files_stash_mode_with_no_uncommitted_changes_does_not_stash(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_merge_mode_stashes_and_restores_changes(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -294,6 +302,7 @@ def test_push_files_merge_mode_stashes_and_restores_changes(
     assert (push_ctx.agent_dir / "host_file.txt").read_text() == "host content"
 
 
+@pytest.mark.rsync
 def test_push_files_merge_mode_restores_untracked_files(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -323,6 +332,7 @@ def test_push_files_merge_mode_restores_untracked_files(
     assert (push_ctx.agent_dir / "host_file.txt").read_text() == "host content"
 
 
+@pytest.mark.rsync
 def test_push_files_merge_mode_when_both_modify_different_files(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -350,6 +360,7 @@ def test_push_files_merge_mode_when_both_modify_different_files(
     assert final_stash_count == initial_stash_count
 
 
+@pytest.mark.rsync
 def test_push_files_merge_mode_with_no_uncommitted_changes(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -380,6 +391,7 @@ def test_push_files_merge_mode_with_no_uncommitted_changes(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_excludes_git_directory(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -427,6 +439,7 @@ def test_push_files_excludes_git_directory(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_dry_run_does_not_modify_files(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -455,6 +468,7 @@ def test_push_files_dry_run_does_not_modify_files(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_with_custom_destination_path(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
@@ -484,14 +498,14 @@ def test_push_files_with_custom_destination_path(
 # =============================================================================
 
 
+@pytest.mark.rsync
 @pytest.mark.parametrize(
     "mode,modify_tracked_file",
     [
-        (UncommittedChangesMode.CLOBBER, False),
-        (UncommittedChangesMode.STASH, True),
-        (UncommittedChangesMode.MERGE, True),
+        pytest.param(UncommittedChangesMode.CLOBBER, False, id="clobber"),
+        pytest.param(UncommittedChangesMode.STASH, True, id="stash"),
+        pytest.param(UncommittedChangesMode.MERGE, True, id="merge"),
     ],
-    ids=["clobber", "stash", "merge"],
 )
 def test_push_files_does_not_modify_host_directory(
     push_ctx: SyncTestContext,
@@ -845,18 +859,14 @@ def remote_git_push_ctx(tmp_path: Path) -> SyncTestContext:
     )
 
 
-def test_push_files_with_remote_host_raises_not_implemented(
+def test_push_files_with_remote_host_without_ssh_info_raises_assertion(
     remote_push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
 ) -> None:
-    """Test that push_files raises NotImplementedError for remote hosts.
-
-    File sync via rsync requires local paths on both sides. Remote host
-    support will require SSH-based rsync or a different transfer mechanism.
-    """
+    """Test that push_files fails when remote host has no SSH info configured."""
     (remote_push_ctx.local_dir / "file.txt").write_text("host content")
 
-    with pytest.raises(NotImplementedError, match="remote hosts"):
+    with pytest.raises(AssertionError, match="SSH connection info"):
         push_files(
             agent=remote_push_ctx.agent,
             host=remote_push_ctx.host,
@@ -869,19 +879,16 @@ def test_push_files_with_remote_host_raises_not_implemented(
         )
 
 
-def test_push_git_with_remote_host_raises_not_implemented(
+def test_push_git_with_remote_host_without_ssh_info_raises_assertion(
     remote_git_push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
 ) -> None:
-    """Test that push_git raises NotImplementedError for remote hosts.
-
-    Git push to remote hosts requires SSH URL support which is not implemented.
-    """
+    """Test that push_git fails when remote host has no SSH info configured."""
     (remote_git_push_ctx.local_dir / "new_file.txt").write_text("new content")
     run_git_command(remote_git_push_ctx.local_dir, "add", "new_file.txt")
     run_git_command(remote_git_push_ctx.local_dir, "commit", "-m", "Add new file")
 
-    with pytest.raises(NotImplementedError, match="remote hosts is not yet implemented"):
+    with pytest.raises(AssertionError, match="SSH connection info"):
         push_git(
             agent=remote_git_push_ctx.agent,
             host=remote_git_push_ctx.host,
@@ -900,6 +907,7 @@ def test_push_git_with_remote_host_raises_not_implemented(
 # =============================================================================
 
 
+@pytest.mark.rsync
 def test_push_files_to_nonexistent_subdir_creates_directory(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,

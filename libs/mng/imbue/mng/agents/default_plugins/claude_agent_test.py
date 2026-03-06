@@ -27,12 +27,11 @@ from imbue.mng.agents.default_plugins.claude_agent import get_files_for_deploy
 from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
-from imbue.mng.api.test_fixtures import FakeHost
+from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.conftest import make_mng_ctx
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import PluginMngError
 from imbue.mng.hosts.host import Host
@@ -48,6 +47,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.testing import init_git_repo
+from imbue.mng.utils.testing import make_mng_ctx
 
 # =============================================================================
 # Test Helpers
@@ -584,12 +584,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_uses_marker_based_send_message_returns_true(
+def test_uses_paste_detection_send_returns_true(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
 ) -> None:
-    """ClaudeAgent.uses_marker_based_send_message should return True."""
+    """ClaudeAgent.uses_paste_detection_send should return True."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
-    assert agent.uses_marker_based_send_message() is True
+    assert agent.uses_paste_detection_send() is True
 
 
 def test_configure_readiness_hooks_raises_when_not_gitignored(
@@ -870,6 +870,44 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
     # Trust should NOT have been extended since there's no git common dir
     config_path = Path.home() / ".claude.json"
     assert not config_path.exists()
+
+
+def test_provision_trusts_working_directory_when_enabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """provision should add trust for work_dir when trust_working_directory is True."""
+    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx, agent_config=config)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    agent.provision(host=host, options=options, mng_ctx=temp_mng_ctx)
+
+    config_path = Path.home() / ".claude.json"
+    claude_config = json.loads(config_path.read_text())
+    assert str(agent.work_dir.resolve()) in claude_config["projects"]
+    assert claude_config["projects"][str(agent.work_dir.resolve())]["hasTrustDialogAccepted"] is True
+    assert claude_config["effortCalloutDismissed"] is True
+
+
+def test_provision_does_not_trust_working_directory_when_disabled(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """provision should not add trust when trust_working_directory is False (default)."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    agent.provision(host=host, options=options, mng_ctx=temp_mng_ctx)
+
+    config_path = Path.home() / ".claude.json"
+    assert not config_path.exists()
+
+
+def test_trust_working_directory_defaults_to_false() -> None:
+    """Verify that trust_working_directory defaults to False for ClaudeAgentConfig."""
+    config = ClaudeAgentConfig()
+    assert config.trust_working_directory is False
 
 
 def test_on_before_provisioning_raises_for_worktree_on_remote_host(
