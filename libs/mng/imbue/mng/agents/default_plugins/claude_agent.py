@@ -416,6 +416,7 @@ def _write_macos_keychain_credential(label: str, value: str, concurrency_group: 
     Returns True if the credential was written successfully.
     """
     account = getpass.getuser()
+    # Remove any existing entry first -- add-generic-password fails if one already exists
     try:
         concurrency_group.run_process_to_completion(
             ["security", "delete-generic-password", "-s", label, "-a", account],
