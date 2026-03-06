@@ -541,7 +541,7 @@ class BaseAgent(AgentInterface):
         timeout_secs = self.enter_submission_timeout_seconds
         cmd = (
             f"bash -c '"
-            f'( sleep 0.05 && tmux send-keys -t "$1" Enter ) & '
+            f'( sleep 0.3 && tmux send-keys -t "$1" Enter ) & '
             f'timeout {timeout_secs} tmux wait-for "$0"'
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
