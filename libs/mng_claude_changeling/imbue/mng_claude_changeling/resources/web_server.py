@@ -134,7 +134,6 @@ def _read_conversations() -> list[dict[str, str]]:
                     "LEFT JOIN conversations c ON cc.conversation_id = c.id"
                 ).fetchall()
                 for conversation_id, model, created_at, tags_json in rows:
-                    # Filter out internal conversations (e.g. system_notifications)
                     try:
                         tags = json.loads(tags_json) if tags_json else {}
                     except json.JSONDecodeError:
