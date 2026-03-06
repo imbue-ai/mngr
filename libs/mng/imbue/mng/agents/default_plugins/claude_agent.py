@@ -163,12 +163,12 @@ def _collect_claude_home_dir_files(claude_dir: Path) -> dict[str, Path]:
 def _build_settings_json_content(sync_local: bool) -> str:
     """Build settings.json content for remote/deploy per-agent config dirs.
 
+    Used for remote hosts and deploy only. Local hosts symlink settings.json
+    from ~/.claude/ instead, preserving the user's exact settings.
+
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Forces skipDangerousModePermissionPrompt=True
     and disables fastMode (not supported via the API on remote hosts).
-
-    Not used for local hosts -- those copy ~/.claude/settings.json as-is to
-    preserve the user's exact settings.
     """
     local_path = Path.home() / ".claude" / "settings.json"
     if sync_local and local_path.exists():
