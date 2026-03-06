@@ -140,12 +140,10 @@ def _sync_messages(
             # syncing duplicate user messages.
             if prompt and response == "":
                 continue
-            # injected messages are, by default, sent with prompt="...", so we can skip these as well
-            # (since they were injected by the agent itself, and it doesn't need to observe its own messages)
-            if prompt == "...":
-                continue
 
-            if prompt:
+            # Sync user messages, but skip empty prompts (e.g. from llm inject
+            # where the agent injected its own message with prompt="" or "...")
+            if prompt and prompt not in ("", "..."):
                 eid = f"{row_id}-user"
                 if eid in file_event_ids:
                     is_found_existing = True
@@ -169,7 +167,11 @@ def _sync_messages(
                         )
                     )
 
-            if response:
+            # Skip assistant responses that are only whitespace. These are
+            # intermediate tool-call responses from llm live-chat's
+            # conversation.chain() -- the actual content comes in the
+            # final response of the chain.
+            if response and response.strip():
                 eid = f"{row_id}-assistant"
                 if eid in file_event_ids:
                     is_found_existing = True

@@ -29,6 +29,7 @@ class ConversationInfo(FrozenModel):
     """Information about a conversation."""
 
     conversation_id: str = Field(description="Unique conversation identifier")
+    name: str = Field(default="", description="Human-readable conversation name from tags")
     model: str = Field(description="Model used for this conversation")
     created_at: str = Field(description="When the conversation was created")
     updated_at: str = Field(description="When the conversation was last updated")
@@ -88,51 +89,63 @@ def _build_chat_script_path(host_dir: Path) -> str:
 
 
 @pure
-def _build_conversation_event_paths(
+def _build_conversation_db_and_messages_paths(
     agent: AgentInterface,
     host: OnlineHostInterface,
 ) -> tuple[Path, Path]:
-    """Build paths to conversation and message event files for an agent."""
+    """Build paths to the llm database and message event file for an agent."""
     agent_state_dir = get_agent_state_dir(agent, host)
-    conversations_path = agent_state_dir / "events" / "conversations" / "events.jsonl"
+    db_path = agent_state_dir / "llm_data" / "logs.db"
     messages_path = agent_state_dir / "events" / "messages" / "events.jsonl"
-    return conversations_path, messages_path
+    return db_path, messages_path
 
 
-# Remote Python script that reads conversation and message event files and outputs
-# a JSON array of conversation info objects sorted by updated_at descending.
-# Receives paths as sys.argv[1] (conversations) and sys.argv[2] (messages).
+# Remote Python script that reads conversations from the changeling_conversations
+# table in the llm sqlite database and message events from a JSONL file, then
+# outputs a JSON array of conversation info objects sorted by updated_at descending.
+# Receives paths as sys.argv[1] (db) and sys.argv[2] (messages).
 _LIST_CONVERSATIONS_SCRIPT: str = """
-import json, sys
+import json, sqlite3, sys
 from pathlib import Path
 
-conv_file = Path(sys.argv[1])
+db_path = Path(sys.argv[1])
 msg_file = Path(sys.argv[2])
 
-if not conv_file.exists():
+if not db_path.exists():
     print('[]')
     sys.exit(0)
 
 conversations = {}
-for line_idx, line in enumerate(conv_file.read_text().splitlines(), 1):
-    line = line.strip()
-    if not line:
-        continue
+try:
+    conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     try:
-        event = json.loads(line)
-        conversation_id = event['conversation_id']
-        conversations[conversation_id] = event
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f'WARNING: skipping malformed conversation event line {line_idx}: {e}', file=sys.stderr)
-        continue
+        rows = conn.execute(
+            'SELECT cc.conversation_id, c.model, cc.created_at, cc.tags '
+            'FROM changeling_conversations cc '
+            'LEFT JOIN conversations c ON cc.conversation_id = c.id'
+        ).fetchall()
+    finally:
+        conn.close()
+    for conversation_id, model, created_at, tags_json in rows:
+        try:
+            tags = json.loads(tags_json) if tags_json else {}
+        except json.JSONDecodeError:
+            tags = {}
+        if 'internal' in tags:
+            continue
+        conversations[conversation_id] = {
+            'conversation_id': conversation_id,
+            'model': model or '?',
+            'created_at': created_at or '?',
+            'updated_at': created_at or '?',
+            'name': tags.get('name', ''),
+        }
+except sqlite3.Error as e:
+    print(f'WARNING: failed to read conversations from database: {e}', file=sys.stderr)
 
 if not conversations:
     print('[]')
     sys.exit(0)
-
-updated_at = {}
-for conversation_id, event in conversations.items():
-    updated_at[conversation_id] = event.get('timestamp', '')
 
 if msg_file.exists():
     for line_idx, line in enumerate(msg_file.read_text().splitlines(), 1):
@@ -144,25 +157,13 @@ if msg_file.exists():
             conversation_id = msg.get('conversation_id', '')
             ts = msg.get('timestamp', '')
             if conversation_id in conversations and ts:
-                if conversation_id not in updated_at or ts > updated_at[conversation_id]:
-                    updated_at[conversation_id] = ts
+                if ts > conversations[conversation_id]['updated_at']:
+                    conversations[conversation_id]['updated_at'] = ts
         except (json.JSONDecodeError, KeyError) as e:
             print(f'WARNING: skipping malformed message event line {line_idx}: {e}', file=sys.stderr)
             continue
 
-result = []
-for conversation_id, event in conversations.items():
-    # Skip internal conversations (e.g. system_notifications)
-    if 'internal' in event.get('tags', {}):
-        continue
-    result.append({
-        'conversation_id': conversation_id,
-        'model': event.get('model', '?'),
-        'created_at': event.get('timestamp', '?'),
-        'updated_at': updated_at.get(conversation_id, event.get('timestamp', '?')),
-    })
-
-result.sort(key=lambda r: r['updated_at'], reverse=True)
+result = sorted(conversations.values(), key=lambda r: r['updated_at'], reverse=True)
 print(json.dumps(result))
 """
 
@@ -249,20 +250,21 @@ def list_conversations_on_agent(
     agent: AgentInterface,
     host: OnlineHostInterface,
 ) -> list[ConversationInfo]:
-    """List conversations for an agent by reading event files on the host.
+    """List conversations for an agent by querying the llm database on the host.
 
-    Executes a Python script on the host that reads the conversation and message
-    event JSONL files and returns a JSON array sorted by updated_at descending.
+    Executes a Python script on the host that reads the changeling_conversations
+    table from the llm sqlite database and message events from JSONL, returning
+    a JSON array sorted by updated_at descending.
 
     Raises ChatCommandError if the remote command fails or returns unparseable output.
     """
-    conversations_path, messages_path = _build_conversation_event_paths(agent, host)
+    db_path, messages_path = _build_conversation_db_and_messages_paths(agent, host)
 
     # Pass paths as command-line arguments (not string interpolation) to avoid
     # injection issues from paths containing special characters
     command = (
         f"python3 -c {shlex.quote(_LIST_CONVERSATIONS_SCRIPT)}"
-        f" {shlex.quote(str(conversations_path))}"
+        f" {shlex.quote(str(db_path))}"
         f" {shlex.quote(str(messages_path))}"
     )
 

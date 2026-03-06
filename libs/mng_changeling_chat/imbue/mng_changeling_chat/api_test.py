@@ -17,7 +17,7 @@ from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng_changeling_chat.api import ChatCommandError
 from imbue.mng_changeling_chat.api import _build_chat_env_vars
 from imbue.mng_changeling_chat.api import _build_chat_script_path
-from imbue.mng_changeling_chat.api import _build_conversation_event_paths
+from imbue.mng_changeling_chat.api import _build_conversation_db_and_messages_paths
 from imbue.mng_changeling_chat.api import _build_remote_chat_script
 from imbue.mng_changeling_chat.api import _load_env_file_into_dict
 from imbue.mng_changeling_chat.api import get_latest_conversation_id
@@ -97,19 +97,19 @@ def test_build_remote_chat_script_quotes_conversation_id_with_special_chars(
 
 
 # =========================================================================
-# Tests for _build_conversation_event_paths
+# Tests for _build_conversation_db_and_messages_paths
 # =========================================================================
 
 
-def test_build_conversation_event_paths(
+def test_build_conversation_db_and_messages_paths(
     local_host_and_agent: tuple[Host, TestAgent],
 ) -> None:
     host, agent = local_host_and_agent
 
-    conv_path, msg_path = _build_conversation_event_paths(agent, host)
+    db_path, msg_path = _build_conversation_db_and_messages_paths(agent, host)
 
     agent_state_dir = host.host_dir / "agents" / str(agent.id)
-    assert conv_path == agent_state_dir / "events" / "conversations" / "events.jsonl"
+    assert db_path == agent_state_dir / "llm_data" / "logs.db"
     assert msg_path == agent_state_dir / "events" / "messages" / "events.jsonl"
 
 
