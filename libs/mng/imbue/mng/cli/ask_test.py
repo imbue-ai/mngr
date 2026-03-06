@@ -6,11 +6,11 @@ import pytest
 from click.testing import CliRunner
 
 import imbue.mng.cli.ask as ask_module
+from imbue.mng.agents.default_plugins.headless_claude_agent import extract_text_delta as _extract_text_delta
 from imbue.mng.cli.ask import ClaudeBackendInterface
 from imbue.mng.cli.ask import _accumulate_chunks
 from imbue.mng.cli.ask import _build_ask_context
 from imbue.mng.cli.ask import _execute_response
-from imbue.mng.cli.ask import _extract_text_delta
 from imbue.mng.cli.ask import _show_command_summary
 from imbue.mng.cli.ask import ask
 from imbue.mng.errors import MngError
@@ -43,7 +43,7 @@ class FakeClaudeError(ClaudeBackendInterface):
 def fake_claude(monkeypatch: pytest.MonkeyPatch) -> FakeClaude:
     """Provide a FakeClaude backend and monkeypatch it into the ask module."""
     backend = FakeClaude()
-    monkeypatch.setattr(ask_module, "SubprocessClaudeBackend", lambda: backend)
+    monkeypatch.setattr(ask_module, "HeadlessClaudeBackend", lambda **kwargs: backend)
     return backend
 
 
@@ -132,7 +132,7 @@ def test_ask_claude_error_shows_message(
 ) -> None:
     """When the claude backend raises an error, it should be displayed to the user."""
     backend = FakeClaudeError(error_message=error_message)
-    monkeypatch.setattr(ask_module, "SubprocessClaudeBackend", lambda: backend)
+    monkeypatch.setattr(ask_module, "HeadlessClaudeBackend", lambda **kwargs: backend)
 
     result = cli_runner.invoke(ask, ["test"], obj=plugin_manager, catch_exceptions=True)
 

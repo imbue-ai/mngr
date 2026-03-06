@@ -6,6 +6,8 @@ import tempfile
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -15,7 +17,10 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.imbue_common.pure import pure
+from imbue.mng.agents.default_plugins.headless_claude_agent import HeadlessClaude
+from imbue.mng.agents.default_plugins.headless_claude_agent import extract_text_delta
+from imbue.mng.api.create import create as api_create
+from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -26,7 +31,16 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import MngError
+from imbue.mng.hosts.host import HostLocation
+from imbue.mng.interfaces.host import AgentLabelOptions
+from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import HostName
+from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import OutputFormat
 
 _QUERY_PREFIX: Final[str] = (
@@ -220,44 +234,82 @@ class ClaudeBackendInterface(MutableModel, ABC):
         """Send a prompt to claude and yield response text chunks."""
 
 
-@pure
-def _extract_text_delta(line: str) -> str | None:
-    """Extract text from a stream-json content_block_delta event.
+@contextmanager
+def _headless_claude_agent(mng_ctx: MngContext, prompt: str, system_prompt: str) -> Iterator[HeadlessClaude]:
+    """Create a HeadlessClaude agent, yield it, and destroy it on exit.
 
-    Returns the delta text if the line is a content_block_delta with a text_delta,
-    or None otherwise.
+    Creates a temporary directory as the work path (no git branch creation),
+    and passes claude args for headless operation (--system-prompt, --output-format
+    stream-json, --tools "", --no-session-persistence).
     """
-    try:
-        parsed = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
-        return None
+    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
+    host_interface = provider.get_host(HostName("localhost"))
+    if not isinstance(host_interface, OnlineHostInterface):
+        raise MngError("Local host is not online")
+    host = host_interface
 
-    if parsed.get("type") != "stream_event":
-        return None
+    with tempfile.TemporaryDirectory(prefix="mng-ask-") as tmp_dir:
+        agent_args = (
+            "--system-prompt",
+            system_prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--tools",
+            "",
+            "--no-session-persistence",
+            prompt,
+        )
 
-    event = parsed.get("event")
-    if not isinstance(event, dict):
-        return None
+        source_location = HostLocation(host=host, path=Path(tmp_dir))
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("headless_claude"),
+            agent_args=agent_args,
+            label_options=AgentLabelOptions(labels={"internal": "ask"}),
+            target_path=Path(tmp_dir),
+        )
 
-    if event.get("type") != "content_block_delta":
-        return None
+        result = api_create(
+            source_location=source_location,
+            target_host=host,
+            agent_options=agent_options,
+            mng_ctx=mng_ctx,
+            create_work_dir=False,
+        )
 
-    delta = event.get("delta")
-    if not isinstance(delta, dict):
-        return None
+        agent = result.agent
+        if not isinstance(agent, HeadlessClaude):
+            raise MngError(f"Expected HeadlessClaude agent, got {type(agent).__name__}")
 
-    if delta.get("type") != "text_delta":
-        return None
+        try:
+            yield agent
+        finally:
+            try:
+                host.stop_agents([agent.id])
+            except (OSError, BaseMngError):
+                pass
+            try:
+                host.destroy_agent(agent)
+            except (OSError, BaseMngError):
+                logger.debug("Failed to destroy ask agent {}", agent.name)
 
-    text = delta.get("text")
-    if isinstance(text, str):
-        return text
 
-    return None
+class HeadlessClaudeBackend(ClaudeBackendInterface):
+    """Runs claude via a HeadlessClaude agent for proper agent lifecycle management."""
+
+    mng_ctx: MngContext
+
+    def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
+        with _headless_claude_agent(self.mng_ctx, prompt, system_prompt) as agent:
+            yield from agent.stream_output()
 
 
 class SubprocessClaudeBackend(ClaudeBackendInterface):
-    """Runs claude in a subprocess from an empty temp directory with streaming."""
+    """Runs claude in a subprocess from an empty temp directory with streaming.
+
+    Fallback backend that bypasses the agent system entirely.
+    """
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
         with tempfile.TemporaryDirectory(prefix="mng-ask-") as tmp_dir:
@@ -307,7 +359,7 @@ class SubprocessClaudeBackend(ClaudeBackendInterface):
                     except (json.JSONDecodeError, ValueError):
                         pass
 
-                    text = _extract_text_delta(stripped)
+                    text = extract_text_delta(stripped)
                     if text is not None:
                         yield text
 
@@ -413,7 +465,7 @@ def ask(ctx: click.Context, **kwargs: Any) -> None:
 
 def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
     """Implementation of ask command (extracted for exception handling)."""
-    _mng_ctx, output_opts, opts = setup_command_context(
+    mng_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="ask",
         command_class=AskCliOptions,
@@ -429,7 +481,7 @@ def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info("Thinking...", output_opts.output_format)
 
-    backend = SubprocessClaudeBackend()
+    backend = HeadlessClaudeBackend(mng_ctx=mng_ctx)
     system_prompt = _build_ask_context()
     chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
 
