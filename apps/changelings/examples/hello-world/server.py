@@ -7,9 +7,12 @@ that the forwarding server is working correctly.
 Reads the PORT environment variable (default: 9100).
 """
 
+import hashlib
 import json
 import os
 import sys
+from datetime import datetime
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from urllib.parse import unquote
@@ -154,16 +157,31 @@ class _Handler(BaseHTTPRequestHandler):
 def _write_server_log(port: int) -> None:
     """Write a server log record so the forwarding server can discover this agent.
 
-    Writes to $MNG_AGENT_STATE_DIR/events/servers.jsonl following the convention
-    that agents self-report their running servers.
+    Writes to $MNG_AGENT_STATE_DIR/events/servers/events.jsonl following the convention
+    that agents self-report their running servers. Includes EventEnvelope fields
+    (timestamp, type, event_id, source) so mng events can parse the records.
+
+    Note: envelope generation is duplicated from web_server.py because this
+    example runs standalone on the host without access to shared libraries.
     """
     agent_state_dir = os.environ.get("MNG_AGENT_STATE_DIR")
     if not agent_state_dir:
         return
-    events_dir = os.path.join(agent_state_dir, "events")
-    os.makedirs(events_dir, exist_ok=True)
-    record = {"server": "web", "url": "http://127.0.0.1:{}".format(port)}
-    with open(os.path.join(events_dir, "servers.jsonl"), "a") as f:
+    servers_dir = os.path.join(agent_state_dir, "events", "servers")
+    os.makedirs(servers_dir, exist_ok=True)
+    url = "http://127.0.0.1:{}".format(port)
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + "{:09d}Z".format(now.microsecond * 1000)
+    event_id = "evt-" + hashlib.sha256("web:{}".format(url).encode()).hexdigest()[:32]
+    record = {
+        "timestamp": timestamp,
+        "type": "server_registered",
+        "event_id": event_id,
+        "source": "servers",
+        "server": "web",
+        "url": url,
+    }
+    with open(os.path.join(servers_dir, "events.jsonl"), "a") as f:
         f.write(json.dumps(record) + "\n")
 
 

@@ -44,6 +44,7 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.polling import wait_for
 
@@ -473,6 +474,7 @@ def make_test_agent_details(
     labels: dict[str, str] | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
+    ssh: SSHInfo | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -487,6 +489,7 @@ def make_test_agent_details(
         state=HostState.RUNNING,
         plugin=host_plugin or {},
         tags=host_tags or {},
+        ssh=ssh,
     )
     return AgentDetails(
         id=AgentId.generate(),
@@ -948,7 +951,7 @@ AllowUsers {current_user}
     sshd_config_path.write_text(sshd_config)
 
     # Start sshd
-    proc = subprocess.Popen(
+    process = subprocess.Popen(
         [sshd_path, "-D", "-f", str(sshd_config_path), "-e"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -966,12 +969,12 @@ AllowUsers {current_user}
 
     finally:
         # Stop sshd
-        proc.send_signal(signal.SIGTERM)
+        process.send_signal(signal.SIGTERM)
         try:
-            proc.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            process.kill()
+            process.wait()
 
 
 # =============================================================================

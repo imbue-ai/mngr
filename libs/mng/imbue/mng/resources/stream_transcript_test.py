@@ -88,7 +88,7 @@ class ScriptRunner:
         # Standard paths
         self.script_path = Path(__file__).parent / "stream_transcript.sh"
         self.history_file = self.agent_state_dir / "claude_session_id_history"
-        self.output_file = self.agent_state_dir / "events" / "claude_transcript" / "events.jsonl"
+        self.output_file = self.agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
         self.offset_dir = self.agent_state_dir / "plugin" / "claude" / ".transcript_offsets"
 
     def add_session(self, session_id: str, lines: list[str]) -> Path:

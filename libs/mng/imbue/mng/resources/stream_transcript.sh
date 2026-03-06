@@ -2,7 +2,7 @@
 # Robust transcript streaming for Claude agents.
 #
 # Watches ALL Claude session JSONL files and appends new lines to
-# events/claude_transcript/events.jsonl. Designed to handle:
+# logs/claude_transcript/events.jsonl. Designed to handle:
 #   - Any session file being written to at any time (not just the "current" one)
 #   - Restarts (reconciles per-session offsets against the output file)
 #   - Late-appearing session files (re-checks each poll cycle, no timeouts)
@@ -25,7 +25,7 @@
 set -euo pipefail
 
 SESSION_HISTORY="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}/claude_session_id_history"
-OUTPUT_FILE="$MNG_AGENT_STATE_DIR/events/claude_transcript/events.jsonl"
+OUTPUT_FILE="$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
 OFFSET_DIR="$MNG_AGENT_STATE_DIR/plugin/claude/.transcript_offsets"
 POLL_INTERVAL=1
 

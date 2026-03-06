@@ -270,6 +270,20 @@ def _handle_landing_page(
     return HTMLResponse(content=html)
 
 
+def _handle_agent_default_redirect(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Redirect to the agent's web server by default."""
+    parsed_id = AgentId(agent_id)
+
+    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated for this changeling")
+
+    return Response(status_code=307, headers={"Location": f"/agents/{agent_id}/web/"})
+
+
 def _handle_agent_servers_page(
     agent_id: str,
     request: Request,
@@ -629,8 +643,11 @@ def create_forwarding_server(
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
 
-    # Agent server listing page: /agents/{agent_id}/
-    app.get("/agents/{agent_id}/")(_handle_agent_servers_page)
+    # Agent default page: redirect to web server
+    app.get("/agents/{agent_id}/")(_handle_agent_default_redirect)
+
+    # Agent server listing page: /agents/{agent_id}/servers/
+    app.get("/agents/{agent_id}/servers/")(_handle_agent_servers_page)
 
     # Proxy routes: /agents/{agent_id}/{server_name}/{path:path}
     app.api_route(

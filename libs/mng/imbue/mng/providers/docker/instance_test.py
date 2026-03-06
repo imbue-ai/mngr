@@ -340,7 +340,7 @@ def test_get_host_resources_returns_defaults(temp_mng_ctx: MngContext) -> None:
         certified_host_data=host_data,
         provider_instance=provider,
         mng_ctx=temp_mng_ctx,
-        on_updated_host_data=lambda hid, data: None,
+        on_updated_host_data=lambda host_id, data: None,
     )
 
     resources = provider.get_host_resources(offline_host)

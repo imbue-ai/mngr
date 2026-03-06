@@ -85,7 +85,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(10))
+    rc.check_getattr(_DIR, snapshot(9))
 
 
 def test_prevent_setattr() -> None:
@@ -213,7 +213,7 @@ def test_prevent_os_fork() -> None:
 def test_prevent_direct_subprocess_usage() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(25), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(23), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
@@ -236,7 +236,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(10))
+    rc.check_cast_usage(_DIR, snapshot(9))
 
 
 def test_prevent_assert_isinstance_usage() -> None:

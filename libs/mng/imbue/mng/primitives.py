@@ -307,6 +307,16 @@ class SnapshotName(str):
         )
 
 
+class SSHInfo(FrozenModel):
+    """SSH connection information for a remote host."""
+
+    user: str = Field(description="SSH username")
+    host: str = Field(description="SSH hostname")
+    port: int = Field(description="SSH port")
+    key_path: Path = Field(description="Path to SSH private key")
+    command: str = Field(description="Full SSH command to connect")
+
+
 class DiscoveredHost(FrozenModel):
     """Lightweight host data collected during discovery (without connecting to the host)."""
 

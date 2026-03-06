@@ -15,8 +15,8 @@ from imbue.changelings.forwarding_server.backend_resolver import BackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import StaticBackendResolver
 from imbue.changelings.forwarding_server.conftest import DEFAULT_SERVER_NAME
-from imbue.changelings.forwarding_server.conftest import FakeMngCli
 from imbue.changelings.forwarding_server.conftest import make_agents_json
+from imbue.changelings.forwarding_server.conftest import make_resolver_with_data
 from imbue.changelings.forwarding_server.conftest import make_server_log
 from imbue.changelings.forwarding_server.cookie_manager import get_cookie_name_for_agent
 from imbue.changelings.forwarding_server.ssh_tunnel import RemoteSSHInfo
@@ -171,7 +171,7 @@ def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) 
     assert cookie_name in response.cookies
 
 
-def test_authenticate_redirects_to_agent_servers_page(tmp_path: Path) -> None:
+def test_authenticate_redirects_to_agent_default_page(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     code = OneTimeCode(f"auth-code-{AgentId()}")
     auth_store.add_one_time_code(agent_id=agent_id, code=code)
@@ -228,6 +228,43 @@ def test_landing_page_shows_agent_after_authentication(tmp_path: Path) -> None:
     assert str(agent_id) in response.text
 
 
+# -- Agent default redirect tests --
+
+
+def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {"web": "http://test-backend:9100"},
+        },
+    )
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+
+    response = client.get(f"/agents/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/agents/{agent_id}/web/"
+
+
+def test_agent_default_page_rejects_unauthenticated_requests(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={str(agent_id): {"web": "http://test-backend"}},
+    )
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get(f"/agents/{agent_id}/", follow_redirects=False)
+    assert response.status_code == 403
+
+
 # -- Agent servers page tests --
 
 
@@ -245,7 +282,7 @@ def test_agent_servers_page_lists_available_servers(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
 
-    response = client.get(f"/agents/{agent_id}/")
+    response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
     assert "web" in response.text
     assert "api" in response.text
@@ -263,7 +300,7 @@ def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) ->
     )
     _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
 
-    response = client.get(f"/agents/{agent_id}/")
+    response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
     assert "No servers are currently running" in response.text
 
@@ -279,7 +316,7 @@ def test_agent_servers_page_rejects_unauthenticated_requests(tmp_path: Path) -> 
         http_client=None,
     )
 
-    response = client.get(f"/agents/{agent_id}/")
+    response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 403
 
 
@@ -518,18 +555,16 @@ def test_mng_cli_resolver_proxies_to_backend_discovered_via_mng_cli(tmp_path: Pa
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(
-        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
-        agents_json=make_agents_json(agent_id),
-    )
-
     backend_app = _create_test_backend()
     test_http_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=backend_app),
         base_url="http://test-backend",
     )
 
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = make_resolver_with_data(
+        server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
+        agents_json=make_agents_json(agent_id),
+    )
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -560,10 +595,6 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     data_dir = tmp_path / "changelings_data"
 
     log_content = make_server_log("web", "http://web-backend") + make_server_log("api", "http://api-backend")
-    fake_cli = FakeMngCli(
-        server_logs={str(agent_id): log_content},
-        agents_json=make_agents_json(agent_id),
-    )
 
     # Create distinct backends for web and api
     web_backend = FastAPI()
@@ -580,7 +611,10 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
 
     test_http_client = _create_multi_backend_http_client(web_app=web_backend, api_app=api_backend)
 
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = make_resolver_with_data(
+        server_logs={str(agent_id): log_content},
+        agents_json=make_agents_json(agent_id),
+    )
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -607,12 +641,11 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
 
 
 def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> None:
-    """When mng events fails (agent has no servers.jsonl), the proxy returns 502."""
+    """When mng events fails (agent has no servers/events.jsonl), the proxy returns 502."""
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(server_logs={}, agents_json=None)
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
+    backend_resolver = MngCliBackendResolver()
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -631,12 +664,10 @@ def test_mng_cli_resolver_landing_page_shows_discovered_agents(tmp_path: Path) -
     agent_id = AgentId()
     data_dir = tmp_path / "changelings_data"
 
-    fake_cli = FakeMngCli(
+    backend_resolver = make_resolver_with_data(
         server_logs={str(agent_id): make_server_log("web", "http://test-backend")},
         agents_json=make_agents_json(agent_id),
     )
-
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -656,12 +687,11 @@ def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None
     data_dir = tmp_path / "changelings_data"
 
     log_content = make_server_log("web", "http://test:9100") + make_server_log("api", "http://test:9200")
-    fake_cli = FakeMngCli(
+
+    backend_resolver = make_resolver_with_data(
         server_logs={str(agent_id): log_content},
         agents_json=make_agents_json(agent_id),
     )
-
-    backend_resolver = MngCliBackendResolver(mng_cli=fake_cli)
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -670,7 +700,7 @@ def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None
 
     _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
 
-    response = client.get(f"/agents/{agent_id}/")
+    response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
     assert "web" in response.text
     assert "api" in response.text
