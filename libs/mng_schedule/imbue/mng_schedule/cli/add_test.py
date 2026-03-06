@@ -154,31 +154,26 @@ class TestCheckSafeCreateCommand:
         result = check_safe_create_command("my-agent --reuse --in modal")
         assert result is None
 
-    def test_passes_with_new_branch_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'agent-run-{DATE}' --in modal")
+    def test_passes_with_branch_date_placeholder(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':agent-run-{DATE}' --in modal")
         assert result is None
 
-    def test_passes_with_new_branch_equals_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch=agent-run-{DATE} --in modal")
+    def test_passes_with_branch_equals_date_placeholder(self) -> None:
+        result = check_safe_create_command("my-agent --branch=:agent-run-{DATE} --in modal")
         assert result is None
 
-    def test_fails_with_new_branch_equals_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch=static-branch --in modal")
+    def test_fails_with_branch_equals_without_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch=:static-branch --in modal")
         assert result is not None
 
-    def test_fails_without_reuse_or_new_branch(self) -> None:
+    def test_fails_without_reuse_or_branch_date(self) -> None:
         result = check_safe_create_command("my-agent --in modal")
         assert result is not None
-        assert "--new-branch" in result
+        assert "--branch" in result
         assert "--reuse" in result
 
-    def test_fails_with_new_branch_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'static-branch' --in modal")
-        assert result is not None
-
-    def test_fails_with_new_branch_flag_only(self) -> None:
-        """--new-branch used as a flag (no value) should fail because there's no {DATE}."""
-        result = check_safe_create_command("my-agent --new-branch --in modal")
+    def test_fails_with_branch_without_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':static-branch' --in modal")
         assert result is not None
 
     def test_passes_with_empty_args_and_reuse(self) -> None:
@@ -194,6 +189,10 @@ class TestCheckSafeCreateCommand:
         result = check_safe_create_command("my-agent -- --reuse")
         assert result is not None
 
-    def test_new_branch_date_before_separator_passes(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'run-{DATE}' -- --model opus")
+    def test_branch_date_before_separator_passes(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':run-{DATE}' -- --model opus")
+        assert result is None
+
+    def test_passes_with_branch_base_and_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch 'main:run-{DATE}' --in modal")
         assert result is None

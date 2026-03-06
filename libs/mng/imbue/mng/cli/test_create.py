@@ -1020,7 +1020,7 @@ no_copy_work_dir = true
 
 
 # =============================================================================
-# Tests for ensure-clean behavior with --base-branch
+# Tests for ensure-clean behavior with explicit base branch
 # =============================================================================
 
 

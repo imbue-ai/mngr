@@ -410,7 +410,6 @@ def test_mng_create_transfers_git_repo_with_new_branch(
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
-            "--new-branch=",
             "--",
             "git rev-parse --abbrev-ref HEAD && sleep 3600",
         ],

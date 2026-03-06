@@ -134,7 +134,7 @@ def check_safe_create_command(args: str) -> str | None:
     Returns None if args are safe, or an error message string if not.
 
     Currently checks:
-    - Either --new-branch with a {DATE} placeholder in its value, or --reuse
+    - Either --branch with a {DATE} placeholder in its NEW part, or --reuse
       must be specified, so that each scheduled run doesn't conflict.
     """
     parts = shlex.split(args) if args else []
@@ -143,28 +143,27 @@ def check_safe_create_command(args: str) -> str | None:
     if _has_flag(mng_args, "--reuse"):
         return None
 
-    # Check for --new-branch with a {DATE} placeholder in its value.
-    # Handles three forms:
-    # 1. "--new-branch value" (two tokens, space-separated)
-    # 2. "--new-branch=value" (single token, equals-separated)
-    # 3. "--new-branch" alone (flag mode, no value -- not sufficient)
+    # Check for --branch with a {DATE} placeholder in the value.
+    # The --branch flag uses [BASE][:NEW] format. We need {DATE} somewhere
+    # in the value to ensure unique branch names per run.
+    # Handles two forms:
+    # 1. "--branch value" (two tokens, space-separated)
+    # 2. "--branch=value" (single token, equals-separated)
     for i, part in enumerate(mng_args):
-        # Single-token form: --new-branch=value
-        if part.startswith("--new-branch="):
-            branch_value = part[len("--new-branch=") :]
+        # Single-token form: --branch=value
+        if part.startswith("--branch="):
+            branch_value = part[len("--branch=") :]
             if "{DATE}" in branch_value:
                 return None
-        # Two-token form: --new-branch value
-        elif part == "--new-branch" and i + 1 < len(mng_args):
+        # Two-token form: --branch value
+        elif part == "--branch" and i + 1 < len(mng_args):
             next_arg = mng_args[i + 1]
-            # If the next arg looks like another flag, --new-branch was used
-            # as a flag (no value), so skip it.
             if not next_arg.startswith("-") and "{DATE}" in next_arg:
                 return None
 
     return (
-        "Create command should either use --new-branch with a {DATE} placeholder "
-        "(e.g. --new-branch 'my-branch-{DATE}') or --reuse to avoid creating "
+        "Create command should either use --branch with a {DATE} placeholder "
+        "(e.g. --branch ':run-{DATE}') or --reuse to avoid creating "
         "conflicting agents/branches on each scheduled run."
     )
 
@@ -211,7 +210,7 @@ def _get_provider_ssh_public_key(
     "ensure_safe_commands",
     default=True,
     show_default=True,
-    help="Error if the scheduled command looks unsafe (e.g. missing --new-branch {DATE} or --reuse). "
+    help="Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). "
     "Pass --no-ensure-safe-commands to downgrade these errors to warnings.",
 )
 @add_common_options
