@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -17,7 +17,7 @@ members = [
     "imbue-common",
     "mng",
     "mng-changeling-chat",
-    "mng-claude-zygote",
+    "mng-claude-changeling",
     "mng-elena-code",
     "mng-kanpan",
     "mng-opencode",
@@ -1877,9 +1877,9 @@ requires-dist = [
 ]
 
 [[package]]
-name = "mng-claude-zygote"
+name = "mng-claude-changeling"
 version = "0.1.0"
-source = { editable = "libs/mng_claude_zygote" }
+source = { editable = "libs/mng_claude_changeling" }
 dependencies = [
     { name = "mng" },
     { name = "mng-ttyd" },
@@ -1899,13 +1899,13 @@ version = "0.1.0"
 source = { editable = "libs/mng_elena_code" }
 dependencies = [
     { name = "mng" },
-    { name = "mng-claude-zygote" },
+    { name = "mng-claude-changeling" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mng", editable = "libs/mng" },
-    { name = "mng-claude-zygote", editable = "libs/mng_claude_zygote" },
+    { name = "mng-claude-changeling", editable = "libs/mng_claude_changeling" },
 ]
 
 [[package]]
@@ -1991,13 +1991,13 @@ version = "0.1.0"
 source = { editable = "libs/mng_test_coder" }
 dependencies = [
     { name = "mng" },
-    { name = "mng-claude-zygote" },
+    { name = "mng-claude-changeling" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mng", editable = "libs/mng" },
-    { name = "mng-claude-zygote", editable = "libs/mng_claude_zygote" },
+    { name = "mng-claude-changeling", editable = "libs/mng_claude_changeling" },
 ]
 
 [[package]]

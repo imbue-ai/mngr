@@ -1,19 +1,19 @@
-"""Unit tests for the mng_claude_zygote settings module."""
+"""Unit tests for the mng_claude_changeling settings module."""
 
 from pathlib import Path
 from typing import Any
 from typing import cast
 
-from imbue.mng_claude_zygote.conftest import StubCommandResult
-from imbue.mng_claude_zygote.conftest import StubHost
-from imbue.mng_claude_zygote.data_types import ChatModel
-from imbue.mng_claude_zygote.data_types import ClaudeZygoteSettings
-from imbue.mng_claude_zygote.settings import load_settings_from_host
+from imbue.mng_claude_changeling.conftest import StubCommandResult
+from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.data_types import ChatModel
+from imbue.mng_claude_changeling.data_types import ClaudeChangelingSettings
+from imbue.mng_claude_changeling.settings import load_settings_from_host
 
 
 def test_settings_from_partial_toml() -> None:
     """Verify that partial TOML data fills in defaults for missing sections."""
-    settings = ClaudeZygoteSettings.model_validate({"chat": {"model": "claude-sonnet-4-6"}})
+    settings = ClaudeChangelingSettings.model_validate({"chat": {"model": "claude-sonnet-4-6"}})
     assert settings.chat.model == ChatModel("claude-sonnet-4-6")
     # Other sections should have defaults
     assert settings.chat.context.max_transcript_line_count == 10
@@ -31,7 +31,7 @@ def test_settings_from_full_toml() -> None:
         "watchers": {"event_poll_interval_seconds": 10},
         "provisioning": {"fs_hard_timeout_seconds": 30.0},
     }
-    settings = ClaudeZygoteSettings.model_validate(data)
+    settings = ClaudeChangelingSettings.model_validate(data)
     assert settings.chat.model == ChatModel("claude-sonnet-4-6")
     assert settings.chat.context.max_content_length == 500
     assert settings.chat.extra_context.transcript_line_count == 100
@@ -45,7 +45,7 @@ def test_settings_from_full_toml() -> None:
 def test_load_settings_returns_defaults_when_file_missing() -> None:
     host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
     settings = load_settings_from_host(cast(Any, host), Path("/work"), ".changelings")
-    assert settings == ClaudeZygoteSettings()
+    assert settings == ClaudeChangelingSettings()
 
 
 def test_load_settings_parses_toml_from_host() -> None:
@@ -58,7 +58,7 @@ def test_load_settings_parses_toml_from_host() -> None:
 def test_load_settings_returns_defaults_on_invalid_toml() -> None:
     host = StubHost(text_file_contents={"settings.toml": "not valid toml {{{"})
     settings = load_settings_from_host(cast(Any, host), Path("/work"), ".changelings")
-    assert settings == ClaudeZygoteSettings()
+    assert settings == ClaudeChangelingSettings()
 
 
 def test_load_settings_returns_defaults_on_read_failure() -> None:

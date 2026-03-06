@@ -1876,6 +1876,8 @@ When adding a new ratchet to any project's `test_ratchets.py`, you must add the 
 
 Ratchet values use `inline_snapshot` so they can be automatically updated with `--inline-snapshot=fix`.
 
+**Important:** Ratchet tests do not work correctly with unstaged changes. Always stage or commit your changes before running ratchet tests.
+
 #### Project-specific ratchets (`test_project_ratchets.py`)
 
 If a project needs ratchets that only apply to it (not to all projects), put them in a `test_project_ratchets.py` file instead. These are not checked for consistency across projects.

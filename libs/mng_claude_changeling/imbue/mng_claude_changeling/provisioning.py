@@ -18,8 +18,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.providers.ssh_host_setup import load_resource_script
-from imbue.mng_claude_zygote import resources as zygote_resources
-from imbue.mng_claude_zygote.data_types import ProvisioningSettings
+from imbue.mng_claude_changeling import resources as changeling_resources
+from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 
 # Scripts to provision to $MNG_HOST_DIR/commands/
 _SCRIPT_FILES: Final[tuple[str, ...]] = (
@@ -88,9 +88,9 @@ def _execute_with_timing(
     return result
 
 
-def load_zygote_resource(filename: str) -> str:
-    """Load a resource file from the mng_claude_zygote resources package."""
-    resource_files = importlib.resources.files(zygote_resources)
+def load_changeling_resource(filename: str) -> str:
+    """Load a resource file from the mng_claude_changeling resources package."""
+    resource_files = importlib.resources.files(changeling_resources)
     resource_path = resource_files.joinpath(filename)
     return resource_path.read_text()
 
@@ -121,7 +121,7 @@ def _write_default_if_missing(
         label="mkdir",
     )
 
-    content = load_zygote_resource(resource_path)
+    content = load_changeling_resource(resource_path)
     with log_span("Writing default content: {}", target_path):
         host.write_text_file(target_path, content)
 
@@ -459,13 +459,13 @@ def provision_changeling_scripts(host: OnlineHostInterface, settings: Provisioni
         host.write_file(mng_log_path, mng_log_content.encode(), mode="0755")
 
     for script_name in _SCRIPT_FILES:
-        script_content = load_zygote_resource(script_name)
+        script_content = load_changeling_resource(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
 
     for module_name in _SCRIPT_MODULES:
-        module_content = load_zygote_resource(module_name)
+        module_content = load_changeling_resource(module_name)
         module_path = commands_dir / module_name
         with log_span("Writing {} to host", module_name):
             host.write_file(module_path, module_content.encode(), mode="0644")
@@ -487,7 +487,7 @@ def provision_llm_tools(host: OnlineHostInterface, settings: ProvisioningSetting
     )
 
     for tool_file in _LLM_TOOL_FILES:
-        tool_content = load_zygote_resource(tool_file)
+        tool_content = load_changeling_resource(tool_file)
         tool_path = tools_dir / tool_file
         with log_span("Writing {} to host", tool_file):
             host.write_file(tool_path, tool_content.encode(), mode="0644")
