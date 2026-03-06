@@ -90,17 +90,6 @@ def test_get_tui_ready_indicator_returns_none(
     assert agent.get_tui_ready_indicator() is None
 
 
-def test_wait_for_ready_signal_calls_start_action(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-) -> None:
-    """wait_for_ready_signal should just call start_action without polling."""
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
-    called = []
-    agent.wait_for_ready_signal(is_creating=True, start_action=lambda: called.append(True))
-    assert called == [True]
-
-
 # =============================================================================
 # Tests for assemble_command
 # =============================================================================

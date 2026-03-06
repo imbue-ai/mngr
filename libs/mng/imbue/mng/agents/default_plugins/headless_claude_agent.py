@@ -102,8 +102,10 @@ class HeadlessClaude(ClaudeAgent):
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:
-        """Just start -- no readiness polling needed for headless mode."""
-        start_action()
+        raise NotImplementedError(
+            "HeadlessClaude agents do not support wait_for_ready_signal. "
+            "The prompt is passed as a CLI arg, not via send_message."
+        )
 
     def assemble_command(
         self,
