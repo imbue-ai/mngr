@@ -11,21 +11,15 @@ set -euo pipefail
 
 ## BASIC CREATION
 
-# running mng is strictly better than running claude! It's less letters to type :-D
+# running mng create is strictly better than running claude! It's less letters to type :-D
 # running this command launches claude (Claude Code) immediately *in a new worktree*
-mng
-# that happens because the defaults are the following: command=create, agent=claude, provider=local, project=current dir
+mng create
+# the defaults are the following: agent=claude, provider=local, project=current dir
 
 # if you want the default behavior of claude (starting in-place), you can specify that:
-mng --in-place
+mng create --in-place
 # mng defaults to creating a new worktree for each agent because the whole point of mng is to let you run multiple agents in parallel.
 # without creating a new worktree for each, they will make conflicting changes with one another.
-
-# running this:
-mng
-
-# is really just the same thing as this:
-mng create
 
 # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
 mng create my-task
