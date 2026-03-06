@@ -223,6 +223,7 @@ def test_deploy_all_flags_skip_all_prompts(tmp_path: Path) -> None:
     assert "launch its own agents" not in result.output
 
 
+@pytest.mark.modal
 def test_deploy_accepts_modal_provider(tmp_path: Path) -> None:
     """Verify that modal provider is accepted (not rejected at provider check)."""
     repo_dir = _create_git_repo_with_agent_type(tmp_path)
@@ -232,6 +233,7 @@ def test_deploy_accepts_modal_provider(tmp_path: Path) -> None:
     assert "Only local deployment is supported" not in result.output
 
 
+@pytest.mark.docker
 def test_deploy_accepts_docker_provider(tmp_path: Path) -> None:
     """Verify that docker provider is accepted (not rejected at provider check)."""
     repo_dir = _create_git_repo_with_agent_type(tmp_path)
@@ -717,6 +719,8 @@ def test_deploy_with_self_deploy_flag(tmp_path: Path) -> None:
 # --- Tests for deploy prompt interaction via CLI ---
 
 
+@pytest.mark.docker
+@pytest.mark.modal
 @pytest.mark.parametrize("provider_input", ["2", "3"])
 def test_deploy_provider_prompt_accepts_selection(
     tmp_path: Path,
