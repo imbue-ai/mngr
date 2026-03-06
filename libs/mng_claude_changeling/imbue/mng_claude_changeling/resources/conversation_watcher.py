@@ -140,9 +140,9 @@ def _sync_messages(
             # syncing duplicate user messages.
             if prompt and response == "":
                 continue
-            # injected messages are, by default, sent with prompt="", so we can skip these as well
+            # injected messages are, by default, sent with prompt="...", so we can skip these as well
             # (since they were injected by the agent itself, and it doesn't need to observe its own messages)
-            if prompt == "":
+            if prompt == "...":
                 continue
 
             if prompt:
