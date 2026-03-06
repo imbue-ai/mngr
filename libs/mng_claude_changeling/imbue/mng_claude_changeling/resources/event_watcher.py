@@ -43,6 +43,7 @@ from loguru import logger
 
 try:
     from imbue.mng_claude_changeling.resources.watcher_common import DEFAULT_CEL_FILTER
+    from imbue.mng_claude_changeling.resources.watcher_common import MngNotInstalledError
     from imbue.mng_claude_changeling.resources.watcher_common import get_mng_command
     from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
     from imbue.mng_claude_changeling.resources.watcher_common import require_env
@@ -50,6 +51,7 @@ try:
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from watcher_common import DEFAULT_CEL_FILTER  # type: ignore[no-redef]
+    from watcher_common import MngNotInstalledError  # type: ignore[no-redef]
     from watcher_common import get_mng_command  # type: ignore[no-redef]
     from watcher_common import load_watchers_section  # type: ignore[no-redef]
     from watcher_common import require_env  # type: ignore[no-redef]
@@ -296,7 +298,7 @@ def _send_message(agent_name: str, message: str) -> bool:
     except subprocess.TimeoutExpired:
         logger.error("Timed out sending message to {}", agent_name)
         return False
-    except (OSError, RuntimeError) as exc:
+    except (OSError, MngNotInstalledError) as exc:
         logger.error("Failed to invoke mng message subprocess: {}", exc)
         return False
 

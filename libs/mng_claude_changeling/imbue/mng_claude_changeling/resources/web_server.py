@@ -40,9 +40,11 @@ from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
 try:
+    from imbue.mng_claude_changeling.resources.watcher_common import MngNotInstalledError
     from imbue.mng_claude_changeling.resources.watcher_common import get_mng_command
 except ImportError:
     sys.path.insert(0, os.path.join(os.environ.get("MNG_HOST_DIR", ""), "commands"))
+    from watcher_common import MngNotInstalledError  # type: ignore[no-redef]
     from watcher_common import get_mng_command  # type: ignore[no-redef]
 
 # -- Environment and paths --
@@ -213,7 +215,7 @@ def _poll_agent_list_forever() -> None:
                     _log(f"Failed to parse mng list JSON output: {e}")
         except subprocess.TimeoutExpired:
             _log("mng list timed out")
-        except (FileNotFoundError, RuntimeError):
+        except (FileNotFoundError, MngNotInstalledError):
             _log("mng not found, cannot poll agent list")
         except OSError as e:
             _log(f"Failed to poll agent list: {e}")

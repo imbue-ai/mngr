@@ -334,17 +334,19 @@ def create_fake_mng_binary(agent_state_dir: Path) -> Path:
     return mng_bin
 
 
-@pytest.fixture(autouse=True)
-def _ensure_fake_mng_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure a fake mng binary exists at $MNG_AGENT_STATE_DIR/bin/mng.
+@pytest.fixture()
+def fake_mng_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a fake mng binary and set MNG_AGENT_STATE_DIR to point to it.
 
-    Always creates a temporary agent state dir with a fake binary and
-    sets MNG_AGENT_STATE_DIR to point to it. This avoids overwriting any
-    real per-agent mng binary when tests run inside an mng-managed agent.
+    Use this fixture in tests that invoke code paths which call
+    get_mng_command() (e.g. event_watcher._send_message, web_server polling).
+
+    Returns the path to the fake agent state dir.
     """
     fake_state_dir = tmp_path / "fake_agent_state"
     create_fake_mng_binary(fake_state_dir)
     monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(fake_state_dir))
+    return fake_state_dir
 
 
 class EventWatcherSubprocessCapture:
@@ -361,7 +363,7 @@ class EventWatcherSubprocessCapture:
 
 
 @pytest.fixture()
-def mock_subprocess_success(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubprocessCapture:
+def mock_subprocess_success(monkeypatch: pytest.MonkeyPatch, fake_mng_binary: Path) -> EventWatcherSubprocessCapture:
     """Replace event_watcher's subprocess with a recording stub (returncode=0)."""
     capture = EventWatcherSubprocessCapture(returncode=0)
     mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)
@@ -370,7 +372,7 @@ def mock_subprocess_success(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubp
 
 
 @pytest.fixture()
-def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubprocessCapture:
+def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch, fake_mng_binary: Path) -> EventWatcherSubprocessCapture:
     """Replace event_watcher's subprocess with a recording stub (returncode=1)."""
     capture = EventWatcherSubprocessCapture(returncode=1, stderr="send failed")
     mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)

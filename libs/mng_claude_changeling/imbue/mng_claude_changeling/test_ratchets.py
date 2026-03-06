@@ -66,7 +66,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(36))
+    rc.check_inline_imports(_DIR, snapshot(40))
 
 
 def test_prevent_relative_imports() -> None:
