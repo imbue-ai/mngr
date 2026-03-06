@@ -21,8 +21,8 @@ from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng_claude_changeling import resources as changeling_resources
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 
-# Scripts to provision to $MNG_HOST_DIR/commands/
-_SCRIPT_FILES: Final[tuple[str, ...]] = (
+# Supporting service scripts to provision to $MNG_HOST_DIR/commands/
+_SERVICE_SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
     "chat_ttyd_handler.sh",
     "web_server.py",
@@ -31,8 +31,8 @@ _SCRIPT_FILES: Final[tuple[str, ...]] = (
     "transcript_watcher.py",
 )
 
-# Python modules provisioned alongside scripts (not executable, mode 0644)
-_SCRIPT_MODULES: Final[tuple[str, ...]] = ("watcher_common.py",)
+# Python modules provisioned alongside supporting service scripts (not executable, mode 0644)
+_SERVICE_MODULES: Final[tuple[str, ...]] = ("watcher_common.py",)
 
 # Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/
 _LLM_TOOL_FILES: Final[tuple[str, ...]] = (
@@ -270,7 +270,7 @@ def warn_if_mng_unavailable(
 ) -> None:
     """Warn if mng will not be available on the agent host.
 
-    Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to
+    Supporting service scripts (event_watcher.py, etc.) use 'uv run mng message' to
     communicate with the primary agent. If mng is not available on the host,
     these scripts will fail silently.
 
@@ -295,7 +295,7 @@ def warn_if_mng_unavailable(
     if not check_result.success:
         logger.warning(
             "mng is not available on the remote host and the mng_recursive plugin is not enabled. "
-            "Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to communicate "
+            "Supporting service scripts (event_watcher.py, etc.) use 'uv run mng message' to communicate "
             "with the primary agent and will fail without mng installed. "
             "Enable the mng_recursive plugin or install mng on the remote host manually."
         )
@@ -437,8 +437,8 @@ def _create_dir_symlink_if_target_exists(
             raise RuntimeError(f"Failed to create directory symlink {link_path} -> {target_path}: {result.stderr}")
 
 
-def provision_changeling_scripts(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
-    """Write changeling scripts to $MNG_HOST_DIR/commands/.
+def provision_supporting_services(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
+    """Write supporting service scripts to $MNG_HOST_DIR/commands/.
 
     Scripts are loaded from the resources package and written with execute permission.
     """
@@ -452,19 +452,19 @@ def provision_changeling_scripts(host: OnlineHostInterface, settings: Provisioni
     )
 
     # Provision the shared logging library (from mng core resources) first,
-    # since the changeling scripts source it.
+    # since the supporting service scripts source it.
     mng_log_content = load_resource_script("mng_log.sh")
     mng_log_path = commands_dir / "mng_log.sh"
     with log_span("Writing mng_log.sh to host"):
         host.write_file(mng_log_path, mng_log_content.encode(), mode="0755")
 
-    for script_name in _SCRIPT_FILES:
+    for script_name in _SERVICE_SCRIPT_FILES:
         script_content = load_changeling_resource(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
 
-    for module_name in _SCRIPT_MODULES:
+    for module_name in _SERVICE_MODULES:
         module_content = load_changeling_resource(module_name)
         module_path = commands_dir / module_name
         with log_span("Writing {} to host", module_name):

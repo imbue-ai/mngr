@@ -19,7 +19,7 @@ from imbue.mng_claude_changeling.data_types import CommonToolResultEvent
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 from imbue.mng_claude_changeling.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_changeling.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_changeling.provisioning import _SCRIPT_FILES
+from imbue.mng_claude_changeling.provisioning import _SERVICE_SCRIPT_FILES
 from imbue.mng_claude_changeling.provisioning import _is_recursive_plugin_registered
 from imbue.mng_claude_changeling.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_changeling.provisioning import compute_claude_project_dir_name
@@ -30,9 +30,9 @@ from imbue.mng_claude_changeling.provisioning import create_event_log_directorie
 from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
 from imbue.mng_claude_changeling.provisioning import load_changeling_resource
-from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
 from imbue.mng_claude_changeling.provisioning import provision_default_content
 from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import provision_supporting_services
 from imbue.mng_claude_changeling.provisioning import resolve_work_dir_abs
 from imbue.mng_claude_changeling.provisioning import setup_memory_directory
 from imbue.mng_claude_changeling.provisioning import validate_talking_role_constraints
@@ -543,25 +543,25 @@ def test_provision_default_content_writes_skills_to_thinking() -> None:
     assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
 
 
-def test_provision_changeling_scripts_creates_commands_dir() -> None:
+def test_provision_supporting_services_creates_commands_dir() -> None:
     host = StubHost()
-    provision_changeling_scripts(cast(Any, host), _DEFAULT_PROVISIONING)
+    provision_supporting_services(cast(Any, host), _DEFAULT_PROVISIONING)
 
     assert any("mkdir" in c and "commands" in c for c in host.executed_commands)
 
 
-def test_provision_changeling_scripts_writes_all_scripts() -> None:
+def test_provision_supporting_services_writes_all_scripts() -> None:
     host = StubHost()
-    provision_changeling_scripts(cast(Any, host), _DEFAULT_PROVISIONING)
+    provision_supporting_services(cast(Any, host), _DEFAULT_PROVISIONING)
 
     written_names = [str(path) for path, _, _ in host.written_files]
-    for script_name in _SCRIPT_FILES:
+    for script_name in _SERVICE_SCRIPT_FILES:
         assert any(script_name in name for name in written_names), f"{script_name} not written"
 
 
-def test_provision_changeling_scripts_uses_executable_mode() -> None:
+def test_provision_supporting_services_uses_executable_mode() -> None:
     host = StubHost()
-    provision_changeling_scripts(cast(Any, host), _DEFAULT_PROVISIONING)
+    provision_supporting_services(cast(Any, host), _DEFAULT_PROVISIONING)
 
     for path, _, mode in host.written_files:
         # Script modules (non-executable) are provisioned with 0644

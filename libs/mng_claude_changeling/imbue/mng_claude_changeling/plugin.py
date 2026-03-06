@@ -27,9 +27,9 @@ from imbue.mng_claude_changeling.provisioning import create_daily_conversation
 from imbue.mng_claude_changeling.provisioning import create_event_log_directories
 from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
-from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
 from imbue.mng_claude_changeling.provisioning import provision_default_content
 from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import provision_supporting_services
 from imbue.mng_claude_changeling.provisioning import resolve_work_dir_abs
 from imbue.mng_claude_changeling.provisioning import setup_memory_directory
 from imbue.mng_claude_changeling.provisioning import validate_talking_role_constraints
@@ -183,7 +183,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
         options: CreateAgentOptions,
         mng_ctx: MngContext,
     ) -> None:
-        """Provision the changeling agent with llm toolchain and watcher infrastructure.
+        """Provision a changeling role agent with llm toolchain and supporting service infrastructure.
 
         Extends ClaudeAgent provisioning with:
         1. Settings loading from changelings.toml
@@ -192,7 +192,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
         4. Default content (GLOBAL.md, role prompts, role .claude/ config)
         5. Symlinks for active role (.claude -> <role>/.claude, CLAUDE.md, CLAUDE.local.md)
         6. All hooks (readiness + memory sync) written to <role>/.claude/settings.local.json
-        7. Watcher scripts and chat utilities
+        7. Supporting service scripts and chat utilities
         8. Event log directory structure (events/<source>/events.jsonl)
         9. LLM tool scripts for conversation context
         10. Per-role memory directory setup
@@ -223,7 +223,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
         work_dir_abs = resolve_work_dir_abs(host, self.work_dir, provisioning)
         self._configure_role_hooks(host, active_role, work_dir_abs)
 
-        provision_changeling_scripts(host, provisioning)
+        provision_supporting_services(host, provisioning)
         provision_llm_tools(host, provisioning)
 
         agent_state_dir = self._get_agent_dir()
@@ -239,7 +239,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
         setup_memory_directory(host, self.work_dir, active_role, work_dir_abs, provisioning)
 
 
-def inject_changeling_windows(params: dict[str, Any]) -> None:
+def inject_supporting_services(params: dict[str, Any]) -> None:
     """Inject all changeling supporting service tmux windows into the create command parameters.
 
     Adds:
@@ -307,4 +307,4 @@ def override_command_options(
     if not _is_claude_changeling_agent_type(agent_type):
         return
 
-    inject_changeling_windows(params)
+    inject_supporting_services(params)

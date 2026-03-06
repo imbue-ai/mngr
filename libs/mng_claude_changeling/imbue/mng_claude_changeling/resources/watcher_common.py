@@ -1,9 +1,10 @@
-"""Shared utilities for changeling watcher scripts.
+"""Shared utilities for changeling supporting service scripts.
 
-This module is provisioned alongside the watcher scripts (event_watcher.py,
-conversation_watcher.py, transcript_watcher.py) to $MNG_HOST_DIR/commands/
-and imported by them at runtime. It provides the common watchdog integration,
-logging, and polling infrastructure that all watchers share.
+This module is provisioned alongside the supporting service scripts
+(event_watcher.py, conversation_watcher.py, transcript_watcher.py) to
+$MNG_HOST_DIR/commands/ and imported by them at runtime. It provides the
+common watchdog integration, logging, and polling infrastructure that all
+supporting services share.
 """
 
 from __future__ import annotations
