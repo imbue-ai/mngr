@@ -59,7 +59,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     # Build board entries with branch and PR info
     entries: list[AgentBoardEntry] = []
     for agent in result.agents:
-        branch = agent.branch
+        branch = agent.initial_branch
         pr = pr_by_branch.get(branch) if branch else None
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None

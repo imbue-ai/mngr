@@ -101,7 +101,7 @@ def test_find_git_cwd_empty_agents() -> None:
 
 def test_fetch_board_snapshot_integrates_agents_and_prs() -> None:
     agent1 = make_agent_details(
-        name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal", branch="mng/agent-1"
+        name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal", initial_branch="mng/agent-1"
     )
     agent2 = make_agent_details(name="agent-2", state=AgentLifecycleState.DONE, provider_name="modal")
 
@@ -168,7 +168,7 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
         capture_output=True,
     )
 
-    agent = make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local", branch="mng/agent-1")
+    agent = make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local", initial_branch="mng/agent-1")
 
     pr_result = FetchPrsResult(prs=(), error="gh pr list failed: auth required")
 
