@@ -42,6 +42,9 @@ source "$MNG_HOST_DIR/commands/mng_log.sh"
 
 LOG_FILE="$_MNG_LOG_FILE"
 
+# set this so that we dont get back funny-looking echo output
+export LLM_MATCHED_RESPONSE="Thinking..."
+
 # Nanosecond-precision UTC timestamp in ISO 8601 format.
 iso_timestamp_ns() {
     date -u +"%Y-%m-%dT%H:%M:%S.%NZ"
