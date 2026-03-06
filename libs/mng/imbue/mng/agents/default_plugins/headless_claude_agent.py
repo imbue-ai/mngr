@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Callable
@@ -168,8 +167,7 @@ class HeadlessClaude(ClaudeAgent, HeadlessAgentMixin):
             parts.extend(all_extra_args)
 
         cmd_str = " ".join(parts)
-        stdout_path = "$MNG_AGENT_STATE_DIR/stdout.jsonl"
-        return CommandString(f"{cmd_str} > {shlex.quote(stdout_path)}")
+        return CommandString(f'{cmd_str} > "$MNG_AGENT_STATE_DIR/stdout.jsonl"')
 
     def _get_stdout_path(self) -> Path:
         """Return the path to the stdout.jsonl file for this agent."""
