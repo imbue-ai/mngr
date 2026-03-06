@@ -30,3 +30,20 @@ command = "mng stop $MNG_AGENT_NAME"
 markable = true
 refresh_afterwards = true
 ```
+
+## Refresh behavior
+
+Kanpan uses two refresh strategies:
+
+- **Full refresh** (manual 'r' key, periodic 10-minute timer): fetches both agent state and GitHub PR data. Only one can be in flight at a time -- pressing 'r' while a refresh is running is ignored.
+- **Agent-only refresh** (after push, delete, custom commands): fetches agent state without hitting the GitHub API. PR data is carried forward from the previous snapshot.
+
+Both are configurable:
+
+```toml
+[plugins.kanpan]
+# Seconds between periodic full refreshes (default 10 minutes)
+refresh_interval_seconds = 600.0
+# Seconds before retrying after a failed full refresh
+retry_cooldown_seconds = 60.0
+```

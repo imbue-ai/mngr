@@ -7,6 +7,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
@@ -18,6 +19,7 @@ from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSnapshot
+from imbue.mng_kanpan.data_types import GitHubData
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.github import fetch_all_prs
@@ -25,47 +27,132 @@ from imbue.mng_kanpan.github import fetch_all_prs
 PLUGIN_NAME = "kanpan"
 
 
-def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
-    """Fetch a complete board snapshot: agents, branches, and PR associations.
+def fetch_agent_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
+    """Fetch agent state: agents, git branches, commits ahead, mute state.
 
-    Lists all agents, fetches GitHub PRs, resolves each agent's branch,
-    and matches agents to PRs by branch name.
+    Entries have pr=None and create_pr_url=None (no GitHub API calls).
     """
     start_time = time.monotonic()
     errors: list[str] = []
     cg = mng_ctx.concurrency_group
 
-    # List all agents (continue on errors to show partial results)
     result = list_agents(mng_ctx, is_streaming=False, error_behavior=ErrorBehavior.CONTINUE)
     for error in result.errors:
         errors.append(f"{error.exception_type}: {error.message}")
 
-    # Load agent references to read plugin data (certified_data from data.json)
     muted_agents = _load_muted_agents(mng_ctx)
 
-    # Find a local agent work_dir to use as cwd for gh (so it can detect the repo)
-    gh_cwd = _find_git_cwd(result.agents)
+    entries: list[AgentBoardEntry] = []
+    for agent in result.agents:
+        branch = agent.initial_branch
+        is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
+        local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
+        commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
+        entries.append(
+            AgentBoardEntry(
+                name=agent.name,
+                state=agent.state,
+                provider_name=agent.host.provider_name,
+                work_dir=local_work_dir,
+                branch=branch,
+                commits_ahead=commits_ahead,
+                is_muted=agent.name in muted_agents,
+            )
+        )
 
-    # Fetch all PRs from GitHub
+    elapsed = time.monotonic() - start_time
+    return BoardSnapshot(
+        entries=tuple(entries),
+        errors=tuple(errors),
+        prs_loaded=False,
+        fetch_time_seconds=elapsed,
+    )
+
+
+def fetch_github_data(mng_ctx: MngContext, agents: list[AgentDetails]) -> GitHubData:
+    """Fetch GitHub PR data and build the PR-to-branch index.
+
+    Returns a GitHubData containing pr_by_branch, repo_path, and any errors.
+    """
+    cg = mng_ctx.concurrency_group
+    errors: list[str] = []
+
+    gh_cwd = _find_git_cwd(agents)
+
     pr_result = fetch_all_prs(cg, cwd=gh_cwd)
     prs_loaded = pr_result.error is None
     if pr_result.error is not None:
         errors.append(pr_result.error)
     pr_by_branch = _build_pr_branch_index(pr_result.prs)
 
-    # Detect GitHub repo for PR creation URLs
     repo_path = _get_github_repo_path(gh_cwd, cg) if gh_cwd is not None else None
 
-    # Build board entries with branch and PR info
+    return GitHubData(
+        pr_by_branch=pr_by_branch,
+        repo_path=repo_path,
+        prs_loaded=prs_loaded,
+        errors=tuple(errors),
+    )
+
+
+@pure
+def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData) -> BoardSnapshot:
+    """Enrich a local-only snapshot with GitHub PR data.
+
+    For each entry, looks up PR by branch name and attaches pr and create_pr_url.
+    """
+    enriched_entries: list[AgentBoardEntry] = []
+    for entry in snapshot.entries:
+        pr = remote.pr_by_branch.get(entry.branch) if entry.branch else None
+        create_pr_url = (
+            _build_create_pr_url(remote.repo_path, entry.branch)
+            if remote.prs_loaded and remote.repo_path and entry.branch and pr is None
+            else None
+        )
+        enriched_entry = entry.model_copy_update(
+            to_update(entry.field_ref().pr, pr),
+            to_update(entry.field_ref().create_pr_url, create_pr_url),
+        )
+        enriched_entries.append(enriched_entry)
+
+    return BoardSnapshot(
+        entries=tuple(enriched_entries),
+        errors=(*snapshot.errors, *remote.errors),
+        prs_loaded=remote.prs_loaded,
+        fetch_time_seconds=snapshot.fetch_time_seconds,
+    )
+
+
+def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
+    """Full fetch: local snapshot enriched with GitHub PR data.
+
+    Lists agents once and uses the result for both local and remote fetching.
+    """
+    start_time = time.monotonic()
+    errors: list[str] = []
+    cg = mng_ctx.concurrency_group
+
+    result = list_agents(mng_ctx, is_streaming=False, error_behavior=ErrorBehavior.CONTINUE)
+    for error in result.errors:
+        errors.append(f"{error.exception_type}: {error.message}")
+
+    muted_agents = _load_muted_agents(mng_ctx)
+
+    # Fetch remote data (GitHub PRs)
+    remote = fetch_github_data(mng_ctx, result.agents)
+
+    # Build board entries with both local and remote info
     entries: list[AgentBoardEntry] = []
     for agent in result.agents:
         branch = agent.initial_branch
-        pr = pr_by_branch.get(branch) if branch else None
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
         commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
+        pr = remote.pr_by_branch.get(branch) if branch else None
         create_pr_url = (
-            _build_create_pr_url(repo_path, branch) if prs_loaded and repo_path and branch and pr is None else None
+            _build_create_pr_url(remote.repo_path, branch)
+            if remote.prs_loaded and remote.repo_path and branch and pr is None
+            else None
         )
         entries.append(
             AgentBoardEntry(
@@ -84,8 +171,8 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     elapsed = time.monotonic() - start_time
     return BoardSnapshot(
         entries=tuple(entries),
-        errors=tuple(errors),
-        prs_loaded=prs_loaded,
+        errors=(*errors, *remote.errors),
+        prs_loaded=remote.prs_loaded,
         fetch_time_seconds=elapsed,
     )
 

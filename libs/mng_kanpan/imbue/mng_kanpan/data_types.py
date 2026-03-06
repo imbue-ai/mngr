@@ -75,6 +75,15 @@ class BoardSnapshot(FrozenModel):
     fetch_time_seconds: float = Field(description="Time taken to fetch data")
 
 
+class GitHubData(FrozenModel):
+    """GitHub PR data fetched via the gh CLI, used to enrich agent snapshots."""
+
+    pr_by_branch: dict[str, PrInfo] = Field(description="Mapping from branch name to the most relevant PR")
+    repo_path: str | None = Field(default=None, description="GitHub owner/repo path (e.g. 'owner/repo')")
+    prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched")
+    errors: tuple[str, ...] = Field(default=(), description="Errors encountered during remote fetch")
+
+
 class CustomCommand(FrozenModel):
     """A command definition for the kanpan board (builtin or user-defined)."""
 
@@ -99,6 +108,14 @@ class KanpanPluginConfig(PluginConfig):
         default_factory=dict,
         description="Custom commands keyed by their trigger key",
     )
+    refresh_interval_seconds: float = Field(
+        default=600.0,
+        description="Seconds between periodic full refreshes (default 10 minutes)",
+    )
+    retry_cooldown_seconds: float = Field(
+        default=60.0,
+        description="Minimum seconds before retrying after a failed full refresh",
+    )
 
     def merge_with(self, override: "PluginConfig") -> "KanpanPluginConfig":
         """Merge this config with an override config."""
@@ -106,4 +123,19 @@ class KanpanPluginConfig(PluginConfig):
             return self
         merged_enabled = override.enabled if override.enabled is not None else self.enabled
         merged_commands = {**self.commands, **override.commands}
-        return KanpanPluginConfig(enabled=merged_enabled, commands=merged_commands)
+        merged_refresh_interval = (
+            override.refresh_interval_seconds
+            if override.refresh_interval_seconds is not None
+            else self.refresh_interval_seconds
+        )
+        merged_auto_cooldown = (
+            override.retry_cooldown_seconds
+            if override.retry_cooldown_seconds is not None
+            else self.retry_cooldown_seconds
+        )
+        return KanpanPluginConfig(
+            enabled=merged_enabled,
+            commands=merged_commands,
+            refresh_interval_seconds=merged_refresh_interval,
+            retry_cooldown_seconds=merged_auto_cooldown,
+        )
