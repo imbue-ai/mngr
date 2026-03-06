@@ -117,7 +117,7 @@ By default, `mng create` uses the "local" host. Use these options to change that
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--branch` | text | Branch spec as [BASE][:NEW]. BASE defaults to current branch. NEW creates a fresh branch (* is replaced by agent name). Omit :NEW to use BASE directly without creating a branch. | `:mng/*` |
+| `--branch` | text | Branch spec as [BASE][:NEW]. BASE defaults to current branch. NEW creates a fresh branch (* is replaced by agent name). Omit :NEW to use BASE directly without creating a branch. Empty NEW (e.g. 'main:') defaults to mng/*. | `:mng/*` |
 | `--depth` | integer | Shallow clone depth [default: full] | None |
 | `--shallow-since` | text | Shallow clone since date | None |
 

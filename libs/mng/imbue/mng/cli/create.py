@@ -5,6 +5,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 from typing import assert_never
 from typing import cast
 
@@ -98,6 +99,8 @@ from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.name_generator import generate_agent_name
 from imbue.mng.utils.polling import wait_for
+
+_DEFAULT_NEW_BRANCH_PATTERN: Final[str] = "mng/*"
 
 
 class _CachedAgentHostLoader(MutableModel):
@@ -393,12 +396,13 @@ class CreateCliOptions(CommonCliOptions):
 @optgroup.group("Agent Git Configuration")
 @optgroup.option(
     "--branch",
-    default=":mng/*",
+    default=f":{_DEFAULT_NEW_BRANCH_PATTERN}",
     show_default=True,
     help="Branch spec as [BASE][:NEW]. "
     "BASE defaults to current branch. "
     "NEW creates a fresh branch (* is replaced by agent name). "
-    "Omit :NEW to use BASE directly without creating a branch.",
+    "Omit :NEW to use BASE directly without creating a branch. "
+    f"Empty NEW (e.g. 'main:') defaults to {_DEFAULT_NEW_BRANCH_PATTERN}.",
 )
 @optgroup.option("--depth", type=int, help="Shallow clone depth [default: full]")
 @optgroup.option("--shallow-since", help="Shallow clone since date")
@@ -693,7 +697,7 @@ def _create_agent(
     )
 
     # Parse agent options
-    agent_opts = _parse_agent_opts(
+    agent_opts, has_explicit_base = _parse_agent_opts(
         opts=opts,
         initial_message=setup.initial_message,
         resume_message=setup.resume_message,
@@ -745,7 +749,6 @@ def _create_agent(
     # Skip the check when using worktree mode with an explicit base branch, since the
     # agent will be created from that branch and uncommitted changes in the current
     # working tree are irrelevant.
-    has_explicit_base = ":" in opts.branch and opts.branch.split(":", 1)[0] != ""
     is_worktree_from_other_branch = (
         agent_opts.git is not None and agent_opts.git.copy_mode == WorkDirCopyMode.WORKTREE and has_explicit_base
     )
@@ -1259,7 +1262,7 @@ def _parse_agent_opts(
     resume_message: str | None,
     source_location: HostLocation,
     mng_ctx: MngContext,
-) -> CreateAgentOptions:
+) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from positional argument or --name flag, otherwise auto-generate
     parsed_agent_name: AgentName
     if opts.positional_name:
@@ -1300,7 +1303,7 @@ def _parse_agent_opts(
             copy_mode = WorkDirCopyMode.COPY
 
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
-    base_branch, new_branch_name = _parse_branch_flag(opts.branch, parsed_agent_name)
+    base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
 
     # --worktree requires a new branch
     if copy_mode == WorkDirCopyMode.WORKTREE and new_branch_name is None:
@@ -1436,7 +1439,7 @@ def _parse_agent_opts(
         label_options=label_options,
         provisioning=provisioning,
     )
-    return agent_opts
+    return agent_opts, has_explicit_base
 
 
 def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOptions:
@@ -1538,26 +1541,27 @@ def _parse_target_host(
 
 
 @pure
-def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, str | None]:
+def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, str | None, bool]:
     """Parse a --branch flag value in [BASE_BRANCH][:NEW_BRANCH] format.
 
-    Returns (base_branch, new_branch_name) where:
+    Returns (base_branch, new_branch_name, has_explicit_base) where:
     - base_branch is None if not specified (meaning "current branch")
     - new_branch_name is None if no colon is present (meaning "no new branch")
     - new_branch_name has any * replaced with the agent name
+    - has_explicit_base is True if a non-empty base branch was specified
     """
     if ":" not in branch:
         # No colon: just a base branch, no new branch
-        return (branch or None, None)
+        return (branch or None, None, bool(branch))
 
     base, new = branch.split(":", 1)
     if not new:
-        raise UserInputError("--branch: new branch name after ':' must not be empty")
+        new = _DEFAULT_NEW_BRANCH_PATTERN
     if new.count("*") > 1:
         raise UserInputError("--branch: at most one '*' is allowed in the new branch name")
 
     resolved_new = new.replace("*", str(agent_name))
-    return (base or None, resolved_new)
+    return (base or None, resolved_new, bool(base))
 
 
 class ParsedSourceString(FrozenModel):

@@ -1423,7 +1423,8 @@ class Host(BaseHost, OnlineHostInterface):
             work_dir_path = self.host_dir / "worktrees" / str(agent_id)
 
         # Worktree mode always requires a new branch (enforced at CLI)
-        assert options.git and options.git.new_branch_name, "Worktree requires a new branch name"
+        if not options.git or not options.git.new_branch_name:
+            raise UserInputError("Worktree mode requires a new branch name in git options")
         branch_name = options.git.new_branch_name
 
         with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
