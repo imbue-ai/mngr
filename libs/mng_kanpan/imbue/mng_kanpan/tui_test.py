@@ -12,7 +12,7 @@ from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSection
 from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import CheckStatus
-from imbue.mng_kanpan.data_types import PendingMark
+from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.testing import make_pr_info
@@ -20,6 +20,7 @@ from imbue.mng_kanpan.tui import _KanpanState
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
+from imbue.mng_kanpan.tui import _dispatch_command
 from imbue.mng_kanpan.tui import _get_name_cell_markup
 from imbue.mng_kanpan.tui import _is_safe_to_delete
 from imbue.mng_kanpan.tui import _toggle_mark
@@ -77,7 +78,10 @@ def _make_entry(
     )
 
 
-def _make_state(entries: tuple[AgentBoardEntry, ...] = ()) -> _KanpanState:
+def _make_state(
+    entries: tuple[AgentBoardEntry, ...] = (),
+    commands: dict[str, CustomCommand] | None = None,
+) -> _KanpanState:
     """Create a minimal _KanpanState for testing pure functions."""
     snapshot = BoardSnapshot(entries=entries, fetch_time_seconds=0.1) if entries else None
     frame = _stub()
@@ -101,7 +105,7 @@ def _make_state(entries: tuple[AgentBoardEntry, ...] = ()) -> _KanpanState:
         list_walker=None,
         focused_agent_name=None,
         steady_footer_text="  Loading...",
-        commands={},
+        commands=commands or {},
         loop=None,
         refresh_future=None,
         executor=None,
@@ -203,7 +207,7 @@ def test_name_cell_markup_no_mark() -> None:
 
 def test_name_cell_markup_delete_mark() -> None:
     entry = _make_entry()
-    result = _get_name_cell_markup(entry, mark=PendingMark.DELETE)
+    result = _get_name_cell_markup(entry, mark_key="d")
     assert isinstance(result, list)
     assert result[0] == ("mark_delete", "d")
     assert "agent-1" in result[1]
@@ -211,7 +215,7 @@ def test_name_cell_markup_delete_mark() -> None:
 
 def test_name_cell_markup_push_mark() -> None:
     entry = _make_entry(work_dir=Path("/tmp/work"))
-    result = _get_name_cell_markup(entry, mark=PendingMark.PUSH)
+    result = _get_name_cell_markup(entry, mark_key="p")
     assert isinstance(result, list)
     assert result[0] == ("mark_push", "p")
 
@@ -226,8 +230,8 @@ def test_toggle_mark_adds_mark() -> None:
     first_idx = min(state.index_to_entry.keys())
     state.list_walker.set_focus(first_idx)
 
-    _toggle_mark(state, PendingMark.DELETE)
-    assert state.marks == {AgentName("agent-1"): PendingMark.DELETE}
+    _toggle_mark(state, "d")
+    assert state.marks == {AgentName("agent-1"): "d"}
 
 
 def test_toggle_mark_removes_same_mark() -> None:
@@ -236,8 +240,8 @@ def test_toggle_mark_removes_same_mark() -> None:
     first_idx = min(state.index_to_entry.keys())
     state.list_walker.set_focus(first_idx)
 
-    state.marks[AgentName("agent-1")] = PendingMark.DELETE
-    _toggle_mark(state, PendingMark.DELETE)
+    state.marks[AgentName("agent-1")] = "d"
+    _toggle_mark(state, "d")
     assert AgentName("agent-1") not in state.marks
 
 
@@ -247,9 +251,9 @@ def test_toggle_mark_replaces_different_mark() -> None:
     first_idx = min(state.index_to_entry.keys())
     state.list_walker.set_focus(first_idx)
 
-    state.marks[AgentName("agent-1")] = PendingMark.DELETE
-    _toggle_mark(state, PendingMark.PUSH)
-    assert state.marks[AgentName("agent-1")] == PendingMark.PUSH
+    state.marks[AgentName("agent-1")] = "d"
+    _toggle_mark(state, "p")
+    assert state.marks[AgentName("agent-1")] == "p"
 
 
 def test_toggle_push_mark_rejected_without_work_dir() -> None:
@@ -258,7 +262,7 @@ def test_toggle_push_mark_rejected_without_work_dir() -> None:
     first_idx = min(state.index_to_entry.keys())
     state.list_walker.set_focus(first_idx)
 
-    _toggle_mark(state, PendingMark.PUSH)
+    _toggle_mark(state, "p")
     assert AgentName("agent-1") not in state.marks
 
 
@@ -270,7 +274,7 @@ def test_unmark_focused_removes_mark() -> None:
     state = _make_state(entries=(entry,))
     first_idx = min(state.index_to_entry.keys())
     state.list_walker.set_focus(first_idx)
-    state.marks[AgentName("agent-1")] = PendingMark.DELETE
+    state.marks[AgentName("agent-1")] = "d"
 
     _unmark_focused(state)
     assert AgentName("agent-1") not in state.marks
@@ -293,8 +297,8 @@ def test_unmark_all_clears_all_marks() -> None:
     e1 = _make_entry(name="agent-1")
     e2 = _make_entry(name="agent-2")
     state = _make_state(entries=(e1, e2))
-    state.marks[AgentName("agent-1")] = PendingMark.DELETE
-    state.marks[AgentName("agent-2")] = PendingMark.PUSH
+    state.marks[AgentName("agent-1")] = "d"
+    state.marks[AgentName("agent-2")] = "p"
 
     _unmark_all(state)
     assert state.marks == {}
@@ -312,7 +316,7 @@ def test_unmark_all_noop_when_empty() -> None:
 def test_build_board_widgets_shows_mark_indicator() -> None:
     entry = _make_entry()
     snapshot = BoardSnapshot(entries=(entry,), fetch_time_seconds=0.1)
-    marks = {AgentName("agent-1"): PendingMark.DELETE}
+    marks = {AgentName("agent-1"): "d"}
 
     walker, index_to_entry = _build_board_widgets(snapshot, marks)
 
@@ -320,6 +324,54 @@ def test_build_board_widgets_shows_mark_indicator() -> None:
     texts = _extract_text([walker[agent_idx]])
     assert len(texts) == 1
     assert texts[0].startswith("d")
+
+
+# --- Custom command dispatch (markable vs immediate) ---
+
+
+def test_dispatch_markable_custom_command_toggles_mark() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)
+    commands = {"s": cmd}
+    state = _make_state(entries=(entry,), commands=commands)
+    first_idx = min(state.index_to_entry.keys())
+    state.list_walker.set_focus(first_idx)
+
+    _dispatch_command(state, "s", cmd)
+    assert state.marks == {AgentName("agent-1"): "s"}
+
+
+def test_dispatch_markable_custom_command_toggles_off() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)
+    commands = {"s": cmd}
+    state = _make_state(entries=(entry,), commands=commands)
+    first_idx = min(state.index_to_entry.keys())
+    state.list_walker.set_focus(first_idx)
+
+    state.marks[AgentName("agent-1")] = "s"
+    _dispatch_command(state, "s", cmd)
+    assert AgentName("agent-1") not in state.marks
+
+
+def test_dispatch_immediate_custom_command_does_not_mark() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="connect", command="mng connect $MNG_AGENT_NAME")
+    commands = {"c": cmd}
+    state = _make_state(entries=(entry,), commands=commands)
+    first_idx = min(state.index_to_entry.keys())
+    state.list_walker.set_focus(first_idx)
+
+    _dispatch_command(state, "c", cmd)
+    assert state.marks == {}
+
+
+def test_name_cell_markup_custom_mark_uses_command_color() -> None:
+    entry = _make_entry()
+    result = _get_name_cell_markup(entry, mark_key="s")
+    assert isinstance(result, list)
+    assert result[0] == ("mark_command", "s")
+    assert "agent-1" in result[1]
 
 
 # === _carry_forward_pr_data ===

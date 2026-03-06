@@ -38,13 +38,6 @@ class BoardSection(UpperCaseStrEnum):
     MUTED = auto()
 
 
-class PendingMark(UpperCaseStrEnum):
-    """A pending operation mark on an agent, like Emacs dired flags."""
-
-    DELETE = auto()
-    PUSH = auto()
-
-
 class PrInfo(FrozenModel):
     """GitHub pull request information associated with an agent."""
 
@@ -92,6 +85,10 @@ class CustomCommand(FrozenModel):
     )
     refresh_afterwards: bool = Field(default=False, description="Whether to trigger a board refresh after completion")
     enabled: bool = Field(default=True, description="Whether this command is active")
+    markable: bool = Field(
+        default=False,
+        description="If true, pressing the key marks agents for batch execution with x instead of running immediately",
+    )
 
 
 class KanpanPluginConfig(PluginConfig):

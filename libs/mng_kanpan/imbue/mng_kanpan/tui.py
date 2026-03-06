@@ -36,7 +36,6 @@ from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import CheckStatus
 from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
-from imbue.mng_kanpan.data_types import PendingMark
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
@@ -75,6 +74,8 @@ PALETTE = [
     ("mark_delete_focus", "light red,standout", ""),
     ("mark_push", "yellow", ""),
     ("mark_push_focus", "yellow,standout", ""),
+    ("mark_command", "light cyan", ""),
+    ("mark_command_focus", "light cyan,standout", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -127,8 +128,8 @@ _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
 _BUILTIN_COMMANDS: dict[str, CustomCommand] = {
     _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push"),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete"),
+    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable=True),
+    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable=True),
     _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute"),
     _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark"),
     _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute"),
@@ -143,12 +144,13 @@ _AGENT_LINE_ATTRS = (
     "muted",
     "mark_delete",
     "mark_push",
+    "mark_command",
 )
 
-# Map from PendingMark to the mark indicator character and attribute
-_MARK_DISPLAY: dict[PendingMark, tuple[str, str]] = {
-    PendingMark.DELETE: ("d", "mark_delete"),
-    PendingMark.PUSH: ("p", "mark_push"),
+# Map from command key to the urwid color attribute for that mark
+_MARK_KEY_ATTR: dict[str, str] = {
+    _BUILTIN_COMMAND_KEY_DELETE: "mark_delete",
+    _BUILTIN_COMMAND_KEY_PUSH: "mark_push",
 }
 
 # Column layout configuration
@@ -174,10 +176,10 @@ class _SelectableRow(Columns):
         """Pass all keys through (no keys are handled by this widget)."""
         return key
 
-    def set_mark(self, mark: PendingMark | None) -> None:
-        """Update the name cell to reflect the given mark (or clear it)."""
+    def set_mark(self, mark_key: str | None) -> None:
+        """Update the name cell to reflect the given mark key (or clear it)."""
         name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(
-            self.entry, mark
+            self.entry, mark_key
         )
         if self.section == BoardSection.MUTED:
             name_markup = _flatten_markup_to_muted(name_markup)
@@ -212,8 +214,8 @@ class _KanpanState(MutableModel):
     spinner_index: int = 0
     refresh_future: Future[BoardSnapshot] | None = None
     executor: ThreadPoolExecutor | None = None
-    # Dired-style marks: agents flagged for batch operations
-    marks: dict[AgentName, PendingMark] = {}
+    # Dired-style marks: agents flagged for batch operations, keyed by command key
+    marks: dict[AgentName, str] = {}
     # Set when awaiting execute confirmation for agents whose PRs are not merged
     pending_confirm_deletes: tuple[AgentName, ...] = ()
     # Active batch execution state
@@ -325,7 +327,7 @@ def _is_safe_to_delete(entry: AgentBoardEntry) -> bool:
     return entry.pr is not None and entry.pr.state == PrState.MERGED
 
 
-def _update_row_mark(state: _KanpanState, walker_idx: int, mark: PendingMark | None) -> None:
+def _update_row_mark(state: _KanpanState, walker_idx: int, mark: str | None) -> None:
     """Update the mark indicator on a single row without rebuilding the display."""
     if state.list_walker is None:
         return
@@ -334,7 +336,7 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark: PendingMark | N
     row.set_mark(mark)
 
 
-def _toggle_mark(state: _KanpanState, mark: PendingMark) -> None:
+def _toggle_mark(state: _KanpanState, key: str) -> None:
     """Toggle a dired-style mark on the focused agent."""
     if state.list_walker is None:
         return
@@ -345,17 +347,17 @@ def _toggle_mark(state: _KanpanState, mark: PendingMark) -> None:
     if entry is None:
         return
 
-    if mark == PendingMark.PUSH and entry.work_dir is None:
+    if key == _BUILTIN_COMMAND_KEY_PUSH and entry.work_dir is None:
         _show_transient_message(state, f"  Cannot push: {entry.name} has no local work_dir")
         return
 
     existing = state.marks.get(entry.name)
-    if existing == mark:
+    if existing == key:
         del state.marks[entry.name]
         new_mark = None
     else:
-        state.marks[entry.name] = mark
-        new_mark = mark
+        state.marks[entry.name] = key
+        new_mark = key
 
     _update_row_mark(state, focus_idx, new_mark)
     _update_mark_count_footer(state)
@@ -395,12 +397,14 @@ def _update_mark_count_footer(state: _KanpanState) -> None:
     if not state.marks:
         _restore_footer(state)
         return
-    counts: dict[PendingMark, int] = {}
-    for mark in state.marks.values():
-        counts[mark] = counts.get(mark, 0) + 1
+    counts: dict[str, int] = {}
+    for mark_key in state.marks.values():
+        counts[mark_key] = counts.get(mark_key, 0) + 1
     parts = []
-    for mark, count in sorted(counts.items(), key=lambda x: x[0].value):
-        parts.append(f"{count} {mark.lower()}")
+    for mark_key, count in sorted(counts.items()):
+        cmd = state.commands.get(mark_key)
+        label = cmd.name if cmd else mark_key
+        parts.append(f"{count} {label}")
     state.footer_left_text.set_text(f"  Marked: {', '.join(parts)}  (x to execute, U to unmark all)")
     state.footer_left_attr.set_attr_map({None: "footer"})
 
@@ -414,8 +418,8 @@ def _execute_marks(state: _KanpanState) -> None:
     unsafe_deletes: list[AgentName] = []
     if state.snapshot is not None:
         entries_by_name = {e.name: e for e in state.snapshot.entries}
-        for name, mark in state.marks.items():
-            if mark == PendingMark.DELETE:
+        for name, mark_key in state.marks.items():
+            if mark_key == _BUILTIN_COMMAND_KEY_DELETE:
                 entry = entries_by_name.get(name)
                 if entry is not None and not _is_safe_to_delete(entry):
                     unsafe_deletes.append(name)
@@ -445,6 +449,26 @@ def _cancel_execute_confirmation(state: _KanpanState) -> None:
     _update_mark_count_footer(state)
 
 
+class _BatchWorkItem(NamedTuple):
+    name: AgentName
+    key: str
+    cmd: CustomCommand
+    entry: AgentBoardEntry | None
+
+
+def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.CompletedProcess[str]:
+    """Run a shell command with MNG_AGENT_NAME set. Called from a background thread."""
+    env = {**os.environ, "MNG_AGENT_NAME": agent_name}
+    return subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+
+
 def _start_batch_execution(state: _KanpanState) -> None:
     """Begin executing all marked operations sequentially."""
     if state.executor is None:
@@ -453,21 +477,37 @@ def _start_batch_execution(state: _KanpanState) -> None:
     state.executing = True
     state.spinner_index = 0
 
-    # Build the work queue: list of (agent_name, mark, entry) tuples
     entries_by_name: dict[AgentName, AgentBoardEntry] = {}
     if state.snapshot is not None:
         entries_by_name = {e.name: e for e in state.snapshot.entries}
 
-    work: list[tuple[AgentName, PendingMark, AgentBoardEntry | None]] = [
-        (name, mark, entries_by_name.get(name)) for name, mark in state.marks.items()
-    ]
+    work: list[_BatchWorkItem] = []
+    for name, mark_key in state.marks.items():
+        cmd = state.commands.get(mark_key)
+        if cmd is not None:
+            work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
 
     _execute_next_in_batch(state, work, [], 0)
 
 
+def _submit_batch_item(
+    executor: ThreadPoolExecutor, item: _BatchWorkItem
+) -> Future[subprocess.CompletedProcess[str]] | None:
+    """Submit a single batch work item to the executor. Returns None if the item can't be executed."""
+    if item.key == _BUILTIN_COMMAND_KEY_DELETE:
+        return executor.submit(_run_destroy, str(item.name))
+    if item.key == _BUILTIN_COMMAND_KEY_PUSH:
+        if item.entry is None or item.entry.work_dir is None:
+            return None
+        return executor.submit(_run_git_push, str(item.entry.work_dir))
+    if item.cmd.command:
+        return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
+    return None
+
+
 def _execute_next_in_batch(
     state: _KanpanState,
-    work: list[tuple[AgentName, PendingMark, AgentBoardEntry | None]],
+    work: list[_BatchWorkItem],
     results: list[str],
     index: int,
 ) -> None:
@@ -476,29 +516,23 @@ def _execute_next_in_batch(
         _finish_batch_execution(state, results)
         return
 
-    name, mark, entry = work[index]
+    item = work[index]
     state.execute_status = f"  [{index + 1}/{len(work)}] "
 
     assert state.executor is not None
-    if mark == PendingMark.DELETE:
-        state.footer_left_text.set_text(f"{state.execute_status}Deleting {name}...")
-        future: Future[subprocess.CompletedProcess[str]] = state.executor.submit(_run_destroy, str(name))
-    elif mark == PendingMark.PUSH:
-        if entry is None or entry.work_dir is None:
-            results.append(f"Cannot push {name}: no local work_dir")
-            _execute_next_in_batch(state, work, results, index + 1)
-            return
-        state.footer_left_text.set_text(f"{state.execute_status}Pushing {name}...")
-        future = state.executor.submit(_run_git_push, str(entry.work_dir))
-    else:
+    future = _submit_batch_item(state.executor, item)
+    if future is None:
+        results.append(f"{item.cmd.name} {item.name}: skipped (not executable)")
         _execute_next_in_batch(state, work, results, index + 1)
         return
+
+    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name}...")
 
     if state.loop is not None:
         state.loop.set_alarm_in(
             SPINNER_INTERVAL_SECONDS,
             _on_batch_item_poll,
-            (state, future, work, results, index, name, mark),
+            (state, future, work, results, index, item),
         )
 
 
@@ -507,36 +541,32 @@ def _on_batch_item_poll(
     data: tuple[
         _KanpanState,
         Future[subprocess.CompletedProcess[str]],
-        list[tuple[AgentName, PendingMark, AgentBoardEntry | None]],
+        list[_BatchWorkItem],
         list[str],
         int,
-        AgentName,
-        PendingMark,
+        _BatchWorkItem,
     ],
 ) -> None:
     """Poll for completion of a single batch item."""
-    state, future, work, results, index, name, mark = data
+    state, future, work, results, index, item = data
 
     if future.done():
-        action = mark.lower()
         try:
             result = future.result()
             if result.returncode == 0:
-                results.append(f"{action} {name}: ok")
-                # Remove the mark for completed item
-                state.marks.pop(name, None)
+                results.append(f"{item.cmd.name} {item.name}: ok")
+                state.marks.pop(item.name, None)
             else:
                 stderr = result.stderr.strip()
-                results.append(f"{action} {name}: failed ({stderr})")
+                results.append(f"{item.cmd.name} {item.name}: failed ({stderr})")
         except Exception as e:
-            results.append(f"{action} {name}: failed ({e})")
+            results.append(f"{item.cmd.name} {item.name}: failed ({e})")
 
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
     frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    action = "Deleting" if mark == PendingMark.DELETE else "Pushing"
-    state.footer_left_text.set_text(f"{state.execute_status}{action} {name} {frame_char}")
+    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name} {frame_char}")
     state.spinner_index += 1
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
 
@@ -625,16 +655,10 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
 
 
 def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
-    """Dispatch a command by key. Routes to builtins or runs shell commands."""
+    """Dispatch a command by key. Routes to builtins, markable commands, or immediate shell commands."""
     if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
         if state.refresh_future is None and state.loop is not None:
             _start_refresh(state.loop, state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_DELETE and not cmd.command:
-        _toggle_mark(state, PendingMark.DELETE)
-        return
-    if key == _BUILTIN_COMMAND_KEY_PUSH and not cmd.command:
-        _toggle_mark(state, PendingMark.PUSH)
         return
     if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
         _mute_focused_agent(state)
@@ -645,7 +669,10 @@ def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None
     if key == _BUILTIN_COMMAND_KEY_EXECUTE and not cmd.command:
         _execute_marks(state)
         return
-    # User-defined shell command
+    if cmd.markable:
+        _toggle_mark(state, key)
+        return
+    # Immediate shell command
     if cmd.command:
         _run_shell_command(state, cmd)
 
@@ -909,12 +936,12 @@ def _flatten_markup_to_muted(
 
 
 def _get_name_cell_markup(
-    entry: AgentBoardEntry, mark: PendingMark | None = None
+    entry: AgentBoardEntry, mark_key: str | None = None
 ) -> str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]:
     """Build urwid text markup for the name column cell, with optional mark indicator."""
-    if mark is not None:
-        char, attr = _MARK_DISPLAY[mark]
-        return [(attr, char), f" {entry.name}"]
+    if mark_key is not None:
+        attr = _MARK_KEY_ATTR.get(mark_key, "mark_command")
+        return [(attr, mark_key), f" {entry.name}"]
     return f"  {entry.name}"
 
 
@@ -982,7 +1009,7 @@ def _build_agent_row(
     entry: AgentBoardEntry,
     section: BoardSection,
     widths: dict[str, int],
-    mark: PendingMark | None = None,
+    mark: str | None = None,
 ) -> _SelectableRow:
     """Build a columnar urwid widget for a single agent row.
 
@@ -1034,7 +1061,7 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
 @pure
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
-    marks: dict[AgentName, PendingMark] | None = None,
+    marks: dict[AgentName, str] | None = None,
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
 
