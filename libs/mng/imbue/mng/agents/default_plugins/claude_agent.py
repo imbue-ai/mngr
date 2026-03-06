@@ -491,6 +491,26 @@ def _provision_remote_credentials(
         logger.debug("Skipped .credentials.json (file does not exist)")
 
 
+def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path) -> None:
+    """Sync user resources from ~/.claude/ into the per-agent config dir.
+
+    Symlinks or copies settings.json, skills/, agents/, commands/, plugins/
+    depending on _SYMLINK_LOCAL_USER_RESOURCES.
+    """
+    home_claude = Path.home() / ".claude"
+    for item_name in _CLAUDE_HOME_SYNC_ITEMS:
+        source = home_claude / item_name
+        if not source.exists():
+            continue
+        dest = config_dir / item_name
+        if _SYMLINK_LOCAL_USER_RESOURCES:
+            host.execute_command(f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+        elif source.is_dir():
+            host.execute_command(f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+        else:
+            host.execute_command(f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+
+
 def _provision_background_scripts(host: OnlineHostInterface) -> None:
     """Write the background task scripts to $MNG_HOST_DIR/commands/.
 
@@ -1027,37 +1047,16 @@ class ClaudeAgent(BaseAgent):
         config_dir: Path,
     ) -> None:
         """Set up the per-agent config dir on a local host."""
-        # 1. Generate per-agent .claude.json
         claude_json_data = self._build_per_agent_claude_json(options, config)
-        config_json_path = config_dir / ".claude.json"
-        host.write_text_file(config_json_path, json.dumps(claude_json_data, indent=2) + "\n")
+        host.write_text_file(config_dir / ".claude.json", json.dumps(claude_json_data, indent=2) + "\n")
 
-        # 2. Provision credentials into the per-agent config dir
         if config.convert_macos_credentials and is_macos():
             _provision_keychain_credentials(config_dir, self.mng_ctx.concurrency_group)
         else:
             _provision_file_credentials(host, config_dir)
 
-        # 3. Sync user resources from ~/.claude/ into the per-agent config dir
         if config.sync_home_settings:
-            home_claude = Path.home() / ".claude"
-            for item_name in _CLAUDE_HOME_SYNC_ITEMS:
-                source = home_claude / item_name
-                if not source.exists():
-                    continue
-                dest = config_dir / item_name
-                if _SYMLINK_LOCAL_USER_RESOURCES:
-                    host.execute_command(
-                        f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
-                    )
-                elif source.is_dir():
-                    host.execute_command(
-                        f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
-                    )
-                else:
-                    host.execute_command(
-                        f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
-                    )
+            _sync_local_user_resources(host, config_dir)
 
     def _setup_remote_config_dir(
         self,
