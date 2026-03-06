@@ -338,20 +338,13 @@ def create_fake_mng_binary(agent_state_dir: Path) -> Path:
 def _ensure_fake_mng_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure a fake mng binary exists at $MNG_AGENT_STATE_DIR/bin/mng.
 
-    If MNG_AGENT_STATE_DIR is already set (e.g. when running inside an
-    mng-managed agent), creates the binary at that path. Otherwise, creates
-    a temporary agent state dir and sets MNG_AGENT_STATE_DIR to point to it.
-
-    This ensures get_mng_command() never raises MngNotInstalledError during
-    tests, regardless of whether the test environment has a real agent state dir.
+    Always creates a temporary agent state dir with a fake binary and
+    sets MNG_AGENT_STATE_DIR to point to it. This avoids overwriting any
+    real per-agent mng binary when tests run inside an mng-managed agent.
     """
-    agent_state_dir = os.environ.get("MNG_AGENT_STATE_DIR", "")
-    if agent_state_dir:
-        create_fake_mng_binary(Path(agent_state_dir))
-    else:
-        fake_state_dir = tmp_path / "fake_agent_state"
-        create_fake_mng_binary(fake_state_dir)
-        monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(fake_state_dir))
+    fake_state_dir = tmp_path / "fake_agent_state"
+    create_fake_mng_binary(fake_state_dir)
+    monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(fake_state_dir))
 
 
 class EventWatcherSubprocessCapture:

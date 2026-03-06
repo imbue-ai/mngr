@@ -140,8 +140,9 @@ def _read_conversations() -> list[dict[str, str]]:
                     "LEFT JOIN conversations c ON cc.conversation_id = c.id"
                 ).fetchall()
                 for conversation_id, model, created_at, tags_json in rows:
-                    # Filter out internal conversations (e.g. system_notifications)
                     tags = json.loads(tags_json) if tags_json else {}
+                    if "internal" in tags:
+                        continue
                     conversations_by_id[conversation_id] = {
                         "conversation_id": conversation_id,
                         "name": tags.get("name", ""),
