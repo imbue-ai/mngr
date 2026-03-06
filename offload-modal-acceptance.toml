@@ -19,9 +19,9 @@ run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 0
-# Exclude release tests from the acceptance suite. Exclude docker and modal tests because they
-# require infrastructure not available inside Modal sandboxes.
-filters = "-m'not release and not docker and not docker_sdk and not modal'"
+# Exclude release tests from the acceptance suite. Exclude docker, modal, rsync, and unison tests
+# because they require infrastructure not available inside Modal sandboxes.
+filters = "-m'not release and not docker and not docker_sdk and not modal and not rsync and not unison'"
 
 [report]
 output_dir = "test-results"
