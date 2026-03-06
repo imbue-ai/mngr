@@ -24,6 +24,7 @@ from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.interfaces.agent import AgentInterface
+from imbue.mng.interfaces.agent import HeadlessAgentMixin
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
@@ -102,7 +103,7 @@ class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     )
 
 
-class HeadlessClaude(ClaudeAgent):
+class HeadlessClaude(ClaudeAgent, HeadlessAgentMixin):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -377,5 +378,23 @@ class AgentInterface(MutableModel, ABC):
 
         Use this method to perform agent-type-specific cleanup, such as
         removing external configuration entries or releasing resources.
+        """
+        ...
+
+
+class HeadlessAgentMixin(ABC):
+    """Mixin for agent types that run headlessly (no TUI, no interactive input).
+
+    Headless agents produce output to a file and expose it via stream_output().
+    This mixin serves as a marker interface so callers can check for headless
+    capability without depending on a specific agent implementation.
+    """
+
+    @abstractmethod
+    def stream_output(self) -> Iterator[str]:
+        """Stream text output from the headless agent.
+
+        Yields text chunks as they become available. Returns when the agent
+        process exits and all output has been consumed.
         """
         ...

@@ -16,7 +16,6 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mng.agents.default_plugins.headless_claude_agent import HeadlessClaude
 from imbue.mng.api.create import create as api_create
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
@@ -33,6 +32,7 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import MngError
 from imbue.mng.hosts.host import HostLocation
+from imbue.mng.interfaces.agent import HeadlessAgentMixin
 from imbue.mng.interfaces.host import AgentLabelOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -275,8 +275,8 @@ def _headless_claude_output(mng_ctx: MngContext, prompt: str, system_prompt: str
         )
 
         agent = result.agent
-        if not isinstance(agent, HeadlessClaude):
-            raise MngError(f"Expected HeadlessClaude agent, got {type(agent).__name__}")
+        if not isinstance(agent, HeadlessAgentMixin):
+            raise MngError(f"Expected headless agent with stream_output(), got {type(agent).__name__}")
         try:
             yield agent.stream_output()
         finally:
