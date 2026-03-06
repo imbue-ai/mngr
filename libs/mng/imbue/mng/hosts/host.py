@@ -1098,7 +1098,14 @@ class Host(BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    config_commands.append(f"git remote add origin {shlex.quote(origin_url)}")
+                    # Use set-url if origin already exists (e.g. from --mirror push),
+                    # otherwise add it.
+                    set_or_add = (
+                        f"git remote set-url origin {shlex.quote(origin_url)}"
+                        f" 2>/dev/null"
+                        f" || git remote add origin {shlex.quote(origin_url)}"
+                    )
+                    config_commands.append(set_or_add)
                 result = self.execute_command(
                     " && ".join(config_commands),
                     cwd=target_path,
