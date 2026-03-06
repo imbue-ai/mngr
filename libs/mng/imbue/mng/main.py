@@ -71,8 +71,9 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 class AliasAwareGroup(DefaultCommandGroup):
     """Custom click.Group that shows aliases inline with commands in --help.
 
-    When no subcommand is given, defaults to 'create'. When an unrecognized
-    subcommand is given, it is treated as arguments to 'create' (e.g.
+    When no subcommand is given, shows help. Users can configure a default
+    subcommand via ``[commands.mng] default_subcommand`` in config files
+    (e.g. set to ``"create"`` to restore the old behavior where
     ``mng my-task`` is equivalent to ``mng create my-task``).
     """
 
