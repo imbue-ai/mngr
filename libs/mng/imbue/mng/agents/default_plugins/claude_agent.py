@@ -1273,6 +1273,13 @@ class ClaudeAgent(BaseAgent):
         host.write_text_file(agent_state_dir / "claude_session_id", session_id)
         logger.info("Adopted session {}", session_id)
 
+    # Files expected to already exist in the dest agent state dir before clone
+    # transfer. These are written by create_agent_state() and _setup_per_agent_config_dir().
+    _EXPECTED_CLONE_SKIP_PREFIXES: tuple[str, ...] = (
+        "data.json",
+        "plugin/claude/anthropic/",
+    )
+
     def _transfer_source_agent_data(
         self,
         host: OnlineHostInterface,
@@ -1283,6 +1290,9 @@ class ClaudeAgent(BaseAgent):
         Copies the source agent's entire data directory into this agent's data
         directory using no-clobber to avoid overwriting the new agent's identity
         (data.json, etc.) which was already written by create_agent_state().
+
+        Warns about any unexpected file skips (files that exist in the dest but
+        are not in the expected whitelist).
         """
         dest_data_dir = self._get_agent_dir()
         source_data_dir = source_agent_state_dir
@@ -1304,6 +1314,36 @@ class ClaudeAgent(BaseAgent):
                         if host.execute_command(f"test -f {shlex.quote(str(dest_path))}", timeout_seconds=5.0).success:
                             continue
                         host.write_file(dest_path, file_path.read_bytes())
+
+            # Check for unexpected skipped files
+            self._warn_unexpected_clone_skips(source_data_dir, dest_data_dir)
+
+    def _warn_unexpected_clone_skips(
+        self,
+        source_data_dir: Path,
+        dest_data_dir: Path,
+    ) -> None:
+        """Warn about files that were skipped during clone transfer unexpectedly."""
+        unexpected_skips: list[str] = []
+        for source_file in source_data_dir.rglob("*"):
+            if not source_file.is_file():
+                continue
+            relative = str(source_file.relative_to(source_data_dir))
+            dest_file = dest_data_dir / relative
+            if not dest_file.exists():
+                continue
+            # File exists in both source and dest (was skipped by no-clobber)
+            if not any(
+                relative == prefix or relative.startswith(prefix) for prefix in self._EXPECTED_CLONE_SKIP_PREFIXES
+            ):
+                unexpected_skips.append(relative)
+
+        if unexpected_skips:
+            logger.warning(
+                "Clone transfer skipped {} unexpected file(s) that already existed in dest: {}",
+                len(unexpected_skips),
+                ", ".join(unexpected_skips),
+            )
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Clean up per-agent credentials and trust entries.
