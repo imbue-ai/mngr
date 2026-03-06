@@ -29,6 +29,7 @@ from imbue.mng_kanpan.tui import _KanpanInputHandler
 from imbue.mng_kanpan.tui import _KanpanState
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _build_command_map
+from imbue.mng_kanpan.tui import _build_mark_palette
 from imbue.mng_kanpan.tui import _cancel_execute_confirmation
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
@@ -154,6 +155,7 @@ def _make_state(
         list_walker=None,
         focused_agent_name=None,
         steady_footer_text="  Loading...",
+        mark_attr_names=(),
     )
 
 
@@ -497,6 +499,33 @@ def test_load_user_commands_handles_dict_values() -> None:
 
 
 # =============================================================================
+# Tests for _build_mark_palette
+# =============================================================================
+
+
+def test_build_mark_palette_returns_entries_for_markable_commands() -> None:
+    commands = {"d": CustomCommand(name="delete", markable="light red"), "r": CustomCommand(name="refresh")}
+    entries, attr_names = _build_mark_palette(commands)
+    assert ("mark_d", "light red", "") in entries
+    assert ("mark_d_focus", "light red,standout", "") in entries
+    assert attr_names == ("mark_d",)
+
+
+def test_build_mark_palette_uses_default_color_for_bare_true() -> None:
+    commands = {"s": CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)}
+    entries, attr_names = _build_mark_palette(commands)
+    assert ("mark_s", "light cyan", "") in entries
+    assert attr_names == ("mark_s",)
+
+
+def test_build_mark_palette_skips_non_markable() -> None:
+    commands = {"m": CustomCommand(name="mute")}
+    entries, attr_names = _build_mark_palette(commands)
+    assert entries == []
+    assert attr_names == ()
+
+
+# =============================================================================
 # Tests for _show_transient_message, _restore_footer, _on_restore_footer
 # =============================================================================
 
@@ -812,7 +841,7 @@ def test_name_cell_markup_delete_mark() -> None:
     entry = _make_entry()
     result = _get_name_cell_markup(entry, mark_key="d")
     assert isinstance(result, list)
-    assert result[0] == ("mark_delete", "d")
+    assert result[0] == ("mark_d", "d")
     assert "test-agent" in result[1]
 
 
@@ -820,14 +849,14 @@ def test_name_cell_markup_push_mark() -> None:
     entry = _make_entry(work_dir=Path("/tmp/work"))
     result = _get_name_cell_markup(entry, mark_key="p")
     assert isinstance(result, list)
-    assert result[0] == ("mark_push", "p")
+    assert result[0] == ("mark_p", "p")
 
 
 def test_name_cell_markup_custom_mark_uses_command_color() -> None:
     entry = _make_entry()
     result = _get_name_cell_markup(entry, mark_key="s")
     assert isinstance(result, list)
-    assert result[0] == ("mark_command", "s")
+    assert result[0] == ("mark_s", "s")
     assert "test-agent" in result[1]
 
 

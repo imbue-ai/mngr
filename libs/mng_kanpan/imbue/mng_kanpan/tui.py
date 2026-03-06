@@ -70,12 +70,6 @@ PALETTE = [
     ("section_muted", "dark gray", ""),
     ("error_text", "light red", ""),
     ("notification", "white", "dark magenta"),
-    ("mark_delete", "light red", ""),
-    ("mark_delete_focus", "light red,standout", ""),
-    ("mark_push", "yellow", ""),
-    ("mark_push_focus", "yellow,standout", ""),
-    ("mark_command", "light cyan", ""),
-    ("mark_command_focus", "light cyan,standout", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -128,12 +122,14 @@ _BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
 _BUILTIN_COMMANDS: dict[str, CustomCommand] = {
     _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable=True),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable=True),
+    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
+    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable="light red"),
     _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute"),
     _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark"),
     _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute"),
 }
+
+_DEFAULT_MARK_COLOR = "light cyan"
 
 # All attributes that can appear in agent lines and need focus variants
 _AGENT_LINE_ATTRS = (
@@ -142,16 +138,7 @@ _AGENT_LINE_ATTRS = (
     "check_failing",
     "check_pending",
     "muted",
-    "mark_delete",
-    "mark_push",
-    "mark_command",
 )
-
-# Map from command key to the urwid color attribute for that mark
-_MARK_KEY_ATTR: dict[str, str] = {
-    _BUILTIN_COMMAND_KEY_DELETE: "mark_delete",
-    _BUILTIN_COMMAND_KEY_PUSH: "mark_push",
-}
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
@@ -203,6 +190,8 @@ class _KanpanState(MutableModel):
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
     commands: dict[str, CustomCommand] = {}
+    # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
+    mark_attr_names: tuple[str, ...] = ()
 
 
 class _KanpanInputHandler(MutableModel):
@@ -921,8 +910,7 @@ def _get_name_cell_markup(
 ) -> str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]:
     """Build urwid text markup for the name column cell, with optional mark indicator."""
     if mark_key is not None:
-        attr = _MARK_KEY_ATTR.get(mark_key, "mark_command")
-        return [(attr, mark_key), f" {entry.name}"]
+        return [(f"mark_{mark_key}", mark_key), f" {entry.name}"]
     return f"  {entry.name}"
 
 
@@ -1037,6 +1025,7 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
     marks: dict[AgentName, str] | None = None,
+    mark_attr_names: tuple[str, ...] = (),
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
 
@@ -1088,7 +1077,7 @@ def _build_board_widgets(
             item = _build_agent_row(entry, section, col_widths, mark)
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
-            for attr in _AGENT_LINE_ATTRS:
+            for attr in _AGENT_LINE_ATTRS + mark_attr_names:
                 focus_map[attr] = f"{attr}_focus"
             walker.append(AttrMap(item, None, focus_map=focus_map))
             index_to_entry[idx] = entry
@@ -1116,7 +1105,7 @@ def _refresh_display(state: _KanpanState) -> None:
     if focused_entry is not None:
         state.focused_agent_name = focused_entry.name
 
-    walker, state.index_to_entry = _build_board_widgets(state.snapshot, state.marks or None)
+    walker, state.index_to_entry = _build_board_widgets(state.snapshot, state.marks or None, state.mark_attr_names)
     state.list_walker = walker
     state.frame.body = ListBox(walker)
 
@@ -1165,6 +1154,27 @@ def _build_command_map(mng_ctx: MngContext) -> dict[str, CustomCommand]:
     return {key: cmd for key, cmd in commands.items() if cmd.enabled}
 
 
+@pure
+def _build_mark_palette(
+    commands: dict[str, CustomCommand],
+) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
+    """Build palette entries and attr names for markable commands.
+
+    Returns (palette_entries, mark_attr_names).
+    """
+    entries: list[tuple[str, str, str]] = []
+    attr_names: list[str] = []
+    for key, cmd in commands.items():
+        if not cmd.markable:
+            continue
+        color = cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
+        attr = f"mark_{key}"
+        entries.append((attr, color, ""))
+        entries.append((f"{attr}_focus", f"{color},standout", ""))
+        attr_names.append(attr)
+    return entries, tuple(attr_names)
+
+
 def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     """Run the kanpan TUI board."""
     commands = _build_command_map(mng_ctx)
@@ -1194,6 +1204,8 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     initial_body = Filler(Pile([Text("Loading...")]), valign="top")
     frame = Frame(body=initial_body, header=header, footer=footer)
 
+    mark_palette_entries, mark_attr_names = _build_mark_palette(commands)
+
     state = _KanpanState(
         mng_ctx=mng_ctx,
         frame=frame,
@@ -1201,6 +1213,7 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
         footer_left_attr=footer_left_attr,
         footer_right=footer_right,
         commands=commands,
+        mark_attr_names=mark_attr_names,
     )
 
     input_handler = _KanpanInputHandler(state=state)
@@ -1208,7 +1221,7 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     screen = Screen()
     screen.tty_signal_keys(intr="undefined")
 
-    loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
+    loop = MainLoop(frame, palette=PALETTE + mark_palette_entries, unhandled_input=input_handler, screen=screen)
     state.loop = loop
 
     # Initial data load with spinner
