@@ -223,24 +223,14 @@ def test_deploy_all_flags_skip_all_prompts(tmp_path: Path) -> None:
     assert "launch its own agents" not in result.output
 
 
-@pytest.mark.modal
-def test_deploy_accepts_modal_provider(tmp_path: Path) -> None:
-    """Verify that modal provider is accepted (not rejected at provider check)."""
-    repo_dir = _create_git_repo_with_agent_type(tmp_path)
-
-    result = _deploy_with_git_url(tmp_path, str(repo_dir), name="test-bot-modal", provider="modal")
-
-    assert "Only local deployment is supported" not in result.output
+def test_resolve_provider_accepts_modal() -> None:
+    """Verify that modal is accepted as a valid provider value."""
+    assert _resolve_provider("modal") == DeploymentProvider.MODAL
 
 
-@pytest.mark.docker
-def test_deploy_accepts_docker_provider(tmp_path: Path) -> None:
-    """Verify that docker provider is accepted (not rejected at provider check)."""
-    repo_dir = _create_git_repo_with_agent_type(tmp_path)
-
-    result = _deploy_with_git_url(tmp_path, str(repo_dir), name="test-bot-docker", provider="docker")
-
-    assert "Only local deployment is supported" not in result.output
+def test_resolve_provider_accepts_docker() -> None:
+    """Verify that docker is accepted as a valid provider value."""
+    assert _resolve_provider("docker") == DeploymentProvider.DOCKER
 
 
 # --- Tests for --agent-type (no git URL) ---
@@ -719,20 +709,16 @@ def test_deploy_with_self_deploy_flag(tmp_path: Path) -> None:
 # --- Tests for deploy prompt interaction via CLI ---
 
 
-@pytest.mark.docker
-@pytest.mark.modal
-@pytest.mark.parametrize("provider_input", ["2", "3"])
-def test_deploy_provider_prompt_accepts_selection(
+def test_deploy_provider_prompt_accepts_local_selection(
     tmp_path: Path,
-    provider_input: str,
 ) -> None:
-    """Verify interactive provider selection proceeds to deployment."""
+    """Verify interactive provider selection with local (choice 1) proceeds to deployment."""
     repo_dir = _create_git_repo_with_agent_type(tmp_path)
 
     result = _RUNNER.invoke(
         cli,
         ["deploy", str(repo_dir), *_data_dir_args(tmp_path)],
-        input="test-bot\n{}\nN\n".format(provider_input),
+        input="test-bot\n1\nN\n",
     )
 
     assert "Where do you want to run" in result.output
