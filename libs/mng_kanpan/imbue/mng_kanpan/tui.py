@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 from collections.abc import Callable
 from collections.abc import Hashable
 from concurrent.futures import Future
@@ -37,10 +38,11 @@ from imbue.mng_kanpan.data_types import CheckStatus
 from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
 
-REFRESH_INTERVAL_SECONDS: int = 600  # 10 minutes
+DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
 
 SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
@@ -188,6 +190,17 @@ class _KanpanState(MutableModel):
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
     commands: dict[str, CustomCommand] = {}
+    # Monotonic timestamp of the last completed refresh (for cooldown logic)
+    last_refresh_time: float = 0.0
+    # Whether the current in-flight refresh is local-only (no GitHub API)
+    refresh_is_local_only: bool = False
+    # Handle for the pending deferred refresh alarm (None if no alarm is pending)
+    deferred_refresh_alarm: Any = None
+    # Monotonic time the deferred refresh is scheduled to fire
+    deferred_refresh_fire_at: float = 0.0
+    # Cooldown durations (loaded from plugin config)
+    refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
+    retry_cooldown_seconds: float = 60.0
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
 
@@ -506,9 +519,9 @@ def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
 
     _refresh_display(state)
 
-    # Trigger a refresh to update the board
-    if state.loop is not None and state.refresh_future is None:
-        _start_refresh(state.loop, state)
+    # Local-only refresh to immediately show updated state (no cooldown needed)
+    if state.loop is not None:
+        _start_local_refresh(state.loop, state)
 
 
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
@@ -577,7 +590,7 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
 def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
     """Dispatch a command by key. Routes to builtins, markable commands, or immediate shell commands."""
     if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
-        if state.refresh_future is None and state.loop is not None:
+        if state.loop is not None and state.refresh_future is None:
             _start_refresh(state.loop, state)
         return
     if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
@@ -639,8 +652,8 @@ def _on_custom_command_poll(
                 _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {stderr}")
         except Exception as e:
             _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {e}")
-        if cmd.refresh_afterwards and state.refresh_future is None:
-            _start_refresh(loop, state)
+        if cmd.refresh_afterwards:
+            _start_local_refresh(loop, state)
     else:
         frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
         state.footer_left_text.set_text(f"  Running {cmd.name} on {agent_name} {frame_char}")
@@ -667,12 +680,69 @@ def _on_restore_footer(loop: MainLoop, state: _KanpanState) -> None:
     _restore_footer(state)
 
 
-def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a background refresh and begin the spinner animation."""
+def _request_refresh(loop: MainLoop, state: _KanpanState, cooldown_seconds: float) -> None:
+    """Request a refresh, subject to a cooldown period.
+
+    If enough time has passed since the last refresh, starts immediately.
+    Otherwise, schedules a deferred refresh for when the cooldown expires.
+    If a deferred refresh is already pending but the new request would fire
+    sooner (e.g. manual refresh with a shorter cooldown), the old alarm is
+    replaced.
+    """
+    if state.refresh_future is not None:
+        return
+    elapsed = time.monotonic() - state.last_refresh_time
+    remaining = cooldown_seconds - elapsed
+    if remaining <= 0:
+        _cancel_deferred_refresh(loop, state)
+        _start_refresh(loop, state)
+        return
+    fire_at = time.monotonic() + remaining
+    if state.deferred_refresh_alarm is not None:
+        if state.deferred_refresh_fire_at <= fire_at:
+            return
+        _cancel_deferred_refresh(loop, state)
+    state.deferred_refresh_fire_at = fire_at
+    state.deferred_refresh_alarm = loop.set_alarm_in(remaining, _on_deferred_refresh, state)
+
+
+def _cancel_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Cancel any pending deferred refresh alarm."""
+    if state.deferred_refresh_alarm is not None:
+        loop.remove_alarm(state.deferred_refresh_alarm)
+        state.deferred_refresh_alarm = None
+
+
+def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback for a deferred (cooldown-delayed) refresh."""
+    state.deferred_refresh_alarm = None
+    if state.refresh_future is None:
+        _start_refresh(loop, state)
+
+
+def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a local-only background refresh (no GitHub API calls).
+
+    Bypasses cooldown entirely since local state is cheap to fetch.
+    """
+    if state.refresh_future is not None:
+        return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
+    state.refresh_is_local_only = True
+    state.refresh_future = state.executor.submit(fetch_agent_snapshot, state.mng_ctx)
+    _schedule_spinner_tick(loop, state)
+
+
+def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a full background refresh and begin the spinner animation."""
+    if state.executor is None:
+        state.executor = ThreadPoolExecutor(max_workers=1)
+    state.footer_left_attr.set_attr_map({None: "footer"})
+    state.spinner_index = 0
+    state.refresh_is_local_only = False
     state.refresh_future = state.executor.submit(fetch_board_snapshot, state.mng_ctx)
     _schedule_spinner_tick(loop, state)
 
@@ -703,12 +773,18 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     if state.refresh_future is None:
         return
 
+    was_local_only = state.refresh_is_local_only
+    failed = False
     try:
         new_snapshot = state.refresh_future.result()
-        if not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded:
+        should_carry_forward = was_local_only or (
+            not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded
+        )
+        if should_carry_forward and state.snapshot is not None:
             new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
         state.snapshot = new_snapshot
     except Exception as e:
+        failed = True
         logger.debug("Refresh failed: {}", e)
         if state.snapshot is not None:
             state.snapshot = BoardSnapshot(
@@ -719,6 +795,11 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
             )
     finally:
         state.refresh_future = None
+        state.refresh_is_local_only = False
+        # Only update last_refresh_time for full refreshes (so the full-refresh
+        # cooldown isn't affected by cheap local-only refreshes)
+        if not was_local_only:
+            state.last_refresh_time = time.monotonic()
 
     _refresh_display(state)
 
@@ -730,7 +811,12 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
         state.steady_footer_text = f"  Last refresh: {now}"
     state.footer_left_text.set_text(state.steady_footer_text)
 
-    _schedule_next_refresh(loop, state)
+    if failed:
+        _request_refresh(loop, state, state.retry_cooldown_seconds)
+    elif was_local_only:
+        pass
+    else:
+        _schedule_next_refresh(loop, state)
 
 
 @pure
@@ -1069,7 +1155,7 @@ def _refresh_display(state: _KanpanState) -> None:
 
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Schedule the next auto-refresh alarm."""
-    loop.set_alarm_in(REFRESH_INTERVAL_SECONDS, _on_auto_refresh_alarm, state)
+    loop.set_alarm_in(state.refresh_interval_seconds, _on_auto_refresh_alarm, state)
 
 
 def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
@@ -1128,6 +1214,7 @@ def _build_mark_palette(
 def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     """Run the kanpan TUI board."""
     commands = _build_command_map(mng_ctx)
+    plugin_config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
 
     # Build footer keybindings, visually separating mark-related from action commands
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
@@ -1163,6 +1250,8 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
         footer_left_attr=footer_left_attr,
         footer_right=footer_right,
         commands=commands,
+        refresh_interval_seconds=plugin_config.refresh_interval_seconds,
+        retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         mark_attr_names=mark_attr_names,
     )
 
