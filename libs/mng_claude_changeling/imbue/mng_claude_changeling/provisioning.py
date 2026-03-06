@@ -554,18 +554,18 @@ def _inject_conversation(
     prompt: str,
     response: str,
     label: str,
+    # FIXME: this variable must ALWAYS be defined (we do not want to accidentally share conversations across agents or pollute the global user db)
     llm_user_path: Path | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> str | None:
     """Run ``llm inject`` to create a new conversation. Returns the conversation ID on success.
 
     Omits ``--cid`` so that ``llm inject`` creates a new conversation and
     prints the assigned ID to stdout (e.g. "Injected message into conversation <id>").
-
-    When ``llm_user_path`` is provided, the command is prefixed with
-    ``LLM_USER_PATH=<path>`` so the conversation is created in the
-    per-agent database rather than the system default.
     """
     env_prefix = f"LLM_USER_PATH={shlex.quote(str(llm_user_path))} " if llm_user_path else ""
+    if env_vars:
+        env_prefix += " ".join(f"{key}={shlex.quote(value)}" for key, value in env_vars.items()) + " "
     inject_cmd = (
         f"{env_prefix}llm inject -m {shlex.quote(model)} --prompt {shlex.quote(prompt)} {shlex.quote(response)}"
     )
@@ -602,7 +602,7 @@ def create_system_notifications_conversation(
     Because this is the first conversation created, ``_send_chat_notification``
     can find it by reading the first entry in the conversations event log.
     """
-    model = "echo"
+    model = "matched-responses"
 
     llm_data_dir = agent_state_dir / "llm_data"
     conversation_id = _inject_conversation(
@@ -613,6 +613,7 @@ def create_system_notifications_conversation(
         response="Confirmed.",
         label="system_notifications",
         llm_user_path=llm_data_dir,
+        env_vars=dict(LLM_MATCHED_RESPONSE=""),
     )
     if conversation_id is None:
         return
