@@ -41,17 +41,24 @@ def remove_docker_container_and_volume(
             pass
 
 
-def _remove_all_containers_by_prefix(
-    client: docker.DockerClient,
+def remove_all_containers_by_prefix(
     prefix: str,
     provider_name: str,
 ) -> None:
     """Remove ALL Docker containers whose name starts with *prefix*.
 
-    This is a belt-and-suspenders cleanup that catches containers missed
-    by label-based discovery (e.g. from interrupted tests).  It finds
-    containers by ``LABEL_PROVIDER`` and then filters by name prefix.
+    Finds containers by ``LABEL_PROVIDER=provider_name`` and then filters
+    by name prefix.  This catches containers that ``_list_containers``
+    might miss (e.g. if the provider name differs from what was used at
+    creation time, or if the test was interrupted before normal cleanup).
+
+    Creates and closes its own Docker client so callers don't need one.
     """
+    try:
+        client = docker.from_env()
+    except (docker.errors.DockerException, OSError):
+        return
+
     try:
         containers = client.containers.list(
             all=True,
@@ -63,6 +70,8 @@ def _remove_all_containers_by_prefix(
                 remove_docker_container_and_volume(client, container)
     except (docker.errors.DockerException, OSError):
         pass
+    finally:
+        client.close()
 
 
 def make_docker_provider(mng_ctx: MngContext, name: str = "test-docker") -> DockerProviderInstance:
@@ -114,19 +123,15 @@ def make_docker_provider_with_cleanup(
     except (MngError, docker.errors.DockerException):
         pass
 
-    # Belt-and-suspenders: also clean up by prefix in case _list_containers
-    # missed containers (e.g. prefix mismatch after _list_containers was
-    # changed to filter by prefix).
-    prefix = mng_ctx.config.prefix
-    try:
-        _remove_all_containers_by_prefix(provider._docker_client, prefix, unique_name)
-    except (MngError, docker.errors.DockerException, OSError):
-        pass
+    # Also clean up by prefix in case _list_containers missed containers
+    # due to a prefix mismatch.
+    remove_all_containers_by_prefix(mng_ctx.config.prefix, unique_name)
 
     # Remove the Docker named volume backing the state container (in case
     # the state container was already removed above but the volume was not).
     try:
         user_id = str(mng_ctx.get_profile_user_id())
+        prefix = mng_ctx.config.prefix
         vol_name = state_volume_name(prefix, user_id)
         provider._docker_client.volumes.get(vol_name).remove(force=True)
     except (docker.errors.NotFound, docker.errors.DockerException, OSError, MngError):

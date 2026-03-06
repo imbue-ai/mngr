@@ -3,12 +3,9 @@ import subprocess
 from collections.abc import Generator
 from pathlib import Path
 
-import docker
-import docker.errors
 import pytest
 
-from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
-from imbue.mng.providers.docker.volume import LABEL_PROVIDER
+from imbue.mng.providers.docker.testing import remove_all_containers_by_prefix
 from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import run_mng_subprocess
@@ -47,27 +44,10 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         pass
 
     # Force-remove ALL Docker containers whose name starts with the test
-    # prefix.  This is the belt-and-suspenders cleanup: even if ``mng
-    # destroy`` missed a container (e.g. the test was interrupted, or
-    # destroy failed silently), we still remove it here.
-    try:
-        client = docker.from_env()
-    except (docker.errors.DockerException, OSError):
-        return
-
-    try:
-        containers = client.containers.list(
-            all=True,
-            filters={"label": [f"{LABEL_PROVIDER}=docker"]},
-        )
-        for container in containers:
-            name = container.name or ""
-            if name.startswith(prefix):
-                remove_docker_container_and_volume(client, container)
-    except (docker.errors.DockerException, OSError):
-        pass
-    finally:
-        client.close()
+    # prefix.  Even if ``mng destroy`` missed a container (e.g. the test
+    # was interrupted, or destroy failed silently), we still remove it here.
+    # Subprocess tests use the default provider name "docker".
+    remove_all_containers_by_prefix(prefix, provider_name="docker")
 
 
 @pytest.fixture
