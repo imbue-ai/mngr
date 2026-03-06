@@ -524,22 +524,25 @@ class BaseAgent(AgentInterface):
     def _send_enter_and_wait_for_signal(self, tmux_target: str, wait_channel: str) -> bool:
         """Send Enter and wait for the tmux wait-for signal from the hook.
 
-        This starts waiting BEFORE sending Enter to avoid a race condition where
-        the hook might fire before we start listening for the signal.
+        Runs ``tmux wait-for`` in the **foreground** so it registers with the
+        tmux server synchronously, then sends Enter from a backgrounded
+        subshell after a short delay.  This avoids a race where the hook's
+        ``tmux wait-for -S`` signal fires before the waiter has registered
+        (signals wake exactly one waiter; if none exists the signal is lost).
 
-        The sequence is:
-        1. Start tmux wait-for (with timeout) in background
-        2. Send Enter
-        3. Wait for the background process to complete
+        The previous implementation backgrounded the waiter, which required a
+        double-fork (bash -> timeout -> tmux) before the waiter could register.
+        When the agent was actively generating (RUNNING state), the Enter key
+        was processed so quickly that the hook signal often fired before the
+        waiter finished its double-fork, causing a consistent timeout.
 
         Returns True if signal received, False if timeout.
         """
         timeout_secs = self.enter_submission_timeout_seconds
         cmd = (
             f"bash -c '"
-            f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '
-            f'tmux send-keys -t "$1" Enter; '
-            f"wait $W"
+            f'( sleep 0.05 && tmux send-keys -t "$1" Enter ) & '
+            f'timeout {timeout_secs} tmux wait-for "$0"'
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
         start = time.time()
