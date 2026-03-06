@@ -272,7 +272,7 @@ def _headless_claude_output(mng_ctx: MngContext, prompt: str, system_prompt: str
 
         agent_args = (
             "--system-prompt",
-            '$(cat "$MNG_AGENT_WORK_DIR/.mng-system-prompt")',
+            '"$(cat "$MNG_AGENT_WORK_DIR/.mng-system-prompt")"',
             "--output-format",
             "stream-json",
             "--verbose",
@@ -280,7 +280,7 @@ def _headless_claude_output(mng_ctx: MngContext, prompt: str, system_prompt: str
             "--tools",
             '""',
             "--no-session-persistence",
-            '$(cat "$MNG_AGENT_WORK_DIR/.mng-prompt")',
+            '"$(cat "$MNG_AGENT_WORK_DIR/.mng-prompt")"',
         )
 
         source_location = HostLocation(host=host, path=work_path)
