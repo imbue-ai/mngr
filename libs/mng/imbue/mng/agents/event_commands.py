@@ -23,7 +23,7 @@ def build_state_transition_command(from_state: str, to_state: str) -> str:
     # Uses /dev/urandom for event ID generation, matching chat.sh's generate_event_id().
     # The printf >> append is atomic under PIPE_BUF.
     return (
-        '_MNG_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z");'
+        '_MNG_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ");'
         ' _MNG_EID="evt-$(head -c 16 /dev/urandom | xxd -p)";'
         ' mkdir -p "$MNG_AGENT_STATE_DIR/events/mng_agents";'
         " printf"
