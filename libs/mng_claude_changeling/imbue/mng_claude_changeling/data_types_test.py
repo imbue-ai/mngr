@@ -8,7 +8,6 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
-from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng_claude_changeling.data_types import AgentStateTransitionEvent
 from imbue.mng_claude_changeling.data_types import ChangelingEvent
 from imbue.mng_claude_changeling.data_types import ChatModel
@@ -125,8 +124,8 @@ def test_agent_state_transition_event_serialization() -> None:
         source=SOURCE_MNG_AGENTS,
         agent_id="agent-abc123",
         agent_name="my-helper",
-        from_state=AgentLifecycleState.RUNNING,
-        to_state=AgentLifecycleState.WAITING,
+        from_state="RUNNING",
+        to_state="WAITING",
     )
     data = json.loads(event.model_dump_json())
     assert data["type"] == "agent_state_transition"
