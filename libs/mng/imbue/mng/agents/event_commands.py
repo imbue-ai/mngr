@@ -20,8 +20,8 @@ def build_state_transition_command(from_state: str, to_state: str) -> str:
     Requires MNG_AGENT_STATE_DIR, MNG_AGENT_ID, and MNG_AGENT_NAME
     to be set in the environment.
     """
-    # Use uuidgen (macOS/Linux) with /proc fallback for Linux containers.
-    # The full command is a single atomic printf >> append (under PIPE_BUF).
+    # Try /proc/sys/kernel/random/uuid (Linux), fall back to uuidgen (macOS).
+    # The printf >> append is atomic under PIPE_BUF.
     return (
         '_MNG_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z");'
         ' _MNG_EID="evt-$(cat /proc/sys/kernel/random/uuid 2>/dev/null'
