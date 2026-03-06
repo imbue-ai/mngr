@@ -680,7 +680,7 @@ def create_system_notifications_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        tags={"internal": "system_notifications"},
+        tags={"internal": "system_notifications", "name": "System Notifications"},
     )
     logger.info("Created system_notifications conversation: conversation_id={}", conversation_id)
 
@@ -717,7 +717,7 @@ def create_daily_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        tags={"daily": today},
+        tags={"daily": today, "name": f"Daily Thread ({today})"},
     )
     logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)
 

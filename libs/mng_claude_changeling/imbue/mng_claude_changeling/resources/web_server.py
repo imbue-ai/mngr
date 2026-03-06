@@ -143,6 +143,7 @@ def _read_conversations() -> list[dict[str, str]]:
                         continue
                     conversations_by_id[conversation_id] = {
                         "conversation_id": conversation_id,
+                        "name": tags.get("name", ""),
                         "model": model or "unknown",
                         "created_at": created_at or "",
                         "updated_at": created_at or "",
@@ -311,15 +312,18 @@ def _render_conversations_page() -> str:
     conv_items = ""
     for conv in conversations:
         conversation_id = _html_escape(conv["conversation_id"])
+        name = _html_escape(conv.get("name", "")) or conversation_id
         model = _html_escape(conv.get("model", ""))
         updated = _html_escape(conv.get("updated_at", ""))
-        detail = model
+        detail = conversation_id
+        if model:
+            detail += f" -- {model}"
         if updated:
             detail += f" -- {updated}"
         conv_items += (
             f'<li class="item">'
             f'<div class="item-info">'
-            f'<span class="item-name">{conversation_id}</span>'
+            f'<span class="item-name">{name}</span>'
             f'<span class="item-detail">{detail}</span>'
             f"</div>"
             f'<a class="link-btn" href="chat?cid={conversation_id}">Open</a>'

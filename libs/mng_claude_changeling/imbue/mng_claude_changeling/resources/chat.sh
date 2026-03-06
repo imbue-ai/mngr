@@ -158,7 +158,7 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
-        insert_conversation_record "$conversation_id"
+        insert_conversation_record "$conversation_id" '{"name":"(new chat)"}'
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $conversation_id"
             llm inject --cid "$conversation_id" -m "$model" "$message"
@@ -186,7 +186,7 @@ new_conversation() {
                 if [ -f "$_LLM_DB" ]; then
                     _new_conversation_id=$(python3 "$CONV_DB" poll-new "$_LLM_DB" "$_max_rowid")
                     if [ -n "$_new_conversation_id" ]; then
-                        insert_conversation_record "$_new_conversation_id"
+                        insert_conversation_record "$_new_conversation_id" '{"name":"(new chat)"}'
                         log "Recorded conversation for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
                         break
                     fi
