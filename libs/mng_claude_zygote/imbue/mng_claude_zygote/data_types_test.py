@@ -113,9 +113,6 @@ def test_conversation_event_roundtrips_without_tags() -> None:
     assert event.tags == {}
 
 
-# -- ChangelingEvent --
-
-
 # -- AgentStateTransitionEvent --
 
 
