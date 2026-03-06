@@ -301,6 +301,9 @@ def _create_mng_agent(
             "changeling=true",
             "--disable-plugin",
             "ttyd",
+            # this is only needed because of the below
+            "--yes",
+            # FOLLOWUP: remove this
             "--",
             "--dangerously-skip-permissions",
         ]
