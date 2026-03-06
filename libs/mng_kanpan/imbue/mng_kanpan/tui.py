@@ -176,8 +176,6 @@ class _KanpanState(MutableModel):
     executor: ThreadPoolExecutor | None = None
     # Dired-style marks: agents flagged for batch operations, keyed by command key
     marks: dict[AgentName, str] = {}
-    # Set when awaiting execute confirmation for agents whose PRs are not merged
-    pending_confirm_deletes: tuple[AgentName, ...] = ()
     # Active batch execution state
     executing: bool = False
     execute_status: str = ""
@@ -203,13 +201,6 @@ class _KanpanInputHandler(MutableModel):
         """Handle keyboard input. Returns True if handled, None to pass through."""
         if isinstance(key, tuple):
             return None
-        # Handle pending execute confirmation (unsafe deletes)
-        if self.state.pending_confirm_deletes:
-            if key in ("y", "Y"):
-                _confirm_execute_deletes(self.state)
-            else:
-                _cancel_execute_confirmation(self.state)
-            return True
         if key in ("q", "ctrl c"):
             raise ExitMainLoop()
         if key == "U":
@@ -279,14 +270,6 @@ def _run_git_push(work_dir: str) -> subprocess.CompletedProcess[str]:  # pragma:
         cwd=work_dir,
         timeout=60,
     )
-
-
-def _is_safe_to_delete(entry: AgentBoardEntry) -> bool:
-    """Check if an agent can be deleted without confirmation.
-
-    Agents with a merged PR are safe to delete. All others require confirmation.
-    """
-    return entry.pr is not None and entry.pr.state == PrState.MERGED
 
 
 def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None) -> None:
@@ -380,43 +363,10 @@ def _update_mark_count_footer(state: _KanpanState) -> None:
 
 
 def _execute_marks(state: _KanpanState) -> None:
-    """Execute all pending marks. Asks for confirmation if any deletes are unsafe."""
+    """Execute all pending marks immediately."""
     if not state.marks or state.executing:
         return
-
-    # Check if any delete marks target agents without merged PRs
-    unsafe_deletes: list[AgentName] = []
-    if state.snapshot is not None:
-        entries_by_name = {e.name: e for e in state.snapshot.entries}
-        for name, mark_key in state.marks.items():
-            if mark_key == _BUILTIN_COMMAND_KEY_DELETE:
-                entry = entries_by_name.get(name)
-                if entry is not None and not _is_safe_to_delete(entry):
-                    unsafe_deletes.append(name)
-
-    if unsafe_deletes:
-        state.pending_confirm_deletes = tuple(unsafe_deletes)
-        names = ", ".join(str(n) for n in unsafe_deletes)
-        state.footer_left_text.set_text(
-            f"  Delete {len(unsafe_deletes)} agent(s) with unmerged PRs ({names})? y to confirm, any key to cancel"
-        )
-        state.footer_left_attr.set_attr_map({None: "notification"})
-        return
-
     _start_batch_execution(state)
-
-
-def _confirm_execute_deletes(state: _KanpanState) -> None:
-    """Confirm execution of unsafe deletes and proceed with full batch."""
-    state.pending_confirm_deletes = ()
-    state.footer_left_attr.set_attr_map({None: "footer"})
-    _start_batch_execution(state)
-
-
-def _cancel_execute_confirmation(state: _KanpanState) -> None:
-    """Cancel the execute confirmation, keeping marks intact."""
-    state.pending_confirm_deletes = ()
-    _update_mark_count_footer(state)
 
 
 class _BatchWorkItem(NamedTuple):

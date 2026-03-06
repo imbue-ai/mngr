@@ -30,7 +30,6 @@ from imbue.mng_kanpan.tui import _KanpanState
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _build_command_map
 from imbue.mng_kanpan.tui import _build_mark_palette
-from imbue.mng_kanpan.tui import _cancel_execute_confirmation
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
 from imbue.mng_kanpan.tui import _clear_focus
@@ -41,7 +40,6 @@ from imbue.mng_kanpan.tui import _get_focused_entry
 from imbue.mng_kanpan.tui import _get_name_cell_markup
 from imbue.mng_kanpan.tui import _get_state_attr
 from imbue.mng_kanpan.tui import _is_focus_on_first_selectable
-from imbue.mng_kanpan.tui import _is_safe_to_delete
 from imbue.mng_kanpan.tui import _load_user_commands
 from imbue.mng_kanpan.tui import _mute_focused_agent
 from imbue.mng_kanpan.tui import _on_auto_refresh_alarm
@@ -148,7 +146,6 @@ def _make_state(
         refresh_future=None,
         executor=None,
         marks={},
-        pending_confirm_deletes=(),
         executing=False,
         execute_status="",
         index_to_entry={},
@@ -282,23 +279,6 @@ def test_format_section_heading_still_cooking() -> None:
     markup = _format_section_heading(BoardSection.STILL_COOKING, 1)
     assert markup[0] == ("section_in_progress", "In progress")
     assert "no PR yet" in markup[1]
-
-
-# =============================================================================
-# Tests for _is_safe_to_delete
-# =============================================================================
-
-
-def test_is_safe_to_delete_merged_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=_make_pr(state=PrState.MERGED))) is True
-
-
-def test_is_safe_to_delete_open_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=_make_pr(state=PrState.OPEN))) is False
-
-
-def test_is_safe_to_delete_no_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=None)) is False
 
 
 # =============================================================================
@@ -557,20 +537,6 @@ def test_on_restore_footer_callback_restores_footer() -> None:
     _show_transient_message(state, "  Temporary")
     _on_restore_footer(_make_mock_loop(), state)
     assert state.footer_left_text.get_text()[0] == "  Steady state text"
-
-
-# =============================================================================
-# Tests for _cancel_execute_confirmation
-# =============================================================================
-
-
-def test_cancel_execute_confirmation_clears_pending_and_restores_footer() -> None:
-    state = _make_state()
-    state.pending_confirm_deletes = (AgentName("agent-to-cancel"),)
-    state.steady_footer_text = "  Steady state"
-    _cancel_execute_confirmation(state)
-    assert state.pending_confirm_deletes == ()
-    assert state.footer_left_text.get_text()[0] == "  Steady state"
 
 
 # =============================================================================
