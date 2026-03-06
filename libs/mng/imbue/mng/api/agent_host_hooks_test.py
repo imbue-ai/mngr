@@ -45,7 +45,7 @@ class _AgentHostHookTracker:
         self.hook_data["before_host_create_provider"] = provider_name
 
     @hookimpl
-    def on_host_created(self, host: Any) -> None:
+    def on_host_created(self, host: Any, mng_ctx: MngContext) -> None:
         self.hook_log.append("on_host_created")
 
     @hookimpl

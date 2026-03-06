@@ -8,7 +8,6 @@ import pytest
 
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import CommandResult
-from imbue.mng.primitives import PluginName
 from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng_recursive.data_types import RecursivePluginConfig
 from imbue.mng_recursive.provisioning import _get_installed_mng_packages
@@ -41,10 +40,8 @@ def _make_mock_mng_ctx(
 ) -> MagicMock:
     """Create a mock MngContext."""
     ctx = MagicMock()
-    plugins: dict[PluginName, RecursivePluginConfig] = {}
-    if plugin_config is not None:
-        plugins[PluginName("recursive")] = plugin_config
-    ctx.config.plugins = plugins
+    resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
+    ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
     return ctx
 

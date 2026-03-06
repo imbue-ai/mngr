@@ -1,5 +1,5 @@
 import json
-import time
+import threading
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Mapping
@@ -13,27 +13,26 @@ from pydantic import PrivateAttr
 from imbue.changelings.config.data_types import MNG_BINARY
 from imbue.changelings.forwarding_server.ssh_tunnel import RemoteSSHInfo
 from imbue.changelings.primitives import ServerName
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mng.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mng.api.discovery_events import HostSSHInfoEvent
+from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
 
-SERVERS_LOG_FILENAME: Final[str] = "servers.jsonl"
+SERVERS_LOG_FILENAME: Final[str] = "servers/events.jsonl"
 
-_SUBPROCESS_TIMEOUT_SECONDS: Final[float] = 10.0
 
-# FIXME: it's a bad idea to set this so high, but it will let us test this out.
-#  The right way to fix this is considerably more complex--rather than using the mng CLI at all, we ought to use mng via the python API directly and do the following:
-#   1. For the call to logs for a single agent, we should be able to get a handle to the BaseAgent instance fairly easily, and then from there we can read the file much more quickly
-#   2. For the call to list all agents, we'll need to wait for a more complex future mechanism that lets other processing more efficiently call list
-_CACHE_TTL_SECONDS: Final[float] = 24 * 60 * 60.0
+class ServerLogParseError(ValueError):
+    """Raised when a server log record cannot be parsed."""
 
 
 class ServerLogRecord(FrozenModel):
-    """A record of a server started by an agent, as written to servers.jsonl.
+    """A record of a server started by an agent, as written to servers/events.jsonl.
 
-    Each line of servers.jsonl is a JSON object with these fields.
+    Each line of servers/events.jsonl is a JSON object with these fields.
     Agents write these records on startup so the forwarding server can discover them.
     """
 
@@ -96,69 +95,11 @@ class StaticBackendResolver(BackendResolverInterface):
         return tuple(ServerName(name) for name in sorted(servers.keys()))
 
 
-class MngCliInterface(MutableModel, ABC):
-    """Interface for calling mng CLI commands.
-
-    Production code uses SubprocessMngCli which shells out to the mng binary.
-    Tests provide fake implementations that return canned responses.
-    """
-
-    @abstractmethod
-    def read_agent_log(self, agent_id: AgentId, log_file: str) -> str | None:
-        """Read an agent's log file via `mng events`. Returns file contents or None on failure."""
-
-    @abstractmethod
-    def list_agents_json(self) -> str | None:
-        """List agents via `mng list --json`. Returns JSON string or None on failure."""
+# -- Parsing helpers --
 
 
-class SubprocessMngCli(MngCliInterface):
-    """Real implementation that shells out to the mng binary via ConcurrencyGroup."""
-
-    def read_agent_log(self, agent_id: AgentId, log_file: str) -> str | None:
-        cg = ConcurrencyGroup(name="mng-events")
-        try:
-            with cg:
-                result = cg.run_process_to_completion(
-                    command=[MNG_BINARY, "events", str(agent_id), log_file, "--quiet"],
-                    timeout=_SUBPROCESS_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                )
-        except ConcurrencyExceptionGroup as e:
-            logger.warning("Failed to run mng events for {}: {}", agent_id, e)
-            return None
-
-        if result.returncode != 0:
-            logger.debug("mng events returned non-zero for {}: {}", agent_id, result.stderr.strip())
-            return None
-
-        return result.stdout
-
-    def list_agents_json(self) -> str | None:
-        cg = ConcurrencyGroup(name="mng-list")
-        try:
-            with cg:
-                result = cg.run_process_to_completion(
-                    command=[MNG_BINARY, "list", "--json", "--quiet"],
-                    timeout=_SUBPROCESS_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                )
-        except ConcurrencyExceptionGroup as e:
-            logger.warning("Failed to run mng list: {}", e)
-            return None
-
-        if result.returncode != 0:
-            logger.warning("mng list failed: {}", result.stderr.strip())
-            return None
-
-        return result.stdout
-
-
-# -- Parsing helpers (must be defined before MngCliBackendResolver) --
-
-
-class _ParsedAgentsResult(FrozenModel):
-    """Result of parsing mng list --json output."""
+class ParsedAgentsResult(FrozenModel):
+    """Result of parsing agent and SSH info from discovery events or mng list --json output."""
 
     agent_ids: tuple[AgentId, ...] = Field(default=(), description="All discovered agent IDs")
     ssh_info_by_agent_id: Mapping[str, RemoteSSHInfo] = Field(
@@ -167,19 +108,19 @@ class _ParsedAgentsResult(FrozenModel):
     )
 
 
-def _parse_agents_from_json(json_output: str | None) -> _ParsedAgentsResult:
+def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     """Parse agent IDs and SSH info from mng list --json output.
 
     Returns both agent IDs and a mapping of agent ID -> RemoteSSHInfo for agents
     that have SSH connection info (i.e., are running on remote hosts).
     """
     if json_output is None:
-        return _ParsedAgentsResult()
+        return ParsedAgentsResult()
     try:
         data = json.loads(json_output)
     except json.JSONDecodeError as e:
         logger.warning("Failed to parse mng list output: {}", e)
-        return _ParsedAgentsResult()
+        return ParsedAgentsResult()
 
     agents = data.get("agents", [])
     agent_ids: list[AgentId] = []
@@ -209,29 +150,45 @@ def _parse_agents_from_json(json_output: str | None) -> _ParsedAgentsResult:
         except (KeyError, ValueError) as e:
             logger.warning("Failed to parse SSH info for agent {}: {}", agent_id_str, e)
 
-    return _ParsedAgentsResult(
+    return ParsedAgentsResult(
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
     )
 
 
-def _parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
+def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
     """Parse agent IDs from mng list --json output, discarding SSH info."""
-    return _parse_agents_from_json(json_output).agent_ids
+    return parse_agents_from_json(json_output).agent_ids
 
 
-def _parse_server_log_records(text: str) -> list[ServerLogRecord]:
-    """Parse JSONL text into server log records, skipping invalid lines."""
+def parse_server_log_record(raw: dict[str, object]) -> ServerLogRecord:
+    """Parse a single JSON dict into a ServerLogRecord.
+
+    Extracts only the 'server' and 'url' fields, ignoring any extra
+    envelope fields (timestamp, event_id, source, type) that may be present.
+    Raises ValueError if required fields are missing.
+    """
+    server = raw.get("server")
+    url = raw.get("url")
+    if not server or not url:
+        raise ServerLogParseError(f"Server log record missing required fields (server={server!r}, url={url!r})")
+    return ServerLogRecord(server=ServerName(str(server)), url=str(url))
+
+
+def parse_server_log_records(text: str) -> list[ServerLogRecord]:
+    """Parse JSONL text into server log records.
+
+    Extracts only the 'server' and 'url' fields, ignoring any extra
+    envelope fields (timestamp, event_id, source, type) that may be present.
+    Raises on malformed lines rather than silently skipping them.
+    """
     records: list[ServerLogRecord] = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
-        try:
-            raw = json.loads(line)
-            records.append(ServerLogRecord.model_validate(raw))
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("Skipping invalid server log record: {}", e)
+        raw = json.loads(line)
+        records.append(parse_server_log_record(raw))
     return records
 
 
@@ -239,70 +196,208 @@ def _parse_server_log_records(text: str) -> list[ServerLogRecord]:
 
 
 class MngCliBackendResolver(BackendResolverInterface):
-    """Resolves backend URLs by calling mng CLI commands.
+    """Resolves backend URLs from continuously-updated state.
 
-    Uses `mng events <agent-id> servers.jsonl` to read server info and
-    `mng list --json` to discover agents. Results are cached with a short
-    TTL to avoid excessive subprocess calls on every request.
+    State is updated externally via update_agents() and update_servers() methods.
+    In production, a MngStreamManager calls these methods from background threads
+    that stream data from `mng list --stream` and `mng events --follow`.
 
-    Each agent may have multiple servers listed in servers.jsonl (one per line).
-    Later entries for the same server name override earlier ones.
-
-    Also parses SSH info from `mng list --json` output to identify which agents
-    are running on remote hosts. This info is used by the forwarding server to
-    set up SSH tunnels for proxying traffic to remote backends.
+    All reads are thread-safe via an internal lock.
     """
 
-    mng_cli: MngCliInterface = Field(
-        frozen=True,
-        description="Interface for calling mng CLI commands",
-    )
+    _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
+    _servers_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    _server_cache: dict[str, tuple[float, dict[str, str]]] = PrivateAttr(default_factory=dict)
-    _agents_cache: tuple[float, _ParsedAgentsResult] | None = PrivateAttr(default=None)
+    def update_agents(self, result: ParsedAgentsResult) -> None:
+        """Replace the known agent list and SSH info. Thread-safe."""
+        with self._lock:
+            self._agents_result = result
 
-    def _resolve_servers(self, agent_id: AgentId) -> dict[str, str]:
-        """Get a mapping of server_name -> URL for an agent, using cache."""
-        now = time.monotonic()
-        cached = self._server_cache.get(str(agent_id))
-        if cached is not None:
-            cache_time, cached_servers = cached
-            if (now - cache_time) < _CACHE_TTL_SECONDS:
-                return cached_servers
-
-        log_content = self.mng_cli.read_agent_log(agent_id, SERVERS_LOG_FILENAME)
-        servers: dict[str, str] = {}
-        if log_content is not None:
-            records = _parse_server_log_records(log_content)
-            for record in records:
-                servers[str(record.server)] = record.url
-
-        self._server_cache[str(agent_id)] = (now, servers)
-        return servers
-
-    def _get_agents_result(self) -> _ParsedAgentsResult:
-        """Get cached parsed agents result, refreshing if stale."""
-        now = time.monotonic()
-        if self._agents_cache is not None:
-            cache_time, cached = self._agents_cache
-            if (now - cache_time) < _CACHE_TTL_SECONDS:
-                return cached
-
-        result = _parse_agents_from_json(self.mng_cli.list_agents_json())
-        self._agents_cache = (now, result)
-        return result
+    def update_servers(self, agent_id: AgentId, servers: dict[str, str]) -> None:
+        """Replace the known servers for a single agent. Thread-safe."""
+        with self._lock:
+            self._servers_by_agent[str(agent_id)] = servers
 
     def get_backend_url(self, agent_id: AgentId, server_name: ServerName) -> str | None:
-        servers = self._resolve_servers(agent_id)
-        return servers.get(str(server_name))
+        with self._lock:
+            servers = self._servers_by_agent.get(str(agent_id), {})
+            return servers.get(str(server_name))
 
     def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
-        servers = self._resolve_servers(agent_id)
-        return tuple(ServerName(name) for name in sorted(servers.keys()))
+        with self._lock:
+            servers = self._servers_by_agent.get(str(agent_id), {})
+            return tuple(ServerName(name) for name in sorted(servers.keys()))
 
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
-        return self._get_agents_result().agent_ids
+        with self._lock:
+            return self._agents_result.agent_ids
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
-        return self._get_agents_result().ssh_info_by_agent_id.get(str(agent_id))
+        with self._lock:
+            return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
+
+
+# -- MngStreamManager --
+
+
+class MngStreamManager(MutableModel):
+    """Manages background streaming subprocesses that feed data to a MngCliBackendResolver.
+
+    Runs two types of long-lived subprocesses via ConcurrencyGroup:
+    1. `mng list --stream --quiet` to discover agents and hosts.
+       Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
+       and HOST_SSH_INFO events for SSH connection details per host.
+    2. `mng events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
+       to discover each agent's servers.
+    """
+
+    resolver: MngCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
+    mng_binary: str = Field(default=MNG_BINARY, frozen=True, description="Path to mng binary")
+
+    _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mng-stream-manager"))
+    _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
+    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def start(self) -> None:
+        """Start the streaming subprocess for continuous agent discovery."""
+        self._cg.__enter__()
+        self._cg.run_process_in_background(
+            command=[self.mng_binary, "list", "--stream", "--quiet"],
+            on_output=self._on_list_stream_output,
+        )
+
+    def stop(self) -> None:
+        """Stop all streaming subprocesses."""
+        self._cg.__exit__(None, None, None)
+
+    def _on_list_stream_output(self, line: str, is_stdout: bool) -> None:
+        """Handle a line of output from mng list --stream."""
+        if not is_stdout:
+            return
+        stripped = line.strip()
+        if not stripped:
+            return
+        self._handle_discovery_line(stripped)
+
+    def _handle_discovery_line(self, line: str) -> None:
+        """Parse a discovery event line and update state.
+
+        Handles two event types:
+        - DISCOVERY_FULL: updates agent list and agent-to-host mapping
+        - HOST_SSH_INFO: updates SSH info for a specific host
+
+        Both event types trigger a resolver update with the current SSH mappings.
+        """
+        try:
+            event = parse_discovery_event_line(line)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse discovery event line: {} (line: {})", e, line[:200])
+            return
+
+        if isinstance(event, FullDiscoverySnapshotEvent):
+            self._handle_full_snapshot(event)
+        elif isinstance(event, HostSSHInfoEvent):
+            self._handle_host_ssh_info(event)
+        elif event is None:
+            logger.warning("Unrecognized discovery event line: {}", line[:200])
+        else:
+            logger.trace("Ignoring non-snapshot discovery event: {}", type(event).__name__)
+
+    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
+        """Update agent list and agent-to-host mapping from a full snapshot."""
+        agent_ids: list[AgentId] = []
+        agent_host_map: dict[str, str] = {}
+        for agent in event.agents:
+            agent_ids.append(agent.agent_id)
+            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
+
+        with self._lock:
+            self._agent_host_map = agent_host_map
+
+        self._update_resolver(tuple(agent_ids))
+
+        new_ids = {str(agent_id) for agent_id in agent_ids}
+        self._sync_events_streams(new_ids)
+
+    def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
+        """Update SSH info for a host and refresh the resolver."""
+        ssh_info = RemoteSSHInfo(
+            user=event.ssh.user,
+            host=event.ssh.host,
+            port=event.ssh.port,
+            key_path=event.ssh.key_path,
+        )
+        with self._lock:
+            self._ssh_by_host_id[str(event.host_id)] = ssh_info
+            agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
+
+        self._update_resolver(agent_ids)
+
+    def _update_resolver(self, agent_ids: tuple[AgentId, ...]) -> None:
+        """Rebuild and push the ParsedAgentsResult to the resolver."""
+        with self._lock:
+            ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
+            for aid_str, host_id_str in self._agent_host_map.items():
+                ssh = self._ssh_by_host_id.get(host_id_str)
+                if ssh is not None:
+                    ssh_info_by_agent_id[aid_str] = ssh
+
+        self.resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=agent_ids,
+                ssh_info_by_agent_id=ssh_info_by_agent_id,
+            )
+        )
+
+    def _sync_events_streams(self, new_agent_ids: set[str]) -> None:
+        """Start events streams for new agents and stop streams for removed agents."""
+        with self._lock:
+            previously_known = set(self._known_agent_ids)
+            self._known_agent_ids = new_agent_ids
+
+            # Stop streams for agents that are no longer present
+            for aid_str in previously_known - new_agent_ids:
+                process = self._events_processes.pop(aid_str, None)
+                if process is not None:
+                    process.terminate()
+                self._events_servers.pop(aid_str, None)
+
+            # Start streams for newly discovered agents
+            for aid_str in new_agent_ids - previously_known:
+                self._start_events_stream(AgentId(aid_str))
+
+    def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
+        """Handle a line of output from mng events --follow for a specific agent."""
+        if not is_stdout:
+            return
+        stripped = line.strip()
+        if not stripped:
+            return
+        aid_str = str(agent_id)
+        try:
+            raw = json.loads(stripped)
+            record = parse_server_log_record(raw)
+            servers = self._events_servers.get(aid_str)
+            if servers is None:
+                return
+            servers[str(record.server)] = record.url
+            self.resolver.update_servers(agent_id, dict(servers))
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
+
+    def _start_events_stream(self, agent_id: AgentId) -> None:
+        """Start mng events <agent-id> servers/events.jsonl --follow for a single agent."""
+        aid_str = str(agent_id)
+        self._events_servers[aid_str] = {}
+
+        process = self._cg.run_process_in_background(
+            command=[self.mng_binary, "events", aid_str, SERVERS_LOG_FILENAME, "--follow", "--quiet"],
+            on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
+        )
+        self._events_processes[aid_str] = process

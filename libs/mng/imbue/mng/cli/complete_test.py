@@ -548,6 +548,47 @@ def test_get_completions_short_flag_allows_positional(
     assert result == ["my-agent", "other-agent"]
 
 
+def test_get_completions_combined_short_flags_allow_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """After combined short flags (-fb), positional candidates should be offered."""
+    data = _make_cache_data(
+        commands=["destroy"],
+        aliases={"rm": "destroy"},
+        options_by_command={"destroy": ["--all", "--force", "--remove-created-branch"]},
+        flag_options_by_command={"destroy": ["--all", "--force", "--remove-created-branch", "-a", "-f", "-b"]},
+        agent_name_arguments=["destroy"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mng rm -fb ", "3")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_combined_short_flags_with_unknown_flag(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Combined flags where one character is not a known flag should suppress completions."""
+    data = _make_cache_data(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--all", "--force"]},
+        flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
+        agent_name_arguments=["destroy"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
+    set_comp_env("mng destroy -fx ", "3")
+
+    result = _get_completions()
+
+    assert result == []
+
+
 def test_get_completions_subcommand_flag_allows_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],

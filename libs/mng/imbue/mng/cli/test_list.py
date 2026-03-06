@@ -942,7 +942,7 @@ def test_list_command_with_sort_by_name(
             # List sorted by name ascending
             result = cli_runner.invoke(
                 list_command,
-                ["--sort", "name", "--sort-order", "asc"],
+                ["--sort", "name"],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
@@ -1013,7 +1013,7 @@ def test_list_command_with_sort_descending(
             # List sorted by name descending
             result = cli_runner.invoke(
                 list_command,
-                ["--sort", "name", "--sort-order", "desc"],
+                ["--sort", "name desc"],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )

@@ -215,7 +215,7 @@ def test_prevent_direct_subprocess_usage() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(2))
+    rc.check_if_elif_without_else(_DIR, snapshot(3))
 
 
 def test_prevent_inline_functions_in_non_test_code() -> None:

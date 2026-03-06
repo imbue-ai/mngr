@@ -14,19 +14,10 @@ from imbue.imbue_common.logging import log_span
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.primitives import PluginName
 from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng.providers.deploy_utils import collect_deploy_files
 from imbue.mng.providers.deploy_utils import resolve_mng_install_mode
 from imbue.mng_recursive.data_types import RecursivePluginConfig
-
-
-def _get_plugin_config(mng_ctx: MngContext) -> RecursivePluginConfig:
-    """Get the recursive plugin config from mng context, falling back to defaults."""
-    config = mng_ctx.config.plugins.get(PluginName("recursive"))
-    if config is not None and isinstance(config, RecursivePluginConfig):
-        return config
-    return RecursivePluginConfig()
 
 
 def _get_remote_home(host: OnlineHostInterface) -> str:
@@ -277,7 +268,7 @@ def provision_mng_on_host(
         logger.debug("Skipping mng provisioning on local host")
         return
 
-    plugin_config = _get_plugin_config(mng_ctx)
+    plugin_config = mng_ctx.get_plugin_config("recursive", RecursivePluginConfig)
 
     resolved_mode = resolve_mng_install_mode(plugin_config.install_mode)
     if resolved_mode == MngInstallMode.SKIP:

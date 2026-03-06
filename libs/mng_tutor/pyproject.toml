@@ -1,10 +1,10 @@
 [project]
 name = "mng-tutor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Interactive tutorial plugin for mng"
 requires-python = ">=3.11"
 dependencies = [
-    "mng==0.1.5",
+    "mng==0.1.6",
     "click>=8.0",
     "click-option-group>=0.5.6",
 ]

@@ -32,6 +32,7 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
@@ -407,16 +408,6 @@ class BuildCacheInfo(FrozenModel):
     path: Path = Field(description="Path to the build cache directory")
     size_bytes: SizeBytes = Field(default=SizeBytes(0), description="Size in bytes")
     created_at: datetime = Field(description="When the cache entry was created")
-
-
-class SSHInfo(FrozenModel):
-    """SSH connection information for a remote host."""
-
-    user: str = Field(description="SSH username")
-    host: str = Field(description="SSH hostname")
-    port: int = Field(description="SSH port")
-    key_path: Path = Field(description="Path to SSH private key")
-    command: str = Field(description="Full SSH command to connect")
 
 
 class HostDetails(FrozenModel):

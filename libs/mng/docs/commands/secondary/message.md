@@ -52,6 +52,7 @@ mng message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `continue` |
+| `--provider` | text | Message only agents using specified provider (repeatable) | None |
 
 ## Common
 

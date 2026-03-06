@@ -44,8 +44,7 @@ mng list [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--fields` | text | Which fields to include (comma-separated) | None |
-| `--sort` | text | Sort by field (supports nested fields like host.name); enables sorted (non-streaming) output [default: create_time] | `create_time` |
-| `--sort-order` | choice (`asc` &#x7C; `desc`) | Sort order [default: asc] | `asc` |
+| `--sort` | text | Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time] | `create_time` |
 | `--limit` | integer | Limit number of results (applied after fetching from all providers) | None |
 
 ## Watch / Stream Mode
@@ -231,4 +230,16 @@ $ mng list --format json
 
 ```bash
 $ mng list --include 'name.contains("prod")'
+```
+
+**Sort by name descending**
+
+```bash
+$ mng list --sort 'name desc'
+```
+
+**Sort by multiple fields**
+
+```bash
+$ mng list --sort 'state, name asc, create_time desc'
 ```

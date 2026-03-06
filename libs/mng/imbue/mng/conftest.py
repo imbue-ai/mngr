@@ -501,8 +501,11 @@ _WORKSPACE_PACKAGES = (
 def isolated_mng_venv(tmp_path: Path) -> Path:
     """Create a temporary venv with mng installed for subprocess-based tests.
 
-    Returns the venv directory. Use `venv / "bin" / "mng"` to run mng
-    commands, or `venv / "bin" / "python"` for the interpreter.
+    Returns the venv directory. Use ``venv / "bin" / "mng"`` to run mng
+    commands, or ``venv / "bin" / "python"`` for the interpreter.
+
+    Writes a ``uv-receipt.toml`` so that ``require_uv_tool_receipt()``
+    recognises this venv as a uv-tool-managed installation.
 
     This fixture is useful for tests that install/uninstall packages and
     need full isolation from the main workspace venv.
@@ -543,6 +546,16 @@ def isolated_mng_venv(tmp_path: Path) -> Path:
         cg.run_process_to_completion(
             ("uv", "pip", "install", "--python", python_path, "--no-deps", *workspace_install_args)
         )
+
+    # Write a uv-receipt.toml so plugin add/remove recognise this as a
+    # uv-tool-managed venv (the receipt lives at sys.prefix root).
+    receipt_content = (
+        '[tool]\nrequirements = [{ name = "mng" }]\n'
+        "entrypoints = [\n"
+        f'    {{ name = "mng", install-path = "{venv_dir / "bin" / "mng"}", from = "mng" }},\n'
+        "]\n"
+    )
+    (venv_dir / "uv-receipt.toml").write_text(receipt_content)
 
     return venv_dir
 
@@ -619,10 +632,10 @@ def _kill_tmux_sessions(sessions: list[str]) -> None:
         cleanup_tmux_session(session)
 
 
-def _is_xdist_worker_process(proc: psutil.Process) -> bool:
+def _is_xdist_worker_process(process: psutil.Process) -> bool:
     """Check if a process is a pytest-xdist worker process."""
     try:
-        cmdline = proc.cmdline()
+        cmdline = process.cmdline()
         cmdline_str = " ".join(cmdline)
         # xdist workers are python processes running pytest with gw* identifiers
         return "pytest" in cmdline_str.lower() and "gw" in cmdline_str
@@ -630,19 +643,19 @@ def _is_xdist_worker_process(proc: psutil.Process) -> bool:
         return False
 
 
-def _format_process_info(proc: psutil.Process) -> str:
+def _format_process_info(process: psutil.Process) -> str:
     """Format process information for error messages."""
     try:
-        cmdline = proc.cmdline()[:5]
-        return f"  PID {proc.pid}: {proc.name()} - {' '.join(cmdline)}"
+        cmdline = process.cmdline()[:5]
+        return f"  PID {process.pid}: {process.name()} - {' '.join(cmdline)}"
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return f"  PID {proc.pid}: <process info unavailable>"
+        return f"  PID {process.pid}: <process info unavailable>"
 
 
-def _is_alive_non_zombie(proc: psutil.Process) -> bool:
+def _is_alive_non_zombie(process: psutil.Process) -> bool:
     """Check if a process is alive and not a zombie."""
     try:
-        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
 
@@ -1048,9 +1061,9 @@ def session_cleanup() -> Generator[None, None, None]:
     stale_docker_containers = _get_stale_docker_state_containers(max_age_seconds=3600)
 
     # 7. Clean up leaked resources (last-ditch safety measure)
-    for proc in leftover_processes:
+    for process in leftover_processes:
         try:
-            proc.kill()
+            process.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
 

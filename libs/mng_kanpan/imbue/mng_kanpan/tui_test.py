@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
+from urwid.widget.columns import Columns
 from urwid.widget.text import Text
 
 from imbue.mng.primitives import AgentLifecycleState
@@ -23,12 +24,13 @@ from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.testing import make_pr_info
 from imbue.mng_kanpan.tui import _KanpanInputHandler
 from imbue.mng_kanpan.tui import _KanpanState
-from imbue.mng_kanpan.tui import _SelectableText
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _build_command_map
 from imbue.mng_kanpan.tui import _cancel_delete
+from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
 from imbue.mng_kanpan.tui import _clear_focus
 from imbue.mng_kanpan.tui import _confirm_delete
@@ -37,9 +39,6 @@ from imbue.mng_kanpan.tui import _dispatch_command
 from imbue.mng_kanpan.tui import _finish_delete
 from imbue.mng_kanpan.tui import _finish_push
 from imbue.mng_kanpan.tui import _finish_refresh
-from imbue.mng_kanpan.tui import _format_agent_line
-from imbue.mng_kanpan.tui import _format_check_markup
-from imbue.mng_kanpan.tui import _format_push_status
 from imbue.mng_kanpan.tui import _format_section_heading
 from imbue.mng_kanpan.tui import _get_focused_entry
 from imbue.mng_kanpan.tui import _get_state_attr
@@ -164,10 +163,12 @@ def _make_state_with_focus(
     commands: dict[str, CustomCommand] | None = None,
 ) -> _KanpanState:
     """Create a state with board widgets built and focus on the first agent."""
-    state = _make_state(snapshot=_make_snapshot(entries=entries), commands=commands)
-    walker = _build_board_widgets(state)
+    snapshot = _make_snapshot(entries=entries)
+    state = _make_state(snapshot=snapshot, commands=commands)
+    walker, index_to_entry = _build_board_widgets(snapshot)
     state.list_walker = walker
-    agent_idx = next(iter(state.index_to_entry.keys()))
+    state.index_to_entry = index_to_entry
+    agent_idx = next(iter(index_to_entry.keys()))
     walker.set_focus(agent_idx)
     return state
 
@@ -182,22 +183,6 @@ def _make_failed_future(error: Exception) -> Future[subprocess.CompletedProcess[
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_exception(error)
     return future
-
-
-# =============================================================================
-# Tests for _SelectableText
-# =============================================================================
-
-
-def test_selectable_text_is_selectable() -> None:
-    widget = _SelectableText("hello")
-    assert widget.selectable() is True
-
-
-def test_selectable_text_passes_keys_through() -> None:
-    widget = _SelectableText("hello")
-    result = widget.keypress((20,), "a")
-    assert result == "a"
 
 
 # =============================================================================
@@ -232,73 +217,15 @@ def test_classify_entry_open_pr() -> None:
 
 
 def test_get_state_attr_running_gets_green() -> None:
-    assert (
-        _get_state_attr(_make_entry(state=AgentLifecycleState.RUNNING), BoardSection.STILL_COOKING) == "state_running"
-    )
+    assert _get_state_attr(_make_entry(state=AgentLifecycleState.RUNNING)) == "state_running"
 
 
-def test_get_state_attr_waiting_in_still_cooking_gets_attention() -> None:
-    assert (
-        _get_state_attr(_make_entry(state=AgentLifecycleState.WAITING), BoardSection.STILL_COOKING)
-        == "state_attention"
-    )
-
-
-def test_get_state_attr_waiting_in_review_gets_no_color() -> None:
-    assert _get_state_attr(_make_entry(state=AgentLifecycleState.WAITING), BoardSection.PR_BEING_REVIEWED) == ""
+def test_get_state_attr_waiting_gets_attention() -> None:
+    assert _get_state_attr(_make_entry(state=AgentLifecycleState.WAITING)) == "state_attention"
 
 
 def test_get_state_attr_stopped_gets_no_color() -> None:
-    assert _get_state_attr(_make_entry(state=AgentLifecycleState.STOPPED), BoardSection.STILL_COOKING) == ""
-
-
-# =============================================================================
-# Tests for _format_check_markup
-# =============================================================================
-
-
-def test_format_check_markup_no_pr_returns_empty() -> None:
-    assert _format_check_markup(_make_entry(pr=None)) == []
-
-
-def test_format_check_markup_unknown_returns_empty() -> None:
-    assert _format_check_markup(_make_entry(pr=_make_pr(check_status=CheckStatus.UNKNOWN))) == []
-
-
-def test_format_check_markup_failing_gets_color() -> None:
-    markup = _format_check_markup(_make_entry(pr=_make_pr(check_status=CheckStatus.FAILING)))
-    assert len(markup) == 2
-    assert markup[0] == "  CI "
-    assert markup[1] == ("check_failing", "failing")
-
-
-def test_format_check_markup_pending_gets_color() -> None:
-    markup = _format_check_markup(_make_entry(pr=_make_pr(check_status=CheckStatus.PENDING)))
-    assert len(markup) == 2
-    assert markup[1] == ("check_pending", "pending")
-
-
-def test_format_check_markup_passing_gets_default_color() -> None:
-    markup = _format_check_markup(_make_entry(pr=_make_pr(check_status=CheckStatus.PASSING)))
-    assert len(markup) == 1
-    assert "passing" in markup[0]
-
-
-# =============================================================================
-# Tests for _format_push_status
-# =============================================================================
-
-
-def test_format_push_status_none_shows_not_pushed() -> None:
-    assert _format_push_status(_make_entry(commits_ahead=None)) == "  [not pushed]"
-
-
-def test_format_push_status_zero_shows_up_to_date() -> None:
-    assert _format_push_status(_make_entry(commits_ahead=0)) == "  [up to date]"
-
-
-def test_format_push_status_positive_shows_count() -> None:
-    assert _format_push_status(_make_entry(commits_ahead=3)) == "  [3 unpushed]"
+    assert _get_state_attr(_make_entry(state=AgentLifecycleState.STOPPED)) == ""
 
 
 # =============================================================================
@@ -326,42 +253,6 @@ def test_format_section_heading_still_cooking() -> None:
 
 
 # =============================================================================
-# Tests for _format_agent_line
-# =============================================================================
-
-
-def _flatten_markup(markup: list[str | tuple[object, str]]) -> str:
-    return "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
-
-
-def test_format_agent_line_basic() -> None:
-    text = _flatten_markup(_format_agent_line(_make_entry(name="my-agent"), BoardSection.STILL_COOKING))
-    assert "my-agent" in text
-    assert "RUNNING" in text
-
-
-def test_format_agent_line_with_pr() -> None:
-    text = _flatten_markup(_format_agent_line(_make_entry(pr=_make_pr(number=99)), BoardSection.PR_BEING_REVIEWED))
-    assert "PR #99" in text
-
-
-def test_format_agent_line_with_create_pr_url() -> None:
-    entry = _make_entry(create_pr_url="https://github.com/owner/repo/compare/branch?expand=1")
-    assert "create PR:" in _flatten_markup(_format_agent_line(entry, BoardSection.STILL_COOKING))
-
-
-def test_format_agent_line_muted_flattens_to_gray() -> None:
-    markup = _format_agent_line(_make_entry(is_muted=True), BoardSection.MUTED)
-    assert len(markup) == 1
-    assert markup[0][0] == "muted"
-
-
-def test_format_agent_line_with_work_dir_shows_push_status() -> None:
-    entry = _make_entry(work_dir=Path("/tmp/work"), commits_ahead=2)
-    assert "[2 unpushed]" in _flatten_markup(_format_agent_line(entry, BoardSection.STILL_COOKING))
-
-
-# =============================================================================
 # Tests for _is_safe_to_delete
 # =============================================================================
 
@@ -384,39 +275,34 @@ def test_is_safe_to_delete_no_pr() -> None:
 
 
 def test_build_board_widgets_none_snapshot_shows_loading() -> None:
-    state = _make_state(snapshot=None)
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(None)
     assert len(walker) == 1
     assert isinstance(walker[0], Text)
 
 
 def test_build_board_widgets_empty_snapshot_shows_no_agents() -> None:
-    state = _make_state(snapshot=_make_snapshot())
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(_make_snapshot())
     assert len(walker) == 1
     assert "No agents found" in str(walker[0].get_text()[0])
 
 
 def test_build_board_widgets_with_entries_creates_sections() -> None:
     entries = (_make_entry(name="cooking"), _make_entry(name="merged", pr=_make_pr(state=PrState.MERGED)))
-    state = _make_state(snapshot=_make_snapshot(entries=entries))
-    walker = _build_board_widgets(state)
+    walker, index_to_entry = _build_board_widgets(_make_snapshot(entries=entries))
     assert len(walker) >= 4
-    assert len(state.index_to_entry) == 2
+    assert len(index_to_entry) == 2
 
 
 def test_build_board_widgets_populates_index_to_entry() -> None:
     entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
-    state = _make_state(snapshot=_make_snapshot(entries=entries))
-    _build_board_widgets(state)
-    names = {entry.name for entry in state.index_to_entry.values()}
+    _, index_to_entry = _build_board_widgets(_make_snapshot(entries=entries))
+    names = {entry.name for entry in index_to_entry.values()}
     assert AgentName("agent-a") in names
     assert AgentName("agent-b") in names
 
 
 def test_build_board_widgets_with_errors_shows_them() -> None:
-    state = _make_state(snapshot=_make_snapshot(errors=("Something went wrong",)))
-    walker = _build_board_widgets(state)
+    walker, _ = _build_board_widgets(_make_snapshot(errors=("Something went wrong",)))
     all_text = " ".join(str(w.get_text()[0]) for w in walker if isinstance(w, Text))
     assert "Errors:" in all_text
     assert "Something went wrong" in all_text
@@ -549,52 +435,57 @@ def test_input_handler_up_on_first_selectable_clears_focus() -> None:
 # =============================================================================
 
 
+def _make_mng_ctx_with_plugins(
+    plugins: dict[PluginName, object] | None = None,
+) -> Any:
+    """Create a SimpleNamespace that mimics MngContext.get_plugin_config behavior."""
+    plugin_dict = plugins or {}
+
+    def get_plugin_config(name: str, config_type: type) -> object:  # ty: ignore[invalid-argument-type]
+        config = plugin_dict.get(PluginName(name))
+        if config is None:
+            return config_type()
+        return config
+
+    return SimpleNamespace(
+        config=SimpleNamespace(plugins=plugin_dict),
+        get_plugin_config=get_plugin_config,
+    )
+
+
 def test_build_command_map_returns_builtins_with_no_user_config() -> None:
-    mng_ctx: Any = SimpleNamespace(config=SimpleNamespace(plugins={}))
-    commands = _build_command_map(mng_ctx)  # ty: ignore[invalid-argument-type]
+    commands = _build_command_map(_make_mng_ctx_with_plugins())  # ty: ignore[invalid-argument-type]
     assert {"r", "p", "d", "m"} <= set(commands.keys())
 
 
 def test_build_command_map_user_command_overrides_builtin() -> None:
-    mng_ctx: Any = SimpleNamespace(
-        config=SimpleNamespace(
-            plugins={
-                PluginName("kanpan"): KanpanPluginConfig(
-                    commands={"r": CustomCommand(name="custom-refresh", command="echo refresh")}
-                )
-            }
-        )
+    mng_ctx = _make_mng_ctx_with_plugins(
+        {
+            PluginName("kanpan"): KanpanPluginConfig(
+                commands={"r": CustomCommand(name="custom-refresh", command="echo refresh")}
+            )
+        }
     )
     commands = _build_command_map(mng_ctx)  # ty: ignore[invalid-argument-type]
     assert commands["r"].name == "custom-refresh"
 
 
 def test_build_command_map_disabled_command_is_excluded() -> None:
-    mng_ctx: Any = SimpleNamespace(
-        config=SimpleNamespace(
-            plugins={
-                PluginName("kanpan"): KanpanPluginConfig(commands={"d": CustomCommand(name="delete", enabled=False)})
-            }
-        )
+    mng_ctx = _make_mng_ctx_with_plugins(
+        {PluginName("kanpan"): KanpanPluginConfig(commands={"d": CustomCommand(name="delete", enabled=False)})}
     )
     assert "d" not in _build_command_map(mng_ctx)  # ty: ignore[invalid-argument-type]
 
 
 def test_load_user_commands_no_kanpan_plugin_returns_empty() -> None:
-    mng_ctx: Any = SimpleNamespace(config=SimpleNamespace(plugins={}))
-    assert _load_user_commands(mng_ctx) == {}  # ty: ignore[invalid-argument-type]
-
-
-def test_load_user_commands_wrong_plugin_type_returns_empty() -> None:
-    mng_ctx: Any = SimpleNamespace(config=SimpleNamespace(plugins={PluginName("kanpan"): "not-a-config"}))
-    assert _load_user_commands(mng_ctx) == {}  # ty: ignore[invalid-argument-type]
+    assert _load_user_commands(_make_mng_ctx_with_plugins()) == {}  # ty: ignore[invalid-argument-type]
 
 
 def test_load_user_commands_handles_dict_values() -> None:
     config = KanpanPluginConfig.model_construct(
         enabled=True, commands={"x": {"name": "from-dict", "command": "echo hi"}}
     )
-    mng_ctx: Any = SimpleNamespace(config=SimpleNamespace(plugins={PluginName("kanpan"): config}))
+    mng_ctx = _make_mng_ctx_with_plugins({PluginName("kanpan"): config})
     commands = _load_user_commands(mng_ctx)  # ty: ignore[invalid-argument-type]
     assert commands["x"].name == "from-dict"
 
@@ -1117,3 +1008,200 @@ def test_on_auto_refresh_alarm_skips_if_already_refreshing() -> None:
     state.refresh_future = existing_future
     _on_auto_refresh_alarm(_make_mock_loop(), state)
     assert state.refresh_future is existing_future
+
+
+# =============================================================================
+# Tests for _carry_forward_pr_data and _build_board_widgets PR failure handling
+# (merged from main)
+# =============================================================================
+
+
+def _text_from_widget(widget: Text) -> str:
+    """Extract plain text content from a single Text widget."""
+    raw = widget.text
+    if isinstance(raw, str):
+        return raw
+    parts: list[str] = []
+    for seg in raw:
+        if isinstance(seg, tuple):
+            parts.append(str(seg[1]))
+        else:
+            parts.append(str(seg))
+    return "".join(parts)
+
+
+def _extract_text(walker: list[object]) -> list[str]:
+    """Extract plain text from all Text and Columns widgets in a walker."""
+    texts: list[str] = []
+    for widget in walker:
+        inner = widget.original_widget if isinstance(widget, AttrMap) else widget
+        if isinstance(inner, Text):
+            texts.append(_text_from_widget(inner))
+        elif isinstance(inner, Columns):
+            cell_texts = [_text_from_widget(child) for child, _options in inner.contents if isinstance(child, Text)]
+            texts.append(" ".join(cell_texts))
+    return texts
+
+
+def _text_contains(texts: list[str], substring: str) -> bool:
+    return any(substring in t for t in texts)
+
+
+def test_carry_forward_pr_data_preserves_old_prs() -> None:
+    pr = make_pr_info(number=42, head_branch="mng/agent-1")
+    old_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=pr,
+        create_pr_url=None,
+    )
+    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        errors=("gh auth failed",),
+        prs_loaded=False,
+        fetch_time_seconds=2.0,
+    )
+
+    result = _carry_forward_pr_data(old, new)
+    assert result.prs_loaded is True
+    assert result.entries[0].pr is not None
+    assert result.entries[0].pr.number == 42
+    assert "gh auth failed" in result.errors[0]
+    assert result.fetch_time_seconds == 2.0
+
+
+def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
+    old_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url="https://github.com/org/repo/compare/mng/agent-1?expand=1",
+    )
+    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+
+    result = _carry_forward_pr_data(old, new)
+    assert result.prs_loaded is True
+    assert result.entries[0].pr is None
+    assert result.entries[0].create_pr_url == "https://github.com/org/repo/compare/mng/agent-1?expand=1"
+
+
+def test_carry_forward_pr_data_handles_new_agents() -> None:
+    old = BoardSnapshot(entries=(), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-new"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-new",
+    )
+    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+
+    result = _carry_forward_pr_data(old, new)
+    assert result.entries[0].pr is None
+
+
+def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
+    entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    snapshot = BoardSnapshot(
+        entries=(entry,),
+        errors=("gh pr list failed: auth required",),
+        prs_loaded=False,
+        fetch_time_seconds=1.0,
+    )
+    walker, _ = _build_board_widgets(snapshot)
+
+    texts = _extract_text(list(walker))
+    assert _text_contains(texts, "PRs not loaded")
+    assert not _text_contains(texts, "no PR yet")
+    assert not _text_contains(texts, "create PR")
+    assert _text_contains(texts, "gh pr list failed")
+
+
+def test_first_load_pr_success_shows_normal_heading() -> None:
+    entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url="https://github.com/org/repo/compare/mng/agent-1?expand=1",
+    )
+    snapshot = BoardSnapshot(
+        entries=(entry,),
+        prs_loaded=True,
+        fetch_time_seconds=1.0,
+    )
+    walker, _ = _build_board_widgets(snapshot)
+
+    texts = _extract_text(list(walker))
+    assert _text_contains(texts, "no PR yet")
+    assert not _text_contains(texts, "PRs not loaded")
+
+
+def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
+    pr = make_pr_info(number=42, head_branch="mng/agent-1")
+    old_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=pr,
+        create_pr_url=None,
+    )
+    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+
+    new_entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("modal"),
+        branch="mng/agent-1",
+        pr=None,
+        create_pr_url=None,
+    )
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        errors=("gh pr list failed: network error",),
+        prs_loaded=False,
+        fetch_time_seconds=2.0,
+    )
+
+    carried = _carry_forward_pr_data(old, new)
+    walker, _ = _build_board_widgets(carried)
+
+    texts = _extract_text(list(walker))
+    assert _text_contains(texts, "github.com/org/repo/pull/42")
+    assert not _text_contains(texts, "PRs not loaded")
+    assert not _text_contains(texts, "no PR yet")
+    assert not _text_contains(texts, "create PR")
+    assert _text_contains(texts, "network error")

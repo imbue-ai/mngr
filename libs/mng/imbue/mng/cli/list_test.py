@@ -22,20 +22,20 @@ from imbue.mng.cli.list import _format_streaming_header_row
 from imbue.mng.cli.list import _format_value_as_string
 from imbue.mng.cli.list import _get_field_value
 from imbue.mng.cli.list import _get_header_label
-from imbue.mng.cli.list import _get_sortable_value
 from imbue.mng.cli.list import _is_streaming_eligible
 from imbue.mng.cli.list import _parse_slice_spec
 from imbue.mng.cli.list import _render_format_template
 from imbue.mng.cli.list import _should_use_streaming_mode
-from imbue.mng.cli.list import _sort_agents
+from imbue.mng.cli.list import _sort_agents_by_cel
 from imbue.mng.cli.list import list_command
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import SnapshotInfo
 from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
+from imbue.mng.utils.cel_utils import compile_cel_sort_keys
 from imbue.mng.utils.testing import make_test_agent_details
 
 
@@ -486,82 +486,73 @@ def test_get_field_value_host_plugin_whole_dict() -> None:
 
 
 # =============================================================================
-# Tests for _get_sortable_value with host plugin dict access
+# Tests for _sort_agents_by_cel
 # =============================================================================
 
 
-def test_get_sortable_value_host_plugin_field() -> None:
-    """_get_sortable_value should return raw value for host plugin field."""
-    agent = make_test_agent_details(host_plugin={"aws": {"iam_user": "admin"}})
-    result = _get_sortable_value(agent, "host.plugin.aws.iam_user")
-    assert result == "admin"
-
-
-def test_get_sortable_value_host_plugin_missing() -> None:
-    """_get_sortable_value should return None for nonexistent host plugin field."""
-    agent = make_test_agent_details(host_plugin={})
-    result = _get_sortable_value(agent, "host.plugin.nonexistent.field")
-    assert result is None
-
-
-# =============================================================================
-# Tests for _get_sortable_value
-# =============================================================================
-
-
-def test_get_sortable_value_simple_field() -> None:
-    """_get_sortable_value should return raw value for simple field."""
-    agent = make_test_agent_details()
-    result = _get_sortable_value(agent, "name")
-    assert result == AgentName("test-agent")
-
-
-def test_get_sortable_value_nested_field() -> None:
-    """_get_sortable_value should return raw value for nested field."""
-    agent = make_test_agent_details()
-    result = _get_sortable_value(agent, "host.name")
-    assert result == "test-host"
-
-
-def test_get_sortable_value_provider_name() -> None:
-    """_get_sortable_value should extract host.provider_name."""
-    agent = make_test_agent_details()
-    result = _get_sortable_value(agent, "host.provider_name")
-    assert result == "local"
-
-
-def test_get_sortable_value_invalid_field() -> None:
-    """_get_sortable_value should return None for invalid field."""
-    agent = make_test_agent_details()
-    result = _get_sortable_value(agent, "nonexistent")
-    assert result is None
-
-
-# =============================================================================
-# Tests for _sort_agents
-# =============================================================================
-
-
-def test_sort_agents_by_name_ascending() -> None:
-    """_sort_agents should sort by name in ascending order."""
+def test_sort_agents_by_cel_ascending() -> None:
+    """_sort_agents_by_cel should sort by name ascending."""
     agents = [
         make_test_agent_details(name="charlie"),
         make_test_agent_details(name="alpha"),
         make_test_agent_details(name="bravo"),
     ]
-    result = _sort_agents(agents, "name", reverse=False)
+    compiled = compile_cel_sort_keys("name")
+    result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["alpha", "bravo", "charlie"]
 
 
-def test_sort_agents_by_name_descending() -> None:
-    """_sort_agents should sort by name in descending order."""
+def test_sort_agents_by_cel_descending() -> None:
+    """_sort_agents_by_cel should sort by name descending."""
     agents = [
         make_test_agent_details(name="alpha"),
         make_test_agent_details(name="charlie"),
         make_test_agent_details(name="bravo"),
     ]
-    result = _sort_agents(agents, "name", reverse=True)
+    compiled = compile_cel_sort_keys("name desc")
+    result = _sort_agents_by_cel(agents, compiled)
     assert [str(a.name) for a in result] == ["charlie", "bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_multiple_keys() -> None:
+    """_sort_agents_by_cel should sort by multiple keys with mixed directions."""
+    agents = [
+        make_test_agent_details(name="alpha", state=AgentLifecycleState.STOPPED),
+        make_test_agent_details(name="bravo", state=AgentLifecycleState.RUNNING),
+        make_test_agent_details(name="charlie", state=AgentLifecycleState.RUNNING),
+    ]
+    # Sort by state ascending (RUNNING before STOPPED), then name descending
+    compiled = compile_cel_sort_keys("state, name desc")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["charlie", "bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_empty_list() -> None:
+    """_sort_agents_by_cel should return empty list for empty input."""
+    compiled = compile_cel_sort_keys("name")
+    result = _sort_agents_by_cel([], compiled)
+    assert result == []
+
+
+def test_sort_agents_by_cel_no_keys() -> None:
+    """_sort_agents_by_cel should return agents unchanged when no sort keys."""
+    agents = [
+        make_test_agent_details(name="bravo"),
+        make_test_agent_details(name="alpha"),
+    ]
+    result = _sort_agents_by_cel(agents, [])
+    assert [str(a.name) for a in result] == ["bravo", "alpha"]
+
+
+def test_sort_agents_by_cel_nested_field() -> None:
+    """_sort_agents_by_cel should sort by nested host fields via CEL."""
+    agents = [
+        make_test_agent_details(name="agent-b", provider_name=ProviderInstanceName("docker")),
+        make_test_agent_details(name="agent-a", provider_name=ProviderInstanceName("aws")),
+    ]
+    compiled = compile_cel_sort_keys("host.provider")
+    result = _sort_agents_by_cel(agents, compiled)
+    assert [str(a.name) for a in result] == ["agent-a", "agent-b"]
 
 
 # =============================================================================
@@ -1469,7 +1460,7 @@ def test_list_command_json_format_with_sort(
     plugin_manager: pluggy.PluginManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """list --format json --sort name --sort-order asc should sort agents."""
+    """list --format json --sort name should sort agents ascending."""
     agents = [
         make_test_agent_details(name="zeta"),
         make_test_agent_details(name="alpha"),
@@ -1478,7 +1469,7 @@ def test_list_command_json_format_with_sort(
 
     result = cli_runner.invoke(
         list_command,
-        ["--format", "json", "--sort", "name", "--sort-order", "asc"],
+        ["--format", "json", "--sort", "name"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1552,7 +1543,7 @@ def test_list_command_template_format_with_sort_falls_back_to_batch(
 
     result = cli_runner.invoke(
         list_command,
-        ["--format", "{name}", "--sort", "name", "--sort-order", "asc"],
+        ["--format", "{name}", "--sort", "name"],
         obj=plugin_manager,
         catch_exceptions=False,
     )

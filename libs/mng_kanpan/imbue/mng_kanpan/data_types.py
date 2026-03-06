@@ -71,6 +71,7 @@ class BoardSnapshot(FrozenModel):
 
     entries: tuple[AgentBoardEntry, ...] = Field(description="All agent board entries")
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during fetch")
+    prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched from GitHub")
     fetch_time_seconds: float = Field(description="Time taken to fetch data")
 
 
