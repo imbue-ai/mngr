@@ -292,10 +292,11 @@ LLM_RESPONSES_SCHEMA = """
 
 
 def create_changeling_conversations_table_in_test_db(db_path: Path) -> None:
-    """Create the changeling_conversations table in the given database."""
+    """Create the changeling_conversations and llm conversations tables in the given database."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(CHANGELING_CONVERSATIONS_TABLE_SQL)
+        conn.execute(LLM_CONVERSATIONS_SCHEMA)
         conn.commit()
 
 
@@ -306,6 +307,7 @@ def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, 
     """
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(LLM_RESPONSES_SCHEMA)
+        conn.execute(LLM_CONVERSATIONS_SCHEMA)
         conn.execute(CHANGELING_CONVERSATIONS_TABLE_SQL)
         for row_id, prompt, response, model, dt, conversation_id in rows:
             conn.execute(
@@ -347,6 +349,15 @@ def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubp
     return capture
 
 
+LLM_CONVERSATIONS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        model TEXT
+    )
+"""
+
+
 def write_conversation_to_db(
     db_path: Path,
     conversation_id: str,
@@ -354,13 +365,22 @@ def write_conversation_to_db(
     tags: str = "{}",
     created_at: str = "2025-01-15T10:00:00.000Z",
 ) -> None:
-    """Insert a conversation record into the changeling_conversations table in the given database."""
+    """Insert a conversation into both the changeling and llm conversations tables.
+
+    The model is stored in the llm-native ``conversations`` table (matching
+    how the llm tool works), while tags and created_at go into the
+    ``changeling_conversations`` table.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(CHANGELING_CONVERSATIONS_TABLE_SQL)
+        conn.execute(LLM_CONVERSATIONS_SCHEMA)
         conn.execute(
-            "INSERT OR REPLACE INTO changeling_conversations "
-            "(conversation_id, model, tags, created_at) VALUES (?, ?, ?, ?)",
-            (conversation_id, model, tags, created_at),
+            "INSERT OR REPLACE INTO changeling_conversations (conversation_id, tags, created_at) VALUES (?, ?, ?)",
+            (conversation_id, tags, created_at),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO conversations (id, name, model) VALUES (?, ?, ?)",
+            (conversation_id, conversation_id, model),
         )
         conn.commit()

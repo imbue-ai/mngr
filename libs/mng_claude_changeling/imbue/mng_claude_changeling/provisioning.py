@@ -581,7 +581,6 @@ def _get_llm_db_path(agent_state_dir: Path) -> Path:
 CHANGELING_CONVERSATIONS_TABLE_SQL: Final[str] = (
     "CREATE TABLE IF NOT EXISTS changeling_conversations ("
     "conversation_id TEXT PRIMARY KEY, "
-    "model TEXT NOT NULL, "
     "tags TEXT NOT NULL DEFAULT '{}', "
     "created_at TEXT NOT NULL"
     ")"
@@ -619,10 +618,14 @@ def _insert_conversation_record(
     settings: ProvisioningSettings,
     *,
     conversation_id: str,
-    model: str,
     tags: dict[str, str] | None = None,
 ) -> None:
-    """Insert a conversation record into the changeling_conversations table in the llm database."""
+    """Insert a conversation record into the changeling_conversations table in the llm database.
+
+    The model is not stored here -- it lives in the llm tool's native
+    ``conversations`` table and is set when the conversation is created
+    via ``llm inject -m <model>``.
+    """
     now = datetime.now(timezone.utc)
     created_at = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
     tags_json = json.dumps(tags or {}, separators=(",", ":"))
@@ -630,10 +633,9 @@ def _insert_conversation_record(
     db_path = _get_llm_db_path(agent_state_dir)
     sql = (
         f"INSERT OR REPLACE INTO changeling_conversations "
-        f"(conversation_id, model, tags, created_at) "
+        f"(conversation_id, tags, created_at) "
         f"VALUES ("
         f"{_sql_quote(conversation_id)}, "
-        f"{_sql_quote(model)}, "
         f"{_sql_quote(tags_json)}, "
         f"{_sql_quote(created_at)}"
         f")"
@@ -740,7 +742,6 @@ def create_system_notifications_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        model=model,
         tags={"internal": "system_notifications"},
     )
     logger.info("Created system_notifications conversation: conversation_id={}", conversation_id)
@@ -778,7 +779,6 @@ def create_daily_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        model=chat_model,
         tags={"daily": today},
     )
     logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)

@@ -82,17 +82,17 @@ generate_conversation_id() {
 }
 
 # Insert a conversation record into the changeling_conversations table.
-# Args: conversation_id, model, [tags_json]
+# The model is not stored here -- it lives in the llm conversations table.
+# Args: conversation_id, [tags_json]
 # tags_json defaults to '{}' if not provided.
 insert_conversation_record() {
     local conversation_id="$1"
-    local model="$2"
-    local tags="${3:-{}}"
+    local tags="${2:-{}}"
     local created_at
     created_at=$(iso_timestamp_ns)
 
-    python3 "$CONV_DB" insert "$_LLM_DB" "$conversation_id" "$model" "$tags" "$created_at"
-    log "Inserted conversation record: conversation_id=$conversation_id model=$model tags=$tags"
+    python3 "$CONV_DB" insert "$_LLM_DB" "$conversation_id" "$tags" "$created_at"
+    log "Inserted conversation record: conversation_id=$conversation_id tags=$tags"
 }
 
 build_tool_args() {
@@ -158,7 +158,7 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
-        insert_conversation_record "$conversation_id" "$model"
+        insert_conversation_record "$conversation_id"
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $conversation_id"
             llm inject --cid "$conversation_id" -m "$model" "$message"
@@ -186,7 +186,7 @@ new_conversation() {
                 if [ -f "$_LLM_DB" ]; then
                     _new_conversation_id=$(python3 "$CONV_DB" poll-new "$_LLM_DB" "$_max_rowid")
                     if [ -n "$_new_conversation_id" ]; then
-                        insert_conversation_record "$_new_conversation_id" "$model"
+                        insert_conversation_record "$_new_conversation_id"
                         log "Recorded conversation for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
                         break
                     fi
@@ -260,7 +260,11 @@ conversations = {}
 try:
     conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     try:
-        rows = conn.execute('SELECT conversation_id, model, tags, created_at FROM changeling_conversations').fetchall()
+        rows = conn.execute(
+            'SELECT cc.conversation_id, c.model, cc.tags, cc.created_at '
+            'FROM changeling_conversations cc '
+            'LEFT JOIN conversations c ON cc.conversation_id = c.id'
+        ).fetchall()
     finally:
         conn.close()
     for conversation_id, model, tags_json, created_at in rows:

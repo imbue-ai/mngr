@@ -129,7 +129,9 @@ def _read_conversations() -> list[dict[str, str]]:
             conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
             try:
                 rows = conn.execute(
-                    "SELECT conversation_id, model, created_at FROM changeling_conversations"
+                    "SELECT cc.conversation_id, c.model, cc.created_at "
+                    "FROM changeling_conversations cc "
+                    "LEFT JOIN conversations c ON cc.conversation_id = c.id"
                 ).fetchall()
                 for conversation_id, model, created_at in rows:
                     conversations_by_id[conversation_id] = {

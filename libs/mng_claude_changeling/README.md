@@ -102,7 +102,7 @@ Event sources:
 
 Every event is self-describing: you never need to know the filename to understand the event. The file organization is a performance/convenience choice, not a correctness one.
 
-Conversation metadata (conversation_id, model, tags, created_at) is stored in the `changeling_conversations` table in the llm sqlite database (`$LLM_USER_PATH/logs.db`), not in an event file.
+Conversation metadata (tags, created_at) is stored in the `changeling_conversations` table in the llm sqlite database (`$LLM_USER_PATH/logs.db`). The model for each conversation lives in the llm tool's native `conversations` table.
 
 ## Provisioning
 

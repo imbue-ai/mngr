@@ -4,12 +4,16 @@
 Provides subcommands for CRUD operations on the changeling_conversations
 table in the llm sqlite database, using parameterized queries for safety.
 
+The changeling_conversations table stores only metadata not tracked by
+the llm tool's native tables (tags, created_at). The model is stored
+in the llm tool's ``conversations`` table and queried from there.
+
 The table schema matches CHANGELING_CONVERSATIONS_TABLE_SQL from provisioning.py.
 The table is expected to already exist (created during provisioning). If it
 does not, the insert subcommand creates it as a safety net.
 
 Usage:
-    python3 conversation_db.py insert <db_path> <conversation_id> <model> <tags_json> <created_at>
+    python3 conversation_db.py insert <db_path> <conversation_id> <tags_json> <created_at>
     python3 conversation_db.py lookup-model <db_path> <conversation_id>
     python3 conversation_db.py count <db_path>
     python3 conversation_db.py max-rowid <db_path>
@@ -27,7 +31,6 @@ import sys
 _CREATE_TABLE_SQL = (
     "CREATE TABLE IF NOT EXISTS changeling_conversations ("
     "conversation_id TEXT PRIMARY KEY, "
-    "model TEXT NOT NULL, "
     "tags TEXT NOT NULL DEFAULT '{}', "
     "created_at TEXT NOT NULL)"
 )
@@ -43,14 +46,13 @@ def _warn(message: str) -> None:
     sys.stderr.flush()
 
 
-def _insert(db_path: str, conversation_id: str, model: str, tags: str, created_at: str) -> None:
+def _insert(db_path: str, conversation_id: str, tags: str, created_at: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(_CREATE_TABLE_SQL)
         conn.execute(
-            "INSERT OR REPLACE INTO changeling_conversations "
-            "(conversation_id, model, tags, created_at) VALUES (?, ?, ?, ?)",
-            (conversation_id, model, tags, created_at),
+            "INSERT OR REPLACE INTO changeling_conversations (conversation_id, tags, created_at) VALUES (?, ?, ?)",
+            (conversation_id, tags, created_at),
         )
         conn.commit()
     finally:
@@ -58,11 +60,12 @@ def _insert(db_path: str, conversation_id: str, model: str, tags: str, created_a
 
 
 def _lookup_model(db_path: str, conversation_id: str) -> None:
+    """Look up the model from the llm tool's native conversations table."""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
             row = conn.execute(
-                "SELECT model FROM changeling_conversations WHERE conversation_id = ?",
+                "SELECT model FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
             if row:
@@ -125,7 +128,7 @@ def main() -> None:
 
     match subcommand:
         case "insert":
-            _insert(db_path, sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
+            _insert(db_path, sys.argv[3], sys.argv[4], sys.argv[5])
         case "lookup-model":
             _lookup_model(db_path, sys.argv[3])
         case "count":

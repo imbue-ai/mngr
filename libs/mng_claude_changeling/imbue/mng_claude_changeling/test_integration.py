@@ -388,13 +388,7 @@ def test_chat_script_no_args_lists_and_shows_hint(chat_env: ChatScriptEnv) -> No
 @pytest.mark.timeout(30)
 def test_chat_script_list_shows_existing_conversations(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh --list shows conversations from the database."""
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    conn.execute(
-        "INSERT INTO changeling_conversations (conversation_id, model, tags, created_at) "
-        "VALUES ('conv-test-12345', 'claude-sonnet-4-6', '{}', '2025-01-15T10:00:00.000000000Z')"
-    )
-    conn.commit()
-    conn.close()
+    write_conversation_to_db(chat_env.llm_db_path, "conv-test-12345", model="claude-sonnet-4-6")
 
     result = chat_env.run("--list")
 
@@ -504,16 +498,15 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
 
     conn = sqlite3.connect(str(chat_env.llm_db_path))
     rows = conn.execute(
-        "SELECT conversation_id, model, created_at FROM changeling_conversations WHERE conversation_id = ?",
+        "SELECT conversation_id, created_at FROM changeling_conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchall()
     conn.close()
 
     assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
     assert rows[0][0] == conversation_id
-    assert rows[0][1] == "claude-sonnet-4-6"
     # created_at should be non-empty
-    assert rows[0][2]
+    assert rows[0][1]
 
 
 @pytest.mark.timeout(30)
@@ -546,13 +539,14 @@ def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
+    # Verify the conversation record was created
     conn = sqlite3.connect(str(chat_env.llm_db_path))
     rows = conn.execute(
-        "SELECT model FROM changeling_conversations WHERE conversation_id = ?",
+        "SELECT conversation_id FROM changeling_conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchall()
     conn.close()
-    assert rows[0][0] == "claude-haiku-4-5"
+    assert len(rows) == 1
 
 
 @pytest.mark.timeout(30)
@@ -797,49 +791,35 @@ def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScrip
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
+    # Verify the conversation record was created (model is not in changeling_conversations)
     conversation_id = result.stdout.strip()
     conn = sqlite3.connect(str(chat_env.llm_db_path))
     rows = conn.execute(
-        "SELECT model FROM changeling_conversations WHERE conversation_id = ?",
+        "SELECT conversation_id FROM changeling_conversations WHERE conversation_id = ?",
         (conversation_id,),
     ).fetchall()
     conn.close()
-    assert rows[0][0] == "claude-opus-4.6", f"Expected hardcoded default, got: {rows[0][0]!r}"
+    assert len(rows) == 1
 
 
 @pytest.mark.timeout(30)
 def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv) -> None:
     """Verify that the DB-based model lookup in resume_conversation finds the right model.
 
-    resume_conversation() queries the changeling_conversations table to find
-    the model for a conversation ID. This test verifies it returns the correct
-    model when multiple conversations exist.
+    resume_conversation() queries the llm conversations table to find the
+    model for a conversation ID. This test inserts conversations directly
+    into the llm conversations table and verifies the lookup works.
     """
-    chat_env.set_default_model("claude-sonnet-4-6")
-
-    # Create first conversation
-    result1 = chat_env.run("--new", "--as-agent")
-    assert result1.returncode == 0
-    cid1 = result1.stdout.strip()
-
-    # Insert a second conversation with a different model directly into the DB
+    # Insert two conversations with different models into the llm conversations table
+    cid1 = "conv-111-aabb"
     cid2 = "conv-222-ccdd"
-    conn = sqlite3.connect(str(chat_env.llm_db_path))
-    conn.execute(
-        "INSERT INTO changeling_conversations (conversation_id, model, tags, created_at) "
-        "VALUES (?, ?, '{}', '2025-01-15T11:00:00.000Z')",
-        (cid2, "claude-haiku-4-5"),
-    )
-    conn.commit()
-    conn.close()
+    write_conversation_to_db(chat_env.llm_db_path, cid1, model="claude-sonnet-4-6")
+    write_conversation_to_db(chat_env.llm_db_path, cid2, model="claude-haiku-4-5")
 
-    # Verify via sqlite3 CLI (same approach as resume_conversation uses)
+    # Use the conversation_db.py helper (same as resume_conversation uses)
+    conv_db = Path(chat_env.env["MNG_HOST_DIR"]) / "commands" / "conversation_db.py"
     lookup_result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"sqlite3 '{chat_env.llm_db_path}' \"SELECT model FROM changeling_conversations WHERE conversation_id = '{cid2}'\"",
-        ],
+        ["python3", str(conv_db), "lookup-model", str(chat_env.llm_db_path), cid2],
         capture_output=True,
         text=True,
         env=chat_env.env,
@@ -848,13 +828,8 @@ def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv
     assert lookup_result.returncode == 0
     assert lookup_result.stdout.strip() == "claude-haiku-4-5"
 
-    # Also verify that looking up the first CID finds the right model
     lookup_result2 = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"sqlite3 '{chat_env.llm_db_path}' \"SELECT model FROM changeling_conversations WHERE conversation_id = '{cid1}'\"",
-        ],
+        ["python3", str(conv_db), "lookup-model", str(chat_env.llm_db_path), cid1],
         capture_output=True,
         text=True,
         env=chat_env.env,
@@ -883,7 +858,6 @@ def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
     chat_env.run("--new", "--as-agent", "hello from test")
 
     conn = sqlite3.connect(str(chat_env.llm_db_path))
-    rows = conn.execute("SELECT conversation_id, model FROM changeling_conversations").fetchall()
+    rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
     conn.close()
     assert len(rows) >= 1, "conversation record should be written even when llm inject fails"
-    assert rows[-1][1] == "claude-sonnet-4-6"

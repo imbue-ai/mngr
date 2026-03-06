@@ -124,7 +124,9 @@ def gather_extra_context() -> str:
                     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                     try:
                         rows = conn.execute(
-                            "SELECT conversation_id, model, created_at FROM changeling_conversations"
+                            "SELECT cc.conversation_id, c.model, cc.created_at "
+                            "FROM changeling_conversations cc "
+                            "LEFT JOIN conversations c ON cc.conversation_id = c.id"
                         ).fetchall()
                         if rows:
                             conv_lines = []
