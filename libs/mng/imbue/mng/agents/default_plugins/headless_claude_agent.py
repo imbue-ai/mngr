@@ -90,6 +90,17 @@ def extract_text_delta(line: str) -> str | None:
     return None
 
 
+def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
+    """Yield text deltas parsed from stream-json lines, skipping blanks and non-delta events."""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        text = extract_text_delta(stripped)
+        if text is not None:
+            yield text
+
+
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     """Config for the headless_claude agent type.
 
@@ -209,26 +220,13 @@ class HeadlessClaude(ClaudeAgent, HeadlessAgentMixin):
                     if not data.endswith("\n"):
                         line_buffer = lines.pop()
 
-                    for line in lines:
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-                        text = extract_text_delta(stripped)
-                        if text is not None:
-                            yield text
+                    yield from _yield_text_deltas_from_lines(lines)
 
-                state = self.get_lifecycle_state()
-                if state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
-                    remaining = fh.read()
-                    if remaining:
-                        remaining = line_buffer + remaining
-                        for line in remaining.split("\n"):
-                            stripped = line.strip()
-                            if not stripped:
-                                continue
-                            text = extract_text_delta(stripped)
-                            if text is not None:
-                                yield text
+                if self._is_agent_finished():
+                    # Drain any remaining data and the line buffer
+                    final_data = line_buffer + fh.read()
+                    if final_data:
+                        yield from _yield_text_deltas_from_lines(final_data.split("\n"))
                     return
 
                 poll_until(tracker.has_changed, timeout=_TAIL_POLL_TIMEOUT, poll_interval=_TAIL_POLL_INTERVAL)
