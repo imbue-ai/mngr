@@ -1,0 +1,25 @@
+[project]
+name = "skitwright"
+version = "0.1.0"
+description = "Lightweight end-to-end testing framework for CLI applications"
+requires-python = ">=3.11"
+dependencies = [
+    "imbue-common",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py"]
+
+[tool.uv.sources]
+imbue-common = { workspace = true }
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]
