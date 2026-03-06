@@ -100,11 +100,6 @@ class ClaudeChangelingConfig(ClaudeAgentConfig):
         default=True,
         description="Whether to install llm and its plugins (llm-anthropic, llm-live-chat) during provisioning.",
     )
-    active_role: str = Field(
-        default="thinking",
-        description="The active role for this agent. Claude Code runs from within this "
-        "role directory (e.g. 'thinking', 'working', 'verifying').",
-    )
 
 
 class ClaudeChangelingAgent(ClaudeAgent):
@@ -180,6 +175,23 @@ class ClaudeChangelingAgent(ClaudeAgent):
         with log_span("Configuring hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(existing_settings, indent=2) + "\n")
 
+    @staticmethod
+    def _get_role_from_env(options: CreateAgentOptions) -> str:
+        """Read the ROLE env var from the agent's environment options.
+
+        The ROLE env var must be passed via ``--env ROLE=<role>`` when creating
+        the agent. It determines which role directory Claude Code runs from.
+
+        Raises RuntimeError if ROLE is not set.
+        """
+        for env_var in options.environment.env_vars:
+            if env_var.key == "ROLE":
+                return env_var.value
+        raise RuntimeError(
+            "ROLE environment variable is required for changeling agents. "
+            "Pass --env ROLE=<role> (e.g. --env ROLE=thinking) when creating the agent."
+        )
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -188,9 +200,8 @@ class ClaudeChangelingAgent(ClaudeAgent):
     ) -> CommandString:
         """Prepend ``cd "$ROLE" &&`` so Claude Code runs from within the role directory.
 
-        Uses the ``$ROLE`` environment variable (injected by
-        ``inject_role_env_var`` in the ``override_command_options`` hook)
-        so that scripts and tools can also read the active role name at runtime.
+        The ``$ROLE`` env var is set via ``--env ROLE=<role>`` when the agent
+        is created (passed by ``changeling deploy`` or manually by the user).
 
         This causes Claude Code to naturally discover ``.claude/``, skills,
         and ``CLAUDE.local.md`` from the role directory, while ``CLAUDE.md``
@@ -222,7 +233,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
         super().provision(host, options, mng_ctx)
 
         config = self._get_changeling_config()
-        active_role = config.active_role
+        active_role = self._get_role_from_env(options)
 
         # Load settings from changelings.toml (falls back to defaults)
         settings = load_settings_from_host(host, self.work_dir)
@@ -283,20 +294,6 @@ def inject_supporting_services(params: dict[str, Any]) -> None:
     )
 
 
-def inject_role_env_var(params: dict[str, Any]) -> None:
-    """Inject the ROLE environment variable into the agent's env.
-
-    Sets ``ROLE`` to the default active role (``thinking``). This is used by
-    ``assemble_command()`` to ``cd "$ROLE"`` at runtime, and is available to
-    scripts and tools that need to know the active role.
-
-    If the user explicitly passes ``--env ROLE=<value>``, their value takes
-    precedence because it appears later in the env var list.
-    """
-    existing = params.get("agent_env", ())
-    params["agent_env"] = (f"ROLE={ClaudeChangelingConfig().active_role}", *existing)
-
-
 def get_agent_type_from_params(params: dict[str, Any]) -> str | None:
     """Extract the agent type from create command parameters."""
     return params.get("agent_type") or params.get("positional_agent_type")
@@ -324,10 +321,10 @@ def override_command_options(
     command_class: type,
     params: dict[str, Any],
 ) -> None:
-    """Add changeling supporting service windows and ROLE env var when creating changeling agents.
+    """Add changeling supporting service windows when creating claude-changeling role agents (or subtypes).
 
     Injects: agent ttyd, conversation watcher, event watcher, web server,
-    chat ttyd as supporting services, and ``ROLE`` env var for the active role.
+    and chat ttyd as supporting services.
 
     Matches any agent type whose registered class is ClaudeChangelingAgent or
     a subclass of it (e.g. elena-code, custom changeling types).
@@ -343,4 +340,3 @@ def override_command_options(
         return
 
     inject_supporting_services(params)
-    inject_role_env_var(params)

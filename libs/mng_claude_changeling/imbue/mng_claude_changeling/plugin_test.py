@@ -6,8 +6,13 @@ from typing import cast
 
 import pytest
 
+from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
+from imbue.mng.config.data_types import EnvVar
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NamedCommand
+from imbue.mng.primitives import CommandString
 from imbue.mng_claude_changeling.plugin import CHAT_TTYD_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_changeling.plugin import CONV_WATCHER_WINDOW_NAME
@@ -17,7 +22,6 @@ from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_COMMAND
 from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import WEB_SERVER_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import get_agent_type_from_params
-from imbue.mng_claude_changeling.plugin import inject_role_env_var
 from imbue.mng_claude_changeling.plugin import inject_supporting_services
 from imbue.mng_claude_changeling.plugin import override_command_options
 
@@ -199,15 +203,12 @@ def test_adds_chat_ttyd_service(changeling_create_params: dict[str, Any]) -> Non
 
 def test_assemble_command_prepends_cd_role(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify that assemble_command prepends 'cd "$ROLE" &&' to the base command."""
-    from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-    from imbue.mng.primitives import CommandString
-
     base_cmd = CommandString("claude --resume $SID || claude --session-id UUID")
 
     monkeypatch.setattr(ClaudeAgent, "assemble_command", lambda self, host, args, override: base_cmd)
 
     agent = ClaudeChangelingAgent.model_construct(
-        agent_config=ClaudeChangelingConfig(active_role="thinking"),
+        agent_config=ClaudeChangelingConfig(),
     )
     result = agent.assemble_command(cast(Any, None), (), None)
 
@@ -215,40 +216,21 @@ def test_assemble_command_prepends_cd_role(monkeypatch: pytest.MonkeyPatch) -> N
     assert str(base_cmd) in str(result)
 
 
-# -- inject_role_env_var tests --
+# -- _get_role_from_env tests --
 
 
-def test_inject_role_env_var_adds_role() -> None:
-    """Verify that inject_role_env_var adds ROLE=thinking to agent_env."""
-    params: dict[str, Any] = {}
-    inject_role_env_var(params)
-    assert "ROLE=thinking" in params["agent_env"]
-
-
-def test_inject_role_env_var_preserves_existing() -> None:
-    """Verify that existing agent_env entries are preserved."""
-    params: dict[str, Any] = {"agent_env": ("FOO=bar",)}
-    inject_role_env_var(params)
-    assert "ROLE=thinking" in params["agent_env"]
-    assert "FOO=bar" in params["agent_env"]
-
-
-def test_inject_role_env_var_user_override_takes_precedence() -> None:
-    """Verify that user-provided ROLE comes after the default (later values win)."""
-    params: dict[str, Any] = {"agent_env": ("ROLE=working",)}
-    inject_role_env_var(params)
-    # Default "ROLE=thinking" is first, user's "ROLE=working" is second
-    env = params["agent_env"]
-    assert env[0] == "ROLE=thinking"
-    assert env[1] == "ROLE=working"
-
-
-def test_override_command_options_injects_role_env_var() -> None:
-    """Verify that the override_command_options hook injects the ROLE env var."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-changeling"}
-    override_command_options(
-        command_name="create",
-        command_class=_DummyCommandClass,
-        params=params,
+def test_get_role_from_env_returns_role() -> None:
+    """Verify _get_role_from_env reads the ROLE env var from options."""
+    options = CreateAgentOptions.model_construct(
+        environment=AgentEnvironmentOptions(env_vars=(EnvVar(key="ROLE", value="working"),)),
     )
-    assert "ROLE=thinking" in params.get("agent_env", ())
+    assert ClaudeChangelingAgent._get_role_from_env(options) == "working"
+
+
+def test_get_role_from_env_raises_when_missing() -> None:
+    """Verify _get_role_from_env raises RuntimeError when ROLE is not set."""
+    options = CreateAgentOptions.model_construct(
+        environment=AgentEnvironmentOptions(env_vars=()),
+    )
+    with pytest.raises(RuntimeError, match="ROLE environment variable is required"):
+        ClaudeChangelingAgent._get_role_from_env(options)

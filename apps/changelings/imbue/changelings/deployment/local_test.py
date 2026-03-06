@@ -592,6 +592,10 @@ def test_create_mng_agent_includes_agent_type_and_no_connect(tmp_path: Path) -> 
     assert cmd[at_index + 1] == "elena-code"
     assert "--no-connect" in cmd
     assert "-t" not in cmd
+    # Verify ROLE env var is passed
+    assert "--env" in cmd
+    env_index = cmd.index("--env")
+    assert cmd[env_index + 1] == "ROLE=thinking"
 
 
 def test_create_mng_agent_passes_agent_id(tmp_path: Path) -> None:

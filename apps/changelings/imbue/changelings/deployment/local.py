@@ -295,6 +295,8 @@ def _create_mng_agent(
             "--await-ready",
             "--agent-type",
             agent_type,
+            "--env",
+            "ROLE=thinking",
             "--label",
             "changeling=true",
         ]
