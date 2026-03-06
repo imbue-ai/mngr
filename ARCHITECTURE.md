@@ -185,50 +185,50 @@ The codebase aggressively uses constrained primitive types to encode domain know
 - `MutableModel`: mutable Pydantic models for interface implementations that need internal state. Critical fields like IDs are still `frozen=True`.
 - All models use `extra="forbid"` to catch typos and stale fields.
 
-### Default Plugins vs. Core
-
-The `mng` package itself contains a set of **default plugins** -- provider backends and agent types that are registered internally via `pm.register()` during startup. These are not separate packages; they live inside `libs/mng` and are always available. They use the same hookimpl mechanism as external plugins but are loaded directly rather than discovered via entry points.
-
-**Default provider backends** (in `providers/`):
-
-| Backend | Description | Isolation | Snapshots | Use Case |
-|---------|------------|-----------|-----------|----------|
-| **local** | Runs on your machine directly | None | No | Quick local dev |
-| **docker** | Docker containers | Container-level | No | Local isolation |
-| **modal** | Modal.com Sandboxes | VM-level | Yes | Cloud compute, auto-shutdown |
-| **ssh** | Any SSH-accessible host | Depends on host | No | Pre-existing infrastructure |
-
-Local and SSH are always loaded. Docker and Modal are conditionally loaded (they can be disabled via `pm.set_blocked()`), though both are hard dependencies of the mng package.
-
-**Default agent types** (in `agents/default_plugins/`):
-
-- **ClaudeAgent** -- Claude Code with configurable model, permissions, and provisioning
-- **CodexAgent** -- OpenAI Codex CLI integration
-- **SkillAgent** -- Runs a specific skill/script
-- **CodeGuardianAgent** -- Code review agent
-- **FixmeFairyAgent** -- Automated FIXME resolver
-
-The minimal core of mng (layered architecture, interfaces, config, utils, primitives) is independent of these default plugins. The default plugins provide the concrete implementations that make mng useful out of the box.
-
-Agent types support inheritance: a custom "my-claude" type can inherit from "claude" and merge parent defaults with custom overrides.
-
 ### Configuration
 
-Configuration is loaded hierarchically (later sources override earlier):
+Configuration is loaded hierarchically. Later sources override earlier ones, with per-key merging for nested config objects (scalars: last writer wins; lists: concatenated; dicts: deep-merged):
 
-1. Built-in defaults
-2. Global config (`~/.mng/settings.toml`)
-3. Local/project config (`.mng/settings.toml`)
-4. Environment variables
-5. CLI arguments
+1. Built-in defaults (hardcoded in `MngConfig`)
+2. User config (`~/.mng/profiles/<profile_id>/settings.toml`)
+3. Project config (`.mng/settings.toml` at git root or context dir)
+4. Local config (`.mng/settings.local.toml` -- gitignored, for personal overrides)
+5. Environment variables (`MNG_PREFIX`, `MNG_HOST_DIR`, `MNG_ROOT_NAME`, `MNG_COMMANDS_*`)
+6. CLI arguments (highest precedence)
 
-The `MngContext` dataclass holds the resolved configuration for a given invocation, including the mng data directory, user ID, enabled plugins, and provider instances.
+The `on_load_config` plugin hook can modify the raw config dict before validation, allowing plugins to inject defaults or transform config.
 
-Key config types (`config/data_types.py`):
-- `MngConfig`: global settings (default_host_dir, prefix, destroyed_host_persisted_seconds)
-- `ProviderInstanceConfig`: per-provider settings (backend name, host_dir, build/start args)
-- `AgentTypeConfig`: agent type definitions (command, CLI args, permissions)
-- `ActivityConfig`: idle detection settings (idle_mode, idle_timeout_seconds)
+**Key config types** (`config/data_types.py`):
+
+- **`MngConfig`** -- root configuration model. Key fields:
+  - `prefix`: resource naming prefix (default: `"mng-"`)
+  - `default_host_dir`: base directory for mng data (default: `~/.mng`)
+  - `agent_types`: custom agent type definitions (map of name -> `AgentTypeConfig`)
+  - `providers`: provider instance definitions (map of name -> `ProviderInstanceConfig`)
+  - `plugins`: plugin configurations (map of name -> `PluginConfig`)
+  - `commands`: default CLI parameter values per command (map of command name -> `CommandDefaults`)
+  - `create_templates`: named presets for the create command (map of name -> `CreateTemplate`)
+  - `pre_command_scripts`: shell commands to run before CLI commands
+  - `logging`: file/console log levels, log rotation settings
+  - `enabled_backends`: whitelist of provider backends (empty = all enabled)
+  - `connect_command`: custom command for agent connection (overrides built-in tmux attach)
+
+- **`AgentTypeConfig`** -- defines a custom or overridden agent type:
+  - `parent_type`: base type to inherit from (enables type inheritance)
+  - `command`: command to run for this agent type
+  - `cli_args`: additional CLI arguments (merged via concatenation)
+  - `permissions`: explicit permission list (replaces parent's permissions)
+
+- **`ProviderInstanceConfig`** -- per-provider instance settings:
+  - `backend`: which provider backend to use
+  - `is_enabled`: toggle without removing config
+  - Subclasses add backend-specific fields (e.g., Modal adds `gpu`, `cpu`, `memory`, `image`, `volumes`)
+
+- **`MngContext`** -- the resolved runtime context passed through the application. Combines `MngConfig`, `PluginManager`, profile directory, concurrency group, and flags like `is_interactive` and `is_auto_approve`.
+
+**Environment variable overrides** for command defaults use the pattern `MNG_COMMANDS_<COMMAND>_<PARAM>=<value>` (e.g., `MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX=agent/`).
+
+**`MNG_ROOT_NAME`** (default: `"mng"`) controls the config file directory name (`.mng/`) and default prefix (`mng-`). This allows multiple independent mng installations on the same machine.
 
 ### CLI Commands
 
@@ -258,11 +258,16 @@ The codebase includes interactive text user interfaces built with **urwid**:
 
 ## Plugin System
 
-`mng` uses [pluggy](https://pluggy.readthedocs.io/) for its plugin system. There are two tiers of plugins:
+`mng` uses [pluggy](https://pluggy.readthedocs.io/) for extensibility. All extensible components -- agent types, provider backends, CLI commands -- are registered through the same plugin hook mechanism, but there are two tiers:
 
-1. **Default plugins** -- ship inside `libs/mng` itself (provider backends like modal/docker, agent types like claude/codex). Registered directly via `pm.register()` during startup. See "Default Plugins vs. Core" above.
+**Default plugins** ship inside `libs/mng` and are registered directly via `pm.register()` during startup. They are always available and don't require separate installation:
 
-2. **External plugins** -- separate packages that declare a setuptools entry point under the `mng` group:
+- **Provider backends** (`providers/`): local, ssh, docker, modal
+- **Agent types** (`agents/default_plugins/`): ClaudeAgent, CodexAgent, SkillAgent, CodeGuardianAgent, FixmeFairyAgent
+
+The minimal core (layered architecture, interfaces, config, utils, primitives) is independent of these default plugins. The default plugins provide the concrete implementations that make mng useful out of the box.
+
+**External plugins** are separate packages that declare a setuptools entry point:
 
 ```toml
 # In a plugin's pyproject.toml
@@ -270,7 +275,13 @@ The codebase includes interactive text user interfaces built with **urwid**:
 my_plugin = "my_package.plugin"
 ```
 
-Both tiers use the same `@hookimpl` mechanism and have access to the same hooks.
+| Plugin | Package | Description |
+|--------|---------|-------------|
+| **pair** | `mng-pair` | Continuous bidirectional file sync between local and agent |
+| **opencode** | `mng-opencode` | OpenCode agent type support |
+| **schedule** | `mng-schedule` | Cron-scheduled recurring agent runs on Modal |
+| **kanpan** | `mng-kanpan` | TUI dashboard aggregating agent state, git, GitHub PRs, and CI |
+| **tutor** | `mng-tutor` | Interactive tutorials for learning mng |
 
 ### Plugin Manager Lifecycle
 
@@ -319,16 +330,6 @@ Both tiers use the same `@hookimpl` mechanism and have access to the same hooks.
 4. `on_agent_state_dir_created()`
 5. `on_before_provisioning()` -> agent provisioning (class methods) -> `on_after_provisioning()`
 6. `on_agent_created()`
-
-### Maintained Plugins
-
-| Plugin | Package | Description |
-|--------|---------|-------------|
-| **pair** | `mng-pair` | Continuous bidirectional file sync between local and agent |
-| **opencode** | `mng-opencode` | OpenCode agent type support |
-| **schedule** | `mng-schedule` | Cron-scheduled recurring agent runs on Modal |
-| **kanpan** | `mng-kanpan` | TUI dashboard aggregating agent state, git, GitHub PRs, and CI |
-| **tutor** | `mng-tutor` | Interactive tutorials for learning mng |
 
 ### Writing a Plugin
 
