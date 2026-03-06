@@ -22,7 +22,7 @@ This generates a new conversation ID, logs a `conversation_created` event, and i
 When you want to follow up in a conversation you already know about (e.g. responding to a user message in the same thread), inject your message directly using the `llm` tool:
 
 ```bash
-llm inject --cid <conversation_id> -m <model> "Your message here"
+llm inject --prompt "" --cid <conversation_id> -m <model> "Your message here"
 ```
 
 You can find the `conversation_id` from the event you are responding to (it is included in `messages` events), or use the `list-conversations` skill. The `model` should match the model used by that conversation (also visible in the event data or conversation list).
