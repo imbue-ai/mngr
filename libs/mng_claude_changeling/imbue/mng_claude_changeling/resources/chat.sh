@@ -299,13 +299,10 @@ if Path(messages_file).exists():
             print(f'WARNING: malformed message event line: {e}', file=sys.stderr)
             continue
 
-# Filter out internal conversations (tagged with 'internal')
-visible_conversations = {conversation_id: e for conversation_id, e in conversations.items() if 'internal' not in e.get('tags', {})}
-
-for conversation_id, event in visible_conversations.items():
+for conversation_id, event in conversations.items():
     event['updated_at'] = updated_at.get(conversation_id, event.get('timestamp', '?'))
 
-sorted_conversations = sorted(visible_conversations.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
+sorted_conversations = sorted(conversations.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
 
 for event in sorted_conversations:
     tags = event.get('tags', {})

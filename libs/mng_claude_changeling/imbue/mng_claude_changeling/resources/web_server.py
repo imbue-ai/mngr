@@ -139,8 +139,6 @@ def _read_conversations() -> list[dict[str, str]]:
                         tags = json.loads(tags_json) if tags_json else {}
                     except json.JSONDecodeError:
                         tags = {}
-                    if "internal" in tags:
-                        continue
                     conversations_by_id[conversation_id] = {
                         "conversation_id": conversation_id,
                         "name": tags.get("name", ""),

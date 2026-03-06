@@ -132,8 +132,6 @@ try:
         except json.JSONDecodeError as e:
             sys.stderr.write(f'WARNING: malformed tags JSON for {conversation_id}: {e}\\n')
             tags = {}
-        if 'internal' in tags:
-            continue
         conversations[conversation_id] = {
             'conversation_id': conversation_id,
             'model': model or '?',
