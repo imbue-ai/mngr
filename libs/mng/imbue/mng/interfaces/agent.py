@@ -393,6 +393,15 @@ class AgentInterface(MutableModel, ABC):
         ...
 
 
+class NoPermissionsAgentMixin:
+    """Marker mixin for agents that are granted no permissions.
+
+    These agents have no tool access and cannot perform destructive actions
+    (e.g. configured with --tools ""). Because no permissions are granted,
+    trust validation and permission dialogs are unnecessary during provisioning.
+    """
+
+
 class HeadlessAgentMixin(ABC):
     """Mixin for agent types that run headlessly (no TUI, no interactive input).
 

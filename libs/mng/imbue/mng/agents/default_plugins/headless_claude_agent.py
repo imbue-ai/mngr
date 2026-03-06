@@ -12,10 +12,13 @@ from imbue.mng import hookimpl
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.config.data_types import AgentTypeConfig
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.interfaces.agent import AgentInterface
+from imbue.mng.interfaces.agent import NoPermissionsAgentMixin
 from imbue.mng.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
@@ -101,11 +104,31 @@ def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
             yield text
 
 
+class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
+    """ClaudeAgent with no permissions granted (no tools, no trust needed).
+
+    Skips trust validation and dialog dismissal during provisioning since
+    the agent cannot perform any actions that require permissions. All other
+    provisioning (config dir setup, installation, hooks) runs normally.
+    """
+
+    def on_before_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mng_ctx: MngContext,
+    ) -> None:
+        """No-op: skip trust/dialog validation for no-permissions agents."""
+
+    def _ensure_no_blocking_dialogs(self, source_path: Path | None, mng_ctx: MngContext) -> None:
+        """No-op: no permissions means no dialogs to check."""
+
+
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     """Config for the headless_claude agent type."""
 
 
-class HeadlessClaude(ClaudeAgent, StreamingHeadlessAgentMixin):
+class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can
