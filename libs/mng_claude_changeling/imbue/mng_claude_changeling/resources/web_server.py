@@ -129,11 +129,18 @@ def _read_conversations() -> list[dict[str, str]]:
             conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
             try:
                 rows = conn.execute(
-                    "SELECT cc.conversation_id, c.model, cc.created_at "
+                    "SELECT cc.conversation_id, c.model, cc.created_at, cc.tags "
                     "FROM changeling_conversations cc "
                     "LEFT JOIN conversations c ON cc.conversation_id = c.id"
                 ).fetchall()
-                for conversation_id, model, created_at in rows:
+                for conversation_id, model, created_at, tags_json in rows:
+                    # Filter out internal conversations (e.g. system_notifications)
+                    try:
+                        tags = json.loads(tags_json) if tags_json else {}
+                    except json.JSONDecodeError:
+                        tags = {}
+                    if "internal" in tags:
+                        continue
                     conversations_by_id[conversation_id] = {
                         "conversation_id": conversation_id,
                         "model": model or "unknown",
