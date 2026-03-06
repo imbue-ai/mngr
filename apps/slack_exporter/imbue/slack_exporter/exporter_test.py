@@ -194,6 +194,43 @@ def test_run_export_fetches_replies_for_threaded_messages(default_settings: Expo
     assert first_reply["source"] == "replies"
 
 
+def test_run_export_fetches_paginated_replies(default_settings: ExporterSettings) -> None:
+    threaded_message = {"ts": "1700000000.000001", "text": "parent", "reply_count": 3}
+
+    api_caller = make_fake_api_caller(
+        {
+            "conversations.list": [make_slack_response("channels", [{"id": "C123", "name": "general"}])],
+            "users.list": [make_slack_response("members", [])],
+            "conversations.history": [make_slack_response("messages", [threaded_message])],
+            "conversations.replies": [
+                {
+                    "ok": True,
+                    "messages": [
+                        {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
+                        {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
+                    ],
+                    "has_more": True,
+                    "response_metadata": {"next_cursor": "reply_page2"},
+                },
+                make_slack_response(
+                    "messages",
+                    [{"ts": "1700000000.000003", "thread_ts": "1700000000.000001", "text": "reply 2"}],
+                ),
+            ],
+        }
+    )
+
+    run_export(default_settings, api_caller=api_caller)
+
+    reply_path = default_settings.output_dir / "replies" / "created" / "events.jsonl"
+    assert reply_path.exists()
+    reply_lines = reply_path.read_text().strip().splitlines()
+    # 2 replies (parent message is excluded from replies)
+    assert len(reply_lines) == 2
+    reply_timestamps = sorted(json.loads(line)["reply_ts"] for line in reply_lines)
+    assert reply_timestamps == ["1700000000.000002", "1700000000.000003"]
+
+
 def test_run_export_skips_replies_for_non_threaded_messages(default_settings: ExporterSettings) -> None:
     reply_call_count = 0
 

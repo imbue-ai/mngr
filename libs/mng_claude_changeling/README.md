@@ -5,7 +5,7 @@ This plugin implements the core functionality for claude-based "changelings": LL
 The core idea is to have a "primary" agent that serves as the "inner monologue" of the changeling, and that reacts to events (like new messages in conversation threads, scheduled events, sub-agent state changes, etc.)
 Rather than having a direct conversation with the agent, the agent has a prompt that tells it what to do in response to various events, and it simply processes those until it decides that everything is complete and it can go to sleep (until it is awoken to process the next event)
 
-In practice, "changelings" are just special mng agents that inherit from the ClaudeZygoteAgent
+In practice, "changelings" are just special mng agents that inherit from the ClaudeChangelingAgent
 
 They can be thought of as a sort of "higher level" agent that is made by assembling a few different LLM-based programs
 
@@ -44,7 +44,7 @@ Every event is self-describing: you never need to know the filename to understan
 - Users create new (and resume existing) conversations by calling a little "chat" command. It's just a little bash script that creates event json entries and also makes calls to "llm" so that users and agents don't need to remember the exact invocations. "chat --new" for a new chat and "chat --resume <conversation_id>" to resume. "chat" with no arguments lists all current conversation ids
 - Agents create new conversations by using their "new chat" skill, which calls "chat --new --as-agent" and passing in the message as well
 - Whenever the user (or the agent) creates a new conversation, the "chat" wrapper appends a `conversation_created` event to `events/conversations/events.jsonl` (with the standard envelope plus `conversation_id` and `model`). The conversation is started by calling "llm live-chat" (for user messages) or "llm inject" (for agent messages)
-- The ClaudeZygoteAgent runs a conversation watcher script in a tmux window that watches the llm database and, whenever it changes, syncs new messages to `events/messages/events.jsonl` (with the standard envelope plus `conversation_id`, `role`, `content`)
+- The ClaudeChangelingAgent runs a conversation watcher script in a tmux window that watches the llm database and, whenever it changes, syncs new messages to `events/messages/events.jsonl` (with the standard envelope plus `conversation_id`, `role`, `content`)
 - Thus the URL to view an existing chat conversation is simply done via a special ttyd server that runs the correct llm invocation: "llm live-chat --show-history -c --cid <conversation_id> -m <chat-model>" where chat-model comes from the most recent event in `events/conversations/events.jsonl` with that conversation_id
 - To list all conversations for this agent, we read `events/conversations/events.jsonl` (append-only, last value per conversation_id wins)
 - When invoking "llm live-chat", we pass in two tools: one for gathering context (recent messages from other conversations, inner monologue, recent events) and another for extra context (mng agent list, deeper history)
@@ -56,7 +56,7 @@ Every event is self-describing: you never need to know the filename to understan
     - `working/` - the working agent (does the actual work, can have skills and tools)
     - `verifying/` - the verifying agent (scheduled in reaction to "finished" events from sub-agents, checks work, can have skills and tools)
     - `(user-defined roles)/` - any additional agent roles the user wants to define (e.g. "planning/", "researching/", etc)
-- Each changeling agent has an "active role" (configured via `active_role` in `ClaudeZygoteConfig`, default: `"thinking"`). The repo root `.claude/` is a directory symlink to `<active_role>/.claude/`, so Claude Code naturally discovers that role's settings, skills, etc.
+- Each changeling agent has an "active role" (configured via `active_role` in `ClaudeChangelingConfig`, default: `"thinking"`). The repo root `.claude/` is a directory symlink to `<active_role>/.claude/`, so Claude Code naturally discovers that role's settings, skills, etc.
 - Each role (except `talking/`) has its own directory structure:
     - `<role>/PROMPT.md` - prompt for the agent (symlinked as `CLAUDE.local.md` when active)
     - `<role>/.claude/settings.json` - Claude Code settings for the role
@@ -64,14 +64,14 @@ Every event is self-describing: you never need to know the filename to understan
     - `<role>/.claude/settings.local.json` - mng-managed hooks (gitignored, written during provisioning)
     - `<role>/memory/` - per-role memory directory (synced into Claude project memory via hooks)
 - The `GLOBAL.md` serves as the core system prompt that is *shared* among all agents (the primary agent, any claude subagent it makes, and even any other agents created via mng with this repo as the target). It is symlinked to `CLAUDE.md` at the project root so Claude Code picks it up.
-- When a role is active, provisioning creates: `.claude` -> `<active_role>/.claude`, `CLAUDE.md` -> `GLOBAL.md`, and `CLAUDE.local.md` -> `<active_role>/PROMPT.md`. All of this is handled by the ClaudeZygoteAgent during provisioning.
+- When a role is active, provisioning creates: `.claude` -> `<active_role>/.claude`, `CLAUDE.md` -> `GLOBAL.md`, and `CLAUDE.local.md` -> `<active_role>/PROMPT.md`. All of this is handled by the ClaudeChangelingAgent during provisioning.
 - Other agent roles can be defined by creating corresponding directories with their own `PROMPT.md` and `.claude/` subdirectories (except `talking/`, which can only have `PROMPT.md`). An appropriate agent type must also be created for them in `.mng/settings.toml` right now.
 - The prompts for the primary agent (both before shutdown and upon message receipt) should encourage it to keep track of messages that it received (via its own task list)
 - Each role has its own memory stored at `<role>/memory/` in the work dir and synced to the Claude project memory location (`~/.claude/projects/<project>/memory/`) via PreToolUse/PostToolUse hooks. This keeps memories version-controlled in git.
 - Any claude agents should use the "project" memory scope (to keep memories version controlled)
-- As part of getting itself set up, the ClaudeZygoteAgent will need to ensure that we've installed the "llm" tool, as well as our plugins for it (ie, "llm-anthropic" and "llm-live-chat"). In other words, we need to call these commands:
+- As part of getting itself set up, the ClaudeChangelingAgent will need to ensure that we've installed the "llm" tool, as well as our plugins for it (ie, "llm-anthropic" and "llm-live-chat"). In other words, we need to call these commands:
         uv tool install llm
         llm install llm-anthropic
         llm install llm-live-chat
 
-All of the above is basically stuff that should either be done directly by the ClaudeZygoteAgent, or that it should configure such that everything works out (eg, shipping over bash scripts for the "chat" command, etc.)
+All of the above is basically stuff that should either be done directly by the ClaudeChangelingAgent, or that it should configure such that everything works out (eg, shipping over bash scripts for the "chat" command, etc.)

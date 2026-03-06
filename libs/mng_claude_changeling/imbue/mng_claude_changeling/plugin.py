@@ -20,21 +20,21 @@ from imbue.mng.errors import MngError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng_claude_zygote.provisioning import build_memory_sync_hooks_config
-from imbue.mng_claude_zygote.provisioning import configure_llm_user_path
-from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
-from imbue.mng_claude_zygote.provisioning import create_daily_conversation
-from imbue.mng_claude_zygote.provisioning import create_event_log_directories
-from imbue.mng_claude_zygote.provisioning import create_system_notifications_conversation
-from imbue.mng_claude_zygote.provisioning import install_llm_toolchain
-from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
-from imbue.mng_claude_zygote.provisioning import provision_default_content
-from imbue.mng_claude_zygote.provisioning import provision_llm_tools
-from imbue.mng_claude_zygote.provisioning import resolve_work_dir_abs
-from imbue.mng_claude_zygote.provisioning import setup_memory_directory
-from imbue.mng_claude_zygote.provisioning import validate_talking_role_constraints
-from imbue.mng_claude_zygote.provisioning import warn_if_mng_unavailable
-from imbue.mng_claude_zygote.settings import load_settings_from_host
+from imbue.mng_claude_changeling.provisioning import build_memory_sync_hooks_config
+from imbue.mng_claude_changeling.provisioning import configure_llm_user_path
+from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
+from imbue.mng_claude_changeling.provisioning import create_daily_conversation
+from imbue.mng_claude_changeling.provisioning import create_event_log_directories
+from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
+from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
+from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
+from imbue.mng_claude_changeling.provisioning import provision_default_content
+from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import resolve_work_dir_abs
+from imbue.mng_claude_changeling.provisioning import setup_memory_directory
+from imbue.mng_claude_changeling.provisioning import validate_talking_role_constraints
+from imbue.mng_claude_changeling.provisioning import warn_if_mng_unavailable
+from imbue.mng_claude_changeling.settings import load_settings_from_host
 from imbue.mng_ttyd.plugin import build_ttyd_server_command
 
 AGENT_TTYD_WINDOW_NAME: Final[str] = "agent"
@@ -82,8 +82,8 @@ _CHAT_TTYD_INVOCATION: Final[str] = (
 CHAT_TTYD_COMMAND: Final[str] = build_ttyd_server_command(_CHAT_TTYD_INVOCATION, CHAT_TTYD_SERVER_NAME)
 
 
-class ClaudeZygoteConfig(ClaudeAgentConfig):
-    """Config for the claude-zygote agent type.
+class ClaudeChangelingConfig(ClaudeAgentConfig):
+    """Config for the claude-changeling agent type.
 
     Defaults trust_working_directory to True because changelings run
     --in-place in their own repo directory (e.g. ~/.changelings/<name>/)
@@ -110,7 +110,7 @@ class ClaudeZygoteConfig(ClaudeAgentConfig):
     )
 
 
-class ClaudeZygoteAgent(ClaudeAgent):
+class ClaudeChangelingAgent(ClaudeAgent):
     """Base agent for changeling agents built on Claude Code.
 
     Inherits all Claude Code functionality (session management, provisioning,
@@ -130,15 +130,15 @@ class ClaudeZygoteAgent(ClaudeAgent):
     - Chat ttyd (--url-arg ttyd for conversation terminal access)
     """
 
-    def _get_zygote_config(self) -> ClaudeZygoteConfig:
-        """Get the zygote-specific config from this agent.
+    def _get_changeling_config(self) -> ClaudeChangelingConfig:
+        """Get the changeling-specific config from this agent.
 
-        Raises RuntimeError if the agent config is not a ClaudeZygoteConfig,
+        Raises RuntimeError if the agent config is not a ClaudeChangelingConfig,
         which indicates a misconfiguration in the agent type registration.
         """
-        if not isinstance(self.agent_config, ClaudeZygoteConfig):
+        if not isinstance(self.agent_config, ClaudeChangelingConfig):
             raise RuntimeError(
-                f"ClaudeZygoteAgent requires ClaudeZygoteConfig, got {type(self.agent_config).__name__}. "
+                f"ClaudeChangelingAgent requires ClaudeChangelingConfig, got {type(self.agent_config).__name__}. "
                 "This indicates the agent type was registered with the wrong config class."
             )
         return self.agent_config
@@ -202,7 +202,7 @@ class ClaudeZygoteAgent(ClaudeAgent):
         """
         super().provision(host, options, mng_ctx)
 
-        config = self._get_zygote_config()
+        config = self._get_changeling_config()
         active_role = config.active_role
 
         # Load settings from .changelings/settings.toml (falls back to defaults)
@@ -272,18 +272,18 @@ def get_agent_type_from_params(params: dict[str, Any]) -> str | None:
 
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
-    """Register the claude-zygote agent type."""
-    return ("claude-zygote", ClaudeZygoteAgent, ClaudeZygoteConfig)
+    """Register the claude-changeling agent type."""
+    return ("claude-changeling", ClaudeChangelingAgent, ClaudeChangelingConfig)
 
 
-def _is_claude_zygote_agent_type(agent_type_name: str) -> bool:
-    """Check whether the given agent type name resolves to a ClaudeZygoteAgent subclass."""
+def _is_claude_changeling_agent_type(agent_type_name: str) -> bool:
+    """Check whether the given agent type name resolves to a ClaudeChangelingAgent subclass."""
     try:
         agent_class = get_agent_class(agent_type_name)
     except MngError as e:
         logger.debug("Could not resolve agent type '{}': {}", agent_type_name, e)
         return False
-    return issubclass(agent_class, ClaudeZygoteAgent)
+    return issubclass(agent_class, ClaudeChangelingAgent)
 
 
 @hookimpl
@@ -292,12 +292,12 @@ def override_command_options(
     command_class: type,
     params: dict[str, Any],
 ) -> None:
-    """Add changeling tmux windows when creating claude-zygote agents (or subtypes).
+    """Add changeling tmux windows when creating claude-changeling agents (or subtypes).
 
     Injects: agent ttyd, conversation watcher, event watcher, web server,
     and chat ttyd.
 
-    Matches any agent type whose registered class is ClaudeZygoteAgent or
+    Matches any agent type whose registered class is ClaudeChangelingAgent or
     a subclass of it (e.g. elena-code, custom changeling types).
     """
     if command_name != "create":
@@ -307,7 +307,7 @@ def override_command_options(
     if agent_type is None:
         return
 
-    if not _is_claude_zygote_agent_type(agent_type):
+    if not _is_claude_changeling_agent_type(agent_type):
         return
 
     inject_changeling_windows(params)

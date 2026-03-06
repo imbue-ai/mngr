@@ -17,8 +17,8 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import HostId
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
 from imbue.mng_elena_code.plugin import ELENA_SYSTEM_PROMPT
 from imbue.mng_elena_code.plugin import ElenaCodeAgent
 from imbue.mng_elena_code.plugin import _merge_system_prompt_into_args
@@ -45,25 +45,25 @@ def _make_elena_agent(tmp_path: Path) -> tuple[ElenaCodeAgent, OnlineHostInterfa
         create_time=datetime.now(timezone.utc),
         host_id=HostId.generate(),
         mng_ctx=mng_ctx,
-        agent_config=ClaudeZygoteConfig(check_installation=False),
+        agent_config=ClaudeChangelingConfig(check_installation=False),
         host=host,
     )
     return agent, host
 
 
-def test_elena_code_registers_with_claude_zygote_config() -> None:
-    """Verify that register_agent_type returns ClaudeZygoteConfig (not ClaudeAgentConfig).
+def test_elena_code_registers_with_claude_changeling_config() -> None:
+    """Verify that register_agent_type returns ClaudeChangelingConfig (not ClaudeAgentConfig).
 
     This ensures elena-code inherits trust_working_directory=True so the
     Claude trust dialog does not appear when deploying with --in-place.
     """
     _agent_type_name, _agent_class, config_class = register_agent_type()
-    assert config_class is ClaudeZygoteConfig
+    assert config_class is ClaudeChangelingConfig
 
 
-def test_elena_code_agent_inherits_from_claude_zygote_agent() -> None:
-    """Verify that ElenaCodeAgent is a subclass of ClaudeZygoteAgent."""
-    assert issubclass(ElenaCodeAgent, ClaudeZygoteAgent)
+def test_elena_code_agent_inherits_from_claude_changeling_agent() -> None:
+    """Verify that ElenaCodeAgent is a subclass of ClaudeChangelingAgent."""
+    assert issubclass(ElenaCodeAgent, ClaudeChangelingAgent)
 
 
 def test_elena_code_agent_inherits_from_claude_agent() -> None:

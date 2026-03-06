@@ -1,4 +1,4 @@
-"""Unit tests for the mng_claude_zygote plugin."""
+"""Unit tests for the mng_claude_changeling plugin."""
 
 from types import SimpleNamespace
 from typing import Any
@@ -8,17 +8,17 @@ import pytest
 
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.interfaces.host import NamedCommand
-from imbue.mng_claude_zygote.plugin import CHAT_TTYD_WINDOW_NAME
-from imbue.mng_claude_zygote.plugin import CONV_WATCHER_COMMAND
-from imbue.mng_claude_zygote.plugin import CONV_WATCHER_WINDOW_NAME
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
-from imbue.mng_claude_zygote.plugin import EVENT_WATCHER_COMMAND
-from imbue.mng_claude_zygote.plugin import EVENT_WATCHER_WINDOW_NAME
-from imbue.mng_claude_zygote.plugin import WEB_SERVER_WINDOW_NAME
-from imbue.mng_claude_zygote.plugin import get_agent_type_from_params
-from imbue.mng_claude_zygote.plugin import inject_changeling_windows
-from imbue.mng_claude_zygote.plugin import override_command_options
+from imbue.mng_claude_changeling.plugin import CHAT_TTYD_WINDOW_NAME
+from imbue.mng_claude_changeling.plugin import CONV_WATCHER_COMMAND
+from imbue.mng_claude_changeling.plugin import CONV_WATCHER_WINDOW_NAME
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
+from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
+from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_COMMAND
+from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_WINDOW_NAME
+from imbue.mng_claude_changeling.plugin import WEB_SERVER_WINDOW_NAME
+from imbue.mng_claude_changeling.plugin import get_agent_type_from_params
+from imbue.mng_claude_changeling.plugin import inject_changeling_windows
+from imbue.mng_claude_changeling.plugin import override_command_options
 
 # Total number of tmux windows injected by inject_changeling_windows:
 # agent ttyd, conv_watcher, events, web_server, transcript, chat ttyd
@@ -30,9 +30,9 @@ class _DummyCommandClass:
 
 
 @pytest.fixture()
-def zygote_create_params() -> dict[str, Any]:
-    """Run override_command_options for a claude-zygote create and return the modified params."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-zygote"}
+def changeling_create_params() -> dict[str, Any]:
+    """Run override_command_options for a claude-changeling create and return the modified params."""
+    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-changeling"}
     override_command_options(
         command_name="create",
         command_class=_DummyCommandClass,
@@ -44,37 +44,37 @@ def zygote_create_params() -> dict[str, Any]:
 # -- override_command_options hook tests --
 
 
-def test_adds_all_changeling_windows(zygote_create_params: dict[str, Any]) -> None:
+def test_adds_all_changeling_windows(changeling_create_params: dict[str, Any]) -> None:
     """Verify that the plugin adds all 5 changeling windows."""
-    assert len(zygote_create_params["add_command"]) == _CHANGELING_WINDOW_COUNT
+    assert len(changeling_create_params["add_command"]) == _CHANGELING_WINDOW_COUNT
 
 
-def test_adds_conv_watcher_window(zygote_create_params: dict[str, Any]) -> None:
-    entries = [c for c in zygote_create_params["add_command"] if CONV_WATCHER_WINDOW_NAME in c]
+def test_adds_conv_watcher_window(changeling_create_params: dict[str, Any]) -> None:
+    entries = [c for c in changeling_create_params["add_command"] if CONV_WATCHER_WINDOW_NAME in c]
     assert len(entries) == 1
     assert CONV_WATCHER_COMMAND in entries[0]
 
 
-def test_adds_event_watcher_window(zygote_create_params: dict[str, Any]) -> None:
+def test_adds_event_watcher_window(changeling_create_params: dict[str, Any]) -> None:
     prefix = f'{EVENT_WATCHER_WINDOW_NAME}="'
-    entries = [c for c in zygote_create_params["add_command"] if c.startswith(prefix)]
+    entries = [c for c in changeling_create_params["add_command"] if c.startswith(prefix)]
     assert len(entries) == 1
     assert EVENT_WATCHER_COMMAND in entries[0]
 
 
-def test_adds_web_server_window(zygote_create_params: dict[str, Any]) -> None:
-    entries = [c for c in zygote_create_params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
+def test_adds_web_server_window(changeling_create_params: dict[str, Any]) -> None:
+    entries = [c for c in changeling_create_params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(entries) == 1
 
 
 def test_adds_changeling_windows_for_positional_agent_type() -> None:
-    params: dict[str, Any] = {"add_command": (), "positional_agent_type": "claude-zygote"}
+    params: dict[str, Any] = {"add_command": (), "positional_agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
 
 
 def test_does_not_modify_non_create_commands() -> None:
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-zygote"}
+    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-changeling"}
     override_command_options(command_name="connect", command_class=_DummyCommandClass, params=params)
     assert params["add_command"] == ()
 
@@ -92,11 +92,11 @@ def test_does_not_modify_when_no_agent_type() -> None:
 
 
 def test_injects_windows_for_registered_subclass() -> None:
-    """Verify that a registered agent type that subclasses ClaudeZygoteAgent gets changeling windows."""
+    """Verify that a registered agent type that subclasses ClaudeChangelingAgent gets changeling windows."""
     from imbue.mng.config.agent_class_registry import register_agent_class
     from imbue.mng.config.agent_class_registry import reset_agent_class_registry
 
-    class _TestSubclassAgent(ClaudeZygoteAgent):
+    class _TestSubclassAgent(ClaudeChangelingAgent):
         """Test subclass for verifying subclass detection."""
 
     try:
@@ -109,7 +109,7 @@ def test_injects_windows_for_registered_subclass() -> None:
 
 
 def test_preserves_existing_add_commands() -> None:
-    params: dict[str, Any] = {"add_command": ('monitor="htop"',), "agent_type": "claude-zygote"}
+    params: dict[str, Any] = {"add_command": ('monitor="htop"',), "agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT + 1
     assert params["add_command"][0] == 'monitor="htop"'
@@ -132,23 +132,23 @@ def test_inject_changeling_windows_preserves_existing() -> None:
     assert params["add_command"][0] == 'foo="bar"'
 
 
-# -- ClaudeZygoteAgent._get_zygote_config tests --
+# -- ClaudeChangelingAgent._get_changeling_config tests --
 
 
-def test_get_zygote_config_raises_on_wrong_type() -> None:
-    """Verify that _get_zygote_config raises RuntimeError for non-ClaudeZygoteConfig."""
+def test_get_changeling_config_raises_on_wrong_type() -> None:
+    """Verify that _get_changeling_config raises RuntimeError for non-ClaudeChangelingConfig."""
     agent_stub = SimpleNamespace(agent_config=ClaudeAgentConfig())
 
-    with pytest.raises(RuntimeError, match="ClaudeZygoteAgent requires ClaudeZygoteConfig"):
-        ClaudeZygoteAgent._get_zygote_config(cast(Any, agent_stub))
+    with pytest.raises(RuntimeError, match="ClaudeChangelingAgent requires ClaudeChangelingConfig"):
+        ClaudeChangelingAgent._get_changeling_config(cast(Any, agent_stub))
 
 
-def test_get_zygote_config_returns_config_when_correct_type() -> None:
-    """Verify that _get_zygote_config returns the config when it is the correct type."""
-    config = ClaudeZygoteConfig()
+def test_get_changeling_config_returns_config_when_correct_type() -> None:
+    """Verify that _get_changeling_config returns the config when it is the correct type."""
+    config = ClaudeChangelingConfig()
     agent_stub = SimpleNamespace(agent_config=config)
 
-    result = ClaudeZygoteAgent._get_zygote_config(cast(Any, agent_stub))
+    result = ClaudeChangelingAgent._get_changeling_config(cast(Any, agent_stub))
     assert result is config
 
 
@@ -188,6 +188,6 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
 # -- Chat ttyd tests --
 
 
-def test_adds_chat_ttyd_window(zygote_create_params: dict[str, Any]) -> None:
-    entries = [c for c in zygote_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
+def test_adds_chat_ttyd_window(changeling_create_params: dict[str, Any]) -> None:
+    entries = [c for c in changeling_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
     assert len(entries) == 1

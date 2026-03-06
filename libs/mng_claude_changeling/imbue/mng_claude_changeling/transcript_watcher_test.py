@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
-from imbue.mng_claude_zygote.conftest import write_changelings_settings_toml
-from imbue.mng_claude_zygote.resources.transcript_watcher import _convert_new_events
-from imbue.mng_claude_zygote.resources.transcript_watcher import _extract_text_content
-from imbue.mng_claude_zygote.resources.transcript_watcher import _has_tool_results_only
-from imbue.mng_claude_zygote.resources.transcript_watcher import _load_poll_interval
+from imbue.mng_claude_changeling.conftest import write_changelings_settings_toml
+from imbue.mng_claude_changeling.resources.transcript_watcher import _convert_new_events
+from imbue.mng_claude_changeling.resources.transcript_watcher import _extract_text_content
+from imbue.mng_claude_changeling.resources.transcript_watcher import _has_tool_results_only
+from imbue.mng_claude_changeling.resources.transcript_watcher import _load_poll_interval
 
 # -- _load_poll_interval tests --
 

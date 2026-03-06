@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from imbue.mng_claude_zygote.provisioning import load_zygote_resource
+from imbue.mng_claude_changeling.provisioning import load_changeling_resource
 
 
 @pytest.fixture()
@@ -28,7 +28,7 @@ def web_server_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("MNG_AGENT_NAME", "test-agent-82741")
     monkeypatch.setenv("MNG_HOST_NAME", "test-host-82741")
 
-    source = load_zygote_resource("web_server.py")
+    source = load_changeling_resource("web_server.py")
     module = types.ModuleType("web_server_test_module")
     module.__file__ = "web_server.py"
     exec(compile(source, "web_server.py", "exec"), module.__dict__)  # noqa: S102

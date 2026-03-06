@@ -40,9 +40,9 @@ from uuid import uuid4
 from loguru import logger
 
 try:
-    from imbue.mng_claude_zygote.resources.watcher_common import load_watchers_section
-    from imbue.mng_claude_zygote.resources.watcher_common import require_env
-    from imbue.mng_claude_zygote.resources.watcher_common import setup_watcher_logging
+    from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+    from imbue.mng_claude_changeling.resources.watcher_common import require_env
+    from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from watcher_common import load_watchers_section  # type: ignore[no-redef]

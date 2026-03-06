@@ -5,7 +5,7 @@ description = "Test agent type plugin for mng - a changeling agent that uses the
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
-    "mng-claude-zygote==0.1.0",
+    "mng-claude-changeling==0.1.0",
 ]
 
 [project.entry-points.mng]
@@ -20,7 +20,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
-mng-claude-zygote = { workspace = true }
+mng-claude-changeling = { workspace = true }
 
 [tool.pyright]
 venvPath = "../.."

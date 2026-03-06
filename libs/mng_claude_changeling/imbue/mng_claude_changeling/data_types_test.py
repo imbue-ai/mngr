@@ -8,14 +8,14 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
-from imbue.mng_claude_zygote.data_types import ChangelingEvent
-from imbue.mng_claude_zygote.data_types import ChatModel
-from imbue.mng_claude_zygote.data_types import ConversationEvent
-from imbue.mng_claude_zygote.data_types import ConversationId
-from imbue.mng_claude_zygote.data_types import MessageEvent
-from imbue.mng_claude_zygote.data_types import MessageRole
-from imbue.mng_claude_zygote.data_types import SOURCE_CONVERSATIONS
-from imbue.mng_claude_zygote.data_types import SOURCE_MESSAGES
+from imbue.mng_claude_changeling.data_types import ChangelingEvent
+from imbue.mng_claude_changeling.data_types import ChatModel
+from imbue.mng_claude_changeling.data_types import ConversationEvent
+from imbue.mng_claude_changeling.data_types import ConversationId
+from imbue.mng_claude_changeling.data_types import MessageEvent
+from imbue.mng_claude_changeling.data_types import MessageRole
+from imbue.mng_claude_changeling.data_types import SOURCE_CONVERSATIONS
+from imbue.mng_claude_changeling.data_types import SOURCE_MESSAGES
 
 _TS = IsoTimestamp("2026-02-28T00:00:00.000000000Z")
 _EID = EventId("evt-1234")

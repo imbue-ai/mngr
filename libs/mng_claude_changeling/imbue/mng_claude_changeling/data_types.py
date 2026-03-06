@@ -310,7 +310,7 @@ class ProvisioningSettings(FrozenModel):
     )
 
 
-class ClaudeZygoteSettings(FrozenModel):
+class ClaudeChangelingSettings(FrozenModel):
     """Top-level settings loaded from .changelings/settings.toml.
 
     All fields have defaults, so an empty or missing settings file

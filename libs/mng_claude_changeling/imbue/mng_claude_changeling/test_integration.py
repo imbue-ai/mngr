@@ -1,4 +1,4 @@
-"""Integration tests for the mng_claude_zygote plugin.
+"""Integration tests for the mng_claude_changeling plugin.
 
 Tests the plugin end-to-end by creating real agents in temporary git repos,
 verifying provisioning creates the expected filesystem structures, and
@@ -29,27 +29,27 @@ from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
-from imbue.mng_claude_zygote.conftest import ChatScriptEnv
-from imbue.mng_claude_zygote.conftest import LocalShellHost
-from imbue.mng_claude_zygote.conftest import StubCommandResult
-from imbue.mng_claude_zygote.conftest import StubHost
-from imbue.mng_claude_zygote.conftest import create_test_llm_db
-from imbue.mng_claude_zygote.conftest import write_conversation_event
-from imbue.mng_claude_zygote.data_types import ProvisioningSettings
-from imbue.mng_claude_zygote.provisioning import _DEFAULT_SKILL_DIRS
-from imbue.mng_claude_zygote.provisioning import _DEFAULT_THINKING_DIR_FILES
-from imbue.mng_claude_zygote.provisioning import _DEFAULT_WORK_DIR_FILES
-from imbue.mng_claude_zygote.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_zygote.provisioning import _SCRIPT_FILES
-from imbue.mng_claude_zygote.provisioning import compute_claude_project_dir_name
-from imbue.mng_claude_zygote.provisioning import create_changeling_symlinks
-from imbue.mng_claude_zygote.provisioning import create_event_log_directories
-from imbue.mng_claude_zygote.provisioning import load_zygote_resource
-from imbue.mng_claude_zygote.provisioning import provision_changeling_scripts
-from imbue.mng_claude_zygote.provisioning import provision_default_content
-from imbue.mng_claude_zygote.provisioning import provision_llm_tools
-from imbue.mng_claude_zygote.provisioning import setup_memory_directory
-from imbue.mng_claude_zygote.resources.conversation_watcher import _sync_messages
+from imbue.mng_claude_changeling.conftest import ChatScriptEnv
+from imbue.mng_claude_changeling.conftest import LocalShellHost
+from imbue.mng_claude_changeling.conftest import StubCommandResult
+from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.conftest import create_test_llm_db
+from imbue.mng_claude_changeling.conftest import write_conversation_event
+from imbue.mng_claude_changeling.data_types import ProvisioningSettings
+from imbue.mng_claude_changeling.provisioning import _DEFAULT_SKILL_DIRS
+from imbue.mng_claude_changeling.provisioning import _DEFAULT_THINKING_DIR_FILES
+from imbue.mng_claude_changeling.provisioning import _DEFAULT_WORK_DIR_FILES
+from imbue.mng_claude_changeling.provisioning import _LLM_TOOL_FILES
+from imbue.mng_claude_changeling.provisioning import _SCRIPT_FILES
+from imbue.mng_claude_changeling.provisioning import compute_claude_project_dir_name
+from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
+from imbue.mng_claude_changeling.provisioning import create_event_log_directories
+from imbue.mng_claude_changeling.provisioning import load_changeling_resource
+from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
+from imbue.mng_claude_changeling.provisioning import provision_default_content
+from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import setup_memory_directory
+from imbue.mng_claude_changeling.resources.conversation_watcher import _sync_messages
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
@@ -437,7 +437,7 @@ def test_conversation_watcher_script_is_valid_python(chat_env: ChatScriptEnv) ->
     """Verify that conversation_watcher.py passes Python syntax check."""
     watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "conversation_watcher.py"
     watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_zygote_resource("conversation_watcher.py"))
+    watcher_script.write_text(load_changeling_resource("conversation_watcher.py"))
 
     result = subprocess.run(
         [sys.executable, "-m", "py_compile", str(watcher_script)],
@@ -454,7 +454,7 @@ def test_event_watcher_script_is_valid_python(chat_env: ChatScriptEnv) -> None:
     """Verify that event_watcher.py passes Python syntax check."""
     watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "event_watcher.py"
     watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_zygote_resource("event_watcher.py"))
+    watcher_script.write_text(load_changeling_resource("event_watcher.py"))
 
     result = subprocess.run(
         [sys.executable, "-m", "py_compile", str(watcher_script)],
@@ -663,7 +663,7 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
 ) -> None:
     """Verify that adding named windows via --add-command creates the expected tmux windows.
 
-    This tests the window injection mechanism that the claude-zygote plugin uses,
+    This tests the window injection mechanism that the claude-changeling plugin uses,
     without requiring ttyd to be installed.
     """
     with _create_agent_in_session(
