@@ -71,7 +71,6 @@ from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng.primitives import default_branch_name
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
@@ -1025,12 +1024,12 @@ class Host(BaseHost, OnlineHostInterface):
         source_path: Path,
         target_path: Path,
         options: CreateAgentOptions,
-    ) -> str:
+    ) -> str | None:
         """Transfer a git repository from source to target.
 
-        Returns the name of the branch created on the target.
+        Returns the name of the branch created on the target, or None if no new branch.
         """
-        new_branch_name = self._determine_branch_name(options)
+        new_branch_name = options.git.new_branch_name if options.git else None
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
         elif source_host.is_local:
@@ -1086,9 +1085,13 @@ class Host(BaseHost, OnlineHostInterface):
             self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
+                if new_branch_name:
+                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                else:
+                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
                 config_commands = [
                     "git config --bool core.bare false",
-                    f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}",
+                    checkout_cmd,
                 ]
                 if git_author_name:
                     config_commands.append(f"git config user.name {shlex.quote(git_author_name)}")
@@ -1419,7 +1422,9 @@ class Host(BaseHost, OnlineHostInterface):
         else:
             work_dir_path = self.host_dir / "worktrees" / str(agent_id)
 
-        branch_name = self._determine_branch_name(options)
+        # Worktree mode always requires a new branch (enforced at CLI)
+        assert options.git and options.git.new_branch_name, "Worktree requires a new branch name"
+        branch_name = options.git.new_branch_name
 
         with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
             cmd = f"mkdir -p {work_dir_path.parent} && git -C {shlex.quote(str(source_path))} worktree add {shlex.quote(str(work_dir_path))} -b {shlex.quote(branch_name)}"
@@ -1435,16 +1440,6 @@ class Host(BaseHost, OnlineHostInterface):
             self._add_generated_work_dir(work_dir_path)
 
             return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
-
-    def _determine_branch_name(self, options: CreateAgentOptions) -> str:
-        """Determine the branch name for a new work_dir."""
-        if options.git and options.git.new_branch_name:
-            return options.git.new_branch_name
-
-        agent_name = options.name or AgentName("agent")
-        branch_prefix = options.git.new_branch_prefix if options.git else "mng/"
-
-        return default_branch_name(agent_name, prefix=branch_prefix)
 
     def create_agent_state(
         self,

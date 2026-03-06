@@ -1059,7 +1059,7 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
     mng_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Creating an agent with --base-branch skips the ensure-clean check."""
+    """Creating an agent with an explicit base branch skips the ensure-clean check."""
     # Create a second branch to use as base
     subprocess.run(
         ["git", "branch", "other-branch"],
@@ -1084,8 +1084,8 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
                 "sleep 847192",
                 "--source",
                 str(temp_git_repo),
-                "--base-branch",
-                "other-branch",
+                "--branch",
+                "other-branch:mng/*",
                 "--no-connect",
                 "--await-ready",
                 "--no-copy-work-dir",
