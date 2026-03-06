@@ -91,9 +91,9 @@ def test_mng_create_with_worktree_flag_on_modal_raises_error(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Test that explicitly requesting --worktree on modal raises an error.
+    """Test that explicitly requesting --git-mode worktree on modal raises an error.
 
-    The --worktree flag only works when source and target are on the same host.
+    Worktree mode only works when source and target are on the same host.
     Modal is always a remote host, so this should fail.
     """
     agent_name = f"test-modal-worktree-{get_short_random_string()}"
@@ -110,7 +110,8 @@ def test_mng_create_with_worktree_flag_on_modal_raises_error(
             "modal",
             "--host-name",
             agent_name,
-            "--worktree",
+            "--git-mode",
+            "worktree",
             "--no-connect",
             "--await-ready",
             "--no-ensure-clean",

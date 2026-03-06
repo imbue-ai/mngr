@@ -182,9 +182,7 @@ class CreateCliOptions(CommonCliOptions):
     target: str | None
     target_path: str | None
     in_place: bool
-    copy_source: bool
-    clone: bool
-    worktree: bool
+    git_mode: str | None
     rsync: bool | None
     rsync_args: str | None
     include_git: bool
@@ -377,20 +375,10 @@ class CreateCliOptions(CommonCliOptions):
     "--in-place", "in_place", is_flag=True, help="Run directly in source directory. Incompatible with --target-path"
 )
 @optgroup.option(
-    "--copy",
-    "copy_source",
-    is_flag=True,
-    help="Copy source to isolated directory before running [default for remote agents, and for local agents if not in a git repo]",
-)
-@optgroup.option(
-    "--clone",
-    is_flag=True,
-    help="Create a git clone that shares objects with original repo (only works for local agents)",
-)
-@optgroup.option(
-    "--worktree",
-    is_flag=True,
-    help="Create a git worktree that shares objects and index with original repo [default for local agents in a git repo]. Requires --new-branch (which is the default)",
+    "--git-mode",
+    type=click.Choice(["copy", "linked-clone", "worktree"], case_sensitive=False),
+    default=None,
+    help="How to set up the work directory: copy (rsync entire directory), linked-clone (git clone sharing objects), or worktree (git worktree) [default: worktree for local git repos, linked-clone for remote]",
 )
 @optgroup.group("Agent Git Configuration")
 @optgroup.option("--base-branch", help="The starting point for the agent [default: current branch]")
@@ -1290,19 +1278,15 @@ def _parse_agent_opts(
     # None means "in-place" (no copy/clone/worktree)
     if opts.in_place:
         copy_mode = None
-    elif opts.worktree:
-        copy_mode = WorkDirCopyMode.WORKTREE
-    elif opts.clone:
-        copy_mode = WorkDirCopyMode.CLONE
-    elif opts.copy_source:
-        copy_mode = WorkDirCopyMode.COPY
+    elif opts.git_mode is not None:
+        copy_mode = WorkDirCopyMode(opts.git_mode.upper().replace("-", "_"))
     else:
         # No explicit flag, apply defaults based on context
-        # When creating a new remote host (--in/--new-host), always use COPY
+        # When creating a new remote host (--in/--new-host), always use LINKED_CLONE
         # since WORKTREE only works when source and target are on the same host
         is_creating_remote_host = opts.new_host is not None and opts.new_host.lower() != LOCAL_PROVIDER_NAME
         if is_creating_remote_host:
-            copy_mode = WorkDirCopyMode.COPY
+            copy_mode = WorkDirCopyMode.LINKED_CLONE
         elif source_location.host.is_local:
             is_git_repo = _is_git_repo(source_location.path, mng_ctx.concurrency_group)
             if is_git_repo:
@@ -1310,15 +1294,17 @@ def _parse_agent_opts(
             else:
                 copy_mode = WorkDirCopyMode.COPY
         else:
-            copy_mode = WorkDirCopyMode.COPY
+            copy_mode = WorkDirCopyMode.LINKED_CLONE
 
     # Parse git options
     # new_branch: None = no new branch, "" = auto-generate name, "name" = use specified name
     is_new_branch = opts.new_branch is not None
 
-    # --worktree requires a new branch; error if --no-new-branch is used with --worktree
+    # Worktree mode requires a new branch; error if --no-new-branch is used with worktree
     if copy_mode == WorkDirCopyMode.WORKTREE and not is_new_branch:
-        raise UserInputError("--worktree requires a new branch. Cannot use --no-new-branch with --worktree.")
+        raise UserInputError(
+            "Worktree mode requires a new branch. Cannot use --no-new-branch with --git-mode worktree."
+        )
 
     new_branch = opts.new_branch
 

@@ -133,7 +133,7 @@ class WorkDirCopyMode(UpperCaseStrEnum):
     """Mode for copying work directory content."""
 
     COPY = auto()
-    CLONE = auto()
+    LINKED_CLONE = auto()
     WORKTREE = auto()
 
 

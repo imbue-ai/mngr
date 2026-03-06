@@ -932,32 +932,33 @@ class Host(BaseHost, OnlineHostInterface):
         with log_span("Creating agent work directory", copy_mode=str(copy_mode)):
             if copy_mode == WorkDirCopyMode.WORKTREE:
                 return self._create_work_dir_as_git_worktree(host, path, options)
-            elif copy_mode in (WorkDirCopyMode.COPY, WorkDirCopyMode.CLONE):
+            elif copy_mode == WorkDirCopyMode.LINKED_CLONE:
+                return self._create_work_dir_as_linked_clone(host, path, options)
+            elif copy_mode == WorkDirCopyMode.COPY:
                 return self._create_work_dir_as_copy(host, path, options)
             else:
                 raise SwitchError(f"Unsupported work dir copy mode: {copy_mode}")
 
-    def _create_work_dir_as_copy(
+    def _determine_copy_target(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
         options: CreateAgentOptions,
-    ) -> CreateWorkDirResult:
-        # Check if source and target are on the same host
+    ) -> tuple[Path, bool]:
+        """Determine the target path and whether it's a generated work directory.
+
+        Returns (target_path, is_generated_work_dir). Also creates the target directory
+        and registers/unregisters it from the generated work dir tracker.
+        """
         source_is_same_host = source_host.id == self.id
 
-        # If target path is specified, use it; otherwise derive one
         if options.target_path:
             target_path = options.target_path
-            # If target equals source and same host, it's in-place
             is_generated_work_dir = not (source_is_same_host and source_path == target_path)
         elif source_is_same_host:
-            # Same host, no target path: run in-place at source path
             target_path = source_path
             is_generated_work_dir = False
         else:
-            # Different host (remote copy): generate a unique work directory so that
-            # multiple agents sharing the same host each get their own directory.
             target_path = self.host_dir / "projects" / str(AgentId.generate())
             is_generated_work_dir = True
 
@@ -973,6 +974,85 @@ class Host(BaseHost, OnlineHostInterface):
             self._add_generated_work_dir(target_path)
         else:
             self._remove_generated_work_dir(target_path)
+
+        return target_path, is_generated_work_dir
+
+    def _create_work_dir_as_copy(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir by copying (rsync) the entire source directory, including .git.
+
+        Unlike _create_work_dir_as_linked_clone which uses git push --mirror for git repos,
+        this method always uses rsync to create a plain directory copy.
+        """
+        source_is_same_host = source_host.id == self.id
+        target_path, _is_generated = self._determine_copy_target(source_host, source_path, options)
+
+        created_branch_name: str | None = None
+
+        # If source and target are same path on same host, nothing to transfer
+        if source_is_same_host and source_path == target_path:
+            logger.debug("Skipped file transfer: source and target are the same path")
+            return CreateWorkDirResult(path=target_path)
+
+        is_git_synced = options.git is not None and options.git.is_git_synced
+        has_git_options = options.git is not None
+
+        if is_git_synced:
+            # Check if source has a .git directory
+            if source_host.is_local:
+                source_has_git = (source_path / ".git").exists()
+            else:
+                result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
+                source_has_git = result.success
+
+            if not source_has_git:
+                logger.warning("Source path is not a git repository, falling back to file copy")
+                self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=True)
+            else:
+                # Key difference from linked-clone: rsync the entire directory including .git
+                # instead of using git push --mirror
+                self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=False)
+
+                # Create new branch at target if requested
+                if options.git.is_new_branch:
+                    branch_name = self._determine_branch_name(options)
+                    base_branch = options.git.base_branch or "HEAD"
+                    checkout_result = self.execute_command(
+                        f"git checkout -B {shlex.quote(branch_name)} {shlex.quote(base_branch)}",
+                        cwd=target_path,
+                    )
+                    if not checkout_result.success:
+                        raise MngError(f"Failed to create branch at copy target: {checkout_result.stderr}")
+                    created_branch_name = branch_name
+
+        # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
+        # not for full directory sync. By default, rsync does NOT use --delete, so existing files
+        # in the target won't be removed.
+        # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
+        if options.data_options.is_rsync_enabled:
+            self._rsync_files(
+                source_host,
+                source_path,
+                target_path,
+                extra_args=options.data_options.rsync_args,
+                exclude_git=has_git_options,
+            )
+
+        return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
+
+    def _create_work_dir_as_linked_clone(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir as a git clone (using git push --mirror)."""
+        source_is_same_host = source_host.id == self.id
+        target_path, _is_generated = self._determine_copy_target(source_host, source_path, options)
 
         created_branch_name: str | None = None
 

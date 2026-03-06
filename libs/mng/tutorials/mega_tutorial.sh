@@ -103,15 +103,15 @@ mng create my-task --base-branch main
 # or set the new branch name explicitly:
 mng create my-task --new-branch feature/my-task
 
-# you can create a copy instead of a worktree:
-mng create my-task --copy
+# you can create a copy instead of a worktree (rsyncs the entire directory including .git):
+mng create my-task --git-mode copy
 # that is used by default if you're not in a git repo
 
-# you can disable new branch creation entirely with --no-new-branch (requires --in-place or --copy due to how worktrees work, and --in-place implies --no-new-branch):
-mng create my-task --copy --no-new-branch
+# you can disable new branch creation entirely with --no-new-branch (requires --in-place or --git-mode copy due to how worktrees work, and --in-place implies --no-new-branch):
+mng create my-task --git-mode copy --no-new-branch
 
-# you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
-mng create my-task --clone
+# you can create a "linked clone" instead of worktree or copy, which transfers git objects via git push --mirror and has its own separate working directory:
+mng create my-task --git-mode linked-clone
 
 # you can make a shallow clone for faster setup:
 mng create my-task --depth 1
