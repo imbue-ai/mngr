@@ -19,6 +19,7 @@ from imbue.mng_claude_changeling.conftest import create_changeling_conversations
 from imbue.mng_claude_changeling.conftest import write_conversation_to_db
 from imbue.mng_claude_changeling.data_types import CommonToolResultEvent
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
+from imbue.mng_claude_changeling.provisioning import CHANGELING_CONVERSATIONS_TABLE_SQL
 from imbue.mng_claude_changeling.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_changeling.provisioning import _LLM_TOOL_FILES
 from imbue.mng_claude_changeling.provisioning import _SERVICE_SCRIPT_FILES
@@ -609,6 +610,29 @@ def test_create_event_log_directories_creates_all_source_dirs() -> None:
     assert any("claude_transcript" in c and "mkdir" in c for c in host.executed_commands), (
         "Missing mkdir for logs/claude_transcript"
     )
+
+
+# -- Schema sync tests --
+
+
+def test_conversation_db_schema_matches_provisioning() -> None:
+    """Verify conversation_db.py contains all column definitions from provisioning.py's schema.
+
+    conversation_db.py runs standalone on remote hosts and cannot import from
+    provisioning.py, so the schema is duplicated. This test catches drift by
+    checking that every column definition from the authoritative schema appears
+    in the resource file source.
+    """
+    source = load_changeling_resource("conversation_db.py")
+    # Extract column definitions from the authoritative schema constant.
+    # Each "X TEXT ..." clause must appear in conversation_db.py's source.
+    for fragment in CHANGELING_CONVERSATIONS_TABLE_SQL.split("(", 1)[1].rsplit(")", 1)[0].split(","):
+        fragment = fragment.strip()
+        assert fragment in source, (
+            f"conversation_db.py is missing schema fragment {fragment!r} from "
+            "provisioning.py CHANGELING_CONVERSATIONS_TABLE_SQL. "
+            "These must be kept in sync."
+        )
 
 
 # -- configure_llm_user_path tests --

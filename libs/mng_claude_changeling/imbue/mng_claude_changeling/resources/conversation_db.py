@@ -21,6 +21,9 @@ Environment: None required (all paths passed as arguments).
 import sqlite3
 import sys
 
+# SYNC: This schema MUST match CHANGELING_CONVERSATIONS_TABLE_SQL in provisioning.py.
+# This file runs standalone on remote hosts and cannot import from provisioning.
+# A test (test_conversation_db_schema_matches_provisioning) verifies they stay in sync.
 _CREATE_TABLE_SQL = (
     "CREATE TABLE IF NOT EXISTS changeling_conversations ("
     "conversation_id TEXT PRIMARY KEY, "
