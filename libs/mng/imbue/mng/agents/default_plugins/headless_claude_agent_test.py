@@ -13,7 +13,6 @@ from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.host import Host
 from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
@@ -191,12 +190,11 @@ def _make_stream_json_line(text: str) -> str:
 def test_stream_output_yields_text_deltas(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    headless_agent_stopped: None,
 ) -> None:
     """stream_output should parse stream-json and yield text chunks."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    # Write some stream-json output to the expected path
     agent_dir = host.host_dir / "agents" / str(agent.id)
     agent_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = agent_dir / "stdout.jsonl"
@@ -207,8 +205,6 @@ def test_stream_output_yields_text_deltas(
     ]
     stdout_path.write_text("\n".join(lines) + "\n")
 
-    # Mock get_lifecycle_state to return STOPPED so stream_output exits
-    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
     chunks = list(agent.stream_output())
 
     assert chunks == ["Hello ", "world!"]
@@ -217,7 +213,7 @@ def test_stream_output_yields_text_deltas(
 def test_stream_output_handles_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    headless_agent_stopped: None,
 ) -> None:
     """stream_output should handle an empty output file gracefully."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
@@ -227,7 +223,6 @@ def test_stream_output_handles_empty_file(
     stdout_path = agent_dir / "stdout.jsonl"
     stdout_path.write_text("")
 
-    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
     chunks = list(agent.stream_output())
 
     assert chunks == []
@@ -236,7 +231,7 @@ def test_stream_output_handles_empty_file(
 def test_stream_output_handles_file_without_trailing_newline(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    headless_agent_stopped: None,
 ) -> None:
     """stream_output should not drop a partial line at the end of the file when there is no trailing newline."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
@@ -245,11 +240,9 @@ def test_stream_output_handles_file_without_trailing_newline(
     agent_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = agent_dir / "stdout.jsonl"
 
-    # Write content without a trailing newline so the last line ends up in line_buffer
     content = _make_stream_json_line("no trailing newline")
     stdout_path.write_text(content)
 
-    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
     chunks = list(agent.stream_output())
 
     assert chunks == ["no trailing newline"]
@@ -258,12 +251,11 @@ def test_stream_output_handles_file_without_trailing_newline(
 def test_stream_output_returns_when_agent_stopped_and_no_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    headless_agent_stopped: None,
 ) -> None:
     """stream_output should return cleanly when agent is stopped and no file exists."""
     agent, _host = _make_headless_agent(local_provider, tmp_path)
 
-    monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
     chunks = list(agent.stream_output())
 
     assert chunks == []

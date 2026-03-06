@@ -31,7 +31,7 @@ def test_prevent_eval_usage() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(1))
+    rc.check_while_true(_DIR, snapshot(0))
 
 
 def test_prevent_time_sleep() -> None:
@@ -192,7 +192,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(35))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(32))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -232,7 +232,7 @@ def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
 
 
 def test_prevent_cast_usage() -> None:

@@ -8,6 +8,7 @@ from typing import Callable
 
 from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng import hookimpl
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
@@ -26,22 +27,21 @@ _TAIL_POLL_INTERVAL: float = 0.05
 _TAIL_POLL_TIMEOUT: float = 300.0
 
 
-class _FileMtimeTracker:
+class _FileMtimeTracker(MutableModel):
     """Tracks a file's mtime and size to detect changes without polling content."""
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self._last_mtime: float = 0
-        self._last_size: int = 0
+    path: Path
+    last_mtime: float = 0
+    last_size: int = 0
 
     def has_changed(self) -> bool:
         try:
-            st = os.stat(self._path)
+            st = os.stat(self.path)
         except OSError:
             return False
-        if st.st_mtime != self._last_mtime or st.st_size != self._last_size:
-            self._last_mtime = st.st_mtime
-            self._last_size = st.st_size
+        if st.st_mtime != self.last_mtime or st.st_size != self.last_size:
+            self.last_mtime = st.st_mtime
+            self.last_size = st.st_size
             return True
         return False
 
@@ -197,11 +197,12 @@ class HeadlessClaude(ClaudeAgent, HeadlessAgentMixin):
         if not self._wait_for_stdout_file(stdout_path):
             return
 
-        tracker = _FileMtimeTracker(stdout_path)
+        tracker = _FileMtimeTracker(path=stdout_path)
         line_buffer = ""
 
         with open(stdout_path) as fh:
-            while True:
+            while not self._is_agent_finished():
+                poll_until(tracker.has_changed, timeout=_TAIL_POLL_TIMEOUT, poll_interval=_TAIL_POLL_INTERVAL)
                 data = fh.read()
                 if data:
                     data = line_buffer + data
@@ -213,14 +214,10 @@ class HeadlessClaude(ClaudeAgent, HeadlessAgentMixin):
 
                     yield from _yield_text_deltas_from_lines(lines)
 
-                if self._is_agent_finished():
-                    # Drain any remaining data and the line buffer
-                    final_data = line_buffer + fh.read()
-                    if final_data:
-                        yield from _yield_text_deltas_from_lines(final_data.split("\n"))
-                    return
-
-                poll_until(tracker.has_changed, timeout=_TAIL_POLL_TIMEOUT, poll_interval=_TAIL_POLL_INTERVAL)
+            # Final drain after agent exits
+            final_data = line_buffer + fh.read()
+            if final_data:
+                yield from _yield_text_deltas_from_lines(final_data.split("\n"))
 
 
 @hookimpl
