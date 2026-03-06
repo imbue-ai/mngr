@@ -837,7 +837,7 @@ def build_memory_sync_hooks_config(role_dir_abs: str) -> dict[str, Any]:
         "hooks": {
             "PreToolUse": [
                 {
-                    "matcher": "memory",
+                    "matcher": "Read",
                     "hooks": [
                         {
                             "type": "command",
@@ -848,7 +848,7 @@ def build_memory_sync_hooks_config(role_dir_abs: str) -> dict[str, Any]:
             ],
             "PostToolUse": [
                 {
-                    "matcher": "memory",
+                    "matcher": "Write|Edit",
                     "hooks": [
                         {
                             "type": "command",
