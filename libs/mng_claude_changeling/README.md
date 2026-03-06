@@ -91,7 +91,6 @@ All event data uses a consistent append-only JSONL format stored under `<agent-d
     {"timestamp": "...", "type": "...", "event_id": "...", "source": "<source>", ...additional fields}
 
 Event sources:
-- `events/conversations/events.jsonl` - conversation lifecycle events (created, model changed)
 - `events/messages/events.jsonl` - all conversation messages across all conversations
 - `events/scheduled/events.jsonl` - scheduled triggers
 - `events/mng_agents/events.jsonl` - role agent state transitions
@@ -102,6 +101,8 @@ Event sources:
 - `logs/claude_transcript/events.jsonl` - raw Claude transcript
 
 Every event is self-describing: you never need to know the filename to understand the event. The file organization is a performance/convenience choice, not a correctness one.
+
+Conversation metadata (conversation_id, model, tags, created_at) is stored in the `changeling_conversations` table in the llm sqlite database (`$LLM_USER_PATH/logs.db`), not in an event file.
 
 ## Provisioning
 

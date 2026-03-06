@@ -3,7 +3,6 @@
 import importlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,6 +15,8 @@ import pytest
 
 from imbue.mng_claude_changeling.conftest import StubCommandResult
 from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.conftest import _create_changeling_conversations_table
+from imbue.mng_claude_changeling.conftest import write_conversation_to_db
 from imbue.mng_claude_changeling.data_types import CommonToolResultEvent
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 from imbue.mng_claude_changeling.provisioning import TalkingRoleConstraintError
@@ -1465,26 +1466,12 @@ def test_extra_context_tool_with_conversations(
 ) -> None:
     """Verify gather_extra_context reads conversations from the DB."""
     llm_data_dir = tmp_path / "llm_data"
-    llm_data_dir.mkdir(parents=True)
     db_path = llm_data_dir / "logs.db"
     monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
 
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE changeling_conversations ("
-        "conversation_id TEXT PRIMARY KEY, model TEXT NOT NULL, "
-        "tags TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"
-    )
-    conn.execute(
-        "INSERT INTO changeling_conversations VALUES (?, ?, ?, ?)",
-        ("conv-1", "claude-opus-4.6", "{}", "2026-01-01T00:00:00Z"),
-    )
-    conn.execute(
-        "INSERT INTO changeling_conversations VALUES (?, ?, ?, ?)",
-        ("conv-2", "claude-sonnet-4-6", "{}", "2026-01-01T00:01:00Z"),
-    )
-    conn.commit()
-    conn.close()
+    _create_changeling_conversations_table(db_path)
+    write_conversation_to_db(db_path, "conv-1", model="claude-opus-4.6", created_at="2026-01-01T00:00:00Z")
+    write_conversation_to_db(db_path, "conv-2", model="claude-sonnet-4-6", created_at="2026-01-01T00:01:00Z")
 
     module = _load_fresh_extra_context_tool()
     _setup_uv_not_found(tmp_path, monkeypatch)
@@ -1545,14 +1532,7 @@ def test_extra_context_tool_conversations_empty_db(
     db_path = llm_data_dir / "logs.db"
     monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
 
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE changeling_conversations ("
-        "conversation_id TEXT PRIMARY KEY, model TEXT NOT NULL, "
-        "tags TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"
-    )
-    conn.commit()
-    conn.close()
+    _create_changeling_conversations_table(db_path)
 
     module = _load_fresh_extra_context_tool()
     _setup_uv_not_found(tmp_path, monkeypatch)
@@ -1597,18 +1577,8 @@ def test_extra_context_tool_conversations_shows_current_model(
     db_path = llm_data_dir / "logs.db"
     monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
 
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE changeling_conversations ("
-        "conversation_id TEXT PRIMARY KEY, model TEXT NOT NULL, "
-        "tags TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"
-    )
-    conn.execute(
-        "INSERT INTO changeling_conversations VALUES (?, ?, ?, ?)",
-        ("conv-1", "claude-sonnet-4-6", "{}", "2026-01-01T00:00:00Z"),
-    )
-    conn.commit()
-    conn.close()
+    _create_changeling_conversations_table(db_path)
+    write_conversation_to_db(db_path, "conv-1", model="claude-sonnet-4-6", created_at="2026-01-01T00:00:00Z")
 
     module = _load_fresh_extra_context_tool()
     _setup_uv_not_found(tmp_path, monkeypatch)
