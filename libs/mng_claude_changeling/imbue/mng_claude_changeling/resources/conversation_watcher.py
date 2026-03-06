@@ -141,9 +141,14 @@ def _sync_messages(
             if prompt and response == "":
                 continue
 
+            # this happens when llm inject creates a message
+            # because this is created by the thinking agent itself, there's no need for these messages to be emitted.
+            if prompt == "...":
+                continue
+
             # Sync user messages, but skip empty prompts (e.g. from llm inject
             # where the agent injected its own message with prompt="" or "...")
-            if prompt and prompt not in ("", "..."):
+            if prompt:
                 eid = f"{row_id}-user"
                 if eid in file_event_ids:
                     is_found_existing = True
