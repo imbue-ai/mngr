@@ -223,7 +223,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
 
 
 class ClaudeBackendInterface(MutableModel, ABC):
-    """Abstraction over the claude subprocess for testability."""
+    """Abstraction over the claude backend for testability."""
 
     @abstractmethod
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
@@ -283,9 +283,9 @@ def _headless_claude_output(mng_ctx: MngContext, prompt: str, system_prompt: str
         )
 
         agent = result.agent
-        if not isinstance(agent, HeadlessAgentMixin):
-            raise MngError(f"Expected headless agent with stream_output(), got {type(agent).__name__}")
         try:
+            if not isinstance(agent, HeadlessAgentMixin):
+                raise MngError(f"Expected headless agent with stream_output(), got {type(agent).__name__}")
             yield agent.stream_output()
         finally:
             try:
