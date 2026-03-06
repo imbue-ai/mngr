@@ -50,6 +50,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
 
     # Fetch all PRs from GitHub
     pr_result = fetch_all_prs(cg, cwd=gh_cwd)
+    prs_loaded = pr_result.error is None
     if pr_result.error is not None:
         errors.append(pr_result.error)
     pr_by_branch = _build_pr_branch_index(pr_result.prs)
@@ -65,7 +66,9 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
         commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
-        create_pr_url = _build_create_pr_url(repo_path, branch) if repo_path and branch and pr is None else None
+        create_pr_url = (
+            _build_create_pr_url(repo_path, branch) if prs_loaded and repo_path and branch and pr is None else None
+        )
         entries.append(
             AgentBoardEntry(
                 name=agent.name,
@@ -84,6 +87,7 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     return BoardSnapshot(
         entries=tuple(entries),
         errors=tuple(errors),
+        prs_loaded=prs_loaded,
         fetch_time_seconds=elapsed,
     )
 

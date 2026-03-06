@@ -12,11 +12,10 @@ type = "modal"
 dockerfile = "libs/mng/imbue/mng/resources/Dockerfile"
 
 [framework]
-type = "default"
-discover_command = "uv run pytest --collect-only -q 2>/dev/null {filters} | grep '::'"
-# Run tests in the sandbox (source is baked into /app)
-run_command = "uv run pytest -v --tb=short --no-cov -p no:xdist -o addopts= --junitxml={result_file} {tests}"
-test_id_format = "{name}"
+type = "pytest"
+paths = ["."]
+command = "uv run pytest"
+run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
 retry_count = 4

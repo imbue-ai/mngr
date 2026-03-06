@@ -1,9 +1,10 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
+    "python_full_version >= '3.12' and python_full_version < '3.14'",
+    "python_full_version < '3.12'",
 ]
 
 [manifest]
@@ -23,9 +24,11 @@ members = [
     "mng-pair",
     "mng-recursive",
     "mng-schedule",
+    "mng-test-coder",
     "mng-ttyd",
     "mng-tutor",
     "sculptor-web",
+    "slack-exporter",
 ]
 
 [[package]]
@@ -692,7 +695,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1556,7 +1559,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1803,7 +1806,7 @@ wheels = [
 
 [[package]]
 name = "mng"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "libs/mng" }
 dependencies = [
     { name = "cel-python" },
@@ -1907,7 +1910,7 @@ requires-dist = [
 
 [[package]]
 name = "mng-kanpan"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "libs/mng_kanpan" }
 dependencies = [
     { name = "click" },
@@ -1924,7 +1927,7 @@ requires-dist = [
 
 [[package]]
 name = "mng-opencode"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/mng_opencode" }
 dependencies = [
     { name = "mng" },
@@ -1935,7 +1938,7 @@ requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-pair"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/mng_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -1983,6 +1986,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mng-test-coder"
+version = "0.1.0"
+source = { editable = "libs/mng_test_coder" }
+dependencies = [
+    { name = "mng" },
+    { name = "mng-claude-zygote" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mng", editable = "libs/mng" },
+    { name = "mng-claude-zygote", editable = "libs/mng_claude_zygote" },
+]
+
+[[package]]
 name = "mng-ttyd"
 version = "0.1.0"
 source = { editable = "libs/mng_ttyd" }
@@ -1995,7 +2013,7 @@ requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-tutor"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "libs/mng_tutor" }
 dependencies = [
     { name = "click" },
@@ -2977,6 +2995,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "slack-exporter"
+version = "0.1.0"
+source = { editable = "apps/slack_exporter" }
+dependencies = [
+    { name = "imbue-common" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "pydantic", specifier = ">=2.5.0" },
 ]
 
 [[package]]

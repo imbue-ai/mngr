@@ -22,11 +22,10 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
 from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_path
-from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.api.list import ErrorInfo
+from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents as api_list_agents
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
@@ -45,6 +44,9 @@ from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.utils.cel_utils import build_cel_context
+from imbue.mng.utils.cel_utils import compile_cel_sort_keys
+from imbue.mng.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mng.utils.terminal import ANSI_DIM_GRAY
 from imbue.mng.utils.terminal import ANSI_ERASE_LINE
 from imbue.mng.utils.terminal import ANSI_ERASE_TO_END
@@ -126,7 +128,6 @@ class ListCliOptions(CommonCliOptions):
     stdin: bool
     fields: str | None
     sort: str
-    sort_order: str
     limit: int | None
     watch: int | None
     on_error: str
@@ -198,13 +199,7 @@ class ListCliOptions(CommonCliOptions):
 @optgroup.option(
     "--sort",
     default="create_time",
-    help="Sort by field (supports nested fields like host.name); enables sorted (non-streaming) output [default: create_time]",
-)
-@optgroup.option(
-    "--sort-order",
-    type=click.Choice(["asc", "desc"], case_sensitive=False),
-    default="asc",
-    help="Sort order [default: asc]",
+    help="Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time]",
 )
 @optgroup.option(
     "--limit",
@@ -323,10 +318,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if opts.remote:
         exclude_filters.append('host.provider == "local"')
 
-    # --sort FIELD: Sort by any available field [default: create_time]
-    # --sort-order ORDER: Sort order (asc, desc) [default: asc]
-    sort_field = opts.sort
-    sort_reverse = opts.sort_order.lower() == "desc"
+    # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
+    compiled_sort_keys = compile_cel_sort_keys(opts.sort)
 
     # --limit N: Limit number of results returned
     # NOTE: The limit is applied after fetching results. The full list is still retrieved
@@ -372,12 +365,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         )
         return
 
-    # Determine if --sort or --sort-order was explicitly set by the user (vs using the default)
+    # Determine if --sort was explicitly set by the user (vs using the default)
     sort_source = ctx.get_parameter_source("sort")
-    sort_order_source = ctx.get_parameter_source("sort_order")
-    is_sort_explicit = (sort_source is not None and sort_source != click.core.ParameterSource.DEFAULT) or (
-        sort_order_source is not None and sort_order_source != click.core.ParameterSource.DEFAULT
-    )
+    is_sort_explicit = sort_source is not None and sort_source != click.core.ParameterSource.DEFAULT
 
     # Template output path: if --format is a template string, use streaming when possible, batch otherwise
     if format_template is not None:
@@ -424,8 +414,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         exclude_filters=exclude_filters_tuple,
         provider_names=provider_names,
         error_behavior=error_behavior,
-        sort_field=sort_field,
-        sort_reverse=sort_reverse,
+        compiled_sort_keys=compiled_sort_keys,
         limit=limit,
         fields=fields,
         format_template=format_template,
@@ -785,8 +774,8 @@ class _ListIterationParams(BaseModel):
     exclude_filters: tuple[str, ...]
     provider_names: tuple[str, ...] | None
     error_behavior: ErrorBehavior
-    sort_field: str
-    sort_reverse: bool
+    # Compiled CEL sort keys: list of (program, is_descending) pairs
+    compiled_sort_keys: list[tuple[Any, bool]]
     limit: int | None
     fields: list[str] | None
     format_template: str | None = None
@@ -808,7 +797,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
             logger.warning("{}: {}", error.exception_type, error.message)
 
     # Apply sorting to results
-    agents_to_display = _sort_agents(result.agents, params.sort_field, params.sort_reverse)
+    agents_to_display = _sort_agents_by_cel(result.agents, params.compiled_sort_keys)
 
     # Apply limit to results (after sorting)
     if params.limit is not None:
@@ -966,51 +955,49 @@ def _format_value_as_string(value: Any) -> str:
 _BRACKET_PATTERN = re.compile(r"^([^\[]+)(?:\[([^\]]+)\])?$")
 
 
-def _get_sortable_value(agent: AgentDetails, field: str) -> Any:
-    """Extract a field value from an AgentDetails object for sorting.
+class _CelSortKeyExtractor:
+    """Extracts a sort key from an (agent, cel_context) pair for a single CEL expression."""
 
-    Returns the raw value (not string-formatted) for proper sorting behavior.
-    Supports nested fields like "host.name".
-    """
-    # Handle nested fields (e.g., "host.name")
-    # Also supports dict key access for plugin fields (e.g., "host.plugin.aws.iam_user")
-    parts = field.split(".")
-    value: Any = agent
+    program: Any
+    is_descending: bool
 
-    try:
-        for part in parts:
-            # Strip any bracket notation for sorting (use base field only)
-            base_part = part.split("[")[0]
-            if hasattr(value, base_part):
-                value = getattr(value, base_part)
-            elif isinstance(value, dict) and base_part in value:
-                value = value[base_part]
-            else:
-                return None
-        return value
-    except (AttributeError, KeyError):
-        return None
-
-
-class _AgentSortKey:
-    """Callable class for sorting agents by a field (avoids inline function definitions)."""
-
-    sort_field: str
-
-    def __call__(self, agent: AgentDetails) -> tuple[int, Any]:
-        value = _get_sortable_value(agent, self.sort_field)
+    def __call__(self, pair: tuple[AgentDetails, dict[str, Any]]) -> tuple[int, str]:
+        _, ctx = pair
+        value = evaluate_cel_sort_key(self.program, ctx)
         if value is None:
-            return (1, "")
-        if hasattr(value, "value"):
-            value = value.value
-        return (0, str(value))
+            # For ascending: (1, "") puts None at end
+            # For descending (reverse=True): (0, "") puts None at end
+            return (1, "") if not self.is_descending else (0, "")
+        return (0, str(value)) if not self.is_descending else (1, str(value))
 
 
-def _sort_agents(agents: list[AgentDetails], sort_field: str, reverse: bool) -> list[AgentDetails]:
-    """Sort a list of agents by the specified field."""
-    key = _AgentSortKey()
-    key.sort_field = sort_field
-    return sorted(agents, key=key, reverse=reverse)
+def _sort_agents_by_cel(
+    agents: list[AgentDetails],
+    compiled_sort_keys: Sequence[tuple[Any, bool]],
+) -> list[AgentDetails]:
+    """Sort agents using compiled CEL sort key expressions.
+
+    Supports multiple sort keys with per-key direction (asc/desc).
+    Uses stable multi-pass sorting: sorts by each key in reverse order
+    of significance so the most significant key dominates.
+    """
+    if not compiled_sort_keys or not agents:
+        return agents
+
+    # Precompute CEL contexts once for all agents
+    cel_contexts = [build_cel_context(agent_details_to_cel_context(agent)) for agent in agents]
+
+    # Pair agents with their precomputed contexts for sorting
+    paired: list[tuple[AgentDetails, dict[str, Any]]] = list(zip(agents, cel_contexts, strict=True))
+
+    # Sort by each key in reverse order of significance (stable sort preserves earlier orderings)
+    for program, is_descending in reversed(compiled_sort_keys):
+        extractor = _CelSortKeyExtractor()
+        extractor.program = program
+        extractor.is_descending = is_descending
+        paired.sort(key=extractor, reverse=is_descending)
+
+    return [agent for agent, _ in paired]
 
 
 def _get_field_value(agent: AgentDetails, field: str) -> str:
@@ -1101,6 +1088,8 @@ Supports filtering, sorting, and multiple output formats.""",
         ("List agents with a specific host tag", "mng list --tag env=prod"),
         ("List agents as JSON", "mng list --format json"),
         ("Filter with CEL expression", "mng list --include 'name.contains(\"prod\")'"),
+        ("Sort by name descending", "mng list --sort 'name desc'"),
+        ("Sort by multiple fields", "mng list --sort 'state, name asc, create_time desc'"),
     ),
     additional_sections=(
         (
@@ -1390,17 +1379,17 @@ def _stream_tail_events_file(
 
 
 def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
-    """Run an unfiltered list and write a full discovery snapshot event.
+    """Run an unfiltered list to trigger a full discovery snapshot event.
 
-    Full snapshots must be unfiltered so they can be used for state reconstruction.
+    The snapshot is written as a side effect of api_list_agents when the listing is
+    unfiltered and error-free. This function exists to trigger that side effect
+    explicitly (e.g. for stream mode's periodic re-polls).
     """
-    result = api_list_agents(
+    api_list_agents(
         mng_ctx=mng_ctx,
         is_streaming=False,
         error_behavior=error_behavior,
     )
-    discovered_agents, discovered_hosts = extract_agents_and_hosts_from_full_listing(result.agents)
-    write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
 
 
 def _list_stream(
@@ -1411,32 +1400,30 @@ def _list_stream(
 
     Snapshots are always unfiltered so they can be used for state reconstruction.
 
-    1. Write an unfiltered full snapshot, emit from the latest snapshot in the file
-    2. Tail the events file for new events written by other mng processes
-    3. Periodically re-poll (unfiltered) and write new full snapshots
+    1. Emit from the latest cached snapshot on disk (instant, if available)
+    2. Run a full sync in the background to update the event stream
+    3. Tail the events file for new events written by the background sync or other processes
+    4. Periodically re-poll (unfiltered) and write new full snapshots
     """
     events_path = get_discovery_events_path(mng_ctx.config)
     emitted_event_ids: set[str] = set()
     emit_lock = Lock()
 
-    # Phase 1: write an unfiltered full snapshot, then emit from the latest snapshot
-    try:
-        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
-    except (MngError, OSError) as e:
-        logger.warning("Failed to write initial discovery snapshot: {}", e)
-
-    # Find the latest full snapshot offset, read from there
+    # Phase 1: emit from the latest cached snapshot on disk (fast path)
+    has_cached_snapshot = False
     if events_path.exists():
         snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        with open(events_path) as f:
-            f.seek(snapshot_offset)
-            for line in f:
-                _stream_emit_line(line, emitted_event_ids, emit_lock)
+        if snapshot_offset > 0:
+            has_cached_snapshot = True
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
 
     # Record the current file position for tailing
     initial_offset = events_path.stat().st_size if events_path.exists() else 0
 
-    # Phase 2: tail the events file for new events from other processes
+    # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
     tail = threading.Thread(
         target=_stream_tail_events_file,
@@ -1445,7 +1432,27 @@ def _list_stream(
     )
     tail.start()
 
-    # Phase 3: periodically re-poll (unfiltered) and write full snapshots
+    # Phase 3: run the initial full sync
+    # If we had a cached snapshot, run this in the background so the user sees results immediately.
+    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+    if has_cached_snapshot:
+        initial_sync = threading.Thread(
+            target=_write_unfiltered_full_snapshot_logged,
+            args=(mng_ctx, error_behavior),
+            daemon=True,
+        )
+        initial_sync.start()
+    else:
+        _write_unfiltered_full_snapshot_logged(mng_ctx, error_behavior)
+        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        if events_path.exists():
+            snapshot_offset = find_latest_full_snapshot_offset(events_path)
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _stream_emit_line(line, emitted_event_ids, emit_lock)
+
+    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:
         while not stop_event.is_set():
             stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
@@ -1461,3 +1468,11 @@ def _list_stream(
     finally:
         stop_event.set()
         tail.join(timeout=5.0)
+
+
+def _write_unfiltered_full_snapshot_logged(mng_ctx: MngContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered full snapshot, logging any errors instead of raising."""
+    try:
+        _write_unfiltered_full_snapshot(mng_ctx, error_behavior)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write discovery snapshot: {}", e)

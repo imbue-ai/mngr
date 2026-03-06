@@ -53,9 +53,9 @@ def _get_llm_db_path() -> Path:
 
 def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
     """Read tracked conversation IDs from events/conversations/events.jsonl."""
-    tracked_cids: set[str] = set()
+    tracked_conversation_ids: set[str] = set()
     if not conversations_file.is_file():
-        return tracked_cids
+        return tracked_conversation_ids
     try:
         with conversations_file.open() as f:
             for line in f:
@@ -63,13 +63,13 @@ def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
                 if not line:
                     continue
                 try:
-                    tracked_cids.add(json.loads(line)["conversation_id"])
+                    tracked_conversation_ids.add(json.loads(line)["conversation_id"])
                 except (json.JSONDecodeError, KeyError) as exc:
                     logger.warning("Malformed conversation event line: {}", exc)
                     continue
     except OSError as exc:
         logger.warning("Failed to read conversations file: {}", exc)
-    return tracked_cids
+    return tracked_conversation_ids
 
 
 def _sync_messages(
@@ -91,8 +91,8 @@ def _sync_messages(
         logger.debug("LLM database not found at {}", db_path)
         return 0
 
-    tracked_cids = _get_tracked_conversation_ids(conversations_file)
-    if not tracked_cids:
+    tracked_conversation_ids = _get_tracked_conversation_ids(conversations_file)
+    if not tracked_conversation_ids:
         return 0
 
     file_event_ids = read_event_ids_from_jsonl(messages_file)
@@ -103,8 +103,8 @@ def _sync_messages(
         logger.warning("Cannot open database: {}", exc)
         return 0
 
-    placeholders = ",".join("?" for _ in tracked_cids)
-    cid_list = list(tracked_cids)
+    placeholders = ",".join("?" for _ in tracked_conversation_ids)
+    conversation_id_list = list(tracked_conversation_ids)
 
     window = 200
     missing_events: list[tuple[str, int, str]] = []
@@ -117,7 +117,7 @@ def _sync_messages(
                 f"WHERE conversation_id IN ({placeholders}) "
                 f"ORDER BY datetime_utc DESC "
                 f"LIMIT ?",
-                [*cid_list, window],
+                [*conversation_id_list, window],
             ).fetchall()
         except sqlite3.Error as exc:
             logger.warning("sqlite3 query error: {}", exc)
@@ -129,7 +129,7 @@ def _sync_messages(
         missing_events = []
         is_found_existing = False
 
-        for row_id, ts, cid, prompt, response in rows:
+        for row_id, ts, conversation_id, prompt, response in rows:
             if prompt:
                 eid = f"{row_id}-user"
                 if eid in file_event_ids:
@@ -145,7 +145,7 @@ def _sync_messages(
                                     "type": "message",
                                     "event_id": eid,
                                     "source": "messages",
-                                    "conversation_id": cid,
+                                    "conversation_id": conversation_id,
                                     "role": "user",
                                     "content": prompt,
                                 },
@@ -169,7 +169,7 @@ def _sync_messages(
                                     "type": "message",
                                     "event_id": eid,
                                     "source": "messages",
-                                    "conversation_id": cid,
+                                    "conversation_id": conversation_id,
                                     "role": "assistant",
                                     "content": response,
                                 },

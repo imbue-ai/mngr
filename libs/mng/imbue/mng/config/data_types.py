@@ -41,6 +41,7 @@ _DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 7
 # === Helper Functions ===
 
 T = TypeVar("T")
+PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
 
 @pure
@@ -638,6 +639,17 @@ class MngContext(FrozenModel):
         default_factory=lambda: ConcurrencyGroup(name="default"),
         description="Top-level concurrency group for managing spawned processes",
     )
+
+    def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
+        """Get a plugin's typed config, falling back to defaults if absent."""
+        config = self.config.plugins.get(PluginName(name))
+        if config is None:
+            return config_type()
+        if not isinstance(config, config_type):
+            raise ConfigParseError(
+                f"Plugin '{name}' config has type {type(config).__name__}, expected {config_type.__name__}"
+            )
+        return config
 
     def get_profile_user_id(self) -> UserId:
         return get_or_create_user_id(self.profile_dir)

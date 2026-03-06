@@ -28,6 +28,7 @@ from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mng/discovery")
 
@@ -40,6 +41,7 @@ class DiscoveryEventType(UpperCaseStrEnum):
     AGENT_DESTROYED = auto()
     HOST_DESTROYED = auto()
     DISCOVERY_FULL = auto()
+    HOST_SSH_INFO = auto()
 
 
 # === Event Data Types ===
@@ -76,6 +78,13 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
 
     agents: tuple[DiscoveredAgent, ...] = Field(description="All discovered agents")
     hosts: tuple[DiscoveredHost, ...] = Field(description="All discovered hosts")
+
+
+class HostSSHInfoEvent(EventEnvelope):
+    """Records SSH connection info for a host."""
+
+    host_id: HostId = Field(description="ID of the host")
+    ssh: SSHInfo = Field(description="SSH connection info for the host")
 
 
 # === Path Helpers ===
@@ -123,6 +132,21 @@ def discovered_host_from_agent_details(agent_details: AgentDetails) -> Discovere
         host_id=agent_details.host.id,
         host_name=HostName(agent_details.host.name),
         provider_name=agent_details.host.provider_name,
+    )
+
+
+def _build_ssh_info_from_host(host: OnlineHostInterface) -> SSHInfo | None:
+    """Build SSHInfo from an online host's SSH connection info, or None for local hosts."""
+    ssh_connection = host.get_ssh_connection_info()
+    if ssh_connection is None:
+        return None
+    user, hostname, port, key_path = ssh_connection
+    return SSHInfo(
+        user=user,
+        host=hostname,
+        port=port,
+        key_path=key_path,
+        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
     )
 
 
@@ -254,6 +278,21 @@ def emit_host_destroyed(
     logger.trace("Emitted host_destroyed event for {}", host_id)
 
 
+def emit_host_ssh_info(config: MngConfig, host_id: HostId, ssh: SSHInfo) -> None:
+    """Build and append a host SSH info event."""
+    timestamp, event_id = _make_envelope_fields()
+    event = HostSSHInfoEvent(
+        timestamp=timestamp,
+        type=EventType(DiscoveryEventType.HOST_SSH_INFO),
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        host_id=host_id,
+        ssh=ssh,
+    )
+    append_discovery_event(config, event)
+    logger.trace("Emitted host_ssh_info event for {}", host_id)
+
+
 def emit_discovery_events_for_host(
     config: MngConfig,
     host: OnlineHostInterface,
@@ -286,6 +325,11 @@ def emit_discovery_events_for_host(
         discovered_host = discovered_host_from_online_host(host, provider_name)
         emit_host_discovered(config, discovered_host)
 
+        # Emit SSH info event if this is a remote host
+        ssh_info = _build_ssh_info_from_host(host)
+        if ssh_info is not None:
+            emit_host_ssh_info(config, host.id, ssh_info)
+
         # Emit agent events with full certified_data from the host's filesystem
         for discovered_agent in discovered_agents:
             emit_agent_discovered(config, discovered_agent)
@@ -313,7 +357,12 @@ def write_full_discovery_snapshot(
 
 
 DiscoveryEvent = (
-    AgentDiscoveryEvent | HostDiscoveryEvent | AgentDestroyedEvent | HostDestroyedEvent | FullDiscoverySnapshotEvent
+    AgentDiscoveryEvent
+    | HostDiscoveryEvent
+    | AgentDestroyedEvent
+    | HostDestroyedEvent
+    | FullDiscoverySnapshotEvent
+    | HostSSHInfoEvent
 )
 
 
@@ -343,6 +392,8 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
             return HostDestroyedEvent.model_validate(data)
         case DiscoveryEventType.DISCOVERY_FULL:
             return FullDiscoverySnapshotEvent.model_validate(data)
+        case DiscoveryEventType.HOST_SSH_INFO:
+            return HostSSHInfoEvent.model_validate(data)
         case _:
             return None
 
@@ -376,16 +427,19 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
 
 def extract_agents_and_hosts_from_full_listing(
     agent_details_list: Sequence[AgentDetails],
-) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...]]:
-    """Extract deduplicated DiscoveredAgent and DiscoveredHost tuples from AgentDetails."""
+) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...], tuple[tuple[HostId, SSHInfo], ...]]:
+    """Extract deduplicated DiscoveredAgent, DiscoveredHost, and SSH info tuples from AgentDetails."""
     discovered_agents = tuple(discovered_agent_from_agent_details(a) for a in agent_details_list)
 
-    # Deduplicate hosts by host_id
+    # Deduplicate hosts by host_id, collecting SSH info along the way
     seen_host_ids: set[HostId] = set()
     discovered_hosts: list[DiscoveredHost] = []
+    host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
     for agent_details in agent_details_list:
         if agent_details.host.id not in seen_host_ids:
             seen_host_ids.add(agent_details.host.id)
             discovered_hosts.append(discovered_host_from_agent_details(agent_details))
+            if agent_details.host.ssh is not None:
+                host_ssh_infos.append((agent_details.host.id, agent_details.host.ssh))
 
-    return discovered_agents, tuple(discovered_hosts)
+    return discovered_agents, tuple(discovered_hosts), tuple(host_ssh_infos)

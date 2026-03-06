@@ -23,29 +23,29 @@ from imbue.mng.uv_tool import require_uv_tool_receipt
 
 def test_tool_requirement_minimal() -> None:
     """ToolRequirement should create with just a name."""
-    req = ToolRequirement(name="mng")
-    assert req.name == "mng"
-    assert req.specifier is None
-    assert req.editable is None
-    assert req.git is None
+    requirement = ToolRequirement(name="mng")
+    assert requirement.name == "mng"
+    assert requirement.specifier is None
+    assert requirement.editable is None
+    assert requirement.git is None
 
 
 def test_tool_requirement_with_specifier() -> None:
     """ToolRequirement should store version specifiers."""
-    req = ToolRequirement(name="mng", specifier=">=0.1.0")
-    assert req.specifier == ">=0.1.0"
+    requirement = ToolRequirement(name="mng", specifier=">=0.1.0")
+    assert requirement.specifier == ">=0.1.0"
 
 
 def test_tool_requirement_with_editable() -> None:
     """ToolRequirement should store editable paths."""
-    req = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
-    assert req.editable == "/path/to/plugin"
+    requirement = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
+    assert requirement.editable == "/path/to/plugin"
 
 
 def test_tool_requirement_with_git() -> None:
     """ToolRequirement should store git URLs."""
-    req = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
-    assert req.git == "https://github.com/user/repo.git"
+    requirement = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
+    assert requirement.git == "https://github.com/user/repo.git"
 
 
 # =============================================================================
@@ -55,32 +55,32 @@ def test_tool_requirement_with_git() -> None:
 
 def test_requirement_to_with_arg_plain_name() -> None:
     """Plain name should produce --with name."""
-    req = ToolRequirement(name="mng-opencode")
-    assert _requirement_to_with_arg(req) == ("--with", "mng-opencode")
+    requirement = ToolRequirement(name="mng-opencode")
+    assert _requirement_to_with_arg(requirement) == ("--with", "mng-opencode")
 
 
 def test_requirement_to_with_arg_with_specifier() -> None:
     """Name with specifier should produce --with name+specifier."""
-    req = ToolRequirement(name="mng-opencode", specifier=">=1.0")
-    assert _requirement_to_with_arg(req) == ("--with", "mng-opencode>=1.0")
+    requirement = ToolRequirement(name="mng-opencode", specifier=">=1.0")
+    assert _requirement_to_with_arg(requirement) == ("--with", "mng-opencode>=1.0")
 
 
 def test_requirement_to_with_arg_editable() -> None:
     """Editable should produce --with-editable path."""
-    req = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
-    assert _requirement_to_with_arg(req) == ("--with-editable", "/path/to/plugin")
+    requirement = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
+    assert _requirement_to_with_arg(requirement) == ("--with-editable", "/path/to/plugin")
 
 
 def test_requirement_to_with_arg_directory() -> None:
     """Directory should produce --with-editable path."""
-    req = ToolRequirement(name="my-plugin", directory="/path/to/plugin")
-    assert _requirement_to_with_arg(req) == ("--with-editable", "/path/to/plugin")
+    requirement = ToolRequirement(name="my-plugin", directory="/path/to/plugin")
+    assert _requirement_to_with_arg(requirement) == ("--with-editable", "/path/to/plugin")
 
 
 def test_requirement_to_with_arg_git() -> None:
     """Git should produce --with 'name @ git+url'."""
-    req = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
-    assert _requirement_to_with_arg(req) == ("--with", "my-plugin @ git+https://github.com/user/repo.git")
+    requirement = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
+    assert _requirement_to_with_arg(requirement) == ("--with", "my-plugin @ git+https://github.com/user/repo.git")
 
 
 # =============================================================================

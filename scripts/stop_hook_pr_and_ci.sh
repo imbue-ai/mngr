@@ -42,26 +42,37 @@ if PR_INFO=$(gh pr view "$CURRENT_BRANCH" --json number,state 2>/dev/null); then
 fi
 
 if [[ -z "$EXISTING_PR" ]]; then
-    # No PR exists - create a new one
-    log_info "Creating new PR..."
-    if NEW_PR=$(create_new_pr "$CURRENT_BRANCH"); then
-        EXISTING_PR="$NEW_PR"
-        log_info "Created PR #$EXISTING_PR"
+    if [[ "${MNG_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
+        log_info "MNG_SKIP_STOP_HOOK_PR_CREATION=1 and no existing PR, skipping PR creation"
+        _log_to_file "INFO" "Skipped PR creation (MNG_SKIP_STOP_HOOK_PR_CREATION=1, no existing PR)"
     else
-        log_error "Failed to create PR"
-        exit 1
+        # No PR exists - create a new one
+        log_info "Creating new PR..."
+        if NEW_PR=$(create_new_pr "$CURRENT_BRANCH"); then
+            EXISTING_PR="$NEW_PR"
+            log_info "Created PR #$EXISTING_PR"
+        else
+            log_error "Failed to create PR"
+            exit 1
+        fi
     fi
 elif [[ "$PR_STATE" == "MERGED" ]]; then
-    # PR was merged - need to create a new one (can't reopen merged PRs on GitHub)
-    log_info "PR #$EXISTING_PR is merged. Creating a new PR..."
-    # Use a different title to distinguish from the merged PR
-    NEW_TITLE="${CURRENT_BRANCH} (subsequent)"
-    if NEW_PR=$(create_new_pr "$NEW_TITLE"); then
-        EXISTING_PR="$NEW_PR"
-        log_info "Created new PR #$EXISTING_PR (previous PR was merged)"
+    if [[ "${MNG_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
+        log_info "MNG_SKIP_STOP_HOOK_PR_CREATION=1 and previous PR was merged, skipping new PR creation"
+        _log_to_file "INFO" "Skipped PR creation (MNG_SKIP_STOP_HOOK_PR_CREATION=1, previous PR merged)"
+        EXISTING_PR=""
     else
-        log_error "Failed to create new PR after merge"
-        exit 1
+        # PR was merged - need to create a new one (can't reopen merged PRs on GitHub)
+        log_info "PR #$EXISTING_PR is merged. Creating a new PR..."
+        # Use a different title to distinguish from the merged PR
+        NEW_TITLE="${CURRENT_BRANCH} (subsequent)"
+        if NEW_PR=$(create_new_pr "$NEW_TITLE"); then
+            EXISTING_PR="$NEW_PR"
+            log_info "Created new PR #$EXISTING_PR (previous PR was merged)"
+        else
+            log_error "Failed to create new PR after merge"
+            exit 1
+        fi
     fi
 elif [[ "$PR_STATE" == "CLOSED" ]]; then
     # PR was closed but not merged - reopen it

@@ -53,6 +53,12 @@ def _convert_to_cel_value(value: Any) -> Any:
     return celpy.json_to_cel(value)
 
 
+@pure
+def build_cel_context(raw_context: dict[str, Any]) -> dict[str, Any]:
+    """Convert a raw dict to a CEL-compatible evaluation context."""
+    return {k: _convert_to_cel_value(v) for k, v in raw_context.items()}
+
+
 def apply_cel_filters_to_context(
     context: dict[str, Any],
     include_filters: Sequence[Any],
@@ -69,7 +75,7 @@ def apply_cel_filters_to_context(
     objects, enabling standard CEL dot notation (e.g., host.provider == "local").
     """
     # Convert nested dicts to CEL-compatible objects for dot notation support
-    cel_context = {k: _convert_to_cel_value(v) for k, v in context.items()}
+    cel_context = build_cel_context(context)
 
     for prgm in include_filters:
         try:
@@ -90,3 +96,63 @@ def apply_cel_filters_to_context(
             continue
 
     return True
+
+
+@pure
+def parse_cel_sort_spec(sort_spec: str) -> list[tuple[str, bool]]:
+    """Parse a sort specification into (expression, is_descending) pairs.
+
+    Format: "expr1 [asc|desc], expr2 [asc|desc], ..."
+    Default direction is ascending.
+    """
+    keys: list[tuple[str, bool]] = []
+    for part in sort_spec.split(","):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        # Check if the last whitespace-separated token is a direction keyword
+        tokens = stripped.rsplit(maxsplit=1)
+        if len(tokens) == 2 and tokens[1].lower() in ("asc", "desc"):
+            expression = tokens[0].strip()
+            is_descending = tokens[1].lower() == "desc"
+        else:
+            expression = stripped
+            is_descending = False
+        keys.append((expression, is_descending))
+    return keys
+
+
+@pure
+def compile_cel_sort_keys(
+    sort_spec: str,
+) -> list[tuple[Any, bool]]:
+    """Compile a sort specification into (program, is_descending) pairs.
+
+    Raises MngError if any sort expression is invalid CEL.
+    """
+    parsed = parse_cel_sort_spec(sort_spec)
+    env = celpy.Environment()
+    compiled: list[tuple[Any, bool]] = []
+    for expression, is_descending in parsed:
+        try:
+            ast = env.compile(expression)
+            prgm = env.program(ast)
+            compiled.append((prgm, is_descending))
+        except CELParseError as e:
+            raise MngError(f"Invalid sort expression '{expression}': {e}") from e
+    return compiled
+
+
+def evaluate_cel_sort_key(
+    program: Any,
+    cel_context: dict[str, Any],
+) -> Any:
+    """Evaluate a single CEL sort key against a pre-built CEL context.
+
+    Returns the evaluated value, or None if evaluation fails.
+    """
+    try:
+        return program.evaluate(cel_context)
+    except CELEvalError as e:
+        logger.trace("CEL sort key evaluation failed: {}", e)
+        return None

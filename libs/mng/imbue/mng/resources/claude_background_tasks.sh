@@ -8,7 +8,7 @@
 #      $MNG_AGENT_STATE_DIR/active file)
 #   2. Transcript streaming: launches stream_transcript.sh which watches
 #      all session JSONL files and streams new lines to
-#      $MNG_AGENT_STATE_DIR/events/claude_transcript/events.jsonl
+#      $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #

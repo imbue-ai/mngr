@@ -292,11 +292,11 @@ def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, 
     """
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute(LLM_RESPONSES_SCHEMA)
-        for row_id, prompt, response, model, dt, cid in rows:
+        for row_id, prompt, response, model, dt, conversation_id in rows:
             conn.execute(
                 "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, prompt, response, model, dt, cid),
+                (row_id, prompt, response, model, dt, conversation_id),
             )
         conn.commit()
 
@@ -332,15 +332,15 @@ def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch) -> EventWatcherSubp
     return capture
 
 
-def write_conversation_event(events_file: Path, cid: str, model: str = "claude-sonnet-4-6") -> None:
+def write_conversation_event(events_file: Path, conversation_id: str, model: str = "claude-sonnet-4-6") -> None:
     """Append a conversation_created event to a JSONL file."""
     event = json.dumps(
         {
             "timestamp": "2025-01-15T10:00:00.000Z",
             "type": "conversation_created",
-            "event_id": f"evt-{cid}",
+            "event_id": f"evt-{conversation_id}",
             "source": "conversations",
-            "conversation_id": cid,
+            "conversation_id": conversation_id,
             "model": model,
         }
     )

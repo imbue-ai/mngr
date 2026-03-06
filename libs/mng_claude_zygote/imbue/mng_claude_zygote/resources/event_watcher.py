@@ -56,7 +56,8 @@ except ImportError:
 # script runs standalone on the host and cannot import from data_types.py.
 
 _DEFAULT_CEL_FILTER: Final[str] = (
-    'source != "claude_transcript" && source != "common_transcript" && source != "monitor"'
+    'source != "common_transcript"'
+    ' && source != "conversations" && source != "delivery_failures"'
     " && ("
     '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
     ")"
@@ -288,7 +289,7 @@ def _send_message(agent_name: str, message: str) -> bool:
     """Send a message to the agent via mng message. Returns True on success."""
     try:
         result = subprocess.run(
-            ["uv", "run", "mng", "message", agent_name, "-m", message],
+            ["uv", "run", "mng", "message", agent_name, "--provider", "local", "-m", message],
             capture_output=True,
             text=True,
             timeout=_MESSAGE_SEND_TIMEOUT_SECONDS,
@@ -308,7 +309,7 @@ def _send_message(agent_name: str, message: str) -> bool:
 
 
 def _write_notification_event(events_dir: Path, message: str, level: str = "WARNING") -> None:
-    """Write a notification event to events/monitor/events.jsonl.
+    """Write a notification event to events/delivery_failures/events.jsonl.
 
     These events are visible through the event system and web UI,
     providing user-facing notifications about delivery issues.
@@ -318,13 +319,13 @@ def _write_notification_event(events_dir: Path, message: str, level: str = "WARN
         "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z",
         "type": "delivery_notification",
         "event_id": f"evt-{uuid4().hex}",
-        "source": "monitor",
+        "source": "delivery_failures",
         "level": level,
         "message": message,
     }
-    monitor_dir = events_dir / "monitor"
-    monitor_dir.mkdir(parents=True, exist_ok=True)
-    events_file = monitor_dir / "events.jsonl"
+    delivery_failures_dir = events_dir / "delivery_failures"
+    delivery_failures_dir.mkdir(parents=True, exist_ok=True)
+    events_file = delivery_failures_dir / "events.jsonl"
     try:
         with events_file.open("a") as f:
             f.write(json.dumps(event, separators=(",", ":")) + "\n")
@@ -332,27 +333,61 @@ def _write_notification_event(events_dir: Path, message: str, level: str = "WARN
         logger.error("Failed to write notification event: {}", exc)
 
 
-_CHAT_NOTIFICATION_CONVERSATION_ID: Final[str] = "mng-system-notifications"
 _CHAT_NOTIFICATION_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
-def _send_chat_notification(message: str) -> bool:
+def _get_system_notifications_conversation_id(events_dir: Path) -> str | None:
+    """Read the first conversation_id from events/conversations/events.jsonl.
+
+    The system_notifications conversation is always created first during
+    provisioning, so its ID is the first entry in the conversations event log.
+
+    Returns None if the file does not exist or contains no valid entries.
+    """
+    conversations_file = events_dir / "conversations" / "events.jsonl"
+    try:
+        if not conversations_file.is_file():
+            return None
+        with conversations_file.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    conversation_id = event.get("conversation_id")
+                    if conversation_id:
+                        return str(conversation_id)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except OSError as exc:
+        logger.warning("Failed to read conversations file for notification CID: {}", exc)
+    return None
+
+
+def _send_chat_notification(events_dir: Path, message: str) -> bool:
     """Send a notification as a chat message via ``llm``.
 
-    Creates (or continues) a conversation with a fixed ID so that all
-    system notifications appear in the same thread. The message is sent
-    as the user prompt; the model response is discarded.
+    Uses the system_notifications conversation (the first conversation
+    created during provisioning) so that all system notifications appear
+    in the same thread. The message is sent as the user prompt; the model
+    response is discarded.
 
     Returns True on success, False if ``llm`` is not available or fails.
     This is best-effort: the caller should not depend on success.
     """
+    conversation_id = _get_system_notifications_conversation_id(events_dir)
+    if conversation_id is None:
+        logger.warning("No system_notifications conversation found, skipping chat notification")
+        return False
+
     try:
         result = subprocess.run(
             [
                 "llm",
                 "chat",
                 "--cid",
-                _CHAT_NOTIFICATION_CONVERSATION_ID,
+                conversation_id,
                 "-m",
                 "echo",
                 message,
@@ -378,11 +413,11 @@ def _notify_user(events_dir: Path, message: str, level: str = "WARNING") -> None
     """Notify the user about a delivery issue.
 
     Uses two mechanisms for reliability:
-    1. Writes a structured event to events/monitor/events.jsonl (always persisted)
+    1. Writes a structured event to events/delivery_failures/events.jsonl (always persisted)
     2. Sends a chat message via ``llm`` (best-effort, visible in chat interface)
     """
     _write_notification_event(events_dir, message, level=level)
-    _send_chat_notification(message)
+    _send_chat_notification(events_dir, message)
 
 
 def _compute_backoff_seconds(consecutive_failures: int) -> float:
@@ -409,15 +444,15 @@ def _start_events_subprocess(agent_name: str, cel_filter: str) -> subprocess.Pop
 
 
 def _read_events_from_subprocess(
-    proc: subprocess.Popen[str],
+    process: subprocess.Popen[str],
     event_buffer: list[str],
     buffer_lock: threading.Lock,
     stop_event: threading.Event,
 ) -> None:
     """Read JSONL lines from subprocess stdout into the event buffer (thread target)."""
-    assert proc.stdout is not None
+    assert process.stdout is not None
     try:
-        for line in proc.stdout:
+        for line in process.stdout:
             if stop_event.is_set():
                 break
             stripped = line.strip()
@@ -431,13 +466,13 @@ def _read_events_from_subprocess(
 
 
 def _drain_stderr(
-    proc: subprocess.Popen[str],
+    process: subprocess.Popen[str],
     stop_event: threading.Event,
 ) -> None:
     """Read and log stderr from the subprocess (daemon thread target)."""
-    assert proc.stderr is not None
+    assert process.stderr is not None
     try:
-        for line in proc.stderr:
+        for line in process.stderr:
             if stop_event.is_set():
                 break
             stripped = line.strip()
@@ -446,6 +481,99 @@ def _drain_stderr(
     except Exception as exc:
         if not stop_event.is_set():
             logger.debug("Stderr reader error: {}", exc)
+
+
+# -- Chat event pairing --
+
+# Maximum time to wait for an assistant response before delivering the user
+# message anyway (in seconds). Prevents events from being held indefinitely
+# if the assistant never responds (e.g. conversation closed, error, etc.).
+_CHAT_PAIR_TIMEOUT_SECONDS: Final[float] = 300.0
+
+
+def _separate_chat_events(
+    lines: list[str],
+    held_user_messages: dict[str, tuple[list[str], float]],
+) -> list[str]:
+    """Separate chat message events into paired (ready) and held (waiting).
+
+    For events from the "messages" source:
+    - User messages are held back until an assistant response for the same
+      conversation_id arrives, so that the agent sees both together.
+    - When an assistant message arrives, the corresponding held user messages
+      are released and included alongside it.
+    - User messages held longer than _CHAT_PAIR_TIMEOUT_SECONDS are released
+      even without an assistant response.
+
+    Non-message events pass through unchanged.
+
+    Args:
+        lines: Parsed JSONL lines to process.
+        held_user_messages: Mutable dict mapping conversation_id to
+            (list of held JSONL lines, timestamp when first held).
+            Updated in place.
+
+    Returns:
+        Lines ready for delivery (non-message events + paired chat events).
+    """
+    ready: list[str] = []
+    new_user_messages: dict[str, list[str]] = {}
+    new_assistant_messages: dict[str, list[str]] = {}
+
+    now = time.monotonic()
+
+    for line in lines:
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            ready.append(line)
+            continue
+
+        source = parsed.get("source", "")
+        if source != "messages":
+            ready.append(line)
+            continue
+
+        role = parsed.get("role", "")
+        conversation_id = parsed.get("conversation_id", "")
+
+        if role == "user" and conversation_id:
+            new_user_messages.setdefault(conversation_id, []).append(line)
+        elif role == "assistant" and conversation_id:
+            new_assistant_messages.setdefault(conversation_id, []).append(line)
+        else:
+            ready.append(line)
+
+    # Release paired messages: user messages first, then assistant messages
+    for conversation_id, assistant_lines in new_assistant_messages.items():
+        # Release any previously held user messages for this conversation
+        if conversation_id in held_user_messages:
+            held_lines, _ = held_user_messages.pop(conversation_id)
+            ready.extend(held_lines)
+        # Release new user messages for this conversation
+        if conversation_id in new_user_messages:
+            ready.extend(new_user_messages.pop(conversation_id))
+        # Then the assistant messages
+        ready.extend(assistant_lines)
+
+    # Release timed-out held messages
+    timed_out_conversation_ids = [
+        conversation_id
+        for conversation_id, (_, held_at) in held_user_messages.items()
+        if now - held_at > _CHAT_PAIR_TIMEOUT_SECONDS
+    ]
+    for conversation_id in timed_out_conversation_ids:
+        held_lines, _ = held_user_messages.pop(conversation_id)
+        ready.extend(held_lines)
+
+    # Hold new user messages that don't have a matching assistant response
+    for conversation_id, user_lines in new_user_messages.items():
+        if conversation_id in held_user_messages:
+            held_user_messages[conversation_id][0].extend(user_lines)
+        else:
+            held_user_messages[conversation_id] = (user_lines, now)
+
+    return ready
 
 
 # -- Delivery loop helpers --
@@ -563,6 +691,9 @@ def _run_delivery_loop(
     consecutive_failures = 0
     has_notified_user = False
 
+    # Chat event pairing: hold user messages until assistant responds
+    held_user_messages: dict[str, tuple[list[str], float]] = {}
+
     while not stop_event.is_set():
         # If we're in a failure state, wait with exponential backoff
         if consecutive_failures > 0:
@@ -586,16 +717,47 @@ def _run_delivery_loop(
             event_buffer.clear()
 
         if not pending:
-            stop_event.wait(timeout=_DELIVERY_POLL_INTERVAL_SECONDS)
-            continue
+            # Even with no new events, check for timed-out held chat messages
+            if held_user_messages:
+                deliverable_lines = _separate_chat_events([], held_user_messages)
+                if deliverable_lines:
+                    last_parsed = {}
+                    for line in deliverable_lines:
+                        try:
+                            last_parsed = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                else:
+                    stop_event.wait(timeout=_DELIVERY_POLL_INTERVAL_SECONDS)
+                    continue
+            else:
+                stop_event.wait(timeout=_DELIVERY_POLL_INTERVAL_SECONDS)
+                continue
+        else:
+            # Parse and filter for catch-up
+            deliverable_lines, last_parsed, is_catching_up = _filter_catchup_events(
+                pending, delivery_state, is_catching_up
+            )
 
-        # Parse and filter for catch-up
-        deliverable_lines, last_parsed, is_catching_up = _filter_catchup_events(
-            pending, delivery_state, is_catching_up
-        )
+            # Separate chat events: hold user messages until assistant responds
+            deliverable_lines = _separate_chat_events(deliverable_lines, held_user_messages)
 
         if not deliverable_lines:
             continue
+
+        # Recompute last_parsed: find the chronologically latest event since
+        # chat separation may have reordered lines (user messages before assistant)
+        # or released held messages from earlier batches.
+        latest_ts = ""
+        for line in deliverable_lines:
+            try:
+                parsed = json.loads(line)
+                ts = parsed.get("timestamp", "")
+                if ts >= latest_ts:
+                    latest_ts = ts
+                    last_parsed = parsed
+            except json.JSONDecodeError:
+                continue
 
         # Consume a rate-limit token
         if not token_bucket.consume():
@@ -690,7 +852,7 @@ def main() -> None:
     stop_event = threading.Event()
     event_buffer: list[str] = []
     buffer_lock = threading.Lock()
-    active_proc: subprocess.Popen[str] | None = None
+    active_process: subprocess.Popen[str] | None = None
 
     # Start the long-lived delivery thread
     delivery_thread = threading.Thread(
@@ -702,12 +864,12 @@ def main() -> None:
 
     try:
         while not stop_event.is_set():
-            active_proc = _start_events_subprocess(agent_name, settings.cel_filter)
+            active_process = _start_events_subprocess(agent_name, settings.cel_filter)
 
             # Reader thread feeds subprocess stdout into the shared buffer
             reader_thread = threading.Thread(
                 target=_read_events_from_subprocess,
-                args=(active_proc, event_buffer, buffer_lock, stop_event),
+                args=(active_process, event_buffer, buffer_lock, stop_event),
                 daemon=True,
             )
             reader_thread.start()
@@ -715,15 +877,15 @@ def main() -> None:
             # Stderr drain thread
             stderr_thread = threading.Thread(
                 target=_drain_stderr,
-                args=(active_proc, stop_event),
+                args=(active_process, stop_event),
                 daemon=True,
             )
             stderr_thread.start()
 
             # Wait for subprocess to exit
-            active_proc.wait()
-            logger.warning("mng events subprocess exited with code {}", active_proc.returncode)
-            active_proc = None
+            active_process.wait()
+            logger.warning("mng events subprocess exited with code {}", active_process.returncode)
+            active_process = None
 
             if stop_event.is_set():
                 break
@@ -735,12 +897,12 @@ def main() -> None:
         logger.info("Event watcher stopping (KeyboardInterrupt)")
     finally:
         stop_event.set()
-        if active_proc is not None and active_proc.poll() is None:
-            active_proc.terminate()
+        if active_process is not None and active_process.poll() is None:
+            active_process.terminate()
             try:
-                active_proc.wait(timeout=5)
+                active_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                active_proc.kill()
+                active_process.kill()
 
 
 if __name__ == "__main__":

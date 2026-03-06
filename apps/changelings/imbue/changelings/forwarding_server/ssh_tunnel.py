@@ -25,7 +25,7 @@ _SOCKET_POLL_SECONDS: Final[float] = 0.01
 
 
 class RemoteSSHInfo(FrozenModel):
-    """SSH connection info for a remote agent host, parsed from mng list --json."""
+    """SSH connection info for a remote agent host."""
 
     user: str = Field(description="SSH username (e.g. 'root')")
     host: str = Field(description="SSH hostname")

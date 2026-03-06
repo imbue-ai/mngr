@@ -6,6 +6,10 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 # Default timeout for tmux capture-pane operations
 _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 
+# Messages at or above this length use load-buffer/paste-buffer instead of send-keys
+# to avoid tmux "command too long" errors. Used by both base_agent.py and host.py.
+LONG_MESSAGE_THRESHOLD: Final[int] = 1024
+
 
 def build_tmux_capture_pane_command(session_name: str) -> str:
     """Build the tmux command string to capture pane content for a session."""

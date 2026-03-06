@@ -2,7 +2,7 @@
 """Transcript watcher for changeling agents.
 
 Converts raw Claude Code transcript events from
-events/claude_transcript/events.jsonl into a common, agent-agnostic
+logs/claude_transcript/events.jsonl into a common, agent-agnostic
 format at events/common_transcript/events.jsonl.
 
 The common format focuses on semantically important messages (user input,
@@ -298,7 +298,7 @@ def main() -> None:
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
     host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    input_file = agent_state_dir / "events" / "claude_transcript" / "events.jsonl"
+    input_file = agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
     output_file = agent_state_dir / "events" / "common_transcript" / "events.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 

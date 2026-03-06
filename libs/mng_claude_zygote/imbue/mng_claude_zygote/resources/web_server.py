@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Web server for the ClaudeZygoteAgent web interface.
 
-Serves a simple link-based web interface with:
-- Main page: links to existing conversations + link to start a new one
-- All Agents page: links to agents on this host
+Serves a web interface where all views (conversations, terminal) are displayed
+in iframes below a persistent navigation header:
+- Main page: shows the most recent conversation in an iframe (or conversation list if none)
+- Conversation view: embeds a specific conversation's ttyd in an iframe
+- Conversations page: lists all conversations with links to open them in iframe views
+- Terminal page: embeds the primary agent terminal in an iframe
+- All Agents page: lists agents on this host with their states
 
 The actual terminal sessions are handled by companion ttyd processes
 (started as separate tmux windows with --url-arg):
 - Chat ttyd: ?arg=<conversation_id> to resume, ?arg=NEW to create
-- Agent-tmux ttyd: ?arg=<agent_name> to attach to an agent's tmux
 
 Environment:
     MNG_AGENT_STATE_DIR  - Agent state directory (contains events/)
@@ -17,6 +20,7 @@ Environment:
     MNG_HOST_NAME        - Name of the host this agent runs on
 """
 
+import hashlib
 import html
 import json
 import os
@@ -25,10 +29,13 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Final
+from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
 # -- Environment and paths --
@@ -39,7 +46,7 @@ AGENT_NAME: Final[str] = os.environ.get("MNG_AGENT_NAME", "")
 HOST_NAME: Final[str] = os.environ.get("MNG_HOST_NAME", "")
 
 SERVERS_JSONL_PATH: Final[Path | None] = (
-    Path(AGENT_STATE_DIR) / "events" / "servers.jsonl" if AGENT_STATE_DIR else None
+    Path(AGENT_STATE_DIR) / "events" / "servers" / "events.jsonl" if AGENT_STATE_DIR else None
 )
 MESSAGES_EVENTS_PATH: Final[Path | None] = (
     Path(AGENT_STATE_DIR) / "events" / "messages" / "events.jsonl" if AGENT_STATE_DIR else None
@@ -76,12 +83,33 @@ def _log(message: str) -> None:
 # -- Server registration --
 
 
+def _make_event_id(data: str) -> str:
+    """Generate a deterministic event ID from content."""
+    return "evt-" + hashlib.sha256(data.encode()).hexdigest()[:32]
+
+
+def _iso_timestamp() -> str:
+    """Return the current UTC time as an ISO 8601 timestamp with nanosecond precision."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
+
+
 def _register_server(server_name: str, port: int) -> None:
-    """Append a server record to servers.jsonl."""
+    """Append a server record to servers/events.jsonl with proper event envelope fields."""
     if SERVERS_JSONL_PATH is None:
         return
     SERVERS_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    record = json.dumps({"server": server_name, "url": f"http://127.0.0.1:{port}"})
+    url = f"http://127.0.0.1:{port}"
+    record = json.dumps(
+        {
+            "timestamp": _iso_timestamp(),
+            "type": "server_registered",
+            "event_id": _make_event_id(f"{server_name}:{url}"),
+            "source": "servers",
+            "server": server_name,
+            "url": url,
+        }
+    )
     with open(SERVERS_JSONL_PATH, "a") as f:
         f.write(record + "\n")
 
@@ -101,10 +129,10 @@ def _read_conversations() -> list[dict[str, str]]:
                 continue
             try:
                 event = json.loads(line)
-                cid = event.get("conversation_id", "")
-                if cid:
-                    conversations_by_id[cid] = {
-                        "conversation_id": cid,
+                conversation_id = event.get("conversation_id", "")
+                if conversation_id:
+                    conversations_by_id[conversation_id] = {
+                        "conversation_id": conversation_id,
                         "model": event.get("model", "unknown"),
                         "created_at": event.get("timestamp", ""),
                         "updated_at": event.get("timestamp", ""),
@@ -120,12 +148,12 @@ def _read_conversations() -> list[dict[str, str]]:
             if not line:
                 continue
             try:
-                msg = json.loads(line)
-                cid = msg.get("conversation_id", "")
-                ts = msg.get("timestamp", "")
-                if cid and ts and cid in conversations_by_id:
-                    if ts > conversations_by_id[cid]["updated_at"]:
-                        conversations_by_id[cid]["updated_at"] = ts
+                message = json.loads(line)
+                conversation_id = message.get("conversation_id", "")
+                ts = message.get("timestamp", "")
+                if conversation_id and ts and conversation_id in conversations_by_id:
+                    if ts > conversations_by_id[conversation_id]["updated_at"]:
+                        conversations_by_id[conversation_id]["updated_at"] = ts
             except json.JSONDecodeError as e:
                 _log(f"Skipping malformed message event line: {e}")
                 continue
@@ -185,7 +213,7 @@ def _poll_agent_list_forever() -> None:
 
 _CSS: Final[str] = """
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
     .header {
       display: flex; align-items: center; gap: 12px;
       padding: 8px 16px; background: rgb(26, 26, 46); color: white; height: 48px;
@@ -197,7 +225,11 @@ _CSS: Final[str] = """
       padding: 4px 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2);
     }
     .header a:hover { background: rgba(255,255,255,0.1); color: white; }
+    .header a.active { background: rgba(255,255,255,0.15); color: white; border-color: rgba(255,255,255,0.5); }
     .content { padding: 24px; max-width: 800px; }
+    .iframe-container { flex: 1; }
+    .iframe-container iframe { width: 100%; height: 100%; border: none; }
+    .iframe-layout { display: flex; flex-direction: column; height: 100%; }
     .item-list { list-style: none; margin-top: 16px; }
     .item {
       padding: 12px 16px; background: white; border: 1px solid #ddd;
@@ -225,14 +257,47 @@ _CSS: Final[str] = """
 """
 
 
-def _render_main_page() -> str:
-    """Render the main page with conversation links (server-side)."""
+def _render_header(agent_name: str, active: str = "") -> str:
+    """Render the common header bar with navigation links."""
+
+    def _nav_link(href: str, label: str, key: str) -> str:
+        cls = ' class="active"' if key == active else ""
+        return f'<a{cls} href="{href}">{label}</a>'
+
+    return (
+        '<div class="header">'
+        f"<h1>{agent_name}</h1>"
+        '<div class="header-spacer"></div>'
+        + _nav_link("conversations", "Conversations", "conversations")
+        + _nav_link("terminal", "Terminal", "terminal")
+        + _nav_link("agents-page", "Agents", "agents")
+        + "</div>"
+    )
+
+
+def _render_iframe_page(agent_name: str, title: str, iframe_src: str, active: str = "") -> str:
+    """Render a full-height page with header and an iframe filling the remaining space."""
+    escaped_title = _html_escape(title)
+    return f"""<!DOCTYPE html>
+<html>
+<head><title>{escaped_title} - {agent_name}</title><style>{_CSS}</style></head>
+<body class="iframe-layout">
+  {_render_header(agent_name, active=active)}
+  <div class="iframe-container">
+    <iframe src="{_html_escape(iframe_src)}"></iframe>
+  </div>
+</body>
+</html>"""
+
+
+def _render_conversations_page() -> str:
+    """Render the conversations page with conversation links (server-side)."""
     agent_name = _html_escape(AGENT_NAME or "Agent")
     conversations = _read_conversations()
 
     conv_items = ""
     for conv in conversations:
-        cid = _html_escape(conv["conversation_id"])
+        conversation_id = _html_escape(conv["conversation_id"])
         model = _html_escape(conv.get("model", ""))
         updated = _html_escape(conv.get("updated_at", ""))
         detail = model
@@ -241,10 +306,10 @@ def _render_main_page() -> str:
         conv_items += (
             f'<li class="item">'
             f'<div class="item-info">'
-            f'<span class="item-name">{cid}</span>'
+            f'<span class="item-name">{conversation_id}</span>'
             f'<span class="item-detail">{detail}</span>'
             f"</div>"
-            f'<a class="link-btn" href="../chat/?arg={cid}">Open</a>'
+            f'<a class="link-btn" href="chat?cid={conversation_id}">Open</a>'
             f"</li>\n"
         )
 
@@ -256,13 +321,9 @@ def _render_main_page() -> str:
 <html>
 <head><title>{agent_name}</title><style>{_CSS}</style></head>
 <body>
-  <div class="header">
-    <h1>{agent_name}</h1>
-    <div class="header-spacer"></div>
-    <a href="agents-page">All Agents</a>
-  </div>
+  {_render_header(agent_name, active="conversations")}
   <div class="content">
-    <a class="link-btn new" href="../chat/?arg=NEW">+ New Conversation</a>
+    <a class="link-btn new" href="chat?cid=NEW">+ New Conversation</a>
     {empty_section}
     <ul class="item-list">{conv_items}</ul>
   </div>
@@ -271,7 +332,7 @@ def _render_main_page() -> str:
 
 
 def _render_agents_page() -> str:
-    """Render the agents page with agent links (server-side)."""
+    """Render the agents page listing agents on this host (server-side)."""
     agent_name = _html_escape(AGENT_NAME or "Agent")
 
     with _agent_list_lock:
@@ -282,11 +343,6 @@ def _render_agents_page() -> str:
         name = _html_escape(str(agent.get("name", "unnamed")))
         state = str(agent.get("state", "unknown")).lower()
         state_escaped = _html_escape(state.upper())
-        is_connectable = state in ("running", "waiting")
-
-        link_class = "link-btn" if is_connectable else "link-btn disabled"
-        link_href = f"../agent-tmux/?arg={_html_escape(str(agent.get('name', '')))}"
-        link_title = "" if is_connectable else ' title="Agent is not running"'
 
         agent_items += (
             f'<li class="item">'
@@ -294,7 +350,6 @@ def _render_agents_page() -> str:
             f'<span class="item-name">{name}</span>'
             f'<span class="badge {_html_escape(state)}">{state_escaped}</span>'
             f"</div>"
-            f'<a class="{link_class}" href="{link_href}"{link_title}>Connect</a>'
             f"</li>\n"
         )
 
@@ -306,17 +361,21 @@ def _render_agents_page() -> str:
 <html>
 <head><title>All Agents - {agent_name}</title><style>{_CSS}</style></head>
 <body>
-  <div class="header">
-    <h1>All Agents</h1>
-    <div class="header-spacer"></div>
-    <a href="./">Back to Conversations</a>
-  </div>
+  {_render_header(agent_name, active="agents")}
   <div class="content">
     {empty_section}
     <ul class="item-list">{agent_items}</ul>
   </div>
 </body>
 </html>"""
+
+
+def _get_most_recent_conversation_id() -> str | None:
+    """Return the conversation ID of the most recent conversation, or None if none exist."""
+    conversations = _read_conversations()
+    if not conversations:
+        return None
+    return conversations[0]["conversation_id"]
 
 
 # -- HTTP Handler --
@@ -331,9 +390,39 @@ class _WebServerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        agent_name = _html_escape(AGENT_NAME or "Agent")
 
         if path == "/" or path == "/index.html":
-            self._send_html(_render_main_page())
+            conversation_id = _get_most_recent_conversation_id()
+            if conversation_id is not None:
+                self._send_html(
+                    _render_iframe_page(
+                        agent_name,
+                        conversation_id,
+                        f"../chat/?arg={conversation_id}",
+                        active="conversations",
+                    )
+                )
+            else:
+                self._send_html(_render_conversations_page())
+        elif path == "/chat":
+            conversation_id = (query.get("cid") or [""])[0]
+            if not conversation_id:
+                self._send_redirect("conversations")
+            else:
+                self._send_html(
+                    _render_iframe_page(
+                        agent_name,
+                        conversation_id,
+                        f"../chat/?arg={conversation_id}",
+                        active="conversations",
+                    )
+                )
+        elif path == "/conversations":
+            self._send_html(_render_conversations_page())
+        elif path == "/terminal":
+            self._send_html(_render_iframe_page(agent_name, "Terminal", "../agent/", active="terminal"))
         elif path == "/agents-page":
             self._send_html(_render_agents_page())
         else:
@@ -346,6 +435,11 @@ class _WebServerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
 
 
 # -- Main --
@@ -368,7 +462,7 @@ def main() -> None:
 
     _log(f"Listening on port {port}")
 
-    # Register this web server in servers.jsonl
+    # Register this web server in servers/events.jsonl
     _register_server(WEB_SERVER_NAME, port)
 
     # Handle shutdown signals.

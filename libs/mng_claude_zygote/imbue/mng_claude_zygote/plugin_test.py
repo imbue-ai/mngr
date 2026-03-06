@@ -21,8 +21,8 @@ from imbue.mng_claude_zygote.plugin import inject_changeling_windows
 from imbue.mng_claude_zygote.plugin import override_command_options
 
 # Total number of tmux windows injected by inject_changeling_windows:
-# agent ttyd, conv_watcher, events, web_server, transcript, chat ttyd, agent-tmux ttyd
-_CHANGELING_WINDOW_COUNT = 7
+# agent ttyd, conv_watcher, events, web_server, transcript, chat ttyd
+_CHANGELING_WINDOW_COUNT = 6
 
 
 class _DummyCommandClass:

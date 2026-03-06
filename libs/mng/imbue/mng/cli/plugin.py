@@ -235,10 +235,10 @@ def _parse_pypi_package_name(specifier: str) -> str | None:
     requirement.
     """
     try:
-        req = Requirement(specifier)
+        requirement = Requirement(specifier)
     except InvalidRequirement:
         return None
-    return req.name
+    return requirement.name
 
 
 def _get_installed_package_names(concurrency_group: Any) -> set[str]:

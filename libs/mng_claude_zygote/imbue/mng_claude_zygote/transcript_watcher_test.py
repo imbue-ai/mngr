@@ -116,7 +116,7 @@ def _make_assistant_event(
     timestamp: str,
     text: str = "",
     tool_calls: list[dict[str, Any]] | None = None,
-    model: str = "claude-opus-4-6",
+    model: str = "claude-opus-4.6",
     stop_reason: str = "end_turn",
     usage: dict[str, int] | None = None,
 ) -> str:
@@ -201,7 +201,7 @@ def test_convert_new_events_converts_assistant_message(tmp_path: Path) -> None:
     events = [json.loads(line) for line in output_file.read_text().strip().split("\n")]
     assert events[0]["type"] == "assistant_message"
     assert events[0]["text"] == "Hi there!"
-    assert events[0]["model"] == "claude-opus-4-6"
+    assert events[0]["model"] == "claude-opus-4.6"
     assert events[0]["event_id"] == "uuid-2-assistant"
     assert events[0]["stop_reason"] == "end_turn"
     assert events[0]["usage"]["input_tokens"] == 100
