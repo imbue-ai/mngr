@@ -135,10 +135,7 @@ def _read_conversations() -> list[dict[str, str]]:
                 ).fetchall()
                 for conversation_id, model, created_at, tags_json in rows:
                     # Filter out internal conversations (e.g. system_notifications)
-                    try:
-                        tags = json.loads(tags_json) if tags_json else {}
-                    except json.JSONDecodeError:
-                        tags = {}
+                    tags = json.loads(tags_json) if tags_json else {}
                     conversations_by_id[conversation_id] = {
                         "conversation_id": conversation_id,
                         "name": tags.get("name", ""),

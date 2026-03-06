@@ -87,7 +87,7 @@ generate_conversation_id() {
 # tags_json defaults to '{}' if not provided.
 insert_conversation_record() {
     local conversation_id="$1"
-    local tags="${2:-{}}"
+    local tags="${2:-\{\}}"
     local created_at
     created_at=$(iso_timestamp_ns)
 
