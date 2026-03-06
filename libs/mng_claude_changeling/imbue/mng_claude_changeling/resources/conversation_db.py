@@ -30,6 +30,16 @@ _CREATE_TABLE_SQL = (
 )
 
 
+def _write_stdout(value: object) -> None:
+    sys.stdout.write(f"{value}\n")
+    sys.stdout.flush()
+
+
+def _warn(message: str) -> None:
+    sys.stderr.write(f"WARNING: {message}\n")
+    sys.stderr.flush()
+
+
 def _insert(db_path: str, conversation_id: str, model: str, tags: str, created_at: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
@@ -53,11 +63,11 @@ def _lookup_model(db_path: str, conversation_id: str) -> None:
                 (conversation_id,),
             ).fetchone()
             if row:
-                print(row[0])
+                _write_stdout(row[0])
         finally:
             conn.close()
     except sqlite3.Error as e:
-        print(f"WARNING: lookup-model failed: {e}", file=sys.stderr)
+        _warn(f"lookup-model failed: {e}")
 
 
 def _count(db_path: str) -> None:
@@ -65,11 +75,12 @@ def _count(db_path: str) -> None:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
             row = conn.execute("SELECT count(*) FROM changeling_conversations").fetchone()
-            print(row[0] if row else 0)
+            _write_stdout(row[0] if row else 0)
         finally:
             conn.close()
-    except sqlite3.Error:
-        print(0)
+    except sqlite3.Error as e:
+        _warn(f"count failed: {e}")
+        _write_stdout(0)
 
 
 def _max_rowid(db_path: str) -> None:
@@ -77,11 +88,12 @@ def _max_rowid(db_path: str) -> None:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
             row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM conversations").fetchone()
-            print(row[0] if row else 0)
+            _write_stdout(row[0] if row else 0)
         finally:
             conn.close()
-    except sqlite3.Error:
-        print(0)
+    except sqlite3.Error as e:
+        _warn(f"max-rowid failed: {e}")
+        _write_stdout(0)
 
 
 def _poll_new(db_path: str, max_rowid: str) -> None:
@@ -93,16 +105,16 @@ def _poll_new(db_path: str, max_rowid: str) -> None:
                 (int(max_rowid),),
             ).fetchone()
             if row:
-                print(row[0])
+                _write_stdout(row[0])
         finally:
             conn.close()
     except sqlite3.Error as e:
-        print(f"WARNING: poll-new failed: {e}", file=sys.stderr)
+        _warn(f"poll-new failed: {e}")
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <subcommand> <db_path> [args...]", file=sys.stderr)
+        _warn(f"Usage: {sys.argv[0]} <subcommand> <db_path> [args...]")
         sys.exit(1)
 
     subcommand = sys.argv[1]
@@ -120,7 +132,7 @@ def main() -> None:
         case "poll-new":
             _poll_new(db_path, sys.argv[3])
         case _ as unreachable:
-            print(f"Unknown subcommand: {unreachable}", file=sys.stderr)
+            _warn(f"Unknown subcommand: {unreachable}")
             sys.exit(1)
 
 
