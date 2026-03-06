@@ -56,9 +56,6 @@ except ImportError:
     from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
 
 
-# FIXME: the below comment is stupid--the defaults should simply be moved to watcher_common, which *can* be imported from data_types.py
-#  (just like we're doing for DEFAULT_CEL_FILTER)
-
 # -- Constants --
 # NOTE: These defaults must be kept in sync with the Field defaults in
 # data_types.py WatcherSettings. They are duplicated here because this

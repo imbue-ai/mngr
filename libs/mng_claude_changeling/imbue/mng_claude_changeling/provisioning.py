@@ -567,7 +567,6 @@ def _inject_conversation(
     prompt: str,
     response: str,
     label: str,
-    # FIXME: this variable must ALWAYS be defined (we do not want to accidentally share conversations across agents or pollute the global user db)
     llm_user_path: Path | None = None,
     env_vars: dict[str, str] | None = None,
 ) -> str | None:
@@ -732,7 +731,10 @@ def setup_memory_directory(
     syncs back so that any memory Claude wrote is captured in version control.
     """
     memory_dir = work_dir / active_role / "memory"
-    project_dir_name = compute_claude_project_dir_name(role_dir_abs)
+    # Use .parent because Claude Code's project dir is named after the git repo
+    # root (the changeling dir), not the role subdirectory within it. This must
+    # match the path used by build_memory_sync_hooks_config.
+    project_dir_name = compute_claude_project_dir_name(str(Path(role_dir_abs).parent))
 
     # Create both memory directories.
     # Remove any existing symlink at the project memory path (from old provisioning)

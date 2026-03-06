@@ -375,8 +375,9 @@ def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
     mkdir_cmds = [c for c in host.executed_commands if "mkdir" in c and ".claude/projects" in c]
     assert len(mkdir_cmds) >= 1
     assert "$HOME" in mkdir_cmds[0]
-    # Project dir name is derived from the role directory path (includes /thinking)
-    assert "-home-user--changelings-agent-thinking" in mkdir_cmds[0]
+    # Project dir name is derived from the work directory (parent of role dir),
+    # matching build_memory_sync_hooks_config which uses .parent
+    assert "-home-user--changelings-agent" in mkdir_cmds[0]
 
 
 def test_setup_memory_directory_rsyncs_initial_content() -> None:

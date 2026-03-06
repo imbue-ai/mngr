@@ -299,11 +299,6 @@ def _create_mng_agent(
             "ROLE=thinking",
             "--label",
             "changeling=true",
-            # FIXME: I don't know which one of these it is...
-            "--disable-plugin",
-            "mng_ttyd",
-            "--disable-plugin",
-            "mng-ttyd",
             "--disable-plugin",
             "ttyd",
         ]

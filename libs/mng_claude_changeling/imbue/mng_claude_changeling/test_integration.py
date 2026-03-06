@@ -278,15 +278,18 @@ def test_provisioning_syncs_memory_directory(
 ) -> None:
     """Verify that provisioning creates both memory dirs and syncs initial content."""
     abs_work_dir = str(temp_git_repo.resolve())
+    role_dir_abs = f"{abs_work_dir}/thinking"
     # Create a file in thinking/memory/ to verify initial sync
     memory_dir = temp_git_repo / "thinking" / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "test.md").write_text("hello")
 
-    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", abs_work_dir, _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", role_dir_abs, _DEFAULT_PROVISIONING)
 
     assert memory_dir.is_dir(), "memory dir should exist"
 
+    # Project dir name is derived from work dir (parent of role dir),
+    # matching build_memory_sync_hooks_config
     project_dir_name = compute_claude_project_dir_name(abs_work_dir)
     project_memory = Path.home() / ".claude" / "projects" / project_dir_name / "memory"
     assert project_memory.is_dir(), "Claude project memory should be a real directory"
