@@ -174,9 +174,9 @@ def test_every_project_with_tests_has_coverage_config() -> None:
             missing_pytest.append(project_dir.name)
             continue
 
-        # Check that addopts contains a --cov flag
+        # Check that addopts contains a --cov flag (or --no-cov to explicitly disable)
         addopts = pytest_opts.get("addopts", [])
-        has_cov_flag = any(str(opt).startswith("--cov=") for opt in addopts)
+        has_cov_flag = any(str(opt).startswith("--cov=") or str(opt) == "--no-cov" for opt in addopts)
         if not has_cov_flag:
             missing_cov_flag.append(project_dir.name)
 

@@ -50,11 +50,13 @@ pythonpath = [
   "libs/*",
 ]
 testpaths = [
+  "test_meta_ratchets.py",
   "libs/mng_recursive",
   "libs/mng_claude_changeling",
   "libs/mng_changeling_chat",
   "libs/mng_elena_code",
   "libs/mng_test_coder",
+  "scripts",
 ]
 addopts = [
   "-n 4",
