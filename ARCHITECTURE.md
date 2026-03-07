@@ -242,28 +242,15 @@ The codebase includes interactive text user interfaces built with **urwid**:
 
 `mng` uses [pluggy](https://pluggy.readthedocs.io/) for extensibility. All extensible components -- agent types, provider backends, CLI commands -- are registered through the same plugin hook mechanism, but there are two tiers:
 
-**Default plugins** ship inside `libs/mng` and are registered directly via `pm.register()` during startup. They are always available and don't require separate installation:
+**Default plugins** ship inside `libs/mng` (provider backends in `providers/`, agent types in `agents/default_plugins/`) and are registered directly via `pm.register()` during startup. The minimal core (layered architecture, interfaces, config, utils, primitives) is independent of these.
 
-- **Provider backends** (`providers/`): local, ssh, docker, modal
-- **Agent types** (`agents/default_plugins/`): ClaudeAgent, CodexAgent, SkillAgent, CodeGuardianAgent, FixmeFairyAgent
-
-The minimal core (layered architecture, interfaces, config, utils, primitives) is independent of these default plugins. The default plugins provide the concrete implementations that make mng useful out of the box.
-
-**External plugins** are separate packages that declare a setuptools entry point:
+**External plugins** (the `mng_*` packages listed in the monorepo structure) are separate packages that declare a setuptools entry point:
 
 ```toml
 # In a plugin's pyproject.toml
 [project.entry-points.mng]
 my_plugin = "my_package.plugin"
 ```
-
-| Plugin | Package | Description |
-|--------|---------|-------------|
-| **pair** | `mng-pair` | Continuous bidirectional file sync between local and agent |
-| **opencode** | `mng-opencode` | OpenCode agent type support |
-| **schedule** | `mng-schedule` | Cron-scheduled recurring agent runs on Modal |
-| **kanpan** | `mng-kanpan` | TUI dashboard aggregating agent state, git, GitHub PRs, and CI |
-| **tutor** | `mng-tutor` | Interactive tutorials for learning mng |
 
 ### Plugin Manager Lifecycle
 
