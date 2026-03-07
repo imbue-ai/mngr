@@ -734,6 +734,10 @@ class Host(BaseHost, OnlineHostInterface):
     # Environment
     # =========================================================================
 
+    def get_host_env_path(self) -> Path:
+        """Get the path to the host env file."""
+        return self.host_dir / "env"
+
     def get_env_vars(self) -> dict[str, str]:
         """Get all environment variables from the host env file."""
         env_path = self.host_dir / "env"
@@ -1594,7 +1598,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_env_path = self.get_agent_env_path(agent)
         return build_source_env_shell_commands(host_env_path, agent_env_path)
 
-    def _build_source_env_prefix(self, agent: AgentInterface) -> str:
+    def build_source_env_prefix(self, agent: AgentInterface) -> str:
         """Build a shell prefix that sources host and agent env files if they exist."""
         commands = self._build_source_env_commands(agent)
         return " && ".join(commands) + " && "
@@ -1676,7 +1680,7 @@ class Host(BaseHost, OnlineHostInterface):
                 logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
             # Build the source prefix for commands (sources host env, then agent env)
-            source_prefix = self._build_source_env_prefix(agent)
+            source_prefix = self.build_source_env_prefix(agent)
 
             # 10. Run sudo commands (with env vars sourced)
             for cmd in provisioning.sudo_commands:

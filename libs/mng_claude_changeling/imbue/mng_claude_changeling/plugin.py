@@ -130,7 +130,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
 
     enter_submission_timeout_seconds: float = Field(
         # increased timeout because we don't want to send duplicate events if we can avoid it
-        default=60.0,
+        default=15.0,
         description="Timeout in seconds for waiting on the enter submission signal",
     )
 

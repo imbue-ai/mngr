@@ -324,6 +324,11 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
+    def get_host_env_path(self) -> Path:
+        """Get the path to the host env file."""
+        ...
+
+    @abstractmethod
     def get_env_vars(self) -> dict[str, str]:
         """Return all environment variables configured for this host."""
         ...
@@ -341,6 +346,11 @@ class OnlineHostInterface(HostInterface, ABC):
     @abstractmethod
     def set_env_var(self, key: str, value: str) -> None:
         """Set a single environment variable to the given value."""
+        ...
+
+    @abstractmethod
+    def build_source_env_prefix(self, agent: AgentInterface) -> str:
+        """Build a shell prefix that sources host and agent env files if they exist."""
         ...
 
     # =========================================================================
