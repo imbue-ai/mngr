@@ -225,14 +225,6 @@ Structured management of threads and processes via the `ConcurrencyGroup` contex
 
 Experimental project for scheduling and running autonomous agents. Depends on mng, imbue-common, concurrency-group, and modal. Includes deployment modules for Modal (cron_runner, remote_runner, verification).
 
-### apps/claude_web_view
-
-Web viewer for Claude Code session transcripts. FastAPI backend with Server-Sent Events (SSE) for live updates. React + TypeScript frontend using Radix UI components.
-
-### apps/sculptor_web
-
-Web interface for managing AI agents programmatically. FastAPI-based with python-fasthtml for server-side rendering.
-
 ## Security Model
 
 - **Plugins** are fully trusted -- they run with your privileges.
