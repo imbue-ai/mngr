@@ -33,15 +33,18 @@ jobs:
 
               git log --oneline --since="$(git log -1 --format=%ci -- CHANGELOG.md ARCHITECTURE.md)" -- ':!*.md'
 
-            If that returns nothing, double-check by also running:
+            If that returns nothing, there are no code changes to document -- exit early without
+            making changes.
 
-              git log --oneline -20
+            However, as a sanity check, also verify that there have been *some* commits (of any
+            kind) in the last 3 days:
 
-            If that also shows no recent commits, there are genuinely no code changes to document --
-            exit early without making changes. But if the second command does show recent commits,
-            something went wrong with the date filter. In that case, warn clearly in your output
-            (e.g. "WARNING: git log date filter returned no results but recent commits exist --
-            the date filter may be wrong") and use the last 7 days of commits as a fallback.
+              git log --oneline --since="3 days ago" -1
+
+            If that also returns nothing, something is wrong with the environment (e.g. shallow
+            clone, missing history, clock skew). In that case, do NOT exit silently -- instead
+            output a clear warning like "WARNING: no commits found in the last 3 days, the
+            environment may be misconfigured" and exit with a non-zero status.
 
             Read the diffs for any commits that touch non-test Python files, focusing on structural
             and user-facing changes:
