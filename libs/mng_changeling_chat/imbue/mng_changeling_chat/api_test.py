@@ -68,7 +68,7 @@ def test_build_remote_chat_script_execs_chat_sh(
 
     script = _build_remote_chat_script(agent, host, ["--new"])
 
-    expected_chat_path = str(host.host_dir / "commands" / "chat.sh")
+    expected_chat_path = str(host.host_dir / "agents" / str(agent.id) / "commands" / "chat.sh")
     assert f"exec {shlex.quote(expected_chat_path)} --new" in script
 
 
