@@ -774,19 +774,19 @@ def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv
     # Use the conversation_db module directly (same logic as mng changelingdb)
     import io
 
-    from imbue.mng_claude_changeling.resources.conversation_db import _lookup_model
+    from imbue.mng_claude_changeling.resources.conversation_db import lookup_model
 
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
     try:
-        _lookup_model(str(chat_env.llm_db_path), cid2)
+        lookup_model(str(chat_env.llm_db_path), cid2)
         assert sys.stdout.getvalue().strip() == "claude-haiku-4-5"
     finally:
         sys.stdout = old_stdout
 
     sys.stdout = io.StringIO()
     try:
-        _lookup_model(str(chat_env.llm_db_path), cid1)
+        lookup_model(str(chat_env.llm_db_path), cid1)
         assert sys.stdout.getvalue().strip() == "claude-sonnet-4-6"
     finally:
         sys.stdout = old_stdout
