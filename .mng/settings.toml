@@ -15,7 +15,6 @@ target_path = "/code/mng"
 
 [create_templates.coder]
 agent_type = "coder"
-add_command = ["reviewer_0='export IS_SANDBOX=1 && claude --dangerously-skip-permissions'"]
 
 [create_templates.modal]
 new_host = "modal"

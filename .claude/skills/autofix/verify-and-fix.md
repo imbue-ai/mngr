@@ -1,92 +1,77 @@
----
-allowed-tools: Bash:*
-description: Review code changes in a branch for errors, issues, and quality problems.
----
+You are an autonomous code verifier and fixer. You will verify the current branch for issues, plan fixes, and implement them. Do not ask any questions. Use your best judgment throughout.
 
-# Code Verification and Review Guide
+# Step 1: Gather Context
 
-This skill provides comprehensive guidance for reviewing code changes to identify errors, quality issues, and problems before they are merged.
+First, understand what you're working with.
 
-## Instructions
+1. Get the diff of changes on this branch (between the current code and the base branch):
 
-When asked to verify or review code changes, follow these steps:
+```bash
+git diff <base_branch>...HEAD
+```
 
-### 1. Gather Context
+2. Read any relevant instruction files (CLAUDE.md, style_guide.md) that apply to the changed code.
+3. Understand the existing codebase patterns around the changed files.
 
-First, understand what you're reviewing.
+If the diff is empty (no changes on the branch), stop immediately -- there is nothing to verify or fix.
 
-This is the transcript of the user's conversation, which should help you understand their intent:
+# Step 2: Create Issue List
 
----
-
-!`export MAIN_CLAUDE_SESSION_ID=$(cat .claude/sessionid) && ./scripts/print_user_session.sh`
-
----
-
-(if the above is empty, run this yourself: `export MAIN_CLAUDE_SESSION_ID=$(cat .claude/sessionid) && ./scripts/print_user_session.sh` )
-
-This is the diff of the changes that resulted (between the current code and the target, eg, where we want to merge it to, eg, the output of git diff !`echo $GIT_BASE_BRANCH`..HEAD):
-
----
-
-!`git diff $GIT_BASE_BRANCH...HEAD`
-
----
-
-(if the above is empty, run this yourself: `git diff $GIT_BASE_BRANCH...HEAD` )
-
-Also be sure to:
-- Understand the existing codebase patterns around the changed files
-- Read any relevant instruction files (CLAUDE.md, style_guide.md) that might apply to the changed code
-
-Consider the user's request--if they did not ask for any changes and no changes were made (ex: they just asked a question), you can exit immediately. Otherwise, proceed to the next step.
-
-### 2. Create Initial Issue List
-
-Go through the diff and create a comprehensive list of ALL potential issues you notice. Be thorough at this stage--it's better to identify more potential issues initially than to miss something.
+Go through the diff and create a comprehensive list of ALL potential issues you notice. Be thorough -- it's better to identify more potential issues initially than to miss something.
 
 For each potential issue, note:
 - The issue type (from the categories below)
 - The specific location (file and line number)
 - A brief description of what you observed
 
-Put these observations into the "initial issues file" for tracking:
+Then, for each potential issue, briefly check: is this actually a problem, or does it fall under one of the listed exceptions for that issue type? Drop anything that clearly isn't a real issue. Keep everything else, regardless of severity.
 
-    .reviews/initial_issue_list/!`tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0`.md
+If there are no issues, stop here. There is nothing to fix.
 
-!`rm -rf .reviews/initial_issue_list/$(tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0).md`
+# Step 3: Plan and Fix
 
-### 3. Analyze Each Potential Issue
+For each issue, do the following in order:
 
-After creating the initial list in that file, read that file, and, for each issue in that initial list:
+## Planning phase (do this BEFORE writing any code)
 
-1. think carefully about each of the following:
-- Is this actually a problem, or is it acceptable given the context?
-- Does it fall under any of the exceptions listed for that issue type?
-- How severe is it? (CRITICAL / MAJOR / MINOR / NITPICK)
-2. If it is a problem (that has not already been output), output the issue by appending to the "final output json file" with all the required details, in order (one JSON object per line, ie, one issue per line, see exact output format details below)
+1. Read the relevant source files thoroughly.
+2. Understand the surrounding code, architecture, and any related abstractions.
+3. Determine the correct fix.
+4. Get the current HEAD hash: `git rev-parse --short HEAD`. Write a short plan to `.autofix/plans/<hash>_<issue_number>.md` describing:
+   - What the issue is and where it is
+   - Why it is a problem
+   - The planned fix (specific changes to specific files)
+   - Any risks or edge cases to watch for
 
-The "final output json file" is:
+## Implementation phase
 
-    .reviews/final_issue_json/!`tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0`.json
+5. Implement the fix according to your plan.
+6. Commit with a message in this format:
 
-!`rm -rf .reviews/final_issue_json/$(tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0).json`
+```
+<short summary>
 
-When finished with all issues, touch this file:
+Problem: <what the issue was and where>
+Fix: <what was changed and why>
+```
 
-    .reviews/final_issue_json/!`tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0`.json.done
+Repeat for each issue. Each fix MUST be its own separate commit.
 
-!`rm -rf .reviews/final_issue_json/$(tmux display-message -t "$TMUX_PANE" -p '#W' || echo reviewer_0).json.done`
+# Step 4: Post-fix Validation
 
-As you are doing your analysis, do *not* run the tests--just focus on the code review itself. CI will prevent failing tests.
+After all fixes are committed, run the project test suite. Use whatever test command is specified in the project's CLAUDE.md or README. If none is specified, try `uv run pytest` or the most obvious equivalent.
+
+If tests pass, you are done.
+
+If tests fail, fix the failures and commit the fixes. Re-run the tests. Keep fixing and re-running until tests pass. The only acceptable exception is if you can prove a failure is preexisting by running the same test on the base branch and seeing it fail there too.
 
 ---
 
-## Issue Categories
+# Issue Categories
 
 Review the code for the following types of issues:
 
-### commit_message_mismatch
+## commit_message_mismatch
 
 The diff must completely fulfill the user's request.
 
@@ -118,9 +103,9 @@ The diff must completely fulfill the user's request.
 
 ---
 
-### commit_contents
+## commit_contents
 
-The diff should not include excessive changes, or changes unrelated to the user's request.  In particular, avoid:
+The diff should not include excessive changes, or changes unrelated to the user's request. In particular, avoid:
 
 1. Checking in binaries, compiled files, dependencies, or build artifacts
 2. Accidental deletion of files or folders
@@ -128,7 +113,7 @@ The diff should not include excessive changes, or changes unrelated to the user'
 
 ---
 
-### documentation_implementation_mismatch
+## documentation_implementation_mismatch
 
 The implementation should follow, in this priority order:
 1. The user's request
@@ -149,7 +134,7 @@ If the user's request conflicts with the state of documentation in the code base
 
 ---
 
-### incomplete_integration_with_existing_code
+## incomplete_integration_with_existing_code
 
 The diff should follow existing architectural and organizational patterns in the codebase:
 - If the codebase uses a modular structure with separate files for classes/components, new classes should follow the same pattern
@@ -172,7 +157,7 @@ Prefer using existing library/dependency APIs over custom implementations when t
 
 ---
 
-### user_request_artifacts_left_in_code
+## user_request_artifacts_left_in_code
 
 Comments should describe what the code does, not how it was changed.
 
@@ -187,7 +172,7 @@ Comments should describe what the code does, not how it was changed.
 
 ---
 
-### poor_naming
+## poor_naming
 
 - File, class, function, function parameter, and constant names should follow the format and naming standards that are currently dominant in the code base (especially within the same file or folder), or the style guide if one exists
 - In the absence of existing code or style guide, common naming standards for the given programming language should be used
@@ -199,7 +184,7 @@ Comments should describe what the code does, not how it was changed.
 
 ---
 
-### repetitive_or_duplicate_code
+## repetitive_or_duplicate_code
 
 **Examples:**
 - A non-trivial calculation or piece of logic is repeated in multiple places within a file
@@ -215,55 +200,32 @@ Comments should describe what the code does, not how it was changed.
 
 ---
 
-### refactoring_needed
+## refactoring_needed
 
 - Functions that have gotten long (> 50 lines) and are mixing multiple concerns and/or combining several different steps should be broken up. (Typically by using helper functions and/or separate classes to encapsulate individual concerns.)
 - Classes or files that are combining different concerns should be broken up, such that each class / file only deals with one primary concern.
-- This also includes structures that are unsafe (ex: returning a type that has an error state rather than raising an exception).
-- Using primitive types (strings, integers, etc) to represent domain-level data--actual data types should be preferred instead, even if they simply inherit from the built-in types, as it makes the code more readable.
-- Using an if/elif/.../else construct where you could use a match statement instead (eg, to dispatch on an enum value)
 
 Note: we don't impose any minimal or maximal length on a class or file. Classes and files are ok to be long, as long as they only deal with a single concern.
 
 **Examples:**
 - New functionality that is orthogonal to the existing functionality in a function is inserted into the existing function's body instead of being separated out into its own function
 - A class mixes two different use cases that could be separated into two classes
-- A function that returns a value that can be either a valid result or an error state (e.g. None, False, -1) instead of raising an exception for the error case. This is bad because the caller can forget to check for the error state.
-- A class that has a "name" attribute that is just a string, instead of having a proper Name class (eg, that inherits from NonEmptyString).
-- A class with a bare string or uuid as an "id" attribute, instead of having a proper ID class
-- An if/elif/.../else construct that dispatches on the value of an enum, instead of using a match statement (in languages that support it)
 
 ---
 
-### test_coverage
+## test_coverage
 
 - If the diff introduces significant new functionality, and the code base has existing unit and/or integration tests, new tests should be added to cover the new functionality
 - If the diff changes the behavior of existing functionality that is covered by automated tests, those tests should be updated to reflect the new behavior
 - If the diff contains a bug fix, and the code base has existing unit and/or integration tests, a regression test should be added for the bug
 
-**Exceptions:** 
+**Exceptions:**
 - Syntactical or logical issues in tests will be raised in other issue types and do not belong in this category.
 - Changes *to the test code itself* (ex: to a conftest.py, testing_utils.py, test_*.py or *_test.py file) do not require test coverage (they will be executed when the tests run).
 
 ---
 
-### test_quality
-
-Any tests added in the diff should be of high quality individually, and should collectively create a high-quality test suite. This means:
-- Avoid pointless and trivial tests
-- Avoid creating lots of highly repetitive tests (parameterize the test or check all cases in a single test instead of making a separate test for each case, when appropriate)
-- Ensure that common test code is factored out into fixtures
-- Ensure that existing fixtures are used (when applicable)
-- Ensure that tests are robust (ex: wait for conditions to be met rather than using hard-coded sleep statements, use appropriate timeouts, avoid flakiness)
-- Ensure that the overall test suite for the changes is comprehensive and covers the new functionality well, but without creating more tests than necessary 
-- Ensure that functionality is tested with unit tests whenever possible, only creating a small number of slower integration tests when necessary
-- Ensure that multiple integration tests for similar functionality are serving unique purposes and are not overly repetitive or duplicative
-- Ensure that the tests are as fast and simple as possible
-- Ensure that individual tests are clearly named and easy to understand
-
----
-
-### resource_leakage
+## resource_leakage
 
 Focus on system resources that require explicit cleanup: file handles, network connections, database connections, memory allocations, and similar OS-level resources.
 
@@ -286,7 +248,7 @@ Also look for reference management issues: objects being cleaned up while still 
 
 ---
 
-### dependency_management
+## dependency_management
 
 - Check all import statements in new or modified files. If new code imports a library or package that is not part of the language's standard library, verify that the dependency is listed in the repository's dependency/requirement files (e.g., requirements.txt, pyproject.toml, package.json, Gemfile, etc.)
 - If the diff removes the last remaining use of an external library or package, the dependency and/or requirement files in the repository should be updated to no longer include the library
@@ -296,7 +258,7 @@ Also look for reference management issues: objects being cleaned up while still 
 
 ---
 
-### insecure_code
+## insecure_code
 
 - Look for hard-coded secrets such as API keys, passwords, tokens, or credentials in the diff
 - Check for variable names containing: "token", "key", "secret", "password", "credential", "auth"
@@ -315,18 +277,14 @@ Also look for reference management issues: objects being cleaned up while still 
 
 ---
 
-### fails_silently
+## fails_silently
 
-Code that fails silently is code that ignores errors without reporting them or properly handling them.
-
-This includes behaviors like catching exceptions without logging them as warnings/errors (or re-raising them), returning inappropriate default values during an error condition, returning None instead of raising an error when there is a legitimate error, or otherwise allowing errors to occur without any indication to the user or developer.
+Code that fails silently is code that ignores errors without reporting them.
 
 **Examples:**
-- The code indiscriminately captures exceptions of all types (e.g. Exception) or multiple types and continues execution without taking any action to handle the error
+- The code indiscriminately captures exceptions of all types (e.g. Exception) and continues execution without taking any action to handle the error
 - Overly broad "except" clauses that catch many different types of errors and simply continue execution (rather than raising it so that invalid states are not silently ignored)
-- Any "except" clause that does *not* log the error (at least at "trace" level) and/or report it to an error tracking system (e.g. Sentry). Real error conditions should be logged at *least* at warning level, and anything that violates a program invariant (eg, is an unexpected condition) should generally be raised.
-- Returning None or an inappropriate default value when an error occurs instead of raising an exception. This can lead to downstream errors that are harder to debug because the original error is obscured.
-- Any except clause *must* either log the error (if it is handling the error), or re-raise the error (if it is not handling the error). If an except clause does neither of these things, it is a silent failure (it's ok if the logging is at trace level, but it must be present).
+- Any "except" clause that does *not* log the error (at least at "trace" level) and/or report it to an error tracking system (e.g. Sentry)
 - The return value of a function that returns an error value in case of a failure is not checked by the caller
 
 **Exceptions:**
@@ -335,7 +293,7 @@ This includes behaviors like catching exceptions without logging them as warning
 
 ---
 
-### instruction_file_disobeyed
+## instruction_file_disobeyed
 
 Explicit instructions in files such as .claude.md, CLAUDE.md, and AGENTS.md MUST be obeyed.
 
@@ -347,11 +305,11 @@ Explicit instructions in files such as .claude.md, CLAUDE.md, and AGENTS.md MUST
 **Exceptions:**
 - Instructions in the closest file _above_ a location take precedence. For example, when considering a file foo/bar.py, foo/CLAUDE.md takes precedence over CLAUDE.md
 - Instructions only apply to the subtree below the file. For example, when considering a file foo/bar.py, foo/baz/CLAUDE.md does not apply
-- Applicable instructions should ONLY be contravened in the case of explicit user request--but if the user does explicitly request something counter to the instruction files, this should not be reported as a disobeyed instruction file
+- Applicable instructions should ONLY be contravened in the case of explicit user request -- but if the user does explicitly request something counter to the instruction files, this should not be reported as a disobeyed instruction file
 
 ---
 
-### logic_error
+## logic_error
 
 Logic errors are flaws in the reasoning or flow of the code that would cause incorrect behavior.
 
@@ -373,7 +331,7 @@ Do not flag issues that are not clearly incorrect. For example, it's possible co
 
 ---
 
-### runtime_error_risk
+## runtime_error_risk
 
 Code patterns that are very likely to cause runtime errors during execution.
 
@@ -397,9 +355,6 @@ Code patterns that are very likely to cause runtime errors during execution.
 - Modifying global state in ways that affect other code
 - Operations that are not thread-safe when concurrency is present
 
-**Catch clauses that are too broad and could hide runtime errors:**
-- Almost all try/except blocks (for specific types of errors) should only span a single line, and should generally catch a single class of errors.
-
 **Look for platform-specific incompatibilities:**
 - Code that will fail when run on OSX or linux (it's ok to fail on Windows)
 
@@ -407,7 +362,7 @@ Only flag issues where there is clear evidence the code will fail or cause serio
 
 ---
 
-### incorrect_algorithm
+## incorrect_algorithm
 
 Code that implements an algorithm incorrectly for its stated purpose.
 
@@ -423,7 +378,7 @@ Only flag issues that are clearly incorrect for the stated purpose of the algori
 
 ---
 
-### error_handling_missing
+## error_handling_missing
 
 Missing error handling for operations that could reasonably fail.
 
@@ -438,7 +393,7 @@ Only flag issues that are clearly incorrect, and avoid flagging issues where it 
 
 ---
 
-### syntax_issues
+## syntax_issues
 
 The diff should not contain any syntax errors that would prevent the code from running.
 
@@ -461,7 +416,7 @@ The diff should not contain any syntax errors that would prevent the code from r
 
 ---
 
-### abstraction_violation
+## abstraction_violation
 
 Code that breaks established abstraction boundaries within the codebase.
 
@@ -476,21 +431,3 @@ Code that breaks established abstraction boundaries within the codebase.
 - A module modifies the internal state of another module directly instead of using and/or adding public API functions
 
 **Exceptions:** Unit tests that need to access internal state for verification purposes.
-
----
-
-## Output Format
-
-After your analysis when you are creating the final json file of issues, make a JSON record with each of the following fields (in order) for each issue you decide is valid to report, and append it as a new line to the final output json file:
-
-- issue_type: the issue type code from above (e.g., "documentation_implementation_mismatch", "abstraction_abstraction", etc.)
-- description: a complete description of the problem
-- confidence_reasoning: the thought process for how confident you are that it is an issue at all
-- confidence: a confidence score between 0.0 and 1.0 (1.0 = absolutely certain it is an issue, 0.0 = no confidence at all, should roughly be the probability that it is an actual issue to 1 decimal place)
-- severity_reasoning: the thought process for how severe the issue is (assuming it were an issue, i.e., ignoring confidence)
-- severity: one of "CRITICAL", "MAJOR", "MINOR", or "NITPICK", where
-    - CRITICAL: must be fixed before merging; would cause major problems, crashes, or security issues
-    - MAJOR: should be fixed before merging; would cause significant issues or confusion
-    - MINOR: could be fixed before merging; would cause minor issues or inconveniences
-    - NITPICK: optional to fix; mostly stylistic or very minor issues
-

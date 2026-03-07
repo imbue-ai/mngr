@@ -10,16 +10,6 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "rm -rf .claude/reviewed_commits"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [
@@ -36,6 +26,14 @@
           {
             "type": "command",
             "command": "[ -e .git ] || { echo \"Be sure to return to the repo root when you finish! Otherwise the other stop hooks cannot run correctly.\" >&2; exit 2; }"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HASH=$(git rev-parse HEAD 2>/dev/null) || exit 0; BASE=${GIT_BASE_BRANCH:-main}; DIFF=$(git diff \"${BASE}\"...HEAD --stat 2>/dev/null) || exit 0; [ -z \"$DIFF\" ] && exit 0; [ -f \".autofix/plans/${HASH}_verified.md\" ] && exit 0; echo \"Run /autofix to verify your changes before finishing.\" >&2; exit 2"
           }
         ]
       }
