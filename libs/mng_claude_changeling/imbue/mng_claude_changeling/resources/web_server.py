@@ -898,6 +898,7 @@ if (conversationId && conversationId !== "NEW") {{
 var audioEnabled = false;
 var audioPc = null;
 var audioDc = null;
+var audioEl = null;
 
 function toggleAudio() {{
   if (audioEnabled) {{
@@ -912,25 +913,68 @@ async function startAudio() {{
   btn.disabled = true;
   btn.textContent = "Connecting...";
   try {{
+    console.log("[audio] Fetching audio config...");
     var resp = await fetch("api/audio/config");
     var cfg = await resp.json();
+    console.log("[audio] Config received:", JSON.stringify({{
+      has_api_key: !!cfg.api_key,
+      ice_server_count: cfg.ice_servers ? cfg.ice_servers.length : 0,
+      url: cfg.url
+    }}));
     if (!cfg.api_key) {{
+      console.warn("[audio] No API key in config");
       btn.textContent = "No API Key";
       setTimeout(function() {{ btn.textContent = "Audio"; btn.disabled = false; }}, 2000);
       return;
     }}
+
+    // Pre-create audio element during user gesture to satisfy autoplay policy.
+    // Browsers allow play() if initiated from a click handler.
+    audioEl = document.createElement("audio");
+    audioEl.autoplay = true;
+    audioEl.className = "inworld-audio";
+    document.body.appendChild(audioEl);
+    console.log("[audio] Audio element pre-created during user gesture");
+
     audioPc = new RTCPeerConnection({{ iceServers: cfg.ice_servers }});
-    audioDc = audioPc.createDataChannel("oai-events", {{ ordered: true }});
-    audioPc.addTransceiver("audio", {{ direction: "recvonly" }});
-    audioPc.ontrack = function(e) {{
-      var a = document.createElement("audio");
-      a.autoplay = true;
-      a.srcObject = new MediaStream([e.track]);
-      a.className = "inworld-audio";
-      document.body.appendChild(a);
+    console.log("[audio] RTCPeerConnection created");
+
+    // Log all connection state changes
+    audioPc.onconnectionstatechange = function() {{
+      console.log("[audio] Connection state:", audioPc.connectionState);
     }};
+    audioPc.oniceconnectionstatechange = function() {{
+      console.log("[audio] ICE connection state:", audioPc.iceConnectionState);
+    }};
+    audioPc.onsignalingstatechange = function() {{
+      console.log("[audio] Signaling state:", audioPc.signalingState);
+    }};
+
+    audioDc = audioPc.createDataChannel("oai-events", {{ ordered: true }});
+    console.log("[audio] Data channel created");
+
+    audioPc.addTransceiver("audio", {{ direction: "recvonly" }});
+    console.log("[audio] Added recvonly audio transceiver");
+
+    audioPc.ontrack = function(e) {{
+      console.log("[audio] ontrack fired! kind:", e.track.kind, "readyState:", e.track.readyState, "muted:", e.track.muted, "enabled:", e.track.enabled);
+      console.log("[audio] Track settings:", JSON.stringify(e.track.getSettings()));
+      // Attach incoming audio track to pre-created element
+      audioEl.srcObject = new MediaStream([e.track]);
+      audioEl.play().then(function() {{
+        console.log("[audio] Audio element playing successfully");
+      }}).catch(function(err) {{
+        console.error("[audio] Audio element play() failed:", err);
+      }});
+      // Monitor track state
+      e.track.onmute = function() {{ console.log("[audio] Track muted"); }};
+      e.track.onunmute = function() {{ console.log("[audio] Track unmuted"); }};
+      e.track.onended = function() {{ console.log("[audio] Track ended"); }};
+    }};
+
     audioDc.onopen = function() {{
-      audioDc.send(JSON.stringify({{
+      console.log("[audio] Data channel opened, sending session.update");
+      var sessionConfig = {{
         type: "session.update",
         session: {{
           type: "realtime",
@@ -941,43 +985,92 @@ async function startAudio() {{
             output: {{ model: "inworld-tts-1.5-mini", voice: "Clive" }}
           }}
         }}
-      }}));
+      }};
+      console.log("[audio] session.update payload:", JSON.stringify(sessionConfig));
+      audioDc.send(JSON.stringify(sessionConfig));
       audioEnabled = true;
       btn.textContent = "Audio On";
       btn.disabled = false;
       btn.classList.add("active");
+      console.log("[audio] Audio enabled, waiting for speakText calls");
     }};
-    audioDc.onclose = function() {{ stopAudio(); }};
-    audioDc.onerror = function() {{ stopAudio(); }};
+    audioDc.onclose = function() {{
+      console.log("[audio] Data channel closed");
+      stopAudio();
+    }};
+    audioDc.onerror = function(e) {{
+      console.error("[audio] Data channel error:", e);
+      stopAudio();
+    }};
+    audioDc.onmessage = function(e) {{
+      try {{
+        var msg = JSON.parse(e.data);
+        console.log("[audio] DC message:", msg.type, msg);
+      }} catch(err) {{
+        console.log("[audio] DC raw message:", e.data);
+      }}
+    }};
+
+    console.log("[audio] Creating SDP offer...");
     var offer = await audioPc.createOffer();
     await audioPc.setLocalDescription(offer);
+    console.log("[audio] Local description set, gathering ICE candidates...");
+    console.log("[audio] ICE gathering state:", audioPc.iceGatheringState);
+
     await new Promise(function(resolve) {{
-      if (audioPc.iceGatheringState === "complete") {{ resolve(); return; }}
+      if (audioPc.iceGatheringState === "complete") {{
+        console.log("[audio] ICE gathering already complete");
+        resolve();
+        return;
+      }}
       var t;
-      var done = function() {{ clearTimeout(t); resolve(); }};
+      var done = function() {{ clearTimeout(t); console.log("[audio] ICE gathering done"); resolve(); }};
       audioPc.onicecandidate = function(e) {{
-        if (e.candidate) {{ clearTimeout(t); t = setTimeout(done, 500); }}
+        if (e.candidate) {{
+          console.log("[audio] ICE candidate:", e.candidate.candidate.substring(0, 80));
+          clearTimeout(t);
+          t = setTimeout(done, 500);
+        }} else {{
+          console.log("[audio] ICE candidate gathering complete (null candidate)");
+        }}
       }};
       audioPc.onicegatheringstatechange = function() {{
+        console.log("[audio] ICE gathering state changed:", audioPc.iceGatheringState);
         if (audioPc.iceGatheringState === "complete") done();
       }};
       setTimeout(done, 3000);
     }});
+
+    console.log("[audio] Sending SDP offer to Inworld...");
+    console.log("[audio] SDP offer media lines:", audioPc.localDescription.sdp.split("\\n").filter(function(l) {{ return l.startsWith("m="); }}));
     var res = await fetch(cfg.url, {{
       method: "POST",
       headers: {{ "Content-Type": "application/sdp", "Authorization": "Bearer " + cfg.api_key }},
       body: audioPc.localDescription.sdp
     }});
-    if (!res.ok) throw new Error("SDP exchange failed: " + res.status);
-    await audioPc.setRemoteDescription({{ type: "answer", sdp: await res.text() }});
+    console.log("[audio] SDP response status:", res.status);
+    if (!res.ok) {{
+      var errBody = await res.text();
+      console.error("[audio] SDP exchange failed:", res.status, errBody);
+      throw new Error("SDP exchange failed: " + res.status + " " + errBody);
+    }}
+    var answerSdp = await res.text();
+    console.log("[audio] SDP answer media lines:", answerSdp.split("\\n").filter(function(l) {{ return l.startsWith("m=") || l.startsWith("a=sendonly") || l.startsWith("a=recvonly") || l.startsWith("a=sendrecv"); }}));
+    await audioPc.setRemoteDescription({{ type: "answer", sdp: answerSdp }});
+    console.log("[audio] Remote description set, connection state:", audioPc.connectionState, "ICE state:", audioPc.iceConnectionState);
   }} catch(e) {{
-    console.error("Audio start failed:", e);
+    console.error("[audio] Audio start failed:", e);
     stopAudio();
   }}
 }}
 
 function stopAudio() {{
-  if (audioPc) audioPc.close();
+  console.log("[audio] stopAudio called");
+  if (audioPc) {{
+    console.log("[audio] Closing peer connection, state was:", audioPc.connectionState);
+    audioPc.close();
+  }}
+  if (audioEl) {{ audioEl.remove(); audioEl = null; }}
   document.querySelectorAll(".inworld-audio").forEach(function(a) {{ a.remove(); }});
   audioPc = null;
   audioDc = null;
@@ -987,12 +1080,29 @@ function stopAudio() {{
 }}
 
 function speakText(text) {{
-  if (!audioEnabled || !audioDc || audioDc.readyState !== "open" || !text.trim()) return;
-  audioDc.send(JSON.stringify({{
+  console.log("[audio] speakText called, audioEnabled:", audioEnabled, "dc readyState:", audioDc ? audioDc.readyState : "null", "text length:", text.length);
+  if (!audioEnabled || !audioDc || audioDc.readyState !== "open" || !text.trim()) {{
+    console.log("[audio] speakText bailing out: enabled=" + audioEnabled + " dc=" + (audioDc ? audioDc.readyState : "null") + " textEmpty=" + !text.trim());
+    return;
+  }}
+  var createMsg = {{
     type: "conversation.item.create",
     item: {{ type: "message", role: "user", content: [{{ type: "input_text", text: text }}] }}
-  }}));
+  }};
+  console.log("[audio] Sending conversation.item.create, text preview:", text.substring(0, 100));
+  audioDc.send(JSON.stringify(createMsg));
+  console.log("[audio] Sending response.create");
   audioDc.send(JSON.stringify({{ type: "response.create" }}));
+  console.log("[audio] speakText commands sent, waiting for audio...");
+  // Log PC state
+  if (audioPc) {{
+    console.log("[audio] PC state: connection=" + audioPc.connectionState + " ice=" + audioPc.iceConnectionState + " signaling=" + audioPc.signalingState);
+    var receivers = audioPc.getReceivers();
+    console.log("[audio] Receivers:", receivers.length);
+    receivers.forEach(function(r, i) {{
+      console.log("[audio] Receiver " + i + ": kind=" + r.track.kind + " readyState=" + r.track.readyState + " muted=" + r.track.muted + " enabled=" + r.track.enabled);
+    }});
+  }}
 }}
 </script>
 </body>
