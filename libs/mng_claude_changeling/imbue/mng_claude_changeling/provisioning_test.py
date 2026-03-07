@@ -55,6 +55,7 @@ def test_load_changeling_resource_loads_resource() -> None:
 # -- Transcript watcher conversion logic tests --
 
 
+# FIXME: transcript_watcher.sh is entirely dead code and should be entirely removed... what are these tests doing?
 def _extract_convert_script() -> str:
     """Extract the inline Python CONVERT_SCRIPT from transcript_watcher.sh."""
     content = load_changeling_resource("transcript_watcher.sh")

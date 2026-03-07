@@ -338,8 +338,6 @@ CONVERT_SCRIPT
     local converted="${result:-0}"
     if [ "$converted" -gt 0 ] 2>/dev/null; then
         log "Converted $converted new event(s) -> events/common_transcript/events.jsonl"
-    else
-        log_debug "No new events to convert"
     fi
 }
 

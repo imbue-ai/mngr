@@ -399,9 +399,6 @@ def run_watcher_loop(
             is_triggered_by_watchdog = wake_event.wait(timeout=poll_interval)
             wake_event.clear()
 
-            if is_triggered_by_watchdog:
-                logger.debug("Woken by watchdog filesystem event")
-
             if is_directory_mode:
                 is_mtime_changed = mtime_poll_directories(watch_targets, mtime_cache)
             else:

@@ -318,8 +318,6 @@ def main() -> None:
         converted_count = _convert_new_events(input_file, output_file)
         if converted_count > 0:
             logger.info("Converted {} new event(s) -> events/common_transcript/events.jsonl", converted_count)
-        else:
-            logger.debug("No new events to convert")
 
     run_watcher_loop(
         "Transcript watcher",

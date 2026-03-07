@@ -287,7 +287,6 @@ def _create_mng_agent(
         mng_command = [
             MNG_BINARY,
             "create",
-            "--name",
             agent_name,
             "--agent-id",
             str(agent_id),
