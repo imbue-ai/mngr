@@ -198,6 +198,23 @@ class ClaudeChangelingAgent(ClaudeAgent):
             "Pass --env ROLE=<role> (e.g. --env ROLE=thinking) when creating the agent."
         )
 
+    def modify_env_vars(
+        self,
+        host: OnlineHostInterface,
+        env_vars: dict[str, str],
+    ) -> None:
+        """Set UV_TOOL_DIR and UV_TOOL_BIN_DIR for per-agent mng isolation.
+
+        These env vars ensure that ``uv tool install`` (run by the
+        mng_recursive plugin) places the mng binary and its venv into
+        the agent's state directory, and that any subsequent ``uv tool``
+        invocations within the agent's processes also use the same paths.
+        """
+        agent_state_dir = env_vars.get("MNG_AGENT_STATE_DIR", "")
+        if agent_state_dir:
+            env_vars["UV_TOOL_DIR"] = f"{agent_state_dir}/tools"
+            env_vars["UV_TOOL_BIN_DIR"] = f"{agent_state_dir}/bin"
+
     def assemble_command(
         self,
         host: OnlineHostInterface,

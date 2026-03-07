@@ -1395,22 +1395,21 @@ def _setup_uv_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _setup_fake_mng_binary(
-    agent_state_dir: Path,
+    bin_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     exit_code: int = 0,
     stdout: str = "",
 ) -> None:
-    """Set up a fake mng binary at <agent_state_dir>/bin/mng.
+    """Set up a fake mng binary at <bin_dir>/mng.
 
     Creates a shell script that echoes the given stdout and exits with
-    the given code. Sets MNG_AGENT_STATE_DIR to point to the agent state dir.
+    the given code. Sets UV_TOOL_BIN_DIR to point to the bin dir.
     """
-    bin_dir = agent_state_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     fake_mng = bin_dir / "mng"
     fake_mng.write_text(f"#!/bin/bash\necho '{stdout}'\nexit {exit_code}\n")
     fake_mng.chmod(0o755)
-    monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(agent_state_dir))
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(bin_dir))
 
 
 @pytest.fixture()
@@ -1490,10 +1489,8 @@ def test_extra_context_tool_with_successful_mng_list(
 ) -> None:
     """Verify gather_extra_context displays agent list on successful mng list."""
     module = _load_fresh_extra_context_tool()
-    agent_state_dir = tmp_path / "agent_state"
-    _setup_fake_mng_binary(
-        agent_state_dir, monkeypatch, exit_code=0, stdout='[{"name":"test-agent","state":"RUNNING"}]'
-    )
+    bin_dir = tmp_path / "fake_bin"
+    _setup_fake_mng_binary(bin_dir, monkeypatch, exit_code=0, stdout='[{"name":"test-agent","state":"RUNNING"}]')
 
     result = module.gather_extra_context()
     assert "Current Agents" in result
@@ -1506,8 +1503,8 @@ def test_extra_context_tool_with_failed_mng_list(
 ) -> None:
     """Verify gather_extra_context handles mng list failure gracefully."""
     module = _load_fresh_extra_context_tool()
-    agent_state_dir = tmp_path / "agent_state"
-    _setup_fake_mng_binary(agent_state_dir, monkeypatch, exit_code=1)
+    bin_dir = tmp_path / "fake_bin"
+    _setup_fake_mng_binary(bin_dir, monkeypatch, exit_code=1)
 
     result = module.gather_extra_context()
     assert "No agents or unable to retrieve" in result
@@ -1605,32 +1602,31 @@ def test_gather_context_first_call_messages_with_empty_lines(
 
 def test_get_mng_command_returns_binary_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_mng_command returns the per-agent mng binary path when it exists."""
-    agent_state_dir = tmp_path / "agent_state"
-    bin_dir = agent_state_dir / "bin"
+    bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True)
     mng_bin = bin_dir / "mng"
     mng_bin.write_text("#!/bin/bash\n")
     mng_bin.chmod(0o755)
 
-    monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(agent_state_dir))
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(bin_dir))
 
     result = get_mng_command()
     assert result == [str(mng_bin)]
 
 
 def test_get_mng_command_raises_when_env_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify get_mng_command raises MngNotInstalledError when MNG_AGENT_STATE_DIR is unset."""
-    monkeypatch.delenv("MNG_AGENT_STATE_DIR", raising=False)
+    """Verify get_mng_command raises MngNotInstalledError when UV_TOOL_BIN_DIR is unset."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
 
-    with pytest.raises(MngNotInstalledError, match="MNG_AGENT_STATE_DIR is not set"):
+    with pytest.raises(MngNotInstalledError, match="UV_TOOL_BIN_DIR is not set"):
         get_mng_command()
 
 
 def test_get_mng_command_raises_when_binary_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_mng_command raises MngNotInstalledError when the binary doesn't exist."""
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir(parents=True)
-    monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(agent_state_dir))
+    bin_dir = tmp_path / "empty_bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(bin_dir))
 
     with pytest.raises(MngNotInstalledError, match="Per-agent mng binary not found"):
         get_mng_command()

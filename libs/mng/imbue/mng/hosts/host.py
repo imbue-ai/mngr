@@ -1573,6 +1573,9 @@ class Host(BaseHost, OnlineHostInterface):
         for env_var in options.environment.env_vars:
             env_vars[env_var.key] = env_var.value
 
+        # 5. Let the agent modify env vars (e.g. set UV_TOOL_DIR for per-agent mng)
+        agent.modify_env_vars(host=self, env_vars=env_vars)
+
         return env_vars
 
     def _write_agent_env_file(self, agent: AgentInterface, env_vars: Mapping[str, str]) -> None:

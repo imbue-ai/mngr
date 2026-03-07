@@ -34,19 +34,20 @@ class MngNotInstalledError(RuntimeError):
 def get_mng_command() -> list[str]:
     """Return the command for invoking the per-agent mng binary.
 
-    The mng binary is installed by the mng_recursive plugin into
-    ``$MNG_AGENT_STATE_DIR/bin/mng`` during agent creation. This function
-    locates that binary and returns it as a command list.
+    Looks for the mng binary in ``$UV_TOOL_BIN_DIR/mng``. This env var
+    is set by ``ClaudeChangelingAgent.modify_env_vars()`` during agent
+    creation and points to the per-agent bin directory where
+    ``uv tool install`` places the mng entrypoint.
 
     Raises MngNotInstalledError if the binary cannot be found, which
     indicates that mng was not properly provisioned for this agent.
     """
-    agent_state_dir = os.environ.get("MNG_AGENT_STATE_DIR", "")
-    if not agent_state_dir:
+    bin_dir = os.environ.get("UV_TOOL_BIN_DIR", "")
+    if not bin_dir:
         raise MngNotInstalledError(
-            "MNG_AGENT_STATE_DIR is not set. The per-agent mng binary cannot be located without it."
+            "UV_TOOL_BIN_DIR is not set. The per-agent mng binary cannot be located without it."
         )
-    mng_bin = os.path.join(agent_state_dir, "bin", "mng")
+    mng_bin = os.path.join(bin_dir, "mng")
     if not os.path.isfile(mng_bin):
         raise MngNotInstalledError(
             f"Per-agent mng binary not found at {mng_bin}. "

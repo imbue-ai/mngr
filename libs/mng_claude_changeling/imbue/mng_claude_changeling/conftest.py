@@ -318,15 +318,14 @@ def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, 
         conn.commit()
 
 
-def create_fake_mng_binary(agent_state_dir: Path) -> Path:
-    """Create a fake mng binary at <agent_state_dir>/bin/mng.
+def create_fake_mng_binary(bin_dir: Path) -> Path:
+    """Create a fake mng binary at <bin_dir>/mng.
 
     This satisfies the get_mng_command() check that the per-agent mng
     binary exists. The binary delegates to the system mng.
 
     Returns the path to the fake mng binary.
     """
-    bin_dir = agent_state_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     mng_bin = bin_dir / "mng"
     mng_bin.write_text('#!/bin/bash\nexec mng "$@"\n')
@@ -336,17 +335,17 @@ def create_fake_mng_binary(agent_state_dir: Path) -> Path:
 
 @pytest.fixture()
 def fake_mng_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a fake mng binary and set MNG_AGENT_STATE_DIR to point to it.
+    """Create a fake mng binary and set UV_TOOL_BIN_DIR to point to it.
 
     Use this fixture in tests that invoke code paths which call
     get_mng_command() (e.g. event_watcher._send_message, web_server polling).
 
-    Returns the path to the fake agent state dir.
+    Returns the path to the bin dir containing the fake mng binary.
     """
-    fake_state_dir = tmp_path / "fake_agent_state"
-    create_fake_mng_binary(fake_state_dir)
-    monkeypatch.setenv("MNG_AGENT_STATE_DIR", str(fake_state_dir))
-    return fake_state_dir
+    bin_dir = tmp_path / "fake_bin"
+    create_fake_mng_binary(bin_dir)
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(bin_dir))
+    return bin_dir
 
 
 class EventWatcherSubprocessCapture:

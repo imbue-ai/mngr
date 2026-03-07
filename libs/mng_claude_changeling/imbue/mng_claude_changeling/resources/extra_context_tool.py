@@ -57,18 +57,17 @@ _EXTRA = _SETTINGS.get("chat", {}).get("extra_context", {})
 def _get_mng_command() -> list[str]:
     """Return the command for invoking the per-agent mng binary.
 
-    The mng binary is installed by the mng_recursive plugin into
-    ``$MNG_AGENT_STATE_DIR/bin/mng``. Raises RuntimeError if the binary
-    cannot be found.
+    Looks for the mng binary in ``$UV_TOOL_BIN_DIR/mng``. Raises RuntimeError
+    if the binary cannot be found.
 
     NOTE: This is a standalone copy of watcher_common.get_mng_command()
     because this file is deployed to commands/llm_tools/ and cannot import
     from the commands/ directory.
     """
-    agent_state_dir = os.environ.get("MNG_AGENT_STATE_DIR", "")
-    if not agent_state_dir:
-        raise RuntimeError("MNG_AGENT_STATE_DIR is not set. The per-agent mng binary cannot be located without it.")
-    mng_bin = os.path.join(agent_state_dir, "bin", "mng")
+    bin_dir = os.environ.get("UV_TOOL_BIN_DIR", "")
+    if not bin_dir:
+        raise RuntimeError("UV_TOOL_BIN_DIR is not set. The per-agent mng binary cannot be located without it.")
+    mng_bin = os.path.join(bin_dir, "mng")
     if not os.path.isfile(mng_bin):
         raise RuntimeError(
             f"Per-agent mng binary not found at {mng_bin}. "
