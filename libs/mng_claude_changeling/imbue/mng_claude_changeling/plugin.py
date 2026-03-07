@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
+import click
 from loguru import logger
 from pydantic import Field
 
@@ -337,7 +339,7 @@ def get_agent_type_from_params(params: dict[str, Any]) -> str | None:
 
 
 @hookimpl
-def register_cli_commands() -> Any:
+def register_cli_commands() -> Sequence[click.Command] | None:
     """Register changeling supporting service commands with mng."""
     from imbue.mng_claude_changeling.cli import get_all_commands
 
