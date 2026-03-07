@@ -17,17 +17,19 @@ libs/
   imbue_common/        # Foundation: primitives, models, utilities (no internal deps)
   concurrency_group/   # Foundation: structured thread/process management (depends on: imbue-common)
   mng/                 # Core framework (depends on: imbue-common, concurrency-group)
-  mng_pair/            # Plugin: continuous file sync (depends on: mng)
-  mng_opencode/        # Plugin: OpenCode agent type (depends on: mng)
-  mng_schedule/        # Plugin: cron-scheduled agent runs (depends on: mng)
-  mng_kanpan/          # Plugin: TUI agent tracker dashboard (depends on: mng)
-  mng_tutor/           # Plugin: interactive tutorials (depends on: mng)
+  mng_pair/            # Plugin: continuous file sync
+  mng_opencode/        # Plugin: OpenCode agent type
+  mng_schedule/        # Plugin: cron-scheduled agent runs
+  mng_kanpan/          # Plugin: TUI agent tracker dashboard
+  mng_tutor/           # Plugin: interactive tutorials
   flexmux/             # Independent: FlexLayout tab manager (no internal deps)
 apps/
   changelings/         # Experimental autonomous agent scheduler (depends on: mng)
   claude_web_view/     # Independent: web viewer for Claude Code transcripts (no internal deps)
   sculptor_web/        # Web interface for agent management (depends on: mng)
 ```
+
+All plugins (`mng_*`) depend on `mng`.
 
 ## Core Concepts
 
