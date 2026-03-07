@@ -508,21 +508,6 @@ def test_agent_package_mode_warns_when_no_packages() -> None:
         provision_mng_for_agent(agent=agent, host=host, mng_ctx=ctx)
 
 
-# --- deploy files collection error ---
-
-
-def test_provision_on_host_handles_deploy_file_collection_error() -> None:
-    """provision_mng_on_host should handle errors from collect_deploy_files."""
-    host = _make_mock_host(is_local=False)
-    ctx = _make_mock_mng_ctx(
-        plugin_config=RecursivePluginConfig(is_errors_fatal=False, install_mode=MngInstallMode.PACKAGE),
-    )
-
-    with patch("imbue.mng_recursive.provisioning.collect_deploy_files") as mock_collect:
-        mock_collect.side_effect = RuntimeError("hook failed")
-        provision_mng_on_host(host=host, mng_ctx=ctx)
-
-
 # --- _upload_deploy_files mkdir failure ---
 
 
@@ -548,31 +533,8 @@ def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:
         _install_mng_package_mode(host, [("mng", "0.1.4")], Path("/tools"), Path("/bin"))
 
 
-def test_agent_editable_mode_dispatches_to_install(tmp_path: Path) -> None:
-    """provision_mng_for_agent with EDITABLE mode should call _install_mng_editable_mode."""
-    host_dir = tmp_path / "host"
-    host_dir.mkdir()
-    host = _make_mock_host(is_local=True, host_dir=host_dir)
-    host.execute_command.return_value = _make_command_result(True)
-    ctx = _make_mock_mng_ctx(
-        plugin_config=RecursivePluginConfig(install_mode=MngInstallMode.EDITABLE),
-    )
-    agent = _make_mock_agent(mng_ctx=ctx)
-
-    repo_root = tmp_path / "monorepo"
-    libs_dir = repo_root / "libs"
-    (libs_dir / "mng").mkdir(parents=True)
-
-    with patch("imbue.mng_recursive.provisioning._get_mng_repo_root") as mock_root:
-        mock_root.return_value = repo_root
-        provision_mng_for_agent(agent=agent, host=host, mng_ctx=ctx)
-
-    install_calls = [call for call in host.execute_command.call_args_list if "uv tool install" in str(call)]
-    assert len(install_calls) >= 1
-
-
-def test_editable_local_retries_with_force_reinstall(tmp_path: Path) -> None:
-    """Editable local mode should retry with --force-reinstall on initial failure."""
+def test_agent_editable_mode_dispatches_and_retries_force_reinstall(tmp_path: Path) -> None:
+    """Editable local mode should dispatch to install and retry with --force-reinstall on failure."""
     repo_root = tmp_path / "monorepo"
     libs_dir = repo_root / "libs"
     (libs_dir / "mng").mkdir(parents=True)
@@ -580,11 +542,8 @@ def test_editable_local_retries_with_force_reinstall(tmp_path: Path) -> None:
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     host = _make_mock_host(is_local=True, host_dir=host_dir)
-
-    call_count = [0]
 
     def execute_side_effect(cmd: str, **kwargs: object) -> CommandResult:
-        call_count[0] += 1
         if "uv tool install" in cmd and "--force-reinstall" not in cmd:
             return _make_command_result(False, stderr="already installed")
         return _make_command_result(True)
@@ -599,12 +558,14 @@ def test_editable_local_retries_with_force_reinstall(tmp_path: Path) -> None:
         mock_root.return_value = repo_root
         provision_mng_for_agent(agent=agent, host=host, mng_ctx=ctx)
 
+    install_calls = [call for call in host.execute_command.call_args_list if "uv tool install" in str(call)]
+    assert len(install_calls) >= 1
     force_calls = [call for call in host.execute_command.call_args_list if "--force-reinstall" in str(call)]
     assert len(force_calls) >= 1
 
 
-def test_provision_on_host_handles_mng_error_from_deploy_files() -> None:
-    """provision_mng_on_host should catch MngError from collect_deploy_files when not fatal."""
+def test_provision_on_host_handles_deploy_file_errors() -> None:
+    """provision_mng_on_host should catch errors from collect_deploy_files when not fatal."""
     host = _make_mock_host(is_local=False)
     ctx = _make_mock_mng_ctx(
         plugin_config=RecursivePluginConfig(is_errors_fatal=False, install_mode=MngInstallMode.PACKAGE),
