@@ -27,27 +27,29 @@ jobs:
 
             ## Step 1: Determine what changed
 
-            Look at the git log for commits on main since the last time these docs were updated.
-            First, get the anchor date:
+            Look at the git log for commits on main since the last time CHANGELOG.md was updated.
+            Get the anchor date:
 
-              git log -1 --format=%ci -- CHANGELOG.md ARCHITECTURE.md
+              git log -1 --format=%ci -- CHANGELOG.md
 
-            If that returns empty (the files don't exist yet), use "7 days ago" instead.
+            If that returns empty (the file doesn't exist yet), use "7 days ago" instead.
             Then find all commits since that anchor:
 
               git log --oneline --since="<anchor>"
 
-            If that returns nothing, verify there have been *some* commits in the last 3 days:
+            If that returns nothing, there are no changes to document. As a health check, verify
+            there have been *some* commits in the last 7 days:
 
-              git log --oneline --since="3 days ago" -1
+              git log --oneline --since="7 days ago" -1
 
-            If that also returns nothing, output "WARNING: no commits found in the last 3 days"
-            and exit with a non-zero status. Otherwise, there are simply no changes to document --
-            exit early without making changes.
+            If that also returns nothing, output "WARNING: no commits found in the last 7 days"
+            and exit with a non-zero status. Otherwise, exit early without making changes.
 
-            Read the diffs, focusing on structural and user-facing changes:
+            If there are commits since the anchor, read the diffs:
 
-              git diff <oldest_relevant_commit>..HEAD
+              git log -p --since="<anchor>"
+
+            Focus on structural and user-facing changes.
 
             ## Step 2: Update ARCHITECTURE.md (if needed)
 
@@ -56,15 +58,17 @@ jobs:
 
             ## Step 3: Update CHANGELOG.md
 
-            Append new entries to CHANGELOG.md for user-visible changes. Follow the existing
-            format in the file. Skip internal-only changes.
+            Add new entries to CHANGELOG.md for user-visible changes. Use newest-first ordering
+            (most recent date at the top). Use `## YYYY-MM-DD` section headers with bullet points
+            underneath. Follow the existing format in the file. Skip internal-only changes.
 
             ## Step 4: Commit and create PR
 
             If you made any changes, commit them and push to a new branch named
-            "docs/nightly-update-YYYY-MM-DD" (using today's date). Then create a PR.
+            "docs/nightly-update-YYYY-MM-DD-HHMM" (using today's date and current time in UTC).
+            Then create a PR.
 
             If no changes were needed, do nothing.
           claude_args: |
-            --model claude-opus-4-20250514
+            --model claude-opus-4
             --allowedTools Read,Write,Edit,Bash(git:*),Bash(gh pr create:*),Bash(date:*)
