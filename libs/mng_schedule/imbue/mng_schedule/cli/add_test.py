@@ -2,6 +2,8 @@
 
 import shlex
 
+from imbue.mng.providers.local.instance import LocalProviderInstance
+from imbue.mng_schedule.cli.add import _get_provider_ssh_public_key
 from imbue.mng_schedule.cli.add import auto_fix_create_args
 from imbue.mng_schedule.cli.add import check_safe_create_command
 
@@ -197,3 +199,16 @@ class TestCheckSafeCreateCommand:
     def test_new_branch_date_before_separator_passes(self) -> None:
         result = check_safe_create_command("my-agent --new-branch 'run-{DATE}' -- --model opus")
         assert result is None
+
+
+# =============================================================================
+# _get_provider_ssh_public_key tests
+# =============================================================================
+
+
+def test_get_provider_ssh_public_key_returns_none_for_local(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Local provider should return None since it doesn't use SSH for agent connections."""
+    result = _get_provider_ssh_public_key(local_provider)
+    assert result is None

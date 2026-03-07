@@ -7,6 +7,8 @@ import pytest
 
 from imbue.mng_schedule.errors import ScheduleDeployError
 from imbue.mng_schedule.git import ensure_current_branch_is_pushed
+from imbue.mng_schedule.git import get_current_mng_git_hash
+from imbue.mng_schedule.git import resolve_current_branch_name
 from imbue.mng_schedule.git import resolve_git_ref
 
 
@@ -106,3 +108,48 @@ def test_ensure_branch_is_pushed_fails_on_detached_head(tmp_path: Path) -> None:
 
     with pytest.raises(ScheduleDeployError, match="detached HEAD"):
         ensure_current_branch_is_pushed(cwd=repo_path)
+
+
+def test_resolve_current_branch_name_succeeds(tmp_path: Path) -> None:
+    """resolve_current_branch_name should return the current branch name."""
+    _init_git_repo(tmp_path)
+    result = resolve_current_branch_name(cwd=tmp_path)
+    assert result == "master"
+
+
+def test_resolve_current_branch_name_raises_on_detached_head(tmp_path: Path) -> None:
+    """resolve_current_branch_name should raise on a detached HEAD."""
+    _init_git_repo(tmp_path)
+    head_sha = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(tmp_path), "checkout", head_sha], check=True, capture_output=True)
+    with pytest.raises(ScheduleDeployError, match="detached HEAD"):
+        resolve_current_branch_name(cwd=tmp_path)
+
+
+def test_resolve_current_branch_name_raises_outside_git_repo(tmp_path: Path) -> None:
+    """resolve_current_branch_name should raise outside a git repo."""
+    with pytest.raises(ScheduleDeployError, match="Could not determine current branch"):
+        resolve_current_branch_name(cwd=tmp_path)
+
+
+def test_get_current_mng_git_hash_returns_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """get_current_mng_git_hash should return a hash in a git repo."""
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = get_current_mng_git_hash()
+    assert result != "unknown"
+    assert len(result) == 40
+
+
+def test_get_current_mng_git_hash_returns_unknown_outside_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_current_mng_git_hash should return 'unknown' outside a git repo."""
+    monkeypatch.chdir(tmp_path)
+    result = get_current_mng_git_hash()
+    assert result == "unknown"
