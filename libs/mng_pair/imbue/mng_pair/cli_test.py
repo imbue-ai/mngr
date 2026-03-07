@@ -1,8 +1,14 @@
 """Unit tests for the pair CLI command."""
 
+from pathlib import Path
+
 from click.testing import CliRunner
 
+from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.primitives import OutputFormat
 from imbue.mng_pair.cli import PairCliOptions
+from imbue.mng_pair.cli import _emit_pair_started
+from imbue.mng_pair.cli import _emit_pair_stopped
 from imbue.mng_pair.cli import pair
 
 
@@ -66,3 +72,43 @@ def test_pair_uncommitted_changes_choices() -> None:
     assert result.exit_code == 0
     # The help should mention uncommitted changes handling
     assert "uncommitted" in result.output.lower()
+
+
+def test_emit_pair_started_human_format() -> None:
+    """Test that _emit_pair_started produces output for HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    # Should not raise
+    _emit_pair_started(Path("/src"), Path("/dst"), output_opts)
+
+
+def test_emit_pair_started_json_format() -> None:
+    """Test that _emit_pair_started handles JSON format."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    # JSON mode is silent for emit_event, but should not raise
+    _emit_pair_started(Path("/src"), Path("/dst"), output_opts)
+
+
+def test_emit_pair_started_jsonl_format() -> None:
+    """Test that _emit_pair_started handles JSONL format."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    _emit_pair_started(Path("/src"), Path("/dst"), output_opts)
+
+
+def test_emit_pair_stopped_human_format() -> None:
+    """Test that _emit_pair_stopped produces output for HUMAN format."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    # Should not raise
+    _emit_pair_stopped(output_opts)
+
+
+def test_emit_pair_stopped_json_format() -> None:
+    """Test that _emit_pair_stopped handles JSON format."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    # JSON mode is silent for emit_event, but should not raise
+    _emit_pair_stopped(output_opts)
+
+
+def test_emit_pair_stopped_jsonl_format() -> None:
+    """Test that _emit_pair_stopped handles JSONL format."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSONL)
+    _emit_pair_stopped(output_opts)
