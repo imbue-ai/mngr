@@ -414,6 +414,24 @@ def write_conversation_to_db(
         conn.commit()
 
 
+@pytest.fixture()
+def web_server_test_server() -> Generator[tuple[object, int], None, None]:
+    """Start and stop a test HTTP server for web_server handler tests."""
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    # Import inside fixture to avoid underscore-prefixed import at module level
+    from imbue.mng_claude_changeling.resources import web_server as ws_mod
+
+    handler_class = ws_mod._WebServerHandler  # noqa: SLF001
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server, port
+    server.shutdown()
+
+
 def assert_conversation_exists_in_db(db_path: Path, conversation_id: str) -> None:
     """Assert that a conversation record exists in the changeling_conversations table."""
     with sqlite3.connect(str(db_path)) as conn:

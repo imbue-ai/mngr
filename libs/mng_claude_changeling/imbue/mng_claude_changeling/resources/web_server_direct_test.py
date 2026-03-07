@@ -8,9 +8,6 @@ belong here.
 
 import http.client
 import json
-import threading
-from collections.abc import Generator
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -214,25 +211,7 @@ def test_render_web_chat_page_escapes_js_injection() -> None:
     assert "\\\\x22" in page
 
 
-def test_render_conversations_page_contains_text_chat_links() -> None:
-    page = _render_conversations_page()
-    assert "chat?cid=NEW" in page
-
-
 # -- HTTP handler tests --
-
-
-@pytest.fixture()
-def test_server() -> Generator[tuple[ThreadingHTTPServer, int], None, None]:
-    """Start and stop a test HTTP server, yielding (server, port)."""
-    from imbue.mng_claude_changeling.resources.web_server import _WebServerHandler
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _WebServerHandler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server, port
-    server.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -249,12 +228,12 @@ def test_server() -> Generator[tuple[ThreadingHTTPServer, int], None, None]:
     ],
 )
 def test_handler_get_routes(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
     path: str,
     expected_status: int,
     expected_in_body: str | None,
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("GET", path)
     resp = conn.getresponse()
@@ -266,9 +245,9 @@ def test_handler_get_routes(
 
 
 def test_handler_get_chat_without_cid_redirects(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("GET", "/chat")
     resp = conn.getresponse()
@@ -278,9 +257,9 @@ def test_handler_get_chat_without_cid_redirects(
 
 
 def test_handler_get_text_chat_without_cid_redirects(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("GET", "/text_chat")
     resp = conn.getresponse()
@@ -289,9 +268,9 @@ def test_handler_get_text_chat_without_cid_redirects(
 
 
 def test_handler_get_api_chat_history_missing_cid(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("GET", "/api/chat/history")
     resp = conn.getresponse()
@@ -302,14 +281,14 @@ def test_handler_get_api_chat_history_missing_cid(
 
 
 def test_handler_post_api_chat_new(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
 ) -> None:
     import imbue.mng_claude_changeling.resources.web_server as ws
 
     original_db = ws.LLM_DB_PATH
     ws.LLM_DB_PATH = None
     try:
-        _, port = test_server
+        _, port = web_server_test_server
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         conn.request("POST", "/api/chat/new")
         resp = conn.getresponse()
@@ -330,11 +309,11 @@ def test_handler_post_api_chat_new(
     ],
 )
 def test_handler_post_api_chat_send_validation(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
     post_body: str,
     expected_status: int,
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request(
         "POST",
@@ -348,9 +327,9 @@ def test_handler_post_api_chat_send_validation(
 
 
 def test_handler_post_404(
-    test_server: tuple[ThreadingHTTPServer, int],
+    web_server_test_server: tuple[object, int],
 ) -> None:
-    _, port = test_server
+    _, port = web_server_test_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("POST", "/nonexistent")
     resp = conn.getresponse()

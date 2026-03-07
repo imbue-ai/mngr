@@ -498,36 +498,39 @@ def _create_new_conversation() -> str:
 class _SseOutputCallback:
     """Callable that streams stdout lines as SSE chunk events and collects them."""
 
-    wfile: Any
-    lines: list[str]
-
     def __init__(self, wfile: Any, lines: list[str]) -> None:
         self.wfile = wfile
         self.lines = lines
+        self.write_failed = False
 
-    def __call__(self, line: str, is_stderr: bool) -> None:
-        if is_stderr:
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        if not is_stdout:
+            _log(f"[chat-stream] stderr line: {line.rstrip()}")
             return
         self.lines.append(line)
-        chunk_data = json.dumps({"chunk": line + "\n"})
+        _log(f"[chat-stream] got stdout line ({len(line)} chars): {line[:80].rstrip()!r}")
+        chunk_data = json.dumps({"chunk": line})
         try:
             self.wfile.write(f"event: chunk\ndata: {chunk_data}\n\n".encode())
             self.wfile.flush()
-        except OSError:
-            pass
+            _log("[chat-stream] SSE chunk written and flushed")
+        except OSError as e:
+            _log(f"[chat-stream] SSE write failed (client may have disconnected): {e}")
+            self.write_failed = True
 
 
 def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
     """Send a message to the LLM and stream the response via SSE.
 
-    Runs ``llm prompt`` via ConcurrencyGroup.run_process_to_completion with an
-    on_output callback that sends each stdout line as an SSE "chunk" event.
+    Runs ``llm prompt`` via ConcurrencyGroup with an on_output callback that
+    sends each stdout line as an SSE "chunk" event. Line-buffered: chunks are
+    sent per-line as the LLM produces newlines in its output.
     """
     from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 
     model_id = _get_default_chat_model()
 
-    cmd = ["llm", "prompt", "-m", model_id, "--cid", conversation_id]
+    cmd = ["stdbuf", "-oL", "llm", "prompt", "-m", model_id, "--cid", conversation_id]
 
     system_prompt = _get_system_prompt()
     if system_prompt:
@@ -540,30 +543,73 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
         env["LLM_USER_PATH"] = _LLM_USER_PATH
     env["PYTHONUNBUFFERED"] = "1"
 
+    _log(f"[chat-stream] starting llm prompt: cid={conversation_id} model={model_id}")
+    _log(f"[chat-stream] cmd={cmd}")
+
     collected_lines: list[str] = []
     callback = _SseOutputCallback(wfile, collected_lines)
 
-    with ConcurrencyGroup(name="web-chat-send") as cg:
-        result = cg.run_process_to_completion(
-            cmd,
-            timeout=300.0,
-            is_checked_after=False,
-            on_output=callback,
-            env=env,
+    try:
+        with ConcurrencyGroup(name="web-chat-send") as cg:
+            _log("[chat-stream] ConcurrencyGroup created, calling run_process_to_completion")
+            result = cg.run_process_to_completion(
+                cmd,
+                timeout=300.0,
+                is_checked_after=False,
+                on_output=callback,
+                env=env,
+            )
+        _log(
+            f"[chat-stream] process finished: returncode={result.returncode} "
+            f"stdout_len={len(result.stdout)} stderr_len={len(result.stderr)} "
+            f"callback_lines={len(collected_lines)} timed_out={result.is_timed_out}"
         )
-
-    if result.returncode != 0:
-        stderr_text = result.stderr[:200] if result.stderr else ""
-        _log(f"llm prompt failed (exit {result.returncode}): {stderr_text}")
-        error_data = json.dumps({"error": f"LLM failed: {stderr_text}"})
+    except FileNotFoundError as e:
+        _log(f"[chat-stream] command not found: {e}")
+        error_data = json.dumps({"error": f"command not found: {e}"})
         wfile.write(f"event: error\ndata: {error_data}\n\n".encode())
         wfile.flush()
         return
 
-    full_text = "\n".join(collected_lines)
-    done_data = json.dumps({"conversation_id": conversation_id, "full_text": full_text})
-    wfile.write(f"event: done\ndata: {done_data}\n\n".encode())
-    wfile.flush()
+    if result.returncode != 0:
+        stderr_text = result.stderr[:500] if result.stderr else "(empty)"
+        _log(f"[chat-stream] llm prompt failed (exit {result.returncode}): {stderr_text}")
+        error_data = json.dumps({"error": f"LLM failed (exit {result.returncode}): {result.stderr[:200]}"})
+        try:
+            wfile.write(f"event: error\ndata: {error_data}\n\n".encode())
+            wfile.flush()
+        except OSError as e:
+            _log(f"[chat-stream] SSE error write failed: {e}")
+        return
+
+    # If lines came via the callback they were already streamed. If the callback
+    # missed some (e.g. incomplete trailing line), send the full stdout as a
+    # final chunk so the client gets the complete text.
+    full_text_from_callback = "".join(collected_lines)
+    full_text_from_result = result.stdout
+    _log(
+        f"[chat-stream] callback_text_len={len(full_text_from_callback)} "
+        f"result_stdout_len={len(full_text_from_result)}"
+    )
+
+    if len(full_text_from_result) > len(full_text_from_callback):
+        remainder = full_text_from_result[len(full_text_from_callback) :]
+        _log(f"[chat-stream] sending remainder chunk ({len(remainder)} chars)")
+        chunk_data = json.dumps({"chunk": remainder})
+        try:
+            wfile.write(f"event: chunk\ndata: {chunk_data}\n\n".encode())
+            wfile.flush()
+        except OSError as e:
+            _log(f"[chat-stream] SSE remainder write failed: {e}")
+
+    done_data = json.dumps({"conversation_id": conversation_id, "full_text": full_text_from_result})
+    _log("[chat-stream] sending done event")
+    try:
+        wfile.write(f"event: done\ndata: {done_data}\n\n".encode())
+        wfile.flush()
+        _log("[chat-stream] done event sent successfully")
+    except OSError as e:
+        _log(f"[chat-stream] SSE done write failed: {e}")
 
 
 # -- Web chat page rendering --
