@@ -19,14 +19,14 @@ libs/
   mng/                 # Core framework (depends on: imbue-common, concurrency-group)
   mng_pair/            # Plugin: continuous file sync (depends on: mng)
   mng_opencode/        # Plugin: OpenCode agent type (depends on: mng)
-  mng_schedule/        # Plugin: cron-scheduled agent runs (depends on: mng, imbue-common, modal)
+  mng_schedule/        # Plugin: cron-scheduled agent runs (depends on: mng, imbue-common)
   mng_kanpan/          # Plugin: TUI agent tracker dashboard (depends on: mng)
   mng_tutor/           # Plugin: interactive tutorials (depends on: mng)
-  flexmux/             # Independent: FlexLayout tab manager (depends on: flask, pydantic)
+  flexmux/             # Independent: FlexLayout tab manager (no internal deps)
 apps/
-  changelings/         # Experimental autonomous agent scheduler (depends on: mng, imbue-common, concurrency-group, modal)
-  claude_web_view/     # Web viewer for Claude Code transcripts (depends on: fastapi, watchfiles)
-  sculptor_web/        # Web interface for agent management (depends on: mng, python-fasthtml)
+  changelings/         # Experimental autonomous agent scheduler (depends on: mng, imbue-common, concurrency-group)
+  claude_web_view/     # Independent: web viewer for Claude Code transcripts (no internal deps)
+  sculptor_web/        # Web interface for agent management (depends on: mng)
 ```
 
 ## Core Concepts
