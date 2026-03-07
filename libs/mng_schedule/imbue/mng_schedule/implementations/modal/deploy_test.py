@@ -84,18 +84,20 @@ def test_get_repo_root_raises_outside_git_repo(
 
 def test_package_repo_at_commit_succeeds_with_valid_script(tmp_path: Path) -> None:
     """package_repo_at_commit should succeed when the packaging script exists."""
+    from imbue.mng.utils.testing import init_git_repo_with_config
+    from imbue.mng.utils.testing import run_git_command
+
     repo_root = tmp_path / "repo"
-    repo_root.mkdir()
+    init_git_repo_with_config(repo_root)
+
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir()
     script = scripts_dir / "make_tar_of_repo.sh"
     script.write_text("#!/bin/bash\ntouch $2/current.tar.gz\n")
     script.chmod(0o755)
-    subprocess.run(["git", "init", str(repo_root)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_root), "config", "user.email", "t@t.com"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_root), "config", "user.name", "T"], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_root), "add", "."], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo_root), "commit", "-m", "init"], check=True, capture_output=True)
+    run_git_command(repo_root, "add", ".")
+    run_git_command(repo_root, "commit", "-m", "add script")
+
     commit = subprocess.run(
         ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
         check=True,

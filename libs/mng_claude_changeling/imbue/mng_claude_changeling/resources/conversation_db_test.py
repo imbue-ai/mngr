@@ -2,6 +2,8 @@
 
 import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -207,15 +209,22 @@ def test_poll_new_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert "WARNING:" in captured.err
 
 
+@contextmanager
+def _override_argv(new_argv: list[str]) -> Iterator[None]:
+    """Temporarily replace sys.argv, restoring on exit."""
+    original = sys.argv
+    sys.argv = new_argv
+    try:
+        yield
+    finally:
+        sys.argv = original
+
+
 def test_main_insert(tmp_path: Path) -> None:
     db_path = tmp_path / "test.db"
     _create_db(db_path)
-    original_argv = sys.argv
-    sys.argv = ["conversation_db", "insert", str(db_path), "conv-main", "{}", "2025-03-01T00:00:00Z"]
-    try:
+    with _override_argv(["conversation_db", "insert", str(db_path), "conv-main", "{}", "2025-03-01T00:00:00Z"]):
         main()
-    finally:
-        sys.argv = original_argv
 
     with sqlite3.connect(str(db_path)) as conn:
         row = conn.execute(
@@ -230,38 +239,26 @@ def test_main_count(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _create_db(db_path)
     insert(str(db_path), "c1", "{}", "2025-01-01T00:00:00Z")
 
-    original_argv = sys.argv
-    sys.argv = ["conversation_db", "count", str(db_path)]
-    try:
+    with _override_argv(["conversation_db", "count", str(db_path)]):
         main()
-    finally:
-        sys.argv = original_argv
 
     captured = capsys.readouterr()
     assert captured.out == "1\n"
 
 
 def test_main_unknown_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
-    original_argv = sys.argv
-    sys.argv = ["conversation_db", "bogus", "/tmp/x.db"]
-    try:
+    with _override_argv(["conversation_db", "bogus", "/tmp/x.db"]):
         with pytest.raises(SystemExit, match="1"):
             main()
-    finally:
-        sys.argv = original_argv
 
     captured = capsys.readouterr()
     assert "Unknown subcommand: bogus" in captured.err
 
 
 def test_main_too_few_args(capsys: pytest.CaptureFixture[str]) -> None:
-    original_argv = sys.argv
-    sys.argv = ["conversation_db", "count"]
-    try:
+    with _override_argv(["conversation_db", "count"]):
         with pytest.raises(SystemExit, match="1"):
             main()
-    finally:
-        sys.argv = original_argv
 
     captured = capsys.readouterr()
     assert "Usage:" in captured.err
