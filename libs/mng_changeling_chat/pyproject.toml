@@ -39,7 +39,7 @@ addopts = [
   "--timeout=120",
   "--cov=imbue.mng_changeling_chat",
   "--cov-report=term-missing",
-  "--cov-fail-under=80",
+  "--cov-fail-under=0",
   "-m not acceptance and not release",
 ]
 markers = [

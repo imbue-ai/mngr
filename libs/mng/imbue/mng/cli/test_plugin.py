@@ -199,14 +199,14 @@ def test_plugin_enable_json_format_returns_valid_json(
 
     result = cli_runner.invoke(
         plugin,
-        ["enable", "opencode", "--format", "json"],
+        ["enable", "claude", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
 
     assert result.exit_code == 0
     output = json.loads(result.output)
-    assert output["plugin"] == "opencode"
+    assert output["plugin"] == "claude"
     assert output["enabled"] is True
     assert output["scope"] == "project"
     assert "path" in output
@@ -221,7 +221,7 @@ def test_plugin_enable_default_scope_is_project(
 
     result = cli_runner.invoke(
         plugin,
-        ["enable", "opencode", "--format", "json"],
+        ["enable", "claude", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
