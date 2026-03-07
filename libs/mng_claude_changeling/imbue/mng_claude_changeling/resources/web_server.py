@@ -495,17 +495,38 @@ def _create_new_conversation() -> str:
     return conversation_id
 
 
+class _SseOutputCallback:
+    """Callable that streams stdout lines as SSE chunk events and collects them."""
+
+    wfile: Any
+    lines: list[str]
+
+    def __init__(self, wfile: Any, lines: list[str]) -> None:
+        self.wfile = wfile
+        self.lines = lines
+
+    def __call__(self, line: str, is_stderr: bool) -> None:
+        if is_stderr:
+            return
+        self.lines.append(line)
+        chunk_data = json.dumps({"chunk": line + "\n"})
+        try:
+            self.wfile.write(f"event: chunk\ndata: {chunk_data}\n\n".encode())
+            self.wfile.flush()
+        except OSError:
+            pass
+
+
 def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
     """Send a message to the LLM and stream the response via SSE.
 
-    Runs ``llm prompt`` as a subprocess with ``--cid`` to continue the conversation.
-    The full response is sent as a single SSE "done" event (subprocess output is
-    not line-buffered, so true streaming requires the llm library directly -- this
-    approach keeps the implementation simple and avoids runtime dependencies).
+    Runs ``llm prompt`` via ConcurrencyGroup.run_process_to_completion with an
+    on_output callback that sends each stdout line as an SSE "chunk" event.
     """
+    from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+
     model_id = _get_default_chat_model()
 
-    # Build the llm command
     cmd = ["llm", "prompt", "-m", model_id, "--cid", conversation_id]
 
     system_prompt = _get_system_prompt()
@@ -514,38 +535,32 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
 
     cmd.append(message)
 
-    env = os.environ.copy()
+    env = dict(os.environ)
     if _LLM_USER_PATH:
         env["LLM_USER_PATH"] = _LLM_USER_PATH
+    env["PYTHONUNBUFFERED"] = "1"
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
-    except FileNotFoundError:
-        error_data = json.dumps({"error": "llm command not found"})
-        wfile.write(f"event: error\ndata: {error_data}\n\n".encode())
-        wfile.flush()
-        return
-    except subprocess.TimeoutExpired:
-        error_data = json.dumps({"error": "LLM request timed out"})
-        wfile.write(f"event: error\ndata: {error_data}\n\n".encode())
-        wfile.flush()
-        return
+    collected_lines: list[str] = []
+    callback = _SseOutputCallback(wfile, collected_lines)
+
+    with ConcurrencyGroup(name="web-chat-send") as cg:
+        result = cg.run_process_to_completion(
+            cmd,
+            timeout=300.0,
+            is_checked_after=False,
+            on_output=callback,
+            env=env,
+        )
 
     if result.returncode != 0:
-        _log(f"llm prompt failed (exit {result.returncode}): {result.stderr[:200]}")
-        error_data = json.dumps({"error": f"LLM failed: {result.stderr[:200]}"})
+        stderr_text = result.stderr[:200] if result.stderr else ""
+        _log(f"llm prompt failed (exit {result.returncode}): {stderr_text}")
+        error_data = json.dumps({"error": f"LLM failed: {stderr_text}"})
         wfile.write(f"event: error\ndata: {error_data}\n\n".encode())
         wfile.flush()
         return
 
-    full_text = result.stdout
-
-    # Send the response as a single chunk followed by done
-    if full_text:
-        chunk_data = json.dumps({"chunk": full_text})
-        wfile.write(f"event: chunk\ndata: {chunk_data}\n\n".encode())
-        wfile.flush()
-
+    full_text = "\n".join(collected_lines)
     done_data = json.dumps({"conversation_id": conversation_id, "full_text": full_text})
     wfile.write(f"event: done\ndata: {done_data}\n\n".encode())
     wfile.flush()
