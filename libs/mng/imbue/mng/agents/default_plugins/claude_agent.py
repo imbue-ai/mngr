@@ -877,8 +877,17 @@ class ClaudeAgent(BaseAgent):
                     "Use --copy or --clone instead."
                 )
 
-        if host.is_local and not mng_ctx.is_interactive and not mng_ctx.is_auto_approve:
-            # Determine trust path based on copy mode
+        config = self._get_claude_config()
+
+        # Validate dialogs for non-interactive local runs so we fail early with
+        # a clear message. Skip when trust_working_directory is True because
+        # provision() will auto-dismiss all dialogs in that case.
+        if (
+            host.is_local
+            and not mng_ctx.is_interactive
+            and not mng_ctx.is_auto_approve
+            and not config.trust_working_directory
+        ):
             copy_mode = options.git.copy_mode if options.git else None
             if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
                 source_path = self._find_git_source_path(mng_ctx.concurrency_group)
@@ -886,8 +895,6 @@ class ClaudeAgent(BaseAgent):
             else:
                 trust_path = self.work_dir
             check_claude_dialogs_dismissed(get_claude_config_path(), trust_path)
-
-        config = self._get_claude_config()
         if not config.check_installation:
             logger.debug("Skipped claude installation check (check_installation=False)")
             return
