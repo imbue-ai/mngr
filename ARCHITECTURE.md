@@ -427,15 +427,12 @@ The codebase follows a **stateless, functional, immutable** style:
 - `FrozenModel` for data, `MutableModel` only where mutation is required
 - `pathlib.Path` for all file paths
 
-See `style_guide.md` and `CLAUDE.md` for detailed coding rules.
-
 ## Build and CI/CD
 
 - **Build backend**: Hatchling
 - **Linting/formatting**: ruff (line length 119, double quotes)
 - **Import enforcement**: import-linter (layer contracts)
 - **Type checking**: ty, run via `uv run ty check`
-- **Coverage**: 80% minimum (hard), 81% warning threshold. Excluded: test files, TUI files, Modal/Docker providers.
 
 **GitHub Actions CI** (`.github/workflows/ci.yml`):
 - **test-integration**: 4 parallel groups with pytest-split, runs unit + integration tests
