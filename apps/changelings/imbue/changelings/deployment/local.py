@@ -301,11 +301,8 @@ def _create_mng_agent(
             "changeling=true",
             "--disable-plugin",
             "ttyd",
-            # this is only needed because of the below
+            # this is only needed because of the dangerous skip permissions below
             "--yes",
-            # FOLLOWUP: remove this
-            "--",
-            "--dangerously-skip-permissions",
         ]
 
         for env_var in pass_env:
@@ -326,6 +323,14 @@ def _create_mng_agent(
                     str(changeling_dir),
                 ]
             )
+
+        mng_command.extend(
+            [
+                # FOLLOWUP: remove this
+                "--",
+                "--dangerously-skip-permissions",
+            ]
+        )
 
         logger.debug("Running: {}", " ".join(mng_command))
 
