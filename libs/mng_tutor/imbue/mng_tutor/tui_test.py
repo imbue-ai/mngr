@@ -1,7 +1,6 @@
 """Unit tests for the tutor TUI."""
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
@@ -12,6 +11,11 @@ from urwid.widget.wimp import SelectableIcon
 
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentName
+
+# =============================================================================
+# Helpers
+# =============================================================================
+from imbue.mng_tutor.conftest import make_mock_loop as _make_mock_loop
 from imbue.mng_tutor.data_types import AgentExistsCheck
 from imbue.mng_tutor.data_types import AgentNotExistsCheck
 from imbue.mng_tutor.data_types import Lesson
@@ -25,26 +29,6 @@ from imbue.mng_tutor.tui import _get_current_step_index
 from imbue.mng_tutor.tui import _on_check_alarm
 from imbue.mng_tutor.tui import _refresh_display
 from imbue.mng_tutor.tui import _schedule_next_check
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
-class _CallTracker:
-    """Lightweight call tracker to replace MagicMock.assert_called patterns."""
-
-    def __init__(self) -> None:
-        self.call_count: int = 0
-
-    def __call__(self, *args: object, **kwargs: object) -> None:
-        self.call_count += 1
-
-
-def _make_mock_loop() -> Any:
-    """Create a lightweight loop substitute with a trackable set_alarm_in."""
-    tracker = _CallTracker()
-    return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker)
 
 
 def _make_step(heading: str = "Step", details: str = "Do something") -> LessonStep:

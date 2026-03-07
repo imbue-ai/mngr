@@ -19,6 +19,11 @@ from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import PluginName
 from imbue.mng.primitives import ProviderInstanceName
+
+# =============================================================================
+# Helpers
+# =============================================================================
+from imbue.mng_kanpan.conftest import make_mock_loop as _make_mock_loop
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSection
 from imbue.mng_kanpan.data_types import BoardSnapshot
@@ -62,26 +67,6 @@ from imbue.mng_kanpan.tui import _toggle_mark
 from imbue.mng_kanpan.tui import _unmark_all
 from imbue.mng_kanpan.tui import _unmark_focused
 from imbue.mng_kanpan.tui import _update_snapshot_mute
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-
-class _CallTracker:
-    """Lightweight call tracker to replace MagicMock.assert_called patterns."""
-
-    def __init__(self) -> None:
-        self.call_count: int = 0
-
-    def __call__(self, *args: object, **kwargs: object) -> None:
-        self.call_count += 1
-
-
-def _make_mock_loop() -> Any:
-    """Create a lightweight loop substitute with a trackable set_alarm_in."""
-    tracker = _CallTracker()
-    return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker)
 
 
 def _make_entry(
