@@ -1299,10 +1299,14 @@ class ClaudeAgent(BaseAgent):
                     f"mkdir -p {shlex.quote(str(dest_project_dir))}",
                     timeout_seconds=5.0,
                 )
-                host.execute_command(
+                result = host.execute_command(
                     f"rsync -a {shlex.quote(str(source_project_dir))}/ {shlex.quote(str(dest_project_dir))}/",
                     timeout_seconds=60.0,
                 )
+                if not result.success:
+                    raise PluginMngError(
+                        f"Failed to copy session data from {source_project_dir}: {result.stderr}"
+                    )
             else:
                 for file_path in source_project_dir.rglob("*"):
                     if file_path.is_file():
@@ -1335,10 +1339,14 @@ class ClaudeAgent(BaseAgent):
 
         with log_span("Transferring plugin data from {} to {}", source_plugin_dir, dest_plugin_dir):
             if host.is_local:
-                host.execute_command(
+                result = host.execute_command(
                     f"rsync -a {shlex.quote(str(source_plugin_dir))}/ {shlex.quote(str(dest_plugin_dir))}/",
                     timeout_seconds=60.0,
                 )
+                if not result.success:
+                    raise PluginMngError(
+                        f"Failed to transfer plugin data from {source_plugin_dir}: {result.stderr}"
+                    )
             else:
                 for file_path in source_plugin_dir.rglob("*"):
                     if file_path.is_file():
