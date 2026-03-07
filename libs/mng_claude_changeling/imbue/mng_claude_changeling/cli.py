@@ -65,9 +65,9 @@ def changelingdb() -> None:
 @click.argument("created_at")
 def insert(db_path: str, conversation_id: str, tags: str, created_at: str) -> None:
     """Insert a conversation record into the changeling_conversations table."""
-    from imbue.mng_claude_changeling.resources.conversation_db import _insert
+    from imbue.mng_claude_changeling.resources.conversation_db import db_insert
 
-    _insert(db_path, conversation_id, tags, created_at)
+    db_insert(db_path, conversation_id, tags, created_at)
 
 
 @changelingdb.command("lookup-model")
@@ -75,27 +75,27 @@ def insert(db_path: str, conversation_id: str, tags: str, created_at: str) -> No
 @click.argument("conversation_id")
 def lookup_model(db_path: str, conversation_id: str) -> None:
     """Look up the model for a conversation."""
-    from imbue.mng_claude_changeling.resources.conversation_db import _lookup_model
+    from imbue.mng_claude_changeling.resources.conversation_db import db_lookup_model
 
-    _lookup_model(db_path, conversation_id)
+    db_lookup_model(db_path, conversation_id)
 
 
 @changelingdb.command()
 @click.argument("db_path")
 def count(db_path: str) -> None:
     """Count conversations in the changeling_conversations table."""
-    from imbue.mng_claude_changeling.resources.conversation_db import _count
+    from imbue.mng_claude_changeling.resources.conversation_db import db_count
 
-    _count(db_path)
+    db_count(db_path)
 
 
 @changelingdb.command("max-rowid")
 @click.argument("db_path")
 def max_rowid(db_path: str) -> None:
     """Get the maximum rowid from the conversations table."""
-    from imbue.mng_claude_changeling.resources.conversation_db import _max_rowid
+    from imbue.mng_claude_changeling.resources.conversation_db import db_max_rowid
 
-    _max_rowid(db_path)
+    db_max_rowid(db_path)
 
 
 @changelingdb.command("poll-new")
@@ -103,9 +103,9 @@ def max_rowid(db_path: str) -> None:
 @click.argument("after_rowid")
 def poll_new(db_path: str, after_rowid: str) -> None:
     """Poll for a new conversation after the given rowid."""
-    from imbue.mng_claude_changeling.resources.conversation_db import _poll_new
+    from imbue.mng_claude_changeling.resources.conversation_db import db_poll_new
 
-    _poll_new(db_path, after_rowid)
+    db_poll_new(db_path, after_rowid)
 
 
 def get_all_commands() -> Sequence[click.Command]:

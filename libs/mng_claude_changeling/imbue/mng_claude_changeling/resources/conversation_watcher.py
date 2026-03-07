@@ -8,7 +8,7 @@ detection, with periodic mtime-based polling as a safety net.
 Tracked conversations are read from the changeling_conversations table
 in the llm database (created during provisioning).
 
-Usage: mng changeling-conversation-watcher
+Usage: mng changelingconversations
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)

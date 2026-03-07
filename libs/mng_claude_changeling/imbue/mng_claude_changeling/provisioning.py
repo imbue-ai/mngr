@@ -28,7 +28,7 @@ _SERVICE_SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat_ttyd_handler.sh",
 )
 
-# Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/
+# Python tool files to provision to $MNG_AGENT_STATE_DIR/commands/llm_tools/
 _LLM_TOOL_FILES: Final[tuple[str, ...]] = (
     "context_tool.py",
     "extra_context_tool.py",

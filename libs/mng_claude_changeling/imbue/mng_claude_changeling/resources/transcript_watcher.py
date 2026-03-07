@@ -17,7 +17,7 @@ derived from the source event's uuid, so re-processing the same input
 never produces duplicate output. The input file is append-only (populated
 by stream_transcript.sh which watches all session files).
 
-Usage: mng changeling-transcript-watcher
+Usage: mng changelingtranscript
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)

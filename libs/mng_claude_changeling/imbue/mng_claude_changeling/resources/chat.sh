@@ -14,7 +14,6 @@
 #   chat                             List conversations and show help hint
 #
 # Environment:
-#   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
 #   MNG_AGENT_STATE_DIR  - agent state directory (contains events/, commands/)
 #   MNG_AGENT_WORK_DIR   - agent work directory (contains talking/PROMPT.md)
 #   LLM_USER_PATH        - llm data directory (contains logs.db)

@@ -12,7 +12,7 @@ to the ``mng events`` command (run as a subprocess). This script handles:
 - Delivery envelope formatting (time since last message, rate warnings)
 - Subprocess lifecycle (restart on exit)
 
-Usage: mng changeling-event-watcher
+Usage: mng changelingevents
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
