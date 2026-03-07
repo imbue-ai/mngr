@@ -80,8 +80,7 @@ def _check_auth_cookie(
     cookie_name = get_cookie_name_for_agent(agent_id)
     cookie_value = cookies.get(cookie_name)
     if cookie_value is None:
-        # FIXME: put this back obviously (after we're done with the demo)
-        return True
+        return False
     verified = verify_signed_cookie_value(
         cookie_value=cookie_value,
         signing_key=signing_key,

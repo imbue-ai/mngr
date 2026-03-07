@@ -7,7 +7,7 @@ on:
     branches: ['**']
 
 jobs:
-  # Integration tests with coverage - runs on non-release branches
+  # Integration tests - runs on non-release branches
   test-integration:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
