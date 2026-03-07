@@ -8,12 +8,14 @@
 # Usage:
 #   ./scripts/launch_web_server.sh
 #
-# The script prints a URL that opens directly into a new conversation.
+# Then open: http://127.0.0.1:8787/chat?cid=NEW
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PORT=8787
 
 # Create a temporary workspace that mimics what a real agent would have.
 TMPDIR_BASE="${TMPDIR:-/tmp}"
@@ -38,32 +40,18 @@ mkdir -p "$LLM_DATA_DIR"
 AGENT_WORK_DIR="$WORK_DIR/workdir"
 mkdir -p "$AGENT_WORK_DIR"
 
+export UV_TOOL_BIN_DIR="$(dirname "$(which mng)")"
+export UV_TOOL_DIR="$(dirname "$UV_TOOL_BIN_DIR")"
 export MNG_AGENT_STATE_DIR="$AGENT_STATE_DIR"
 export MNG_AGENT_NAME="dev-agent"
 export MNG_HOST_NAME="localhost"
 export MNG_AGENT_WORK_DIR="$AGENT_WORK_DIR"
 export LLM_USER_PATH="$LLM_DATA_DIR"
+export WEB_SERVER_PORT="$PORT"
+
+echo ""
+echo "  http://127.0.0.1:${PORT}/chat?cid=NEW"
+echo ""
 
 cd "$REPO_ROOT"
-
-# Start the server in the background so we can extract the port.
-uv run python -m imbue.mng_claude_changeling.resources.web_server &
-SERVER_PID=$!
-
-# Wait for the server to register itself (writes port to servers/events.jsonl).
-SERVERS_FILE="$AGENT_STATE_DIR/events/servers/events.jsonl"
-for _ in $(seq 1 30); do
-    if [ -s "$SERVERS_FILE" ]; then
-        PORT=$(python3 -c "import json; print(json.loads(open('$SERVERS_FILE').readlines()[-1])['url'].split(':')[-1])")
-        echo ""
-        echo "  http://127.0.0.1:${PORT}/chat?cid=NEW"
-        echo ""
-        wait "$SERVER_PID"
-        exit $?
-    fi
-    sleep 0.1
-done
-
-echo "[launch] ERROR: server did not start within 3 seconds" >&2
-kill "$SERVER_PID" 2>/dev/null || true
-exit 1
+exec uv run python -m imbue.mng_claude_changeling.resources.web_server

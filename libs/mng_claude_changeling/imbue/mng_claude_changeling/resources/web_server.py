@@ -581,7 +581,25 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
 
     model_id = _get_default_chat_model()
 
-    cmd = ["stdbuf", "-oL", "llm", "prompt", "-m", model_id, "--cid", conversation_id]
+    cmd = ["stdbuf", "-oL", "llm", "prompt", "-m", model_id]
+
+    # Only pass --cid if the conversation already exists in llm's database.
+    # Synthetic conversation IDs (from _create_new_conversation) only exist in
+    # changeling_conversations, not in llm's own conversations table, so passing
+    # them to --cid would cause an error.
+    if LLM_DB_PATH and LLM_DB_PATH.is_file():
+        try:
+            conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+                if row:
+                    cmd.extend(["--cid", conversation_id])
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
 
     system_prompt = _get_system_prompt()
     if system_prompt:
@@ -1246,8 +1264,9 @@ def main() -> None:
     poll_thread = threading.Thread(target=_poll_agent_list_forever, daemon=True)
     poll_thread.start()
 
-    # Start HTTP server on a random port
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _WebServerHandler)
+    # Start HTTP server. Use WEB_SERVER_PORT if set, otherwise pick a random port.
+    requested_port = int(os.environ.get("WEB_SERVER_PORT", "0"))
+    server = ThreadingHTTPServer(("127.0.0.1", requested_port), _WebServerHandler)
     port = server.server_address[1]
 
     _log(f"Listening on port {port}")
