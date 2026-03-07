@@ -4,7 +4,8 @@
 Serves a web interface where all views (conversations, terminal) are displayed
 in iframes below a persistent navigation header:
 - Main page: shows the web chat for the most recent conversation (or conversation list if none)
-- Chat page: web-based chat with SSE streaming for real-time responses
+- Chat page: web-based chat with SSE streaming for real-time responses, with
+  optional Inworld WebRTC audio for TTS playback of streamed responses
 - Text Chat page: embeds a specific conversation's ttyd in an iframe (legacy terminal chat)
 - Conversations page: lists all conversations with links to open them
 - Terminal page: embeds the primary agent terminal in an iframe
@@ -14,6 +15,11 @@ The web chat uses SSE (Server-Sent Events) for streaming LLM responses and
 receives messages via POST requests from the frontend (plain JavaScript).
 It uses the llm library for calling LLMs and storing results.
 
+When INWORLD_API_KEY is set, the chat page includes an "Audio" toggle button
+that establishes a WebRTC connection to Inworld for real-time TTS. After each
+LLM response finishes streaming, the text is sent to Inworld via a data channel
+and played back as audio through the WebRTC audio track.
+
 The text chat (legacy) uses companion ttyd processes for terminal-based chat.
 
 Environment:
@@ -22,6 +28,7 @@ Environment:
     MNG_HOST_NAME        - Name of the host this agent runs on
     MNG_AGENT_WORK_DIR   - Agent work directory (contains changelings.toml)
     LLM_USER_PATH        - LLM data directory (contains logs.db)
+    INWORLD_API_KEY      - (optional) Inworld API key for WebRTC TTS audio
 """
 
 import hashlib
@@ -108,6 +115,11 @@ def _get_inworld_config() -> dict[str, Any]:
     Fetches ICE servers from Inworld's API and returns the full config
     needed by the browser to establish a WebRTC connection for TTS.
     Returns an empty config (no api_key) if INWORLD_API_KEY is not set.
+
+    Security: the API key is returned to the browser so it can establish
+    a direct WebRTC connection to Inworld. This server is intended to run
+    on localhost or within a restricted network (behind the mng forwarding
+    proxy with its own access controls), not exposed to the public internet.
     """
     if not INWORLD_API_KEY:
         return {"api_key": "", "ice_servers": [], "url": ""}
@@ -900,7 +912,7 @@ async function startAudio() {{
   btn.disabled = true;
   btn.textContent = "Connecting...";
   try {{
-    var resp = await fetch("api/config");
+    var resp = await fetch("api/audio/config");
     var cfg = await resp.json();
     if (!cfg.api_key) {{
       btn.textContent = "No API Key";
@@ -1043,7 +1055,7 @@ class _WebServerHandler(BaseHTTPRequestHandler):
             else:
                 messages = _read_message_history(conversation_id)
                 self._send_json({"messages": messages, "conversation_id": conversation_id})
-        elif path == "/api/config":
+        elif path == "/api/audio/config":
             self._send_json(_get_inworld_config())
         else:
             self.send_error(404)
