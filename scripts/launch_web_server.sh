@@ -38,6 +38,8 @@ mkdir -p "$LLM_DATA_DIR"
 AGENT_WORK_DIR="$WORK_DIR/workdir"
 mkdir -p "$AGENT_WORK_DIR"
 
+export UV_TOOL_BIN_DIR="$(dirname "$(which mng)")"
+export UV_TOOL_DIR="$(dirname "$UV_TOOL_BIN_DIR")"
 export MNG_AGENT_STATE_DIR="$AGENT_STATE_DIR"
 export MNG_AGENT_NAME="dev-agent"
 export MNG_HOST_NAME="localhost"
