@@ -2,13 +2,13 @@
 # Minimal script to launch the changeling web server for local UI iteration.
 #
 # This sets up a temporary directory structure that satisfies the web server's
-# env var requirements, then runs it directly via uv.
+# env var requirements, then runs it. The database tables are created
+# automatically by llm on first use.
 #
 # Usage:
 #   ./scripts/launch_web_server.sh
 #
-# The server will print its port to stderr. Open http://127.0.0.1:<port> in
-# your browser.
+# The script prints a URL that opens directly into a new conversation.
 
 set -euo pipefail
 
@@ -30,44 +30,13 @@ AGENT_STATE_DIR="$WORK_DIR/agent_state"
 mkdir -p "$AGENT_STATE_DIR/events/servers"
 mkdir -p "$AGENT_STATE_DIR/events/messages"
 
-# LLM data directory (holds logs.db)
+# LLM data directory (holds logs.db -- tables created automatically by llm)
 LLM_DATA_DIR="$WORK_DIR/llm_data"
 mkdir -p "$LLM_DATA_DIR"
-
-# Create a minimal llm logs.db with the changeling_conversations table so the
-# conversations page works without a real llm installation.
-sqlite3 "$LLM_DATA_DIR/logs.db" <<'SQL'
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    model TEXT
-);
-CREATE TABLE IF NOT EXISTS changeling_conversations (
-    conversation_id TEXT PRIMARY KEY,
-    tags TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS responses (
-    id TEXT PRIMARY KEY,
-    system TEXT,
-    prompt TEXT,
-    response TEXT,
-    model TEXT,
-    datetime_utc TEXT,
-    conversation_id TEXT,
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    token_details TEXT,
-    duration_ms INTEGER
-);
-SQL
 
 # Agent work directory (contains changelings.toml)
 AGENT_WORK_DIR="$WORK_DIR/workdir"
 mkdir -p "$AGENT_WORK_DIR"
-
-echo "[launch] Workspace: $WORK_DIR" >&2
-echo "[launch] Starting web server..." >&2
 
 export MNG_AGENT_STATE_DIR="$AGENT_STATE_DIR"
 export MNG_AGENT_NAME="dev-agent"
@@ -76,4 +45,25 @@ export MNG_AGENT_WORK_DIR="$AGENT_WORK_DIR"
 export LLM_USER_PATH="$LLM_DATA_DIR"
 
 cd "$REPO_ROOT"
-exec uv run python -m imbue.mng_claude_changeling.resources.web_server
+
+# Start the server in the background so we can extract the port.
+uv run python -m imbue.mng_claude_changeling.resources.web_server &
+SERVER_PID=$!
+
+# Wait for the server to register itself (writes port to servers/events.jsonl).
+SERVERS_FILE="$AGENT_STATE_DIR/events/servers/events.jsonl"
+for _ in $(seq 1 30); do
+    if [ -s "$SERVERS_FILE" ]; then
+        PORT=$(python3 -c "import json; print(json.loads(open('$SERVERS_FILE').readlines()[-1])['url'].split(':')[-1])")
+        echo ""
+        echo "  http://127.0.0.1:${PORT}/chat?cid=NEW"
+        echo ""
+        wait "$SERVER_PID"
+        exit $?
+    fi
+    sleep 0.1
+done
+
+echo "[launch] ERROR: server did not start within 3 seconds" >&2
+kill "$SERVER_PID" 2>/dev/null || true
+exit 1
