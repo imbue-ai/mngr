@@ -43,7 +43,7 @@ mkdir -p "$MNG_AGENT_STATE_DIR/events"
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="claude_background_tasks"
 _MNG_LOG_SOURCE="logs/claude_background_tasks"
-_MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/claude_background_tasks/events.jsonl"
+_MNG_LOG_FILE="$MNG_AGENT_STATE_DIR/events/logs/claude_background_tasks/events.jsonl"
 # shellcheck source=mng_log.sh
 source "$MNG_HOST_DIR/commands/mng_log.sh"
 

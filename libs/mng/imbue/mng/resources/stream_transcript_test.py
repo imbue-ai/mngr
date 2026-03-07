@@ -78,7 +78,7 @@ class ScriptRunner:
         self.host_dir.mkdir(parents=True)
         self.claude_projects_dir.mkdir(parents=True)
         (self.host_dir / "commands").mkdir(parents=True)
-        (self.host_dir / "events" / "logs" / "stream_transcript").mkdir(parents=True)
+        (self.agent_state_dir / "events" / "logs" / "stream_transcript").mkdir(parents=True)
 
         # Write stub mng_log.sh
         log_path = self.host_dir / "commands" / "mng_log.sh"
