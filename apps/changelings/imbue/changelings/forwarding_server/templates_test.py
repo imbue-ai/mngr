@@ -25,7 +25,21 @@ def test_render_landing_page_with_agents_lists_them_as_links() -> None:
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
     assert "No changelings are accessible" in html
-    assert "/agents/" not in html
+    assert f'href="/agents/' not in html
+
+
+def test_render_landing_page_includes_sw_cleanup_script_with_active_ids() -> None:
+    ids = (_AGENT_A, _AGENT_B)
+    html = render_landing_page(accessible_agent_ids=ids)
+    assert "getRegistrations" in html
+    assert f"'{_AGENT_A}'" in html
+    assert f"'{_AGENT_B}'" in html
+
+
+def test_render_landing_page_sw_cleanup_script_has_empty_list_when_no_agents() -> None:
+    html = render_landing_page(accessible_agent_ids=())
+    assert "getRegistrations" in html
+    assert "var activeIds = []" in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
