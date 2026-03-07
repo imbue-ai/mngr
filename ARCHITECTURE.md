@@ -29,17 +29,15 @@ apps/
   sculptor_web/        # Web interface for agent management (depends on: mng)
 ```
 
-All plugins (`mng_*`) depend on `mng`.
-
 ## Core Concepts
 
 The three fundamental abstractions are **agents**, **hosts**, and **providers**:
 
-- **Agent**: A process running in window 0 of a `mng-<agent_name>` tmux session. Each agent has a name, a unique ID, an agent type (claude, codex, etc.), a working directory, and a lifecycle state (stopped, running, waiting, replaced, done).
+- **Agent**: A process running in window 0 of a `mng-<agent_name>` tmux session. Each agent has a name, a unique ID, an agent type (claude, codex, etc.), a working directory, and a lifecycle state.
 
-- **Host**: An isolated sandbox where agents run. A host can be the local machine, a Docker container, a Modal sandbox, or any SSH-accessible machine. Multiple agents can share a single host. Hosts have their own lifecycle (building, starting, running, stopping, stopped, paused, crashed, failed, destroyed) and automatically pause when all their agents are idle.
+- **Host**: An isolated sandbox where agents run. A host can be the local machine, a Docker container, a Modal sandbox, or any SSH-accessible machine. Multiple agents can share a single host. Hosts have their own lifecycle state and automatically pause when all their agents are idle.
 
-- **Provider**: A configured endpoint that creates and manages hosts. Provider **backends** (local, docker, modal, ssh) are stateless factories; provider **instances** are configured endpoints created from backends (e.g., "my-aws-prod" using the "aws" backend with specific region/profile settings).
+- **Provider**: A configured endpoint that creates and manages hosts. Provider **backends** (local, docker, modal, ssh) are stateless factories; provider **instances** are configured endpoints created from backends (e.g., "my-modal-gpu" using the "modal" backend with specific GPU/memory settings).
 
 ### State Model
 
@@ -61,7 +59,6 @@ Agent state lives on the host filesystem:
 `mng` relies on naming conventions to identify managed resources:
 
 - Tmux sessions are named `mng-<agent_name>` (prefix customizable via `MNG_PREFIX`)
-- Agent state lives at `$MNG_HOST_DIR/agents/$MNG_AGENT_ID/`
 - Host state lives at `$MNG_HOST_DIR/` (default: `~/.mng`)
 - IDs are base16-encoded UUID4s with type prefixes (e.g., `agent-abc123...`, `host-def456...`)
 - Names are human-readable strings containing only letters, numbers, and hyphens
@@ -98,34 +95,13 @@ Each layer may only import from layers below it. This is checked in CI.
 
 ### Key Interfaces
 
-**`AgentInterface`** (`interfaces/agent.py`) -- the abstract agent contract:
-- Identity: `id`, `name`, `agent_type`, `work_dir`, `create_time`, `host_id`
-- Commands: `assemble_command()`, `get_command()`, `get_expected_process_name()`
-- State: `is_running()`, `get_lifecycle_state()`, `get_permissions()`, `get_labels()`
-- Interaction: `send_message()`, `capture_pane_content()`, `wait_for_ready_signal()`
-- Activity: `get_reported_activity_time()`, `record_activity()`
-- Provisioning: `on_before_provisioning()`, `get_provision_file_transfers()`, `provision()`, `on_after_provisioning()`
-- Destruction: `on_destroy()`
+All interfaces live in `interfaces/`. Read the source files for method-level details.
 
-**`HostInterface`** (`interfaces/host.py`) -- the abstract host contract:
-- Identity: `id`, `is_local`, `host_dir`, `get_name()`
-- State: `get_state()`, `get_certified_data()`, `get_activity_config()`
-- Extended by `OnlineHostInterface` for hosts that are currently accessible, adding: `execute_command()`, `read_file()`, `write_file()`, `get_agents()`, `create_agent_work_dir()`, `provision_agent()`, `start_agents()`, `stop_agents()`, etc.
-
-**`ProviderInstanceInterface`** (`interfaces/provider_instance.py`) -- manages host lifecycle:
-- Capabilities: `supports_snapshots`, `supports_shutdown_hosts`, `supports_volumes`
-- Lifecycle: `create_host()`, `stop_host()`, `start_host()`, `destroy_host()`
-- Discovery: `get_host()`, `list_hosts()`, `load_agent_refs()`
-- Snapshots: `create_snapshot()`, `list_snapshots()`, `delete_snapshot()`
-- Volumes: `list_volumes()`, `delete_volume()`
-
-**`ProviderBackendInterface`** (`interfaces/provider_backend.py`) -- stateless factory:
-- `get_name()`, `get_description()`, `get_config_class()`, `build_provider_instance()`
-
-**`Volume`** (`interfaces/volume.py`) -- persistent storage abstraction:
-- File operations: `listdir()`, `read_file()`, `write_files()`, `remove_file()`, `remove_directory()`
-- Scoping: `scoped(prefix)` returns a new Volume with path prefix prepended
-- Concrete implementations: ModalVolume, LocalVolume (inherit from `BaseVolume`)
+- **`AgentInterface`** (`agent.py`) -- agent identity, command assembly, lifecycle state, user interaction (send message, capture pane), activity tracking, provisioning lifecycle, and destruction.
+- **`HostInterface`** (`host.py`) -- host identity and state. Extended by `OnlineHostInterface` for hosts that are currently accessible (command execution, file I/O, agent management, provisioning).
+- **`ProviderInstanceInterface`** (`provider_instance.py`) -- host lifecycle management (create, stop, start, destroy), discovery, snapshots, and volumes.
+- **`ProviderBackendInterface`** (`provider_backend.py`) -- stateless factory that creates provider instances from config.
+- **`Volume`** (`volume.py`) -- persistent storage abstraction with file operations and path scoping. Concrete implementations: ModalVolume, LocalVolume.
 
 ### Core Domain Types
 
@@ -164,39 +140,14 @@ Configuration is loaded hierarchically. Later sources override earlier ones, wit
 5. Environment variables (`MNG_PREFIX`, `MNG_HOST_DIR`, `MNG_ROOT_NAME`, `MNG_COMMANDS_*`)
 6. CLI arguments (highest precedence)
 
-The `on_load_config` plugin hook can modify the raw config dict before validation, allowing plugins to inject defaults or transform config.
-
 **Key config types** (`config/data_types.py`):
 
-- **`MngConfig`** -- root configuration model. Key fields:
-  - `prefix`: resource naming prefix (default: `"mng-"`)
-  - `default_host_dir`: base directory for mng data (default: `~/.mng`)
-  - `agent_types`: custom agent type definitions (map of name -> `AgentTypeConfig`)
-  - `providers`: provider instance definitions (map of name -> `ProviderInstanceConfig`)
-  - `plugins`: plugin configurations (map of name -> `PluginConfig`)
-  - `commands`: default CLI parameter values per command (map of command name -> `CommandDefaults`)
-  - `create_templates`: named presets for the create command (map of name -> `CreateTemplate`)
-  - `pre_command_scripts`: shell commands to run before CLI commands
-  - `logging`: file/console log levels, log rotation settings
-  - `enabled_backends`: whitelist of provider backends (empty = all enabled)
-  - `connect_command`: custom command for agent connection (overrides built-in tmux attach)
-
-- **`AgentTypeConfig`** -- defines a custom or overridden agent type:
-  - `parent_type`: base type to inherit from (enables type inheritance)
-  - `command`: command to run for this agent type
-  - `cli_args`: additional CLI arguments (merged via concatenation)
-  - `permissions`: explicit permission list (replaces parent's permissions)
-
-- **`ProviderInstanceConfig`** -- per-provider instance settings:
-  - `backend`: which provider backend to use
-  - `is_enabled`: toggle without removing config
-  - Subclasses add backend-specific fields (e.g., Modal adds `gpu`, `cpu`, `memory`, `image`, `volumes`)
-
+- **`MngConfig`** -- root configuration model covering prefix, host dir, agent types, providers, plugins, command defaults, create templates, logging, and more. See the source for all fields.
+- **`AgentTypeConfig`** -- defines a custom or overridden agent type with parent type inheritance, command, CLI args, and permissions.
+- **`ProviderInstanceConfig`** -- per-provider instance settings. Subclasses add backend-specific fields (e.g., Modal adds GPU, CPU, memory, image, volumes).
 - **`MngContext`** -- the resolved runtime context passed through the application. Combines `MngConfig`, `PluginManager`, profile directory, concurrency group, and flags like `is_interactive` and `is_auto_approve`.
 
 **Environment variable overrides** for command defaults use the pattern `MNG_COMMANDS_<COMMAND>_<PARAM>=<value>` (e.g., `MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX=agent/`).
-
-**`MNG_ROOT_NAME`** (default: `"mng"`) controls the config file directory name (`.mng/`) and default prefix (`mng-`). This allows multiple independent mng installations on the same machine.
 
 ### CLI Commands
 
@@ -218,17 +169,7 @@ Commands follow a consistent pattern: CliOptions class -> @click.command -> setu
 
 ### Event Stream System
 
-`mng` has a structured event logging and streaming subsystem for observability of agent and host activity.
-
-**Foundation** (`imbue_common/event_envelope.py`): `EventEnvelope` is a shared base class (in `imbue_common`) for all structured event records. Every event written to a `logs/<source>/events.jsonl` file includes envelope fields: `timestamp` (ISO 8601 with nanosecond precision), `type`, `event_id`, and `source`. Subclasses add domain-specific fields. `LogEvent` extends this for diagnostic logging from both Python and bash scripts.
-
-**Event sources on the host**: Agents and hosts emit events to JSONL files under `$MNG_HOST_DIR/logs/<source>/events.jsonl`. Sources are discovered by scanning subdirectories. Files support rotation (`events.jsonl.1`, `events.jsonl.2`, etc.). A `stream_transcript.sh` script streams Claude session transcripts into this format with crash-recovery via UUID-based offset reconciliation.
-
-**Discovery events** (`api/discovery_events.py`): Structured events for host/agent discovery state changes (`AGENT_DISCOVERED`, `HOST_DISCOVERED`, `AGENT_DESTROYED`, `HOST_DESTROYED`, `DISCOVERY_FULL`). These extend `EventEnvelope` and are written during the discovery process.
-
-**Streaming API** (`api/events.py`): `EventsTarget` resolves an agent or host to its event sources, supporting three access strategies: direct host access (SSH), volume-based reads (for offline hosts with Modal volumes), and polling for online/offline transitions. `stream_all_events()` merges events from multiple sources in timestamp order with optional CEL expression filtering.
-
-**CLI** (`cli/events.py`): `mng events` (experimental) streams events in real-time (`--follow`) or historical, with CEL-based `--filter`, `--head`/`--tail` pagination, and source selection.
+Agents and hosts emit structured events to JSONL files under `$MNG_HOST_DIR/logs/`. All events extend `EventEnvelope` (from `imbue_common`), which provides timestamp, type, event ID, and source fields. Events can be streamed and filtered via `mng events` (experimental). The streaming API (`api/events.py`) supports direct host access, volume-based reads for offline hosts, and timestamp-ordered merging across sources with CEL expression filtering.
 
 ## Plugin System
 
@@ -246,14 +187,9 @@ my_plugin = "my_package.plugin"
 
 ### Plugin Manager Lifecycle
 
-1. `create_plugin_manager()` creates `pluggy.PluginManager("mng")`
-2. Hookspecs registered from `plugins/hookspecs.py`
-3. Disabled plugins blocked via `pm.set_blocked()` (prevents hooks from firing without removing the plugin object, so `mng plugin list` still shows them)
-4. External plugins loaded via `pm.load_setuptools_entrypoints("mng")`
-5. Default plugins registered via `pm.register()` for built-in agent types and provider backends
-6. All registries populated via `load_all_registries(pm)` (calls registration hooks across both tiers)
+At startup, `create_plugin_manager()` loads hookspecs from `plugins/hookspecs.py`, blocks disabled plugins via `pm.set_blocked()`, discovers external plugins via setuptools entry points, registers built-in defaults, and populates all registries by calling registration hooks across both tiers.
 
-### Hook Categories
+### Hooks and Execution Flows
 
 **Registration hooks** (called once at startup):
 - `register_agent_type` -- add new agent types (returns name, class, config)
@@ -261,36 +197,15 @@ my_plugin = "my_package.plugin"
 - `register_cli_commands` -- add new CLI commands (returns list of Click commands)
 - `register_cli_options` -- add options to existing commands (returns option group mapping)
 
-**Program lifecycle hooks** (called during execution):
-- `on_startup`, `on_before_command`, `on_after_command`, `on_error`, `on_shutdown`
-- `on_load_config` -- modify config dict before validation
-- `override_command_options` -- transform parsed args before execution
+**Program lifecycle hooks** (called in this order for every command):
+`on_load_config` -> `override_command_options` -> `on_startup` -> `on_before_command` (can abort) -> command executes -> `on_after_command` (or `on_error` on exception) -> `on_shutdown`
 
-**Host lifecycle hooks**: `on_before_host_create`, `on_host_created`, `on_before_host_destroy`, `on_host_destroyed`
+**Agent create flow** (hooks fired in order during `mng create`):
+`on_before_create` (chained, can modify args) -> `on_before_host_create` -> provider creates host -> `on_host_created` -> `on_before_initial_file_copy` -> files copied -> `on_after_initial_file_copy` -> `on_agent_state_dir_created` -> `on_before_provisioning` -> agent provisioning -> `on_after_provisioning` -> `on_agent_created`
 
-**Agent lifecycle hooks**: `on_before_initial_file_copy`, `on_after_initial_file_copy`, `on_agent_state_dir_created`, `on_before_provisioning`, `on_after_provisioning`, `on_agent_created`, `on_before_agent_destroy`, `on_agent_destroyed`
+**Destroy hooks**: `on_before_agent_destroy`, `on_agent_destroyed`, `on_before_host_destroy`, `on_host_destroyed`
 
 **Deployment hooks**: `get_files_for_deploy`, `modify_env_vars_for_deploy`
-
-**Create hooks**: `on_before_create` -- inspect/modify create arguments (chained: each hook receives output from previous)
-
-### Command Execution Flow
-
-1. Click parses arguments -> creates CliOptions object
-2. `setup_command_context()` loads config, creates MngContext, initializes ConcurrencyGroup
-3. Plugin hooks: `on_before_command()` (can abort)
-4. Command delegates to API layer
-5. Plugin hooks: `on_after_command()` on success, `on_error()` on exception
-6. Cleanup via `on_shutdown()`
-
-### Agent Create Flow
-
-1. `on_before_create()` -- plugins inspect/modify arguments
-2. `on_before_host_create()` -> provider creates host -> `on_host_created()`
-3. `on_before_initial_file_copy()` -> files copied -> `on_after_initial_file_copy()`
-4. `on_agent_state_dir_created()`
-5. `on_before_provisioning()` -> agent provisioning (class methods) -> `on_after_provisioning()`
-6. `on_agent_created()`
 
 ### Writing a Plugin
 
@@ -300,15 +215,7 @@ See [libs/mng/docs/concepts/plugins.md](libs/mng/docs/concepts/plugins.md#writin
 
 ### libs/imbue_common
 
-Core types and patterns shared across all projects:
-
-- **`primitives.py`** -- constrained types: `NonEmptyStr`, `Probability`, `PositiveInt`, etc.
-- **`ids.py`** -- `RandomId` base class for UUID4-based identifiers with type prefixes
-- **`frozen_model.py`** -- `FrozenModel(BaseModel)`: immutable Pydantic models with `model_copy_update()`
-- **`mutable_model.py`** -- `MutableModel`: for cases where mutation is necessary (used sparingly)
-- **`enums.py`** -- `UpperCaseStrEnum` base class
-- **`event_envelope.py`** -- `EventEnvelope` base class for structured event log records (see Event Stream System)
-- **`model_update.py`** -- type-safe model update utilities (`to_update_dict()`, `FieldProxy`)
+Foundation types shared across all projects. Contains the primitives, IDs, model base classes, and enums described in Core Domain Types, plus `EventEnvelope` (see Event Stream System) and `model_update.py` (type-safe model update utilities).
 
 ### libs/concurrency_group
 
@@ -342,13 +249,6 @@ Web interface for managing AI agents programmatically. FastAPI-based with python
 3. **Safe** -- prioritize safety and reliability; avoid data loss.
 4. **Personal** -- serve only the user; no data sharing without explicit permission.
 
-## Style and Conventions
-
-The codebase follows a **stateless, functional, immutable** style:
-
-- `FrozenModel` for data, `MutableModel` only where mutation is required
-- `pathlib.Path` for all file paths
-
 ## Build and CI/CD
 
 - **Build backend**: Hatchling
@@ -356,11 +256,7 @@ The codebase follows a **stateless, functional, immutable** style:
 - **Import enforcement**: import-linter (layer contracts)
 - **Type checking**: ty, run via `uv run ty check`
 
-**GitHub Actions CI** (`.github/workflows/ci.yml`):
-- **test-integration**: 4 parallel groups with pytest-split, runs unit + integration tests
-- **test-acceptance**: 16 parallel groups, 90-second timeout, requires Modal credentials
-- **test-release**: 12 parallel groups on release branch only
-- **cleanup-modal-environments**: deletes stale Modal test environments (>1 hour old)
+**GitHub Actions CI** (`.github/workflows/ci.yml`): runs integration, acceptance, and release test suites in parallel groups. Acceptance tests require Modal credentials. Release tests run on the release branch only.
 
 ## Key Technologies
 
