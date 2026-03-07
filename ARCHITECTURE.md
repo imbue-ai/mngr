@@ -29,8 +29,6 @@ apps/
   sculptor_web/        # Web interface for agent management (depends on: mng, python-fasthtml)
 ```
 
-Dependencies flow cleanly from applications -> plugins -> core framework -> common libraries, with no circular dependencies. This is enforced by import-linter in CI.
-
 ## Core Concepts
 
 The three fundamental abstractions are **agents**, **hosts**, and **providers**:
