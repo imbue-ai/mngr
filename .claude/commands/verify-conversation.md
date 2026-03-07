@@ -1,5 +1,6 @@
 ---
 description: Review the conversation transcript for behavioral issues (misleading behavior, disobeyed instructions, instructions worth saving).
+model: opus[1m]
 allowed-tools: Bash:*, Read, Write, Agent
 ---
 
