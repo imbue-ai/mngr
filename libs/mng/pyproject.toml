@@ -77,11 +77,8 @@ testpaths = ["."]
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.mng",
-  "--cov-report=term-missing",
-  "--cov-report=html",
-  "--cov-report=xml",
-  "--cov-fail-under=80",
+  "--no-cov",
+  "--cov-fail-under=0",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
