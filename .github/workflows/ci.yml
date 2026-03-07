@@ -115,7 +115,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run acceptance tests
-        run: export IS_ACCEPTANCE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0 -m "acceptance"' --no-cov -v --tb=short --splits 18 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+        run: export IS_ACCEPTANCE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0 -m "acceptance"' --override-ini='testpaths=apps libs scripts test_meta_ratchets.py' --no-cov -v --tb=short --splits 18 --group ${{ matrix.group }} --splitting-algorithm=least_duration
 
       - name: Upload test timing data
         if: always()
@@ -164,7 +164,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run release tests
-        run: export IS_RELEASE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+        run: export IS_RELEASE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --override-ini='testpaths=apps libs scripts test_meta_ratchets.py' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
 
       - name: Upload test timing data
         if: always()
