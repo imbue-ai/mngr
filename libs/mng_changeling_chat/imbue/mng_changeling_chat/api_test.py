@@ -16,7 +16,6 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng_changeling_chat.api import ChatCommandError
 from imbue.mng_changeling_chat.api import _build_chat_env_vars
-from imbue.mng_changeling_chat.api import _build_chat_script_path
 from imbue.mng_changeling_chat.api import _build_conversation_db_and_messages_paths
 from imbue.mng_changeling_chat.api import _build_remote_chat_script
 from imbue.mng_changeling_chat.api import _load_env_file_into_dict
@@ -25,16 +24,6 @@ from imbue.mng_changeling_chat.api import list_conversations_on_agent
 from imbue.mng_changeling_chat.testing import TestAgent
 from imbue.mng_changeling_chat.testing import create_conversation_events
 from imbue.mng_changeling_chat.testing import create_message_events
-
-# =========================================================================
-# Tests for _build_chat_script_path
-# =========================================================================
-
-
-def test_build_chat_script_path() -> None:
-    result = _build_chat_script_path(Path("/home/user/.mng"))
-    assert result == "/home/user/.mng/commands/chat.sh"
-
 
 # =========================================================================
 # Tests for _build_chat_env_vars
@@ -65,7 +54,7 @@ def test_build_remote_chat_script_uses_shlex_quote_for_env_values(
 ) -> None:
     host, agent = local_host_and_agent
 
-    script = _build_remote_chat_script(host.host_dir, agent, host, ["--new"])
+    script = _build_remote_chat_script(agent, host, ["--new"])
 
     env_vars = _build_chat_env_vars(agent, host)
     for key, value in env_vars.items():
@@ -77,7 +66,7 @@ def test_build_remote_chat_script_execs_chat_sh(
 ) -> None:
     host, agent = local_host_and_agent
 
-    script = _build_remote_chat_script(host.host_dir, agent, host, ["--new"])
+    script = _build_remote_chat_script(agent, host, ["--new"])
 
     expected_chat_path = str(host.host_dir / "commands" / "chat.sh")
     assert f"exec {shlex.quote(expected_chat_path)} --new" in script
@@ -90,7 +79,7 @@ def test_build_remote_chat_script_quotes_conversation_id_with_special_chars(
     host, agent = local_host_and_agent
     dangerous_id = "conv-123; rm -rf /"
 
-    script = _build_remote_chat_script(host.host_dir, agent, host, ["--resume", dangerous_id])
+    script = _build_remote_chat_script(agent, host, ["--resume", dangerous_id])
 
     expected_quoted = shlex.quote(dangerous_id)
     assert expected_quoted in script
@@ -373,7 +362,7 @@ def test_build_remote_chat_script_sources_env_files(
 ) -> None:
     host, agent = local_host_and_agent
 
-    script = _build_remote_chat_script(host.host_dir, agent, host, ["--new"])
+    script = _build_remote_chat_script(agent, host, ["--new"])
 
     # Should source env files before setting MNG_ vars
     assert "set -a" in script

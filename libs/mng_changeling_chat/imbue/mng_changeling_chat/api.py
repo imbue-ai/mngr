@@ -83,9 +83,12 @@ def _load_env_file_into_dict(env_path: Path, env: dict[str, str]) -> None:
 
 
 @pure
-def _build_chat_script_path(host_dir: Path) -> str:
-    """Build the path to the chat.sh script on the host."""
-    return str(host_dir / "commands" / "chat.sh")
+def _build_chat_script_path(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+) -> str:
+    agent_state_dir = get_agent_state_dir(agent, host)
+    return str(agent_state_dir / "commands" / "chat.sh")
 
 
 @pure
@@ -171,7 +174,6 @@ print(json.dumps(result))
 
 @pure
 def _build_remote_chat_script(
-    host_dir: Path,
     agent: AgentInterface,
     host: OnlineHostInterface,
     chat_args: list[str],
@@ -181,7 +183,7 @@ def _build_remote_chat_script(
     Sources the host and agent env files (for API keys etc.), sets the
     required MNG_ environment variables, and then execs chat.sh.
     """
-    chat_script = _build_chat_script_path(host_dir)
+    chat_script = _build_chat_script_path(agent, host)
     env_vars = _build_chat_env_vars(agent, host)
     host_env_path, agent_env_path = _build_env_file_paths(agent, host)
 
@@ -211,7 +213,7 @@ def run_chat_on_agent(  # pragma: no cover
     logger.info("Starting chat session...")
 
     if host.is_local:
-        chat_script = _build_chat_script_path(host.host_dir)
+        chat_script = _build_chat_script_path(agent, host)
 
         if not Path(chat_script).exists():
             raise ChatCommandError(
@@ -238,7 +240,7 @@ def run_chat_on_agent(  # pragma: no cover
         ssh_args = build_ssh_base_args(host, is_unknown_host_allowed=is_unknown_host_allowed)
 
         # Build the remote command script (sources env files + runs chat.sh)
-        remote_script = _build_remote_chat_script(host.host_dir, agent, host, chat_args)
+        remote_script = _build_remote_chat_script(agent, host, chat_args)
         ssh_args.extend(["-t", "bash -c " + shlex.quote(remote_script)])
 
         logger.debug("Running SSH chat command: {}", ssh_args)
