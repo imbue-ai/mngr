@@ -4,13 +4,11 @@
 # Outputs the raw .jsonl content for every session ID in chronological order.
 # No filtering or formatting is applied -- callers can pipe to jq or grep.
 #
-# Requires:
-#   MNG_AGENT_STATE_DIR  - the agent state directory (contains claude_session_id_history)
-#
 # Session IDs are read from $MNG_AGENT_STATE_DIR/claude_session_id_history
-# (one per line, format: "session_id source"). Falls back to
-# $MNG_AGENT_STATE_DIR/claude_session_id or $MAIN_CLAUDE_SESSION_ID if the
-# history file is missing.
+# (one per line, format: "session_id source"). If $CLAUDE_CODE_SESSION_ID is
+# set and not already in the history, it is appended so the current session's
+# transcript is always included (this also covers plain Claude Code sessions
+# without the mng agent infrastructure).
 
 set -euo pipefail
 
@@ -35,17 +33,19 @@ if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_sessio
     done < "$MNG_AGENT_STATE_DIR/claude_session_id_history"
 fi
 
-# Fall back to single current session ID if no history available
-if [ ${#_SESSION_IDS[@]} -eq 0 ]; then
-    _FALLBACK_SID="${MAIN_CLAUDE_SESSION_ID:-}"
-    if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_session_id" ]; then
-        _MNG_READ_SID=$(cat "$MNG_AGENT_STATE_DIR/claude_session_id")
-        if [ -n "$_MNG_READ_SID" ]; then
-            _FALLBACK_SID="$_MNG_READ_SID"
+# Ensure the current Claude Code session is included (covers plain sessions
+# without mng agent infrastructure, and handles the edge case where the
+# SessionStart hook hasn't fired yet for the current session).
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    _ALREADY_PRESENT=false
+    for sid in "${_SESSION_IDS[@]}"; do
+        if [ "$sid" = "$CLAUDE_CODE_SESSION_ID" ]; then
+            _ALREADY_PRESENT=true
+            break
         fi
-    fi
-    if [ -n "$_FALLBACK_SID" ]; then
-        _SESSION_IDS+=("$_FALLBACK_SID")
+    done
+    if [ "$_ALREADY_PRESENT" = false ]; then
+        _SESSION_IDS+=("$CLAUDE_CODE_SESSION_ID")
     fi
 fi
 
