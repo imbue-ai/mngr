@@ -72,12 +72,12 @@ def test_get_local_config_name_returns_correct_path() -> None:
 # =============================================================================
 
 
-def test_read_default_command_returns_create_when_no_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """read_default_command should return 'create' when no config files exist."""
+def test_read_default_command_returns_none_when_no_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """read_default_command should return None when no config files exist."""
 
     monkeypatch.setenv("MNG_HOST_DIR", str(tmp_path / "nonexistent"))
     monkeypatch.setenv("MNG_ROOT_NAME", "mng-test-nocfg")
-    assert read_default_command("mng") == "create"
+    assert read_default_command("mng") is None
 
 
 def test_read_default_command_reads_from_project_config(
@@ -122,8 +122,8 @@ def test_read_default_command_independent_command_names(
 
     assert read_default_command("mng") == "list"
     assert read_default_command("snapshot") == "destroy"
-    # Unconfigured groups still get "create"
-    assert read_default_command("other") == "create"
+    # Unconfigured groups get None (use compile-time default)
+    assert read_default_command("other") is None
 
 
 # =============================================================================

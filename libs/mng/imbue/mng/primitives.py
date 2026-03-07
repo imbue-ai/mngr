@@ -314,6 +314,10 @@ class SnapshotName(str):
         )
 
 
+class CertifiedDataError(Exception):
+    """Raised when certified_data contains an unexpected type for a field."""
+
+
 class SSHInfo(FrozenModel):
     """SSH connection information for a remote host."""
 
@@ -391,6 +395,17 @@ class DiscoveredAgent(FrozenModel):
         """Return the list of permissions assigned to this agent."""
         permissions_value = self.certified_data.get("permissions", [])
         return tuple(Permission(p) for p in permissions_value)
+
+    @property
+    def created_branch_name(self) -> str | None:
+        """Return the git branch name that was created for this agent, or None if not set."""
+        match self.certified_data.get("created_branch_name"):
+            case str(value):
+                return value
+            case None:
+                return None
+            case unexpected:
+                raise CertifiedDataError(f"Expected str or None for created_branch_name, got {type(unexpected)}")
 
     @property
     def labels(self) -> dict[str, str]:
