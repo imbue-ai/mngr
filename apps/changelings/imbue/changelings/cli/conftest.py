@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Generator
 from uuid import uuid4
@@ -6,6 +7,23 @@ import pytest
 
 from imbue.mng.utils.testing import isolate_home
 from imbue.mng.utils.testing import isolate_tmux_server
+
+
+@pytest.fixture(autouse=True)
+def fake_mng_on_path(tmp_path: Path) -> None:
+    """Place a fake mng binary first on PATH so deploy tests don't spawn real agents.
+
+    The CLI deploy tests verify prompting behavior and argument parsing, not
+    actual deployment. The real `mng create` spawns tmux sessions, provisions
+    agents, etc. and takes >10s, causing timeouts. This fake binary exits
+    immediately with success.
+    """
+    bin_dir = tmp_path / "fake_mng_bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake_mng = bin_dir / "mng"
+    fake_mng.write_text("#!/bin/bash\nexit 0\n")
+    fake_mng.chmod(0o755)
+    os.environ["PATH"] = f"{bin_dir}:{os.environ.get('PATH', '')}"
 
 
 @pytest.fixture(autouse=True)
