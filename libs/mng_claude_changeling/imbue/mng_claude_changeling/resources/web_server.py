@@ -935,7 +935,7 @@ _CHAT_CSS: Final[str] = """
     .message.assistant { align-items: flex-start; }
     .message-bubble {
       padding: 10px 14px; border-radius: 12px;
-      font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;
+      font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;
     }
     .message.user .message-bubble {
       background: rgb(235, 233, 228); color: rgb(51, 51, 51); border-bottom-right-radius: 4px;
