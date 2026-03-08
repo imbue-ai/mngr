@@ -570,6 +570,21 @@ class _SseOutputCallback:
             self.write_failed = True
 
 
+def _find_latest_conversation_id() -> str | None:
+    """Find the conversation_id of the most recently inserted llm response."""
+    if not LLM_DB_PATH or not LLM_DB_PATH.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT conversation_id FROM responses ORDER BY rowid DESC LIMIT 1").fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
     """Send a message to the LLM and stream the response via SSE.
 
@@ -579,15 +594,15 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
     """
     from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 
+    is_new_conversation = conversation_id == "NEW"
     model_id = _get_default_chat_model()
 
     cmd = ["stdbuf", "-oL", "llm", "prompt", "-m", model_id]
 
-    # Only pass --cid if the conversation already exists in llm's database.
-    # Synthetic conversation IDs (from _create_new_conversation) only exist in
-    # changeling_conversations, not in llm's own conversations table, so passing
-    # them to --cid would cause an error.
-    if LLM_DB_PATH and LLM_DB_PATH.is_file():
+    # Pass --cid to continue an existing conversation. For new conversations
+    # (cid=NEW), omit --cid so llm creates a new one; we discover its real ID
+    # after the prompt completes.
+    if not is_new_conversation and LLM_DB_PATH and LLM_DB_PATH.is_file():
         try:
             conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
             try:
@@ -670,6 +685,35 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
             wfile.flush()
         except OSError as e:
             _log(f"[chat-stream] SSE remainder write failed: {e}")
+
+    # For new conversations, discover the real conversation_id that llm created
+    # and register it in changeling_conversations so it appears in the list and
+    # persists across reloads.
+    if is_new_conversation and result.returncode == 0:
+        real_cid = _find_latest_conversation_id()
+        if real_cid:
+            _log(f"[chat-stream] new conversation created by llm: {real_cid}")
+            conversation_id = real_cid
+            if LLM_DB_PATH:
+                try:
+                    conn = sqlite3.connect(str(LLM_DB_PATH))
+                    try:
+                        conn.execute(
+                            "CREATE TABLE IF NOT EXISTS changeling_conversations ("
+                            "conversation_id TEXT PRIMARY KEY, "
+                            "tags TEXT NOT NULL DEFAULT '{}', "
+                            "created_at TEXT NOT NULL)"
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO changeling_conversations "
+                            "(conversation_id, tags, created_at) VALUES (?, ?, ?)",
+                            (real_cid, '{"name":"(new chat)"}', _iso_timestamp()),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                except sqlite3.Error as e:
+                    _log(f"[chat-stream] failed to register new conversation: {e}")
 
     done_data = json.dumps({"conversation_id": conversation_id, "full_text": full_text_from_result})
     _log("[chat-stream] sending done event")
@@ -856,8 +900,9 @@ function sendMessage() {{
                 currentBubble.textContent = fullText;
                 scrollToBottom();
               }} else if (eventType === "done") {{
-                if (data.conversation_id) {{
+                if (data.conversation_id && data.conversation_id !== conversationId) {{
                   conversationId = data.conversation_id;
+                  history.replaceState(null, "", "chat?cid=" + encodeURIComponent(conversationId));
                 }}
               }} else if (eventType === "error") {{
                 if (!currentBubble) {{
@@ -1161,9 +1206,6 @@ class _WebServerHandler(BaseHTTPRequestHandler):
             conversation_id = (query.get("cid") or [""])[0]
             if not conversation_id:
                 self._send_redirect("conversations")
-            elif conversation_id == "NEW":
-                new_cid = _create_new_conversation()
-                self._send_redirect(f"chat?cid={new_cid}")
             else:
                 self._send_html(_render_web_chat_page(agent_name, conversation_id))
         elif path == "/text_chat":
@@ -1215,10 +1257,6 @@ class _WebServerHandler(BaseHTTPRequestHandler):
             if not conversation_id or not message:
                 self._send_json({"error": "Missing conversation_id or message"}, status=400)
                 return
-
-            # If conversation_id is "NEW", create a new one
-            if conversation_id == "NEW":
-                conversation_id = _create_new_conversation()
 
             # Start SSE streaming response.
             # Connection: close ensures the TCP connection is closed after the

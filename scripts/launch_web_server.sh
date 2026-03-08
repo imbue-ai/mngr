@@ -56,8 +56,9 @@ stop_server() {
 }
 
 start_server() {
-    uv run python -m imbue.mng_claude_changeling.resources.web_server &
+    uv run python -m imbue.mng_claude_changeling.resources.web_server < /dev/null &
     SERVER_PID=$!
+    echo "[launch] Server started (PID $SERVER_PID)"
 }
 
 cleanup() {
