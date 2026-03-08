@@ -720,6 +720,8 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
             _log(f"[chat-stream] new conversation created by llm: {real_cid}")
             conversation_id = real_cid
             _register_conversation(real_cid)
+        else:
+            _log("[chat-stream] WARNING: llm prompt succeeded but no new response found in database")
 
     done_data = json.dumps({"conversation_id": conversation_id, "full_text": full_text_from_result})
     _log("[chat-stream] sending done event")
@@ -1275,10 +1277,6 @@ class _WebServerHandler(BaseHTTPRequestHandler):
 
             _handle_chat_send(conversation_id, message, self.wfile)
             self.close_connection = True
-        elif path == "/api/chat/new":
-            new_cid = f"conv-{int(time.time())}-{os.urandom(4).hex()}"
-            _register_conversation(new_cid)
-            self._send_json({"conversation_id": new_cid})
         else:
             self.send_error(404)
 

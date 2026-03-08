@@ -280,25 +280,15 @@ def test_handler_get_api_chat_history_missing_cid(
     conn.close()
 
 
-def test_handler_post_api_chat_new(
+def test_handler_post_unknown_endpoint_returns_404(
     web_server_test_server: tuple[object, int],
 ) -> None:
-    import imbue.mng_claude_changeling.resources.web_server as ws
-
-    original_db = ws.LLM_DB_PATH
-    ws.LLM_DB_PATH = None
-    try:
-        _, port = web_server_test_server
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request("POST", "/api/chat/new")
-        resp = conn.getresponse()
-        assert resp.status == 200
-        body = json.loads(resp.read().decode())
-        assert "conversation_id" in body
-        assert body["conversation_id"].startswith("conv-")
-        conn.close()
-    finally:
-        ws.LLM_DB_PATH = original_db
+    _, port = web_server_test_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/api/chat/new")
+    resp = conn.getresponse()
+    assert resp.status == 404
+    conn.close()
 
 
 @pytest.mark.parametrize(
