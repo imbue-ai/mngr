@@ -666,6 +666,59 @@ def _read_message_history(conversation_id: str) -> list[dict[str, str]]:
     return messages
 
 
+_NEW_CONVERSATION_GREETING: Final[str] = (
+    "Hi, I'm Selene! Welcome to the future.\n"
+    "```\n"
+    "You can interrupt at any time if you want to focus on something else\n"
+    "```\n"
+    "Is it ok if I get to know you a little bit?\n"
+    "```\n"
+    "This simply generates a document for you to review (to save you time)\n"
+    "Zero risk: *none* of your data *ever* leaves your device\n"
+    "Learn more here\n"
+    "```"
+)
+
+
+def _create_greeting_conversation() -> str | None:
+    """Create a new conversation with a greeting message via ``llm inject``.
+
+    Returns the conversation ID on success, or None on failure.
+    """
+    from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+
+    model_id = _get_default_chat_model()
+    cmd = ["llm", "inject", "-m", model_id, "--prompt", "", _NEW_CONVERSATION_GREETING]
+
+    env = dict(os.environ)
+    if _LLM_USER_PATH:
+        env["LLM_USER_PATH"] = _LLM_USER_PATH
+
+    _log(f"[new-conv] creating greeting conversation: model={model_id}")
+    try:
+        with ConcurrencyGroup(name="web-new-conv") as cg:
+            result = cg.run_process_to_completion(cmd, timeout=30.0, is_checked_after=False, env=env)
+    except FileNotFoundError:
+        _log("[new-conv] llm command not found")
+        return None
+
+    if result.returncode != 0:
+        _log(f"[new-conv] llm inject failed (exit {result.returncode}): {result.stderr.strip()}")
+        return None
+
+    # Parse conversation ID from output like "Injected message into conversation <id>"
+    stdout = result.stdout.strip()
+    parts = stdout.rsplit(" ", 1)
+    if len(parts) == 2:
+        conversation_id = parts[1]
+        _log(f"[new-conv] created conversation: {conversation_id}")
+        _register_conversation(conversation_id)
+        return conversation_id
+
+    _log(f"[new-conv] could not parse conversation ID from: {stdout}")
+    return None
+
+
 def _register_conversation(conversation_id: str) -> None:
     """Register a conversation in the changeling_conversations table.
 
@@ -1418,6 +1471,12 @@ class _WebServerHandler(BaseHTTPRequestHandler):
             conversation_id = (query.get("cid") or [""])[0]
             if not conversation_id:
                 self._send_redirect("conversations")
+            elif conversation_id == "NEW":
+                new_cid = _create_greeting_conversation()
+                if new_cid:
+                    self._send_redirect(f"chat?cid={new_cid}")
+                else:
+                    self._send_html(_render_web_chat_page(agent_name, "NEW"))
             else:
                 self._send_html(_render_web_chat_page(agent_name, conversation_id))
         elif path == "/text_chat":
