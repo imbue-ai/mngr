@@ -75,7 +75,7 @@ system: |
   
   Perfect, you're all set!
   
-  I'll default to sending Slack notifications to the [slack-notifications](/slack-notifications/) thread, but let me know if you want to group them differently
+  I'll send Slack notifications to the [slack-notifications](/slack-notifications/) thread, but let me know if you want to group them differently
   
   #!SPEECH_SEPARATOR
   

@@ -671,6 +671,8 @@ _NEW_CONVERSATION_GREETING: Final[str] = (
     "\n"
     "> You can interrupt at any time if you want to focus on something else\n"
     "\n"
+    "#!SPEECH_SEPARATOR\n"
+    "\n"
     "Is it ok if I get to know you a little bit?\n"
     "\n"
     "> This simply generates a document for you to review (to save you time)\n"
@@ -986,7 +988,7 @@ _CHAT_CSS: Final[str] = """
     .chat-scroll::-webkit-scrollbar-thumb { background: rgb(200, 200, 200); border-radius: 3px; }
     .chat-scroll::-webkit-scrollbar-thumb:hover { background: rgb(170, 170, 170); }
     .chat-messages {
-      max-width: 800px; margin: 0 auto; width: 100%; padding: 16px;
+      max-width: 800px; margin: 0 auto; width: 100%;
     }
     .message { margin-bottom: 16px; display: flex; flex-direction: column; }
     .message.user { align-items: flex-end; }
@@ -1006,6 +1008,9 @@ _CHAT_CSS: Final[str] = """
       background: rgb(235, 235, 235); border-radius: 10px; border: none;
       padding: 10px 14px; margin: 8px 0; color: rgb(100, 100, 100);
       font-family: 'Crimson Text', serif; font-size: 13px;
+    }
+    .message-divider {
+      border-top: 1px solid rgb(225, 225, 225); margin: 20px 0;
     }
     .message-bubble a { color: inherit; text-decoration: underline; }
     .message-bubble a:hover { opacity: 0.7; }
@@ -1135,6 +1140,9 @@ function loadConversations() {{
     if (!foundCurrent && conversationId === "NEW") {{
       label.textContent = "New conversation";
     }}
+    if (isDemoMode) {{
+      label.textContent = "Daily Thread (" + new Date().toISOString().substring(0, 10) + ")";
+    }}
     // "New conversation" option at the bottom
     var newBtn = document.createElement("button");
     newBtn.className = "conv-picker-item new-conv";
@@ -1195,15 +1203,39 @@ function inlineMarkdown(html) {{
   return html;
 }}
 
-function appendMessage(role, content) {{
+function createBubble(role, html) {{
   var messages = document.getElementById("messages");
   var div = document.createElement("div");
   div.className = "message " + role;
   var bubble = document.createElement("div");
   bubble.className = "message-bubble";
-  bubble.innerHTML = renderMarkdown(content);
+  bubble.innerHTML = html;
   div.appendChild(bubble);
   messages.appendChild(div);
+  return bubble;
+}}
+
+function appendMessage(role, content) {{
+  // If content contains speech separators, split into multiple bubbles with dividers
+  if (content.indexOf("#!SPEECH_SEPARATOR") !== -1) {{
+    var parts = content.split("#!SPEECH_SEPARATOR");
+    var lastBubble = null;
+    var renderedCount = 0;
+    for (var p = 0; p < parts.length; p++) {{
+      var text = parts[p].replace(/^\\n+|\\n+$/g, "");
+      if (!text) continue;
+      if (renderedCount > 0) {{
+        var divider = document.createElement("div");
+        divider.className = "message-divider";
+        document.getElementById("messages").appendChild(divider);
+      }}
+      lastBubble = createBubble(role, renderMarkdown(text));
+      renderedCount++;
+    }}
+    scrollToBottom();
+    return lastBubble;
+  }}
+  var bubble = createBubble(role, renderMarkdown(content));
   scrollToBottom();
   return bubble;
 }}
@@ -1259,12 +1291,16 @@ function sendMessage() {{
       var evt = eventQueue.shift();
 
       if (evt.type === "separator") {{
-        // Speak text so far, start new bubble, then pause before continuing
+        // Speak text so far, render a divider, start new bubble, then pause
         if (fullText.trim() && audioEnabled) {{
           speakText(fullText);
         }}
         fullText = "";
         currentBubble = null;
+        var divider = document.createElement("div");
+        divider.className = "message-divider";
+        document.getElementById("messages").appendChild(divider);
+        scrollToBottom();
         setTimeout(drainQueue, 5000);
         return;
       }}
@@ -1626,7 +1662,7 @@ function stopAudio() {{
 
 function speakText(text) {{
   // Strip blockquote lines and markdown syntax so TTS reads clean text
-  text = text.split("\\n").filter(function(l) {{ return !l.startsWith("> "); }}).join("\\n");
+  text = text.split("\\n").filter(function(l) {{ return !l.startsWith("> ") && l !== "#!SPEECH_SEPARATOR"; }}).join("\\n");
   // Strip bold/italic markers and link syntax
   text = text.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
