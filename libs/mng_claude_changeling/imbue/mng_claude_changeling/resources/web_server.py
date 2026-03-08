@@ -326,6 +326,46 @@ _CSS: Final[str] = """
     .link-btn.new { background: rgb(34, 120, 60); }
     .link-btn.new:hover { background: rgb(40, 150, 70); }
     .empty-state { color: #666; font-size: 15px; margin-top: 16px; }
+    .icon-btn {
+      width: 32px; height: 32px; padding: 0; background: none; color: rgb(130, 130, 130);
+      border: none; border-radius: 50%; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .icon-btn:hover { background: rgb(230, 230, 230); color: rgb(51, 51, 51); }
+    .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .icon-btn:disabled:hover { background: none; }
+    .icon-btn svg { width: 18px; height: 18px; }
+    .icon-btn.active { color: rgb(34, 120, 60); }
+    .icon-btn.active:hover { color: rgb(40, 150, 70); }
+    .conv-picker { position: relative; }
+    .conv-picker-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: none; border: none; cursor: pointer; padding: 4px 8px;
+      font-size: 14px; font-weight: 500; color: rgb(51, 51, 51);
+      font-family: inherit; border-radius: 6px;
+    }
+    .conv-picker-btn:hover { background: rgb(230, 230, 230); }
+    .conv-picker-btn svg { width: 14px; height: 14px; color: rgb(130, 130, 130); }
+    .conv-picker-menu {
+      display: none; position: absolute; top: 100%; left: 0; margin-top: 4px;
+      background: white; border: 1px solid rgb(215, 215, 215); border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1); min-width: 240px; max-width: 320px;
+      max-height: 320px; overflow-y: auto; z-index: 100;
+    }
+    .conv-picker-menu.open { display: block; }
+    .conv-picker-item {
+      display: block; width: 100%; padding: 8px 12px; font-size: 13px;
+      color: rgb(51, 51, 51); text-decoration: none; border: none; background: none;
+      text-align: left; cursor: pointer; font-family: inherit;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .conv-picker-item:first-child { border-radius: 8px 8px 0 0; }
+    .conv-picker-item:last-child { border-radius: 0 0 8px 8px; }
+    .conv-picker-item:hover { background: rgb(245, 245, 245); }
+    .conv-picker-item.active { font-weight: 600; }
+    .conv-picker-item.new-conv {
+      border-top: 1px solid rgb(230, 230, 230); color: rgb(100, 100, 100);
+    }
 """
 
 
@@ -349,17 +389,30 @@ _ICON_AGENTS: Final[str] = (
 )
 
 
-def _render_header(agent_name: str, active: str = "") -> str:
-    """Render the common header bar with navigation icon links."""
+def _render_header(
+    agent_name: str,
+    active: str = "",
+    extra_right: str = "",
+    left_content: str = "",
+) -> str:
+    """Render the common header bar with navigation icon links.
+
+    left_content replaces the default ``<h1>`` when provided (e.g. a
+    conversation dropdown).  extra_right is raw HTML inserted between
+    the spacer and the nav icons.
+    """
 
     def _nav_link(href: str, icon: str, title: str, key: str) -> str:
         cls = ' class="active"' if key == active else ""
         return f'<a{cls} href="{href}" title="{title}">{icon}</a>'
 
+    left = left_content or f"<h1>{agent_name}</h1>"
+
     return (
         '<div class="header">'
-        f"<h1>{agent_name}</h1>"
-        '<div class="header-spacer"></div>'
+        + left
+        + '<div class="header-spacer"></div>'
+        + extra_right
         + _nav_link("conversations", _ICON_CONVERSATIONS, "Conversations", "conversations")
         + _nav_link("terminal", _ICON_TERMINAL, "Terminal", "terminal")
         + _nav_link("agents-page", _ICON_AGENTS, "Agents", "agents")
@@ -772,25 +825,17 @@ _CHAT_CSS: Final[str] = """
       background: inherit; padding: 8px 16px 12px;
     }
     .chat-input-container {
-      max-width: 800px; margin: 0 auto; display: flex; gap: 4px; align-items: flex-end;
+      max-width: 800px; margin: 0 auto; position: relative;
     }
     .chat-input-container textarea {
-      flex: 1; padding: 10px 14px; border: 1px solid rgb(215, 215, 215); border-radius: 18px;
-      font-size: 14px; font-family: inherit; resize: none; outline: none;
-      min-height: 44px; max-height: 120px; line-height: 1.4; background: white;
+      width: 100%; padding: 12px 48px 12px 14px; border: 1px solid rgb(215, 215, 215);
+      border-radius: 18px; font-size: 14px; font-family: inherit; resize: none;
+      outline: none; min-height: 72px; max-height: 160px; line-height: 1.4; background: white;
     }
     .chat-input-container textarea:focus { border-color: rgb(160, 160, 160); }
-    .icon-btn {
-      width: 36px; height: 36px; padding: 0; background: none; color: rgb(130, 130, 130);
-      border: none; border-radius: 50%; cursor: pointer;
-      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    .chat-input-container .send-btn {
+      position: absolute; right: 8px; bottom: 8px;
     }
-    .icon-btn:hover { background: rgb(230, 230, 230); color: rgb(51, 51, 51); }
-    .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-    .icon-btn:disabled:hover { background: none; }
-    .icon-btn svg { width: 20px; height: 20px; }
-    .icon-btn.active { color: rgb(34, 120, 60); }
-    .icon-btn.active:hover { color: rgb(40, 150, 70); }
     .streaming-indicator { font-size: 12px; color: rgb(153, 153, 153); padding: 4px 0; text-align: center; }
 """
 
@@ -803,6 +848,26 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
     # Also escape </ to prevent premature script tag closing.
     js_safe_cid = json.dumps(conversation_id).replace("</", r"<\/")
 
+    _chevron_svg = (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>'
+    )
+    conv_dropdown = (
+        '<div class="conv-picker">'
+        f'<button class="conv-picker-btn" id="conv-picker-btn" onclick="toggleConvMenu()">'
+        f'<span id="conv-picker-label">Conversation</span>{_chevron_svg}</button>'
+        '<div class="conv-picker-menu" id="conv-picker-menu"></div>'
+        "</div>"
+    )
+    audio_btn = (
+        '<button id="audio-btn" class="icon-btn" onclick="toggleAudio()" title="Toggle audio">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round">'
+        '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>'
+        '<path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>'
+        '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg></button>'
+    )
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -813,20 +878,13 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
 </style>
 </head>
 <body class="chat-layout">
-  {_render_header(agent_name, active="conversations")}
+  {_render_header(agent_name, active="conversations", extra_right=audio_btn, left_content=conv_dropdown)}
   <div class="chat-messages" id="messages"></div>
   <div id="streaming-indicator" class="streaming-indicator" style="display:none;">Thinking...</div>
   <div class="chat-input-area">
     <div class="chat-input-container">
-      <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
-      <button id="audio-btn" class="icon-btn" onclick="toggleAudio()" title="Toggle audio">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-        </svg>
-      </button>
-      <button id="send-btn" class="icon-btn" onclick="sendMessage()" title="Send message">
+      <textarea id="chat-input" placeholder="Type a message..." rows="3"></textarea>
+      <button id="send-btn" class="icon-btn send-btn" onclick="sendMessage()" title="Send message">
         <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
           <path d="M3.478 2.405a.75.75 0 0 0-.926.94l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.405z"/>
         </svg>
@@ -836,6 +894,51 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
 <script>
 var conversationId = {js_safe_cid};
 var isStreaming = false;
+
+// -- Conversation picker --
+function toggleConvMenu() {{
+  document.getElementById("conv-picker-menu").classList.toggle("open");
+}}
+// Close menu when clicking outside
+document.addEventListener("click", function(e) {{
+  var picker = document.querySelector(".conv-picker");
+  if (picker && !picker.contains(e.target)) {{
+    document.getElementById("conv-picker-menu").classList.remove("open");
+  }}
+}});
+function loadConversations() {{
+  fetch("api/conversations").then(function(r) {{ return r.json(); }}).then(function(data) {{
+    var menu = document.getElementById("conv-picker-menu");
+    var label = document.getElementById("conv-picker-label");
+    menu.innerHTML = "";
+    var convs = data.conversations || [];
+    var foundCurrent = false;
+    convs.forEach(function(c) {{
+      var btn = document.createElement("button");
+      btn.className = "conv-picker-item";
+      btn.textContent = c.name || c.conversation_id;
+      if (c.conversation_id === conversationId) {{
+        btn.classList.add("active");
+        label.textContent = c.name || c.conversation_id;
+        foundCurrent = true;
+      }}
+      btn.onclick = function() {{
+        window.location.href = "chat?cid=" + encodeURIComponent(c.conversation_id);
+      }};
+      menu.appendChild(btn);
+    }});
+    if (!foundCurrent && conversationId === "NEW") {{
+      label.textContent = "New conversation";
+    }}
+    // "New conversation" option at the bottom
+    var newBtn = document.createElement("button");
+    newBtn.className = "conv-picker-item new-conv";
+    newBtn.textContent = "+ New conversation";
+    newBtn.onclick = function() {{ window.location.href = "chat?cid=NEW"; }};
+    menu.appendChild(newBtn);
+  }}).catch(function(e) {{ console.error("Failed to load conversations:", e); }});
+}}
+loadConversations();
 
 function scrollToBottom() {{
   var el = document.getElementById("messages");
@@ -1260,6 +1363,9 @@ class _WebServerHandler(BaseHTTPRequestHandler):
                 self._send_json({"messages": messages, "conversation_id": conversation_id})
         elif path == "/api/audio/config":
             self._send_json(_get_inworld_config())
+        elif path == "/api/conversations":
+            conversations = _read_conversations()
+            self._send_json({"conversations": conversations})
         else:
             self.send_error(404)
 
