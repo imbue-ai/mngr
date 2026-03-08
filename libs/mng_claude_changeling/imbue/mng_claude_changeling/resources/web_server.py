@@ -1171,14 +1171,13 @@ function renderMarkdown(text) {{
 }}
 
 function inlineMarkdown(html) {{
-  // Links: [text](url) -- append ?cid= to local links so server routes get the conversation ID
+  // Links: [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, text, url) {{
-    if (url.startsWith("/") && conversationId) {{
+    if (url.indexOf("/demo_slack_auth") !== -1 && conversationId) {{
       var sep = url.indexOf("?") === -1 ? "?" : "&";
       url = url + sep + "cid=" + encodeURIComponent(conversationId);
     }}
-    var target = url.startsWith("/") ? "" : ' target="_blank" rel="noopener"';
-    return '<a href="' + url + '"' + target + '>' + text + '</a>';
+    return '<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>';
   }});
   // Bold: **text**
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -1467,9 +1466,9 @@ async function startAudio() {{
           model: "openai/gpt-4o-mini",
           instructions: "Read the user message aloud exactly as written. Do not add or change anything.",
           output_modalities: ["audio"],
-          "temperature": 0.7,
+          temperature: 0.7,
           audio: {{
-            output: {{ model: "inworld-tts-1.5-mini", voice: "Selene", "speed": 1.4 }}
+            output: {{ model: "inworld-tts-1.5-mini", voice: "Selene", speed: 1.4 }}
           }}
         }}
       }};

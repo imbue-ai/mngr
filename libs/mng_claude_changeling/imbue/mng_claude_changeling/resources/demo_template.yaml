@@ -30,7 +30,7 @@ system: |
   
   You'll need to authenticate with Slack before we can get started on this:
   
-  [ ] [authenticate with Slack](/demo_slack_auth/)
+  > [ ] [authenticate with Slack](/demo_slack_auth/)
   
   <USER: (auth)>
   
