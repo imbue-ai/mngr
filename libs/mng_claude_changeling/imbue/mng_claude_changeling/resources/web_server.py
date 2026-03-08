@@ -282,19 +282,22 @@ def _poll_agent_list_forever() -> None:
 
 _CSS: Final[str] = """
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: whitesmoke; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: rgb(245, 245, 245); }
     .header {
-      display: flex; align-items: center; gap: 12px;
-      padding: 8px 16px; background: rgb(26, 26, 46); color: white; height: 48px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px; background: inherit; color: rgb(51, 51, 51);
+      height: 40px;
     }
-    .header h1 { font-size: 16px; font-weight: 600; }
+    .header h1 { font-size: 14px; font-weight: 500; }
     .header-spacer { flex: 1; }
     .header a {
-      color: rgba(255,255,255,0.8); text-decoration: none; font-size: 14px;
-      padding: 4px 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2);
+      color: rgb(130, 130, 130); text-decoration: none; font-size: 14px;
+      padding: 6px; border-radius: 6px; border: none;
+      display: inline-flex; align-items: center; justify-content: center;
     }
-    .header a:hover { background: rgba(255,255,255,0.1); color: white; }
-    .header a.active { background: rgba(255,255,255,0.15); color: white; border-color: rgba(255,255,255,0.5); }
+    .header a:hover { background: rgb(230, 230, 230); color: rgb(51, 51, 51); }
+    .header a.active { color: rgb(51, 51, 51); }
+    .header a svg { width: 18px; height: 18px; }
     .content { padding: 24px; max-width: 800px; }
     .iframe-container { flex: 1; }
     .iframe-container iframe { width: 100%; height: 100%; border: none; }
@@ -315,10 +318,10 @@ _CSS: Final[str] = """
     .badge.stopped { background: #f8d7da; color: #721c24; }
     .badge.waiting { background: #fff3cd; color: #856404; }
     .link-btn {
-      display: inline-block; padding: 6px 14px; background: rgb(26, 26, 46);
+      display: inline-block; padding: 6px 14px; background: rgb(51, 51, 51);
       color: white; text-decoration: none; border-radius: 4px; font-size: 14px;
     }
-    .link-btn:hover { background: rgb(42, 42, 78); }
+    .link-btn:hover { background: rgb(80, 80, 80); }
     .link-btn.disabled { opacity: 0.5; pointer-events: none; }
     .link-btn.new { background: rgb(34, 120, 60); }
     .link-btn.new:hover { background: rgb(40, 150, 70); }
@@ -326,20 +329,40 @@ _CSS: Final[str] = """
 """
 
 
-def _render_header(agent_name: str, active: str = "") -> str:
-    """Render the common header bar with navigation links."""
+_ICON_CONVERSATIONS: Final[str] = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+)
+_ICON_TERMINAL: Final[str] = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round">'
+    '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>'
+)
+_ICON_AGENTS: Final[str] = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>'
+    '<circle cx="9" cy="7" r="4"/>'
+    '<path d="M23 21v-2a4 4 0 0 0-3-3.87"/>'
+    '<path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'
+)
 
-    def _nav_link(href: str, label: str, key: str) -> str:
+
+def _render_header(agent_name: str, active: str = "") -> str:
+    """Render the common header bar with navigation icon links."""
+
+    def _nav_link(href: str, icon: str, title: str, key: str) -> str:
         cls = ' class="active"' if key == active else ""
-        return f'<a{cls} href="{href}">{label}</a>'
+        return f'<a{cls} href="{href}" title="{title}">{icon}</a>'
 
     return (
         '<div class="header">'
         f"<h1>{agent_name}</h1>"
         '<div class="header-spacer"></div>'
-        + _nav_link("conversations", "Conversations", "conversations")
-        + _nav_link("terminal", "Terminal", "terminal")
-        + _nav_link("agents-page", "Agents", "agents")
+        + _nav_link("conversations", _ICON_CONVERSATIONS, "Conversations", "conversations")
+        + _nav_link("terminal", _ICON_TERMINAL, "Terminal", "terminal")
+        + _nav_link("agents-page", _ICON_AGENTS, "Agents", "agents")
         + "</div>"
     )
 
@@ -685,8 +708,6 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
 
 
 _CHAT_CSS: Final[str] = """
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: rgb(245, 245, 245); }
     .chat-layout { display: flex; flex-direction: column; height: 100%; }
     .chat-messages {
       flex: 1; overflow-y: auto; padding: 16px; max-width: 800px;
@@ -700,40 +721,36 @@ _CHAT_CSS: Final[str] = """
       font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;
     }
     .message.user .message-bubble {
-      background: rgb(26, 26, 46); color: white; border-bottom-right-radius: 4px;
+      background: rgb(235, 233, 228); color: rgb(51, 51, 51); border-bottom-right-radius: 4px;
     }
     .message.assistant .message-bubble {
-      background: white; color: rgb(51, 51, 51); border: 1px solid rgb(221, 221, 221); border-bottom-left-radius: 4px;
+      background: transparent; color: rgb(51, 51, 51); border-bottom-left-radius: 4px;
     }
     .message-label { font-size: 11px; color: rgb(153, 153, 153); margin-bottom: 2px; padding: 0 4px; }
     .chat-input-area {
-      border-top: 1px solid rgb(221, 221, 221); background: white; padding: 12px 16px;
+      background: inherit; padding: 8px 16px 12px;
     }
     .chat-input-container {
-      max-width: 800px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end;
+      max-width: 800px; margin: 0 auto; display: flex; gap: 4px; align-items: flex-end;
     }
     .chat-input-container textarea {
-      flex: 1; padding: 10px 14px; border: 1px solid rgb(221, 221, 221); border-radius: 8px;
+      flex: 1; padding: 10px 14px; border: 1px solid rgb(215, 215, 215); border-radius: 18px;
       font-size: 14px; font-family: inherit; resize: none; outline: none;
-      min-height: 44px; max-height: 120px; line-height: 1.4;
+      min-height: 44px; max-height: 120px; line-height: 1.4; background: white;
     }
-    .chat-input-container textarea:focus { border-color: rgb(26, 26, 46); }
-    .chat-input-container button {
-      padding: 10px 20px; background: rgb(26, 26, 46); color: white;
-      border: none; border-radius: 8px; font-size: 14px; cursor: pointer;
-      white-space: nowrap;
+    .chat-input-container textarea:focus { border-color: rgb(160, 160, 160); }
+    .icon-btn {
+      width: 36px; height: 36px; padding: 0; background: none; color: rgb(130, 130, 130);
+      border: none; border-radius: 50%; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
-    .chat-input-container button:hover { background: rgb(42, 42, 78); }
-    .chat-input-container button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .icon-btn:hover { background: rgb(230, 230, 230); color: rgb(51, 51, 51); }
+    .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .icon-btn:disabled:hover { background: none; }
+    .icon-btn svg { width: 20px; height: 20px; }
+    .icon-btn.active { color: rgb(34, 120, 60); }
+    .icon-btn.active:hover { color: rgb(40, 150, 70); }
     .streaming-indicator { font-size: 12px; color: rgb(153, 153, 153); padding: 4px 0; text-align: center; }
-    .audio-btn {
-      padding: 10px 16px; background: rgb(200, 200, 200); color: rgb(51, 51, 51);
-      border: none; border-radius: 8px; font-size: 14px; cursor: pointer; white-space: nowrap;
-    }
-    .audio-btn:hover { background: rgb(180, 180, 180); }
-    .audio-btn.active { background: rgb(34, 120, 60); color: white; }
-    .audio-btn.active:hover { background: rgb(40, 150, 70); }
-    .audio-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 """
 
 
@@ -761,8 +778,18 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
   <div class="chat-input-area">
     <div class="chat-input-container">
       <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
-      <button id="send-btn" onclick="sendMessage()">Send</button>
-      <button id="audio-btn" class="audio-btn" onclick="toggleAudio()">Audio</button>
+      <button id="audio-btn" class="icon-btn" onclick="toggleAudio()" title="Toggle audio">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+        </svg>
+      </button>
+      <button id="send-btn" class="icon-btn" onclick="sendMessage()" title="Send message">
+        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <path d="M3.478 2.405a.75.75 0 0 0-.926.94l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.405z"/>
+        </svg>
+      </button>
     </div>
   </div>
 <script>
@@ -930,7 +957,7 @@ function toggleAudio() {{
 async function startAudio() {{
   var btn = document.getElementById("audio-btn");
   btn.disabled = true;
-  btn.textContent = "Connecting...";
+  btn.title = "Connecting...";
   try {{
     console.log("[audio] Fetching audio config...");
     var resp = await fetch("api/audio/config");
@@ -942,8 +969,8 @@ async function startAudio() {{
     }}));
     if (!cfg.api_key) {{
       console.warn("[audio] No API key in config");
-      btn.textContent = "No API Key";
-      setTimeout(function() {{ btn.textContent = "Audio"; btn.disabled = false; }}, 2000);
+      btn.title = "No API key";
+      setTimeout(function() {{ btn.title = "Toggle audio"; btn.disabled = false; }}, 2000);
       return;
     }}
 
@@ -1015,7 +1042,7 @@ async function startAudio() {{
       console.log("[audio] session.update payload:", JSON.stringify(sessionConfig));
       audioDc.send(JSON.stringify(sessionConfig));
       audioEnabled = true;
-      btn.textContent = "Audio On";
+      btn.title = "Audio on";
       btn.disabled = false;
       btn.classList.add("active");
       console.log("[audio] Audio enabled, waiting for speakText calls");
@@ -1103,7 +1130,7 @@ function stopAudio() {{
   audioDc = null;
   audioEnabled = false;
   var btn = document.getElementById("audio-btn");
-  if (btn) {{ btn.textContent = "Audio"; btn.disabled = false; btn.classList.remove("active"); }}
+  if (btn) {{ btn.title = "Toggle audio"; btn.disabled = false; btn.classList.remove("active"); }}
 }}
 
 function speakText(text) {{
