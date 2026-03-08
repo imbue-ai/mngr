@@ -718,6 +718,51 @@ def _create_greeting_conversation() -> str | None:
     return None
 
 
+_DEMO_SLACK_AUTH_RESPONSE: Final[str] = (
+    "Ok, great, I'm connected!\n"
+    "\n"
+    "I need you to teach me how you'd like me to deal with your Slack messages."
+    " How should we go about that?\n"
+    "\n"
+    "> 1. Work through messages one by one and have Selene learn\n"
+    "> 2. Design a process for Selene to follow\n"
+    "> 3. Something else"
+)
+
+
+def _inject_into_conversation(conversation_id: str, response: str) -> bool:
+    """Inject a response into an existing conversation via ``llm inject``.
+
+    Returns True on success, False on failure.
+    """
+    from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+
+    model_id = _get_default_chat_model()
+    cmd = ["llm", "inject", "-m", model_id, "--cid", conversation_id, "--prompt", "", response]
+
+    env = dict(os.environ)
+    if _LLM_USER_PATH:
+        env["LLM_USER_PATH"] = _LLM_USER_PATH
+
+    _log(f"[inject] injecting into conversation {conversation_id}, cmd={cmd}")
+    _log(f"[inject] LLM_USER_PATH={env.get('LLM_USER_PATH', '(not set)')}")
+    _log(f"[inject] response text ({len(response)} chars): {response[:100]!r}...")
+    try:
+        with ConcurrencyGroup(name="web-inject") as cg:
+            result = cg.run_process_to_completion(cmd, timeout=30.0, is_checked_after=False, env=env)
+    except FileNotFoundError:
+        _log("[inject] llm command not found")
+        return False
+
+    _log(f"[inject] returncode={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}")
+    if result.returncode != 0:
+        _log(f"[inject] llm inject failed (exit {result.returncode}): {result.stderr.strip()}")
+        return False
+
+    _log("[inject] injection successful")
+    return True
+
+
 def _register_conversation(conversation_id: str) -> None:
     """Register a conversation in the changeling_conversations table.
 
@@ -1126,8 +1171,15 @@ function renderMarkdown(text) {{
 }}
 
 function inlineMarkdown(html) {{
-  // Links: [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // Links: [text](url) -- append ?cid= to local links so server routes get the conversation ID
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, text, url) {{
+    if (url.startsWith("/") && conversationId) {{
+      var sep = url.indexOf("?") === -1 ? "?" : "&";
+      url = url + sep + "cid=" + encodeURIComponent(conversationId);
+    }}
+    var target = url.startsWith("/") ? "" : ' target="_blank" rel="noopener"';
+    return '<a href="' + url + '"' + target + '>' + text + '</a>';
+  }});
   // Bold: **text**
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   // Italic: *text*
@@ -1156,6 +1208,7 @@ function loadHistory() {{
         for (var i = 0; i < data.messages.length; i++) {{
           appendMessage(data.messages[i].role, data.messages[i].content);
         }}
+        knownMessageCount = data.messages.length;
       }}
     }})
     .catch(function(e) {{ console.error("Failed to load history:", e); }});
@@ -1167,6 +1220,7 @@ function sendMessage() {{
   if (!message || isStreaming) return;
 
   appendMessage("user", message);
+  knownMessageCount++;
   input.value = "";
   input.style.height = "auto";
 
@@ -1248,8 +1302,11 @@ function sendMessage() {{
   }});
 
   function finishStreaming() {{
-    if (fullText && audioEnabled) {{
-      speakText(fullText);
+    if (fullText) {{
+      knownMessageCount++;
+      if (audioEnabled) {{
+        speakText(fullText);
+      }}
     }}
     isStreaming = false;
     var ind = document.getElementById("streaming-indicator");
@@ -1275,29 +1332,44 @@ textarea.addEventListener("keydown", function(e) {{
 // Demo mode: wait for audio before loading history
 var isDemoMode = new URLSearchParams(window.location.search).get("demo") === "true";
 
-function loadHistoryAndSpeak() {{
+// Track how many messages the client has rendered, for polling
+var knownMessageCount = 0;
+
+function pollForNewMessages() {{
+  if (!conversationId || conversationId === "NEW" || isStreaming) return;
   fetch("api/chat/history?cid=" + encodeURIComponent(conversationId))
     .then(function(r) {{ return r.json(); }})
     .then(function(data) {{
-      if (data.messages) {{
-        var spokenText = [];
-        for (var i = 0; i < data.messages.length; i++) {{
-          appendMessage(data.messages[i].role, data.messages[i].content);
-          if (data.messages[i].role === "assistant") {{
-            spokenText.push(data.messages[i].content);
-          }}
-        }}
-        if (spokenText.length > 0) {{
-          speakText(spokenText.join("\\n"));
+      if (!data.messages || data.messages.length <= knownMessageCount) return;
+      var newMessages = data.messages.slice(knownMessageCount);
+      knownMessageCount = data.messages.length;
+      var spokenText = [];
+      for (var i = 0; i < newMessages.length; i++) {{
+        appendMessage(newMessages[i].role, newMessages[i].content);
+        if (newMessages[i].role === "assistant") {{
+          spokenText.push(newMessages[i].content);
         }}
       }}
+      if (spokenText.length > 0 && audioEnabled) {{
+        speakText(spokenText.join("\\n"));
+      }}
     }})
-    .catch(function(e) {{ console.error("Failed to load history:", e); }});
+    .catch(function(e) {{ console.error("Poll failed:", e); }});
 }}
 
-// Load history on page load (unless demo mode, which waits for audio)
-if (conversationId && conversationId !== "NEW" && !isDemoMode) {{
-  loadHistory();
+var pollIntervalId = null;
+function startPolling() {{
+  if (!pollIntervalId) {{
+    pollIntervalId = setInterval(pollForNewMessages, 3000);
+  }}
+}}
+
+if (!isDemoMode) {{
+  // Normal mode: load history immediately and start polling
+  if (conversationId && conversationId !== "NEW") {{
+    loadHistory();
+  }}
+  startPolling();
 }}
 
 // -- Audio (Inworld WebRTC TTS) --
@@ -1395,8 +1467,9 @@ async function startAudio() {{
           model: "openai/gpt-4o-mini",
           instructions: "Read the user message aloud exactly as written. Do not add or change anything.",
           output_modalities: ["audio"],
+          "temperature": 0.7,
           audio: {{
-            output: {{ model: "inworld-tts-1.5-max", voice: "Selene", "speakingRate": 1.4, "temperature": 0.8 }}
+            output: {{ model: "inworld-tts-1.5-mini", voice: "Selene", "speed": 1.4 }}
           }}
         }}
       }};
@@ -1407,9 +1480,10 @@ async function startAudio() {{
       btn.disabled = false;
       btn.classList.add("active");
       console.log("[audio] Audio enabled, waiting for speakText calls");
-      if (isDemoMode && conversationId && conversationId !== "NEW") {{
-        console.log("[audio] Demo mode: loading history now that audio is ready");
-        loadHistoryAndSpeak();
+      if (isDemoMode) {{
+        console.log("[audio] Demo mode: starting polling now that audio is ready");
+        pollForNewMessages();
+        startPolling();
       }}
     }};
     audioDc.onclose = function() {{
@@ -1540,7 +1614,11 @@ class _WebServerHandler(BaseHTTPRequestHandler):
     """Handles HTTP requests for the agent web interface."""
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        _log(format % args)
+        msg = format % args
+        # Suppress noisy polling requests
+        if "/api/chat/history" in msg or "/api/conversations" in msg:
+            return
+        _log(msg)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -1591,6 +1669,16 @@ class _WebServerHandler(BaseHTTPRequestHandler):
                 self._send_html(font_html)
             except OSError:
                 self.send_error(404, "font_preview.html not found in working directory")
+        elif path == "/demo_slack_auth":
+            conversation_id = (query.get("cid") or [""])[0]
+            _log(f"[demo_slack_auth] called with cid={conversation_id!r}, query={query}")
+            if conversation_id:
+                _log(f"[demo_slack_auth] injecting response into {conversation_id}")
+                success = _inject_into_conversation(conversation_id, _DEMO_SLACK_AUTH_RESPONSE)
+                _log(f"[demo_slack_auth] inject result: {success}")
+            else:
+                _log("[demo_slack_auth] WARNING: no cid provided, skipping inject")
+            self._send_redirect("https://app.slack.com/client/TSTHRQ7MY/DT6CC44GM")
         elif path == "/api/chat/history":
             conversation_id = (query.get("cid") or [""])[0]
             if not conversation_id:

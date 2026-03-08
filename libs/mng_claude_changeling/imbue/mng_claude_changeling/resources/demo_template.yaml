@@ -30,7 +30,7 @@ system: |
   
   You'll need to authenticate with Slack before we can get started on this:
   
-  [ ] [authenticate with Slack](https://app.slack.com/)
+  [ ] [authenticate with Slack](/demo_slack_auth/)
   
   <USER: (auth)>
   
@@ -75,9 +75,9 @@ system: |
   
   I'll default to sending Slack notifications to the [slack-notifications](/slack-notifications/) thread, but let me know if you want to group them differently
   
-  Oh, it seems like I've finished cyber-stalking, err, I mean "learning about" you
+  Oh, and it seems like I've finished cyber-stalking, haha, I mean "learning about" you
   
-  > [View report]()
+  > [View report](/report/)
   > Let Selene know if she got anything wrong (or just edit it directly)
   
   I'll use that document to track your preferences. You can always access it on the [settings page](/settings/)
