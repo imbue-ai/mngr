@@ -1408,19 +1408,36 @@ function pollForNewMessages() {{
   if (!conversationId || conversationId === "NEW" || isStreaming) return;
   fetch("api/chat/history?cid=" + encodeURIComponent(conversationId))
     .then(function(r) {{ return r.json(); }})
-    .then(function(data) {{
+    .then(async function(data) {{
       if (!data.messages || data.messages.length <= knownMessageCount) return;
       var newMessages = data.messages.slice(knownMessageCount);
       knownMessageCount = data.messages.length;
+
+      // Collect assistant text for TTS
       var spokenText = [];
       for (var i = 0; i < newMessages.length; i++) {{
-        appendMessage(newMessages[i].role, newMessages[i].content);
         if (newMessages[i].role === "assistant") {{
           spokenText.push(newMessages[i].content);
         }}
       }}
+
+      // If audio is enabled, pre-fetch the first sentence's TTS before showing messages
       if (spokenText.length > 0 && audioEnabled) {{
-        speakText(spokenText.join("\\n"));
+        var firstBlob = await prefetchFirstSentence(spokenText.join("\\n"));
+        // Now show messages (audio is ready to play immediately)
+        for (var i = 0; i < newMessages.length; i++) {{
+          appendMessage(newMessages[i].role, newMessages[i].content);
+        }}
+        // Queue the pre-fetched blob and kick off the rest
+        if (firstBlob) {{
+          audioPlayQueue.push(firstBlob);
+          playNextInQueue();
+        }}
+        speakTextRemaining();
+      }} else {{
+        for (var i = 0; i < newMessages.length; i++) {{
+          appendMessage(newMessages[i].role, newMessages[i].content);
+        }}
       }}
     }})
     .catch(function(e) {{ console.error("Poll failed:", e); }});
@@ -1577,29 +1594,75 @@ function playNextInQueue() {{
   }});
 }}
 
-async function speakText(text) {{
-  // Strip blockquote lines, separators, and markdown syntax for clean TTS
+function cleanTextForTTS(text) {{
   text = text.split("\\n").filter(function(l) {{ return !l.startsWith("> ") && l !== "#!SPEECH_SEPARATOR"; }}).join("\\n");
   text = text.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  return text;
+}}
+
+function splitSentences(text) {{
+  return text.split(/(?<=[.!?])\\s+|\\n+/).filter(function(s) {{ return s.trim().length > 0; }});
+}}
+
+// Pre-fetch TTS for the first sentence only. Returns a Promise<Blob|null>.
+// Also kicks off parallel fetches for remaining sentences (stored in _pendingTTSPromises).
+var _pendingTTSPromises = [];
+async function prefetchFirstSentence(text) {{
+  text = cleanTextForTTS(text);
+  if (!audioApiKey || !text.trim()) return null;
+  var sentences = splitSentences(text);
+  if (sentences.length === 0) return null;
+  // Start all fetches in parallel
+  _pendingTTSPromises = sentences.map(function(s) {{ return fetchTTS(s); }});
+  // Wait for and return the first one
+  try {{
+    return await _pendingTTSPromises[0];
+  }} catch(e) {{
+    console.error("[audio] prefetch first sentence failed:", e);
+    return null;
+  }}
+}}
+
+// Queue remaining sentences (index 1+) from a previous prefetchFirstSentence call.
+async function speakTextRemaining() {{
+  var promises = _pendingTTSPromises;
+  _pendingTTSPromises = [];
+  for (var i = 1; i < promises.length; i++) {{
+    try {{
+      var blob = await promises[i];
+      if (blob) {{
+        audioPlayQueue.push(blob);
+        playNextInQueue();
+      }}
+    }} catch(e) {{
+      console.error("[audio] TTS fetch failed for sentence " + i + ":", e);
+    }}
+  }}
+}}
+
+async function speakText(text) {{
+  text = cleanTextForTTS(text);
   if (!audioEnabled || !audioApiKey || !text.trim()) return;
 
-  // Split into sentences for parallel TTS requests
-  var sentences = text.split(/(?<=[.!?])\\s+|\\n+/).filter(function(s) {{ return s.trim().length > 0; }});
+  var sentences = splitSentences(text);
   if (sentences.length === 0) return;
 
   console.log("[audio] speakText: " + sentences.length + " sentence(s)");
 
-  // Fire all requests in parallel, wait for all to complete (order preserved by Promise.all)
+  // Fire all requests in parallel. As each completes (in order), queue it
+  // for playback immediately so the first sentence plays as soon as it's ready.
   var promises = sentences.map(function(s) {{ return fetchTTS(s); }});
-  try {{
-    var blobs = await Promise.all(promises);
-    for (var i = 0; i < blobs.length; i++) {{
-      if (blobs[i]) audioPlayQueue.push(blobs[i]);
+  for (var i = 0; i < promises.length; i++) {{
+    try {{
+      var blob = await promises[i];
+      if (blob) {{
+        audioPlayQueue.push(blob);
+        playNextInQueue();
+      }}
+    }} catch(e) {{
+      console.error("[audio] TTS fetch failed for sentence " + i + ":", e);
     }}
-    playNextInQueue();
-  }} catch(e) {{
-    console.error("[audio] TTS batch failed:", e);
   }}
 }}
 </script>
