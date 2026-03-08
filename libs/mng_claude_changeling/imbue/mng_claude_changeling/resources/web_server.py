@@ -650,19 +650,8 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any) -> None:
     # Pass --cid to continue an existing conversation. For new conversations
     # (cid=NEW), omit --cid so llm creates a new one; we discover its real ID
     # after the prompt completes.
-    if not is_new_conversation and LLM_DB_PATH and LLM_DB_PATH.is_file():
-        try:
-            conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
-            try:
-                row = conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-                if row:
-                    cmd.extend(["--cid", conversation_id])
-            except sqlite3.Error:
-                pass
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            pass
+    if not is_new_conversation:
+        cmd.extend(["--cid", conversation_id])
 
     system_prompt = _get_system_prompt()
     if system_prompt:
