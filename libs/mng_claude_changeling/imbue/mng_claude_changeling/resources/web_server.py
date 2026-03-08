@@ -909,7 +909,7 @@ _CHAT_CSS: Final[str] = """
     .chat-input-container .input-btn-right {
       position: absolute; right: 8px; bottom: 8px;
     }
-    .streaming-indicator { font-size: 12px; color: rgb(153, 153, 153); padding: 4px 0; text-align: center; }
+    .streaming-indicator { font-size: 12px; color: rgb(153, 153, 153); padding: 4px 0; text-align: left; }
 """
 
 
@@ -955,7 +955,6 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
   <div class="app-main chat-layout">
     {_render_header(agent_name, extra_right=audio_btn, left_content=conv_dropdown, show_nav=False)}
     <div class="chat-messages" id="messages"></div>
-    <div id="streaming-indicator" class="streaming-indicator" style="display:none;">Thinking...</div>
     <div class="chat-input-area">
       <div class="chat-input-container">
         <button class="icon-btn input-btn-left" onclick="alert('Coming soon!')" title="Attach">
@@ -1064,7 +1063,12 @@ function sendMessage() {{
   input.style.height = "auto";
 
   isStreaming = true;
-  document.getElementById("streaming-indicator").style.display = "block";
+  var indicator = document.createElement("div");
+  indicator.id = "streaming-indicator";
+  indicator.className = "streaming-indicator";
+  indicator.textContent = "Thinking...";
+  document.getElementById("messages").appendChild(indicator);
+  scrollToBottom();
 
   var currentBubble = null;
   var fullText = "";
@@ -1100,6 +1104,9 @@ function sendMessage() {{
               if (eventType === "chunk") {{
                 if (!currentBubble) {{
                   currentBubble = appendMessage("assistant", "");
+                  // Re-append indicator so it stays below the streaming bubble
+                  var ind = document.getElementById("streaming-indicator");
+                  if (ind) document.getElementById("messages").appendChild(ind);
                 }}
                 fullText += data.chunk;
                 currentBubble.textContent = fullText;
@@ -1137,7 +1144,8 @@ function sendMessage() {{
       speakText(fullText);
     }}
     isStreaming = false;
-    document.getElementById("streaming-indicator").style.display = "none";
+    var ind = document.getElementById("streaming-indicator");
+    if (ind) ind.remove();
   }}
 }}
 
