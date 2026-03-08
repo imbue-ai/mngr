@@ -942,7 +942,7 @@ _CHAT_CSS: Final[str] = """
     }
     .message.assistant .message-bubble {
       background: transparent; color: rgb(51, 51, 51); border-bottom-left-radius: 4px;
-      font-family: 'Crimson Text', serif; font-size: 16px;
+      font-family: 'Crimson Text', serif; font-size: 16px; width: 100%;
     }
     .message-bubble blockquote {
       background: rgb(235, 235, 235); border-radius: 10px; border: none;
