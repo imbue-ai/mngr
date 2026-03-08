@@ -21,12 +21,6 @@ PORT=8787
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 WORK_DIR=$(mktemp -d "$TMPDIR_BASE/mng-web-dev.XXXXXX")
 
-cleanup() {
-    echo "[launch] Cleaning up $WORK_DIR" >&2
-    rm -rf "$WORK_DIR"
-}
-trap cleanup EXIT
-
 # Agent state directory (holds events/ subdirectories)
 AGENT_STATE_DIR="$WORK_DIR/agent_state"
 mkdir -p "$AGENT_STATE_DIR/events/servers"
@@ -49,9 +43,42 @@ export MNG_AGENT_WORK_DIR="$AGENT_WORK_DIR"
 export LLM_USER_PATH="$LLM_DATA_DIR"
 export WEB_SERVER_PORT="$PORT"
 
+cd "$REPO_ROOT"
+
+SERVER_PID=""
+
+stop_server() {
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+    fi
+}
+
+start_server() {
+    uv run python -m imbue.mng_claude_changeling.resources.web_server &
+    SERVER_PID=$!
+}
+
+cleanup() {
+    stop_server
+    echo "[launch] Cleaning up $WORK_DIR" >&2
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
 echo ""
 echo "  http://127.0.0.1:${PORT}/chat?cid=NEW"
 echo ""
+echo "  Press Enter to restart the web server, Ctrl-C to quit."
+echo ""
 
-cd "$REPO_ROOT"
-exec uv run python -m imbue.mng_claude_changeling.resources.web_server
+start_server
+
+while true; do
+    read -r || break
+    echo "[launch] Restarting web server..."
+    stop_server
+    start_server
+    echo "[launch] Web server restarted."
+done
