@@ -977,9 +977,16 @@ def _handle_chat_send(conversation_id: str, message: str, wfile: Any, is_demo: b
 
 _CHAT_CSS: Final[str] = """
     .chat-layout { display: flex; flex-direction: column; height: 100%; font-family: 'Nunito', sans-serif; }
+    .chat-scroll {
+      flex: 1; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: rgb(200, 200, 200) transparent;
+    }
+    .chat-scroll::-webkit-scrollbar { width: 6px; }
+    .chat-scroll::-webkit-scrollbar-track { background: transparent; }
+    .chat-scroll::-webkit-scrollbar-thumb { background: rgb(200, 200, 200); border-radius: 3px; }
+    .chat-scroll::-webkit-scrollbar-thumb:hover { background: rgb(170, 170, 170); }
     .chat-messages {
-      flex: 1; overflow-y: auto; max-width: 800px;
-      margin: 0 auto; width: 100%;
+      max-width: 800px; margin: 0 auto; width: 100%; padding: 16px;
     }
     .message { margin-bottom: 16px; display: flex; flex-direction: column; }
     .message.user { align-items: flex-end; }
@@ -1068,7 +1075,9 @@ def _render_web_chat_page(agent_name: str, conversation_id: str) -> str:
   {_render_sidebar(active="conversations", agent_name=agent_name)}
   <div class="app-main chat-layout">
     {_render_header(agent_name, extra_right=audio_btn, left_content=conv_dropdown, show_nav=False)}
-    <div class="chat-messages" id="messages"></div>
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="chat-messages" id="messages"></div>
+    </div>
     <div class="chat-input-area">
       <div class="chat-input-container">
         <button class="icon-btn input-btn-left" onclick="alert('Coming soon!')" title="Attach">
@@ -1137,7 +1146,7 @@ function loadConversations() {{
 loadConversations();
 
 function scrollToBottom() {{
-  var el = document.getElementById("messages");
+  var el = document.getElementById("chat-scroll");
   el.scrollTop = el.scrollHeight;
 }}
 
