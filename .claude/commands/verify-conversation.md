@@ -17,6 +17,8 @@ Run the export transcript script to discover session file paths:
 bash ./scripts/export_transcript_paths.sh
 ```
 
+The script outputs lines in the format `source\tpath`, where source is one of: `tracked`, `current`, `agent_dir`, `subagent`. Parse each line to collect the files grouped by source.
+
 If this outputs nothing (no sessions found), skip to Step 5 and write an empty marker file.
 
 ### Step 2: Choose Model
@@ -51,7 +53,11 @@ Build the subagent prompt by combining:
 1. The review prompt (from review.md)
 2. A separator, then the full contents of categories.md
 3. A section with the instruction file contents
-4. The list of session file paths for the subagent to read
+4. The list of session file paths for the subagent to read, grouped by provenance:
+   - `tracked` files: label as "The sequence of tracked session files for this task"
+   - `current` files: label as "The current session"
+   - `agent_dir` files: label as "All sessions found in this agent's directory"
+   - `subagent` files: label as "Subagent transcripts"
 5. The output file path: `.reviews/conversation/{hash}.json`
 
 If the progress file exists:

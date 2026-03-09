@@ -1,0 +1,13 @@
+# Configuration for /verify-conversation transcript discovery.
+
+# Include sessions from $MNG_AGENT_STATE_DIR/claude_session_id_history
+include_tracked_sessions = true
+
+# Include the current session via $MNG_CLAUDE_SESSION_ID
+include_current_session = true
+
+# Scan the agent's project directory for all session .jsonl files
+include_all_agent_sessions = true
+
+# Include subagent transcripts ({session_dir}/subagents/*.jsonl)
+include_subagents = true
