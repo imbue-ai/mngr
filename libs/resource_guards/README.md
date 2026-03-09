@@ -54,36 +54,15 @@ def pytest_sessionstart(session):
 def pytest_sessionfinish(session, exitstatus):
     stop_resource_guards()
 
-# Wire up the per-test hooks. If you don't have your own hooks, you can
-# assign them directly:
+# Wire up the per-test hooks
 pytest_runtest_setup = _pytest_runtest_setup
 pytest_runtest_teardown = _pytest_runtest_teardown
 pytest_runtest_makereport = _pytest_runtest_makereport
 ```
 
-If you already have your own `pytest_runtest_setup` (or teardown/makereport), call the guard hooks from within yours:
+The guard hooks are prefixed with `_` to prevent pytest from auto-discovering them when the module is imported. The assignments above expose them under the standard hook names so pytest finds them in your conftest.py.
 
-```python
-import pytest
-from imbue.resource_guards.resource_guards import (
-    _pytest_runtest_setup as _guard_setup,
-    _pytest_runtest_teardown as _guard_teardown,
-    _pytest_runtest_makereport as _guard_makereport,
-)
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_setup(item):
-    # your custom setup logic here
-    yield from _guard_setup(item)
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_teardown(item):
-    yield from _guard_teardown(item)
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    yield from _guard_makereport(item, call)
-```
+If you already have your own hooks in the same conftest.py, put the guard hooks in a separate conftest.py (e.g., in a parent or child directory). Pytest discovers and calls all hook implementations it finds, regardless of which conftest.py they live in.
 
 ### 2. Add guards for Modal or Docker
 
