@@ -12,6 +12,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.mng_claude_changeling.resources.watcher_common import DEFAULT_CEL_FILTER
 
 
 class ConversationId(NonEmptyStr):
@@ -31,7 +32,6 @@ class MessageRole(NonEmptyStr):
 # Event sources write to events/<SOURCE>/events.jsonl (proper EventEnvelope format).
 # Log sources write to logs/<SOURCE>/events.jsonl (raw format, not EventEnvelope).
 
-SOURCE_CONVERSATIONS: Final[EventSource] = EventSource("conversations")
 SOURCE_MESSAGES: Final[EventSource] = EventSource("messages")
 SOURCE_SCHEDULED: Final[EventSource] = EventSource("scheduled")
 SOURCE_MNG_AGENTS: Final[EventSource] = EventSource("mng_agents")
@@ -39,21 +39,6 @@ SOURCE_STOP: Final[EventSource] = EventSource("stop")
 SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_DELIVERY_FAILURES: Final[EventSource] = EventSource("delivery_failures")
 SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("common_transcript")
-
-
-class ConversationEvent(EventEnvelope):
-    """An event in events/conversations/events.jsonl tracking conversation lifecycle.
-
-    Emitted when a conversation is created or its model is changed.
-    Tags are optional key/value metadata (e.g. ``{"daily": "2026-03-04"}``).
-    """
-
-    conversation_id: ConversationId
-    model: ChatModel
-    tags: dict[str, str] = Field(
-        default_factory=dict,
-        description="Optional key/value tags for categorizing conversations.",
-    )
 
 
 class MessageEvent(EventEnvelope):
@@ -163,7 +148,7 @@ class CommonToolResultEvent(EventEnvelope):
 
 
 # -- Settings types --
-# These model the structure of .changelings/settings.toml.
+# These model the structure of changelings.toml.
 # Each section corresponds to a TOML table.
 
 
@@ -246,19 +231,8 @@ class WatcherSettings(FrozenModel):
         default=PositiveInt(5),
         description="Poll interval for the transcript watcher (seconds).",
     )
-    watched_event_sources: tuple[str, ...] = Field(
-        default=("messages", "scheduled", "mng_agents", "stop"),
-        description="Event sources monitored by the event watcher. "
-        "Deprecated: use event_cel_filter instead for CEL-based filtering via mng events.",
-    )
     event_cel_filter: str = Field(
-        default=(
-            'source != "common_transcript"'
-            ' && source != "conversations" && source != "delivery_failures"'
-            " && ("
-            '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
-            ")"
-        ),
+        default=DEFAULT_CEL_FILTER,
         description="CEL filter expression passed to 'mng events --filter'. "
         "Controls which event sources the event watcher receives.",
     )
@@ -311,12 +285,17 @@ class ProvisioningSettings(FrozenModel):
 
 
 class ClaudeChangelingSettings(FrozenModel):
-    """Top-level settings loaded from .changelings/settings.toml.
+    """Top-level settings loaded from changelings.toml.
 
     All fields have defaults, so an empty or missing settings file
     produces a valid settings object with the standard defaults.
     """
 
+    agent_type: str | None = Field(
+        default=None,
+        description="Agent type for this changeling (e.g. 'elena-code', 'claude-changeling'). "
+        "Used by changeling deploy to determine the agent type when --agent-type is not provided on the CLI.",
+    )
     chat: ChatSettings = Field(
         default_factory=ChatSettings,
         description="Chat-related settings ([chat] section).",

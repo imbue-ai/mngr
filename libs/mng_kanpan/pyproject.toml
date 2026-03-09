@@ -22,6 +22,50 @@ packages = ["imbue"]
 [tool.uv.sources]
 mng = { workspace = true }
 
+# Shared pytest settings (markers, filterwarnings, coverage report config)
+# are centralized in:
+#   libs/imbue_common/imbue/imbue_common/conftest_hooks.py
+# The settings below remain here because they are read from pyproject.toml
+# before any hooks run: addopts, coverage.run, inline-snapshot, timeout_func_only.
+[tool.pytest.ini_options]
+timeout_func_only = true
+junit_family = "xunit1"
+testpaths = ["."]
+addopts = [
+  "-n 4",
+  "--dist=worksteal",
+  "--cov=imbue.mng_kanpan",
+  "--cov-report=term-missing",
+  "--cov-report=html",
+  "--cov-report=xml",
+  "--cov-fail-under=80",
+  "--durations=20",
+  "--timeout=10",
+  "--timeout-method=signal",
+  "--max-worker-restart=0",
+  "-m not acceptance and not release",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/testing.py",
+  "*/utils/testing.py",
+]
+
+[tool.inline-snapshot]
+default-flags=["report"]
+default-flags-tui=["report"]
+default-flags-ide=["report"]
+format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
+
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"

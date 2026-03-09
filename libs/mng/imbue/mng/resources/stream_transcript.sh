@@ -19,8 +19,7 @@
 # Usage: stream_transcript.sh
 #
 # Requires environment variables:
-#   MNG_AGENT_STATE_DIR  - the agent's state directory
-#   MNG_HOST_DIR         - the host data directory (contains commands/)
+#   MNG_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
 
 set -euo pipefail
 
@@ -35,9 +34,9 @@ touch "$OUTPUT_FILE"
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="stream_transcript"
 _MNG_LOG_SOURCE="logs/stream_transcript"
-_MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/stream_transcript/events.jsonl"
+_MNG_LOG_FILE="$MNG_AGENT_STATE_DIR/events/logs/stream_transcript/events.jsonl"
 # shellcheck source=mng_log.sh
-source "$MNG_HOST_DIR/commands/mng_log.sh"
+source "$MNG_AGENT_STATE_DIR/commands/mng_log.sh"
 
 # -- Per-session state (bash 4+ associative arrays) --
 # Note: explicit =() is required for set -u compatibility (empty associative

@@ -322,6 +322,22 @@ class AgentInterface(MutableModel, ABC):
         """
         ...
 
+    def modify_env_vars(
+        self,
+        host: OnlineHostInterface,
+        env_vars: dict[str, str],
+    ) -> None:
+        """Mutate the agent's environment variables before they are written.
+
+        Called during provisioning after the base env vars (MNG_HOST_DIR,
+        MNG_AGENT_STATE_DIR, etc.) and user-provided env vars have been
+        collected, but before the env file is written to disk. Subclasses
+        can add, update, or remove entries in env_vars.
+
+        The default implementation is a no-op.
+        """
+        ...
+
     @abstractmethod
     def provision(
         self,

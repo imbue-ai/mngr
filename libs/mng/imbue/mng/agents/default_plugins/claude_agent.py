@@ -351,19 +351,19 @@ def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGr
     return result.stdout.strip()
 
 
-def _provision_background_scripts(host: OnlineHostInterface) -> None:
-    """Write the background task scripts to $MNG_HOST_DIR/commands/.
+def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
+    """Write the background task scripts to $MNG_AGENT_STATE_DIR/commands/.
 
     Provisions mng_log.sh (shared logging library), stream_transcript.sh, and claude_background_tasks.sh so they can be
     launched by the agent's assemble_command at runtime.
     """
-    commands_dir = host.host_dir / "commands"
+    commands_dir = agent_state_dir / "commands"
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
     for script_name in ("mng_log.sh", "stream_transcript.sh", "claude_background_tasks.sh"):
         script_content = load_resource_script(script_name)
         script_path = commands_dir / script_name
-        with log_span("Writing {} to host", script_name):
+        with log_span("Writing {} to agent state dir", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
 
 
@@ -584,11 +584,11 @@ class ClaudeAgent(BaseAgent):
     def _build_background_tasks_command(self, session_name: str) -> str:
         """Build a shell command that starts the background tasks script.
 
-        The background tasks script (provisioned to $MNG_HOST_DIR/commands/)
+        The background tasks script (provisioned to $MNG_AGENT_STATE_DIR/commands/)
         handles both activity tracking and transcript export. It runs in the
         background while the tmux session is alive.
         """
-        script_path = "$MNG_HOST_DIR/commands/claude_background_tasks.sh"
+        script_path = "$MNG_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
         return f"( {script_path} {shlex.quote(session_name)} ) &"
 
     def assemble_command(
@@ -947,8 +947,8 @@ class ClaudeAgent(BaseAgent):
         # Configure readiness hooks (for both local and remote hosts)
         self._configure_readiness_hooks(host)
 
-        # Provision background task scripts to the host commands directory
-        _provision_background_scripts(host)
+        # Provision background task scripts to the agent state directory
+        _provision_background_scripts(host, self._get_agent_dir())
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Clean up Claude trust entries for this agent's work directory."""

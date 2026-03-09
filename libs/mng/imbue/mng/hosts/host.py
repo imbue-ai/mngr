@@ -734,6 +734,10 @@ class Host(BaseHost, OnlineHostInterface):
     # Environment
     # =========================================================================
 
+    def get_host_env_path(self) -> Path:
+        """Get the path to the host env file."""
+        return self.host_dir / "env"
+
     def get_env_vars(self) -> dict[str, str]:
         """Get all environment variables from the host env file."""
         env_path = self.host_dir / "env"
@@ -1573,6 +1577,9 @@ class Host(BaseHost, OnlineHostInterface):
         for env_var in options.environment.env_vars:
             env_vars[env_var.key] = env_var.value
 
+        # 5. Let the agent modify env vars (e.g. set UV_TOOL_DIR for per-agent mng)
+        agent.modify_env_vars(host=self, env_vars=env_vars)
+
         return env_vars
 
     def _write_agent_env_file(self, agent: AgentInterface, env_vars: Mapping[str, str]) -> None:
@@ -1591,7 +1598,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_env_path = self.get_agent_env_path(agent)
         return build_source_env_shell_commands(host_env_path, agent_env_path)
 
-    def _build_source_env_prefix(self, agent: AgentInterface) -> str:
+    def build_source_env_prefix(self, agent: AgentInterface) -> str:
         """Build a shell prefix that sources host and agent env files if they exist."""
         commands = self._build_source_env_commands(agent)
         return " && ".join(commands) + " && "
@@ -1608,12 +1615,13 @@ class Host(BaseHost, OnlineHostInterface):
         1. Call agent.on_before_provisioning() (validation only)
         2. Call agent.get_provision_file_transfers() to collect file transfers
         3. Validate required files exist, execute file transfers
-        4. Call agent.provision() (agent-type-specific provisioning)
-        5. Create directories (so paths exist for uploads)
-        6. Upload files (files exist before modifications)
-        7. Append text to files
-        8. Prepend text to files
-        9. Write environment variables to agent env file
+        4. Write environment variables to agent env file (before agent.provision()
+           so agent provisioning can use env vars like UV_TOOL_DIR)
+        5. Call agent.provision() (agent-type-specific provisioning)
+        6. Create directories (so paths exist for uploads)
+        7. Upload files (files exist before modifications)
+        8. Append text to files
+        9. Prepend text to files
         10. Run sudo commands (system-level setup, with env vars sourced)
         11. Run user commands (user-level setup, with env vars sourced)
         12. Call agent.on_after_provisioning() (finalization)
@@ -1629,7 +1637,12 @@ class Host(BaseHost, OnlineHostInterface):
         # 3. Validate required files exist and execute transfers
         self._execute_agent_file_transfers(agent, all_file_transfers)
 
-        # 4. Call agent.provision() for agent-type-specific provisioning
+        # 4. Write environment variables to agent env file (before agent.provision()
+        # so that agent provisioning can use env vars like UV_TOOL_DIR)
+        env_vars = self._collect_agent_env_vars(agent, options)
+        self._write_agent_env_file(agent, env_vars)
+
+        # 5. Call agent.provision() for agent-type-specific provisioning
         with log_span("Calling provision for agent {}", agent.name):
             agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
@@ -1644,34 +1657,30 @@ class Host(BaseHost, OnlineHostInterface):
             sudo_cmds=len(provisioning.sudo_commands),
             user_cmds=len(provisioning.user_commands),
         ):
-            # 5. Create directories
+            # 6. Create directories
             for directory in provisioning.create_directories:
                 self._mkdir(directory)
                 logger.trace("Created directory: {}", directory)
 
-            # 6. Upload files (read from local filesystem, write to host)
+            # 7. Upload files (read from local filesystem, write to host)
             for upload_spec in provisioning.upload_files:
                 # Read from local filesystem (not via host primitives)
                 local_content = upload_spec.local_path.read_bytes()
                 self.write_file(upload_spec.remote_path, local_content)
                 logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 7. Append text to files
+            # 8. Append text to files
             for append_spec in provisioning.append_to_files:
                 self._append_to_file(append_spec.remote_path, append_spec.text)
                 logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # 8. Prepend text to files
+            # 9. Prepend text to files
             for prepend_spec in provisioning.prepend_to_files:
                 self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
                 logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
-            # 9. Write environment variables to agent env file
-            env_vars = self._collect_agent_env_vars(agent, options)
-            self._write_agent_env_file(agent, env_vars)
-
             # Build the source prefix for commands (sources host env, then agent env)
-            source_prefix = self._build_source_env_prefix(agent)
+            source_prefix = self.build_source_env_prefix(agent)
 
             # 10. Run sudo commands (with env vars sourced)
             for cmd in provisioning.sudo_commands:

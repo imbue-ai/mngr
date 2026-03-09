@@ -1,24 +1,88 @@
-# Design for "Changelings"
+# mng_claude_changeling
 
-This plugin implements the core functionality for claude-based "changelings": LLM-based agents that can have multiple conversation threads, react to events, and store persistent memories.
+This plugin implements the core functionality for Claude-based "changelings": composite agents built from multiple mng agents that, together, form a single higher-level agent from the user's perspective.
 
-The core idea is to have a "primary" agent that serves as the "inner monologue" of the changeling, and that reacts to events (like new messages in conversation threads, scheduled events, sub-agent state changes, etc.)
-Rather than having a direct conversation with the agent, the agent has a prompt that tells it what to do in response to various events, and it simply processes those until it decides that everything is complete and it can go to sleep (until it is awoken to process the next event)
+## What is a changeling?
 
-In practice, "changelings" are just special mng agents that inherit from the ClaudeChangelingAgent
+A changeling is a *collection of persistent mng agents* that serve a web interface and support chat input/output. Each mng agent within the changeling fulfills a specific **role** (e.g., thinking, working, verifying), and they coordinate through shared event streams in a common git repo.
 
-They can be thought of as a sort of "higher level" agent that is made by assembling a few different LLM-based programs
+From mng's perspective, each role is a separate mng agent with its own agent type. Multiple instances of a single role can run simultaneously (e.g., multiple workers). The plugin is responsible for transforming a simple directory of text files (prompts, skills, configuration) into a valid set of mng agent configurations.
 
-Fundamentally, changelings are mng agents where:
-- The primary agent (from mng's perspective) is a claude code instance *that reacts to "events"* and forms the sort of "inner dialog" of the agent
-- Users do *not* chat directly with this main "inner monolouge" agent--instead, they have conversational threads via the "llm live-chat" command-line tool, and those conversations are *exposed* to the primary agent by sending it events to react to.
-- The core "inner monologue" agent can be thought of as reacting to events. It is sent messages (by a watcher, via "mng message") whenever new events appear in the event streams. For example:
-    - `events/messages/events.jsonl`: new conversation messages synced from the llm database (we'll need to filter out any where the source was the primary agent, since it obviously should not be notified for its own messages)
-    - `events/scheduled/events.jsonl`: one of the time based triggers happens ("mng schedule" can be used, via a skill, to schedule custom events at certain times, which in turn append the json data for that event)
-    - `events/mng_agents/events.jsonl`: a sub agent (launched by this primary agent) transitions to "waiting" (happens via our own hooks--goes through a modal hook like snapshot_and_save if remote, otherwise can just create directly)
-    - `events/stop/events.jsonl`: the primary agent tries to stop (for the first time--before thought complete, roughly). This allows it to do a last check of whether there is anything else worth responding to before going to sleep (and considering when it ought to wake)
-    - `events/monitor/events.jsonl`: (future) a local monitor agent appends a message/reminder to its file
-- The primary agent is generally instructed to do everything via "mng" (because then all sub agents and work is visible / totally transparent to you)
+### Terminology
+
+To avoid confusion, this project uses precise terminology for three distinct concepts:
+
+- **Role agent**: A standard mng agent (a process in a tmux session, visible in `mng list`, with its own lifecycle state). Each role agent is created via `mng create` and fulfills a specific role within the changeling.
+- **Changeling**: The collection of role agents that together form a single higher-level agent from the user's perspective. Not itself an mng agent -- it's the emergent whole.
+- **Supporting service**: A background process running in a tmux window alongside the primary role agent (e.g., watchers, web server, ttyd). These are *not* mng agents -- they don't appear in `mng list`, can't be messaged, and have no lifecycle state. They are infrastructure that the plugin provisions automatically.
+
+## Architecture
+
+### Roles as agent types
+
+Each role directory in the changeling repo corresponds to an mng agent type:
+
+- `thinking/` - the primary role agent; the "inner monologue" that reacts to events and coordinates the changeling
+- `talking/` - generates replies to user messages (runs via `llm live-chat`, not Claude Code)
+- `working/` - executes actual work tasks, can have skills and tools
+- `verifying/` - checks work quality, triggered by "finished" events from other role agents
+- `(user-defined)/` - any additional roles (e.g., "planning/", "researching/")
+
+Each role (except `talking/`) has its own directory structure:
+
+- `<role>/PROMPT.md` - role-specific prompt (symlinked as `CLAUDE.local.md` within the role directory)
+- `<role>/.claude/settings.json` - Claude Code settings for the role
+- `<role>/.claude/skills/` - skills available to the role
+- `<role>/.claude/settings.local.json` - mng-managed hooks (gitignored, written during provisioning)
+- `<role>/memory/` - per-role memory (synced into Claude project memory via hooks)
+
+Claude Code runs from within the role directory (via `cd $ROLE` in `assemble_command`), so `.claude/` is discovered naturally. `GLOBAL.md` at the repo root is symlinked as `CLAUDE.md` and discovered by Claude Code walking up the directory tree.
+
+### Role agent lifecycle
+
+The **thinking** role agent is the first role agent created when a changeling is deployed. It is the coordinator: it decides when to create other role agents based on the events it receives.
+
+When the thinking agent determines that work needs to be done, it creates other role agents by calling `mng create`. Each created role agent is a fully independent mng agent -- it appears in `mng list`, has its own lifecycle state, and runs in its own tmux session. Multiple instances of the same role can exist simultaneously (e.g., several workers tackling different tasks in parallel).
+
+The thinking agent learns about role agent state changes via the `events/mng_agents/events.jsonl` event stream. When a role agent transitions to "waiting", "done", or "crashed", an event is written and delivered to the thinking agent, which can then decide how to proceed (e.g., verify work, retry, or report to the user).
+
+All role agents share the same git repo as their working directory, and they all see the same `GLOBAL.md` instructions. Each role agent's specific behavior is determined by its role directory (prompt, skills, settings).
+
+### The primary role agent (thinking role)
+
+The "thinking" role is the default primary role agent. It does not chat directly with users. Instead, it reacts to events delivered from shared event streams:
+
+- `events/messages/events.jsonl` - new conversation messages (synced from the `llm` database)
+- `events/scheduled/events.jsonl` - time-based triggers
+- `events/mng_agents/events.jsonl` - role agent state transitions (waiting, crashed, done, etc.)
+- `events/stop/events.jsonl` - shutdown detection (last chance to check for pending work)
+- `events/monitor/events.jsonl` - (future) metacognitive reminders from a monitor agent
+
+### Conversation system
+
+Conversations are stored in the `llm` tool's SQLite database, which serves as the authoritative source of all chat data. The system provides multiple interfaces for interacting with that database:
+
+- **Users** chat via `llm live-chat` through a ttyd web terminal or the `chat` bash script
+- **Role agents** post messages via `llm inject` (through skills like "send-message-to-user")
+- **The conversation watcher** (a supporting service) syncs new messages from the database to `events/messages/events.jsonl`
+- **The event watcher** (a supporting service) delivers those events to the primary role agent via `mng message`
+
+This means: user sends message -> `llm` database -> conversation watcher syncs to events -> event watcher delivers to primary role agent -> primary role agent uses skill to call `llm inject` -> response appears in `llm` database -> user sees it in `llm live-chat`.
+
+### Supporting services (tmux windows)
+
+The primary role agent is augmented with several supporting services running in additional tmux windows. These are *not* mng agents -- they are background processes that the plugin provisions automatically:
+
+- **Conversation watcher** - polls the `llm` SQLite database and syncs new messages to `events/messages/events.jsonl`
+- **Event watcher** - monitors event streams and delivers new events to the primary role agent via `mng message`
+- **Transcript watcher** - converts raw Claude transcript to a common agent-agnostic format
+- **Web server** - serves the main web interface with conversation selector and agent list
+- **Chat ttyd** - provides web-terminal access to conversations via `llm live-chat`
+- **Agent ttyd** - provides web-terminal access to the primary role agent's tmux session
+
+## Settings
+
+Per-deployment settings are read from `changelings.toml` in the agent work directory (`$MNG_AGENT_WORK_DIR/changelings.toml`). This file is optional -- all settings have built-in defaults. See `ClaudeChangelingSettings` in `data_types.py` for the full schema.
 
 ## Event log structure
 
@@ -27,51 +91,36 @@ All event data uses a consistent append-only JSONL format stored under `<agent-d
     {"timestamp": "...", "type": "...", "event_id": "...", "source": "<source>", ...additional fields}
 
 Event sources:
-- `events/conversations/events.jsonl` - conversation lifecycle events (created, model changed). Each event includes `conversation_id` and `model`.
-- `events/messages/events.jsonl` - all conversation messages across all conversations. Each event includes `conversation_id`, `role`, and `content`.
-- `events/scheduled/events.jsonl`: Each event corresponds to a scheduled trigger that the primary agent should react to. The event data includes the name of the trigger and any relevant metadata.
-- `events/mng_agents/events.jsonl`: all relevant agent state transitions (eg, when they become blocked, crash, finish, etc). Each event includes the agent_id, the new state, and any relevant metadata about the transition (eg, error message if it crashed)
-- `events/stop/events.jsonl`: for detecting when this agent tried to stop the first time
-- `events/monitor/events.jsonl`: (future) for injecting metacognitive thoughts or reminders from a local monitor agent
-- `events/delivery_failures/events.jsonl`: event delivery failure notifications (written by event_watcher.py when it cannot deliver events to the primary agent)
-- `logs/claude_transcript/events.jsonl` - inner monologue transcript (raw Claude JSONL, written by stream_transcript.sh).
+- `events/messages/events.jsonl` - all conversation messages across all conversations
+- `events/scheduled/events.jsonl` - scheduled triggers
+- `events/mng_agents/events.jsonl` - role agent state transitions
+- `events/stop/events.jsonl` - shutdown detection
+- `events/monitor/events.jsonl` - (future) metacognitive reminders
+- `events/delivery_failures/events.jsonl` - event delivery failure notifications
+- `events/common_transcript/events.jsonl` - agent-agnostic transcript format
+- `logs/claude_transcript/events.jsonl` - raw Claude transcript
 
 Every event is self-describing: you never need to know the filename to understand the event. The file organization is a performance/convenience choice, not a correctness one.
 
-## Implementation details
+Conversation metadata (tags, created_at) is stored in the `changeling_conversations` table in the llm sqlite database (`$LLM_USER_PATH/logs.db`). The model for each conversation lives in the llm tool's native `conversations` table.
 
-- The "conversation threads" or "chat threads" are simply conversation ids that are tracked by the "llm" tool (a 3rd party CLI tool that is really nice and simple--we've made a plugin for it, llm-live-chat, that enables the below "llm live-chat" and "llm inject" commands)
-- Users create new (and resume existing) conversations by calling a little "chat" command. It's just a little bash script that creates event json entries and also makes calls to "llm" so that users and agents don't need to remember the exact invocations. "chat --new" for a new chat and "chat --resume <conversation_id>" to resume. "chat" with no arguments lists all current conversation ids
-- Agents create new conversations by using their "new chat" skill, which calls "chat --new --as-agent" and passing in the message as well
-- Whenever the user (or the agent) creates a new conversation, the "chat" wrapper appends a `conversation_created` event to `events/conversations/events.jsonl` (with the standard envelope plus `conversation_id` and `model`). The conversation is started by calling "llm live-chat" (for user messages) or "llm inject" (for agent messages)
-- The ClaudeChangelingAgent runs a conversation watcher script in a tmux window that watches the llm database and, whenever it changes, syncs new messages to `events/messages/events.jsonl` (with the standard envelope plus `conversation_id`, `role`, `content`)
-- Thus the URL to view an existing chat conversation is simply done via a special ttyd server that runs the correct llm invocation: "llm live-chat --show-history -c --cid <conversation_id> -m <chat-model>" where chat-model comes from the most recent event in `events/conversations/events.jsonl` with that conversation_id
-- To list all conversations for this agent, we read `events/conversations/events.jsonl` (append-only, last value per conversation_id wins)
-- When invoking "llm live-chat", we pass in two tools: one for gathering context (recent messages from other conversations, inner monologue, recent events) and another for extra context (mng agent list, deeper history)
-- A simple event watcher observes the event streams (`events/messages/events.jsonl`, `events/scheduled/events.jsonl`, `events/mng_agents/events.jsonl`, `events/stop/events.jsonl`) for changes, and when modified, sends the next unhandled event(s) to the primary agent (via "mng message")
-- Changeling agents are assumed to run from a specially structured git repo that contains various skills, configuration, prompt files, and the code for any tools they have constructed for themselves. The layout is:
-    - `GLOBAL.md` - shared instructions for all agents (symlinked as `CLAUDE.md` so Claude Code discovers it)
-    - `talking/` - the talking agent (generates replies to user messages, runs via llm, not Claude Code)
-    - `thinking/` - primary/inner monologue agent (that reacts to events, can have skills and tools)
-    - `working/` - the working agent (does the actual work, can have skills and tools)
-    - `verifying/` - the verifying agent (scheduled in reaction to "finished" events from sub-agents, checks work, can have skills and tools)
-    - `(user-defined roles)/` - any additional agent roles the user wants to define (e.g. "planning/", "researching/", etc)
-- Each changeling agent has an "active role" (configured via `active_role` in `ClaudeChangelingConfig`, default: `"thinking"`). The repo root `.claude/` is a directory symlink to `<active_role>/.claude/`, so Claude Code naturally discovers that role's settings, skills, etc.
-- Each role (except `talking/`) has its own directory structure:
-    - `<role>/PROMPT.md` - prompt for the agent (symlinked as `CLAUDE.local.md` when active)
-    - `<role>/.claude/settings.json` - Claude Code settings for the role
-    - `<role>/.claude/skills/` - skills for the role
-    - `<role>/.claude/settings.local.json` - mng-managed hooks (gitignored, written during provisioning)
-    - `<role>/memory/` - per-role memory directory (synced into Claude project memory via hooks)
-- The `GLOBAL.md` serves as the core system prompt that is *shared* among all agents (the primary agent, any claude subagent it makes, and even any other agents created via mng with this repo as the target). It is symlinked to `CLAUDE.md` at the project root so Claude Code picks it up.
-- When a role is active, provisioning creates: `.claude` -> `<active_role>/.claude`, `CLAUDE.md` -> `GLOBAL.md`, and `CLAUDE.local.md` -> `<active_role>/PROMPT.md`. All of this is handled by the ClaudeChangelingAgent during provisioning.
-- Other agent roles can be defined by creating corresponding directories with their own `PROMPT.md` and `.claude/` subdirectories (except `talking/`, which can only have `PROMPT.md`). An appropriate agent type must also be created for them in `.mng/settings.toml` right now.
-- The prompts for the primary agent (both before shutdown and upon message receipt) should encourage it to keep track of messages that it received (via its own task list)
-- Each role has its own memory stored at `<role>/memory/` in the work dir and synced to the Claude project memory location (`~/.claude/projects/<project>/memory/`) via PreToolUse/PostToolUse hooks. This keeps memories version-controlled in git.
-- Any claude agents should use the "project" memory scope (to keep memories version controlled)
-- As part of getting itself set up, the ClaudeChangelingAgent will need to ensure that we've installed the "llm" tool, as well as our plugins for it (ie, "llm-anthropic" and "llm-live-chat"). In other words, we need to call these commands:
-        uv tool install llm
-        llm install llm-anthropic
-        llm install llm-live-chat
+## Provisioning
 
-All of the above is basically stuff that should either be done directly by the ClaudeChangelingAgent, or that it should configure such that everything works out (eg, shipping over bash scripts for the "chat" command, etc.)
+The `ClaudeChangelingAgent.provision()` method transforms the changeling repo into a running role agent:
+
+1. Loads settings from `changelings.toml`
+2. Validates role constraints (e.g., `talking/` cannot have `.claude/` or skills)
+3. Installs the `llm` toolchain (`llm`, `llm-anthropic`, `llm-live-chat`)
+4. Provisions default content (GLOBAL.md, role prompts, role configs) for any missing files
+5. Creates symlinks (`CLAUDE.md` -> `GLOBAL.md`, `<role>/CLAUDE.local.md` -> `<role>/PROMPT.md`)
+6. Configures hooks (readiness detection + memory sync) in `<role>/.claude/settings.local.json`
+7. Deploys supporting service scripts and chat utilities to the host
+8. Creates the event log directory structure
+9. Sets up per-role memory directories with sync hooks
+
+## Dependencies
+
+This plugin depends on:
+- `mng` - the core agent management framework
+- `mng-ttyd` - ttyd integration for web terminal access
+- `watchdog` - filesystem event monitoring for supporting services
