@@ -8,5 +8,5 @@ enabled = true
 # The agent sees "Run: /autofix <extra_args>" and passes this text to the skill.
 # Examples:
 #   extra_args = "Only fix MAJOR and CRITICAL issues."
-#   extra_args = "Focus only on logic_error and runtime_error_risk categories."
+#   extra_args = "Pay extra attention to whether the tests are rigorous and non-tautological."
 extra_args = ""
