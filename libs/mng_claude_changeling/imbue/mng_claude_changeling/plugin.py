@@ -29,6 +29,7 @@ from imbue.mng_claude_changeling.provisioning import create_changeling_conversat
 from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
 from imbue.mng_claude_changeling.provisioning import create_daily_conversation
 from imbue.mng_claude_changeling.provisioning import create_event_log_directories
+from imbue.mng_claude_changeling.provisioning import create_slack_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
 from imbue.mng_claude_changeling.provisioning import provision_default_content
@@ -302,6 +303,7 @@ class ClaudeChangelingAgent(ClaudeAgent):
 
         if config.install_llm:
             create_system_notifications_conversation(host, agent_state_dir, provisioning)
+            create_slack_notifications_conversation(host, agent_state_dir, provisioning)
             chat_model = settings.chat.model or "claude-opus-4.6"
             create_daily_conversation(host, agent_state_dir, provisioning, chat_model)
 
