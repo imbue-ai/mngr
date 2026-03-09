@@ -1,6 +1,7 @@
 """Tests for completion_writer module."""
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -31,6 +32,7 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     assert result.exists()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores filesystem permission bits")
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """write_cli_completions_cache should silently handle OSError."""
     # Point to a read-only directory so the atomic_write fails
