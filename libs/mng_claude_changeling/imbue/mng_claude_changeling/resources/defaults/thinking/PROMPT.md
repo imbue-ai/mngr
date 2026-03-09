@@ -84,6 +84,12 @@ If this agent *was* the "task verification" agent, then you should see what it r
 
 If you believe that the user should be notified about this work (according to their notification preferences, see ["Memory" section below](#memory)), then you should proactively send a message to the user about it (using the "send-message-to-user" skill).
 
+### Events from the "slack" source
+
+These events represent messages that have been posted in various Slack channels.
+
+If a message contains the string "!IMPORTANT!", you should use the "send-message-to-user" skill to notify the user about it in the "Slack Notifications" conversation. Be sure to include the content of the message.
+
 ## Learning more about event types and sources
 
 Use your "list-event-types" skill to get a list of all event sources and types you might receive, and what they mean.
