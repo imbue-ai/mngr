@@ -348,42 +348,19 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
         state.env_patcher.stop()
 
 
-@pytest.hookimpl(hookwrapper=True)
-def _pytest_runtest_makereport(
-    item: pytest.Item,
-    call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
-) -> Generator[None, None, None]:
-    """Enforce resource guard invariants after each test.
+def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
+    """Check resource guard invariants after the call phase and mutate the report if violated.
 
-    After the call phase, checks two things:
-    1. Blocked invocations: if a test without @pytest.mark.<resource> invoked
-       the resource anyway (and handled the non-zero exit or caught the
-       ResourceGuardViolation), the blocked_<resource> tracking file catches it.
-       This check runs regardless of test pass/fail so that the guard violation
-       is visible even when the test fails for a downstream reason.
-    2. Superfluous marks: if a test has @pytest.mark.<resource> but the resource
-       was never invoked, the test is failed. Only checked on passing tests.
+    Two checks:
+    1. Blocked invocations: a test without @pytest.mark.<resource> invoked
+       the resource anyway. Checked regardless of pass/fail so the guard
+       violation is visible even when the test fails for a downstream reason.
+    2. Superfluous marks: a test has @pytest.mark.<resource> but the resource
+       was never invoked. Only checked on passing tests.
     """
-    outcome = yield
-    report = outcome.get_result()
-
-    state: _PerTestGuardState | None = getattr(item, "_guard_state", None)
-    if state is None:
-        return
-
-    if call.when != "call":
-        # Clean up tracking dir on the final phase (teardown)
-        if call.when == "teardown":
-            shutil.rmtree(state.tracking_dir, ignore_errors=True)
-        return
-
     tracking_dir = state.tracking_dir
     marks = state.marks
 
-    # Check for blocked invocations regardless of pass/fail. When a guard
-    # blocks a resource inside a subprocess (e.g., mng create -> tmux), the
-    # test often fails for a downstream reason ("Agent is stopped") that
-    # obscures the real cause. Surfacing the guard violation makes it clear.
     for resource in _guarded_resources:
         blocked_file = Path(tracking_dir) / f"blocked_{resource}"
         if blocked_file.exists():
@@ -395,11 +372,9 @@ def _pytest_runtest_makereport(
                 report.outcome = "failed"
                 report.longrepr = msg
             else:
-                # Append guard info to the existing failure so the root cause is visible.
                 report.longrepr = f"{report.longrepr}\n\n{msg}"
             return
 
-    # Superfluous mark check only matters if the test passed.
     if not report.passed:
         return
 
@@ -413,3 +388,24 @@ def _pytest_runtest_makereport(
                     f"Remove the mark or ensure the test exercises {resource}."
                 )
                 return
+
+
+@pytest.hookimpl(hookwrapper=True)
+def _pytest_runtest_makereport(
+    item: pytest.Item,
+    call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
+) -> Generator[None, None, None]:
+    """Enforce resource guard invariants after each test phase."""
+    outcome = yield
+    report = outcome.get_result()
+
+    state: _PerTestGuardState | None = getattr(item, "_guard_state", None)
+    if state is None:
+        return
+
+    if call.when != "call":
+        if call.when == "teardown":
+            shutil.rmtree(state.tracking_dir, ignore_errors=True)
+        return
+
+    _check_guard_violations(state, report)

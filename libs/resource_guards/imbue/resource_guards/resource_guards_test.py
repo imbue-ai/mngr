@@ -5,7 +5,9 @@ import pytest
 
 import imbue.resource_guards.resource_guards as resource_guards
 from imbue.resource_guards.resource_guards import ResourceGuardViolation
+from imbue.resource_guards.resource_guards import _PerTestGuardState
 from imbue.resource_guards.resource_guards import _build_per_test_guard_env
+from imbue.resource_guards.resource_guards import _check_guard_violations
 from imbue.resource_guards.resource_guards import cleanup_resource_guard_wrappers
 from imbue.resource_guards.resource_guards import cleanup_sdk_resource_guards
 from imbue.resource_guards.resource_guards import create_resource_guard_wrappers
@@ -101,6 +103,28 @@ def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> No
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
     result.assert_outcomes(passed=1)
+
+
+def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
+    """Guards work correctly when xdist distributes tests across workers.
+
+    The controller creates wrapper scripts and sets PATH; workers inherit
+    both via _PYTEST_GUARD_WRAPPER_DIR and enforce guards independently.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        @pytest.mark.cat
+        def test_marked_cat():
+            subprocess.run(["cat", "/dev/null"], check=True)
+
+        def test_unmarked_no_cat():
+            assert True
+    """)
+    result = pytester.runpytest_subprocess("-n2", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=2)
 
 
 def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> None:
@@ -302,6 +326,111 @@ def test_build_per_test_guard_env_sets_allow_for_marked_resources(
     assert env["_PYTEST_GUARD_TRACKING_DIR"] == "/tmp/track"
     assert env["_PYTEST_GUARD_TMUX"] == "allow"
     assert env["_PYTEST_GUARD_RSYNC"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# _check_guard_violations (unit tests)
+# ---------------------------------------------------------------------------
+
+
+class _FakeReport:
+    """Minimal stand-in for pytest.TestReport for testing _check_guard_violations."""
+
+    def __init__(self, *, passed: bool, longrepr: str = "") -> None:
+        self.outcome = "passed" if passed else "failed"
+        self.longrepr = longrepr
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome == "passed"
+
+
+def _make_state(tmp_path: Path, marks: set[str]) -> _PerTestGuardState:
+    tracking_dir = str(tmp_path)
+    return _PerTestGuardState(
+        tracking_dir=tracking_dir,
+        marks=marks,
+        env_patcher=None,  # ty: ignore[invalid-type-form]
+    )
+
+
+def test_check_guard_violations_blocked_invocation_fails_passing_test(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A passing test that invoked a blocked resource should be failed."""
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    state = _make_state(tmp_path, marks=set())
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "without @pytest.mark.cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_blocked_invocation_appends_to_failing_test(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A failing test that also invoked a blocked resource gets both messages."""
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    state = _make_state(tmp_path, marks=set())
+    report = _FakeReport(passed=False, longrepr="original failure")
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "original failure" in str(report.longrepr)
+    assert "without @pytest.mark.cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_superfluous_mark_fails_test(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A passing test marked with a resource it never invoked should be failed."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "never invoked cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_no_violation_leaves_report_unchanged(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A passing test that correctly used its marked resource should stay passed."""
+    register_resource_guard("cat")
+    (tmp_path / "cat").touch()
+
+    state = _make_state(tmp_path, marks={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "passed"
+
+
+def test_check_guard_violations_skips_superfluous_check_on_failing_test(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A failing test with a superfluous mark should not get the superfluous mark error."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks={"cat"})
+    report = _FakeReport(passed=False, longrepr="real failure")
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "never invoked" not in str(report.longrepr)
+    assert report.longrepr == "real failure"
 
 
 # ---------------------------------------------------------------------------
