@@ -1,10 +1,12 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from modal._grpc_client import UnaryStreamWrapper
 from modal._grpc_client import UnaryUnaryWrapper
 
 import imbue.resource_guards.resource_guards as resource_guards
+from imbue.resource_guards.resource_guards import ResourceGuardViolation
 from imbue.resource_guards_modal.guards import _cleanup_modal_guards
 from imbue.resource_guards_modal.guards import _guarded_modal_unary_call
 from imbue.resource_guards_modal.guards import _guarded_modal_unary_stream
@@ -103,7 +105,7 @@ def test_guarded_modal_unary_call_delegates_to_original(
     isolated_guard_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guarded unary call invokes enforce_sdk_guard and delegates."""
+    """The guarded unary call delegates to the original when the guard allows it."""
     monkeypatch.delenv("_PYTEST_GUARD_PHASE", raising=False)
 
     sentinel = object()
@@ -119,11 +121,29 @@ def test_guarded_modal_unary_call_delegates_to_original(
     _modal_originals.clear()
 
 
+def test_guarded_modal_unary_call_enforces_guard(
+    isolated_guard_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The guarded unary call raises ResourceGuardViolation when blocked."""
+    monkeypatch.setenv("_PYTEST_GUARD_PHASE", "call")
+    monkeypatch.setenv("_PYTEST_GUARD_MODAL", "block")
+    monkeypatch.setenv("_PYTEST_GUARD_TRACKING_DIR", str(tmp_path))
+
+    _modal_originals["unary_call"] = None
+
+    with pytest.raises(ResourceGuardViolation, match="without @pytest.mark.modal"):
+        asyncio.get_event_loop().run_until_complete(_guarded_modal_unary_call(None))
+
+    _modal_originals.clear()
+
+
 def test_guarded_modal_unary_stream_delegates_to_original(
     isolated_guard_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guarded unary stream invokes enforce_sdk_guard and yields from original."""
+    """The guarded unary stream yields from the original when the guard allows it."""
     monkeypatch.delenv("_PYTEST_GUARD_PHASE", raising=False)
 
     async def fake_original(self, *args, **kwargs):
@@ -141,4 +161,26 @@ def test_guarded_modal_unary_stream_delegates_to_original(
     results = asyncio.get_event_loop().run_until_complete(collect())
 
     assert results == ["a", "b"]
+    _modal_originals.clear()
+
+
+def test_guarded_modal_unary_stream_enforces_guard(
+    isolated_guard_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The guarded unary stream raises ResourceGuardViolation when blocked."""
+    monkeypatch.setenv("_PYTEST_GUARD_PHASE", "call")
+    monkeypatch.setenv("_PYTEST_GUARD_MODAL", "block")
+    monkeypatch.setenv("_PYTEST_GUARD_TRACKING_DIR", str(tmp_path))
+
+    _modal_originals["unary_stream"] = None
+
+    async def collect():
+        async for _item in _guarded_modal_unary_stream(None):
+            pass
+
+    with pytest.raises(ResourceGuardViolation, match="without @pytest.mark.modal"):
+        asyncio.get_event_loop().run_until_complete(collect())
+
     _modal_originals.clear()

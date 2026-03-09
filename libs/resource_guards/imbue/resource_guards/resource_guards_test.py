@@ -106,10 +106,12 @@ def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester) -> No
 
 
 def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
-    """Guards work correctly when xdist distributes tests across workers.
+    """Guards enforce correctly when xdist distributes tests across workers.
 
     The controller creates wrapper scripts and sets PATH; workers inherit
     both via _PYTEST_GUARD_WRAPPER_DIR and enforce guards independently.
+    Includes a marked test that passes and an unmarked test that calls the
+    resource and should fail.
     """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -120,11 +122,12 @@ def test_guards_work_with_xdist_workers(pytester: pytest.Pytester) -> None:
         def test_marked_cat():
             subprocess.run(["cat", "/dev/null"], check=True)
 
-        def test_unmarked_no_cat():
-            assert True
+        def test_unmarked_cat_should_fail():
+            subprocess.run(["cat", "/dev/null"], check=True)
     """)
     result = pytester.runpytest_subprocess("-n2", "--no-header", "-p", "no:cacheprovider")
-    result.assert_outcomes(passed=2)
+    result.assert_outcomes(passed=1, failed=1)
+    result.stdout.fnmatch_lines(["*without @pytest.mark.cat*"])
 
 
 def test_unmarked_test_that_calls_resource_fails(pytester: pytest.Pytester) -> None:

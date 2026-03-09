@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pytest
 from docker.api.client import APIClient
 
 import imbue.resource_guards.resource_guards as resource_guards
+from imbue.resource_guards.resource_guards import ResourceGuardViolation
 from imbue.resource_guards_docker.guards import _cleanup_docker_sdk_guards
 from imbue.resource_guards_docker.guards import _docker_originals
 from imbue.resource_guards_docker.guards import _guarded_docker_send
@@ -75,7 +78,7 @@ def test_guarded_docker_send_delegates_to_original(
     isolated_guard_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guarded send function calls enforce_sdk_guard and delegates."""
+    """The guarded send function delegates to the original when the guard allows it."""
     monkeypatch.delenv("_PYTEST_GUARD_PHASE", raising=False)
 
     sentinel = object()
@@ -85,3 +88,61 @@ def test_guarded_docker_send_delegates_to_original(
 
     assert result is sentinel
     _docker_originals.clear()
+
+
+def test_guarded_docker_send_enforces_guard(
+    isolated_guard_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The guarded send raises ResourceGuardViolation when blocked."""
+    monkeypatch.setenv("_PYTEST_GUARD_PHASE", "call")
+    monkeypatch.setenv("_PYTEST_GUARD_DOCKER_SDK", "block")
+    monkeypatch.setenv("_PYTEST_GUARD_TRACKING_DIR", str(tmp_path))
+
+    _docker_originals["send_original_resolved"] = lambda self, *a, **kw: None
+
+    with pytest.raises(ResourceGuardViolation, match="without @pytest.mark.docker_sdk"):
+        _guarded_docker_send(None)
+
+    _docker_originals.clear()
+
+
+def test_install_when_apiclient_has_own_send(
+    isolated_guard_state: None,
+) -> None:
+    """install/cleanup round-trips correctly when APIClient already has send in __dict__."""
+    _cleanup_docker_sdk_guards()
+
+    def original_own_send(self, *a, **kw):
+        pass
+
+    APIClient.send = original_own_send  # ty: ignore[invalid-assignment]
+
+    _install_docker_sdk_guards()
+
+    assert _docker_originals["send_existed"] is True
+    assert _docker_originals["send_original"] is original_own_send
+    assert APIClient.send is _guarded_docker_send
+
+    _cleanup_docker_sdk_guards()
+
+    assert APIClient.__dict__.get("send") is original_own_send
+    # Clean up: remove our test attribute so we don't leak state
+    del APIClient.send
+
+
+def test_cleanup_when_send_already_removed(
+    isolated_guard_state: None,
+) -> None:
+    """Cleanup handles the case where another path already removed the patched send."""
+    _cleanup_docker_sdk_guards()
+
+    _install_docker_sdk_guards()
+
+    # Simulate another cleanup path removing our patch before we clean up
+    if "send" in APIClient.__dict__:
+        del APIClient.send
+
+    # Should not raise
+    _cleanup_docker_sdk_guards()
