@@ -75,7 +75,6 @@ omit = [
   "*/utils/testing.py",
   # Test infrastructure modules are exercised by tests that use them
   "*/conftest_hooks.py",
-  "*/resource_guards.py",
   "*/ratchet_testing/*",
 ]
 
