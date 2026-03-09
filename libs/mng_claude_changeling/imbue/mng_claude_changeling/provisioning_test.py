@@ -657,10 +657,21 @@ _FAKE_INJECT_RESULT = StubCommandResult(
 )
 
 
-def test_create_system_notifications_conversation_runs_inject_and_records_event() -> None:
+@pytest.mark.parametrize(
+    ("create_fn", "expected_tag"),
+    [
+        (create_system_notifications_conversation, "system_notifications"),
+        (create_slack_notifications_conversation, "slack_notifications"),
+    ],
+    ids=["system_notifications", "slack_notifications"],
+)
+def test_create_internal_conversation_runs_inject_and_records_event(
+    create_fn: Any,
+    expected_tag: str,
+) -> None:
     host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+    create_fn(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     # Should run llm inject with LLM_USER_PATH prefix (no --cid, llm assigns the ID)
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
@@ -673,57 +684,23 @@ def test_create_system_notifications_conversation_runs_inject_and_records_event(
     db_commands = [c for c in host.executed_commands if "sqlite3" in c and "changeling_conversations" in c]
     assert len(db_commands) == 1
     assert "fake-conv-id-123" in db_commands[0]
-    # Should be tagged as internal
     assert "internal" in db_commands[0]
-    assert "system_notifications" in db_commands[0]
+    assert expected_tag in db_commands[0]
 
 
-def test_create_system_notifications_conversation_skips_event_on_inject_failure() -> None:
+@pytest.mark.parametrize(
+    "create_fn",
+    [create_system_notifications_conversation, create_slack_notifications_conversation],
+    ids=["system_notifications", "slack_notifications"],
+)
+def test_create_internal_conversation_skips_event_on_inject_failure(
+    create_fn: Any,
+) -> None:
     host = StubHost(
         command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
     )
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
-
-    # Should have attempted llm inject
-    inject_commands = [c for c in host.executed_commands if "llm inject" in c]
-    assert len(inject_commands) == 1
-
-    # Should NOT have written a DB record (early return on failure)
-    db_commands = [c for c in host.executed_commands if "sqlite3" in c and "changeling_conversations" in c]
-    assert len(db_commands) == 0
-
-
-# -- create_slack_notifications_conversation tests --
-
-
-def test_create_slack_notifications_conversation_runs_inject_and_records_event() -> None:
-    host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
-    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_slack_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
-
-    # Should run llm inject with LLM_USER_PATH prefix (no --cid, llm assigns the ID)
-    inject_commands = [c for c in host.executed_commands if "llm inject" in c]
-    assert len(inject_commands) == 1
-    assert "--cid" not in inject_commands[0]
-    assert "LLM_USER_PATH=" in inject_commands[0]
-    assert "llm_data" in inject_commands[0]
-
-    # Should insert a record into changeling_conversations via sqlite3
-    db_commands = [c for c in host.executed_commands if "sqlite3" in c and "changeling_conversations" in c]
-    assert len(db_commands) == 1
-    assert "fake-conv-id-123" in db_commands[0]
-    # Should be tagged as internal with slack_notifications
-    assert "internal" in db_commands[0]
-    assert "slack_notifications" in db_commands[0]
-
-
-def test_create_slack_notifications_conversation_skips_event_on_inject_failure() -> None:
-    host = StubHost(
-        command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
-    )
-    agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_slack_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+    create_fn(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     # Should have attempted llm inject
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
