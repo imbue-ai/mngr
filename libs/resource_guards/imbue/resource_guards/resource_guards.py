@@ -320,9 +320,10 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     Uses patch.dict to manage env vars so cleanup is automatic and the
     set of vars added in setup can never drift from what teardown removes.
     """
-    if _guard_wrapper_dir is None:
-        yield
-        return
+    assert _guard_wrapper_dir is not None, (
+        "Resource guard hooks are registered but create_resource_guard_wrappers() was never called. "
+        "Call create_resource_guard_wrappers() in pytest_sessionstart before tests run."
+    )
 
     marks = {m.name for m in item.iter_markers()}
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
@@ -343,9 +344,8 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
     """Clean up resource guard environment variables after teardown."""
     yield
 
-    state: _PerTestGuardState | None = getattr(item, "_guard_state", None)
-    if state is not None:
-        state.env_patcher.stop()
+    state: _PerTestGuardState = item._guard_state  # ty: ignore[unresolved-attribute]
+    state.env_patcher.stop()
 
 
 def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
@@ -399,9 +399,7 @@ def _pytest_runtest_makereport(
     outcome = yield
     report = outcome.get_result()
 
-    state: _PerTestGuardState | None = getattr(item, "_guard_state", None)
-    if state is None:
-        return
+    state: _PerTestGuardState = item._guard_state  # ty: ignore[unresolved-attribute]
 
     if call.when != "call":
         if call.when == "teardown":
