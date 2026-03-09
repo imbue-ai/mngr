@@ -52,8 +52,6 @@ def pytest_sessionfinish(session, exitstatus):
     stop_resource_guards()
 ```
 
-`start_resource_guards` registers the per-test hooks as a pytest plugin, so they coexist naturally with any hooks you define in the same conftest.py.
-
 ### 2. Add guards for Modal or Docker
 
 Install the extension package and call its registration function:
