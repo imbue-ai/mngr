@@ -2196,11 +2196,7 @@ def test_new_tmux_window_inherits_env_vars(
             capture_output=True,
         )
 
-        # Wait for the shell to be ready before sending keys. Under heavy
-        # load (e.g. xdist parallelism), the default-command's bash -c script
-        # that sources env files and exec's into the user's shell can take
-        # long enough that PTY-buffered keys are lost during the terminal
-        # mode transition (cooked -> raw) when the interactive shell starts.
+        # Wait for the shell to be ready before sending keys
         window_target = f"{session_name}:user-window"
 
         def shell_prompt_visible() -> bool:
