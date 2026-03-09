@@ -9,7 +9,7 @@
           },
           {
             "type": "command",
-            "command": "read INPUT; SID=$(echo \"$INPUT\" | jq -r '.session_id // empty'); [ -n \"$SID\" ] && [ -n \"${CLAUDE_ENV_FILE:-}\" ] && echo \"export CLAUDE_CODE_SESSION_ID=$SID\" >> \"$CLAUDE_ENV_FILE\" || true"
+            "command": "read INPUT; SID=$(echo \"$INPUT\" | jq -r '.session_id // empty'); [ -n \"$SID\" ] && [ -n \"${CLAUDE_ENV_FILE:-}\" ] && echo \"export MNG_CLAUDE_SESSION_ID=$SID\" >> \"$CLAUDE_ENV_FILE\" || true"
           }
         ]
       }

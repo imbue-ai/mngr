@@ -3,7 +3,7 @@
 # Outputs one absolute file path per line, in chronological order.
 #
 # Session IDs are read from $MNG_AGENT_STATE_DIR/claude_session_id_history.
-# If $CLAUDE_CODE_SESSION_ID is set and not already in the history, it is
+# If $MNG_CLAUDE_SESSION_ID is set and not already in the history, it is
 # appended so the current session is always included.
 
 set -euo pipefail
@@ -29,16 +29,16 @@ if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_sessio
 fi
 
 # Ensure the current Claude Code session is included
-if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+if [ -n "${MNG_CLAUDE_SESSION_ID:-}" ]; then
     _ALREADY_PRESENT=false
     for sid in "${_SESSION_IDS[@]}"; do
-        if [ "$sid" = "$CLAUDE_CODE_SESSION_ID" ]; then
+        if [ "$sid" = "$MNG_CLAUDE_SESSION_ID" ]; then
             _ALREADY_PRESENT=true
             break
         fi
     done
     if [ "$_ALREADY_PRESENT" = false ]; then
-        _SESSION_IDS+=("$CLAUDE_CODE_SESSION_ID")
+        _SESSION_IDS+=("$MNG_CLAUDE_SESSION_ID")
     fi
 fi
 
