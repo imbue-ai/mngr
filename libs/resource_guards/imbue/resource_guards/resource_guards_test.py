@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -330,6 +331,56 @@ def test_cleanup_sdk_resource_guards_calls_cleanup(
     cleanup_sdk_resource_guards()
 
     assert cleanup_called == [1]
+
+
+def test_custom_sdk_guard_end_to_end(
+    isolated_guard_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A custom SDK guard following the README pattern blocks, allows, and cleans up."""
+
+    class FakeClient:
+        def send(self, data: str) -> str:
+            return f"sent:{data}"
+
+    originals: dict[str, Callable[..., str]] = {}
+
+    def guarded_send(self, data: str) -> str:
+        enforce_sdk_guard("fake_sdk")
+        return originals["send"](self, data)
+
+    def install() -> None:
+        originals["send"] = FakeClient.send
+        FakeClient.send = guarded_send  # ty: ignore[invalid-assignment]
+
+    def cleanup() -> None:
+        if "send" in originals:
+            FakeClient.send = originals["send"]  # ty: ignore[invalid-assignment]
+            originals.clear()
+
+    register_sdk_guard("fake_sdk", install, cleanup)
+    create_sdk_resource_guards()
+
+    # Blocked: calling send without the mark raises ResourceGuardViolation
+    monkeypatch.setenv("_PYTEST_GUARD_PHASE", "call")
+    monkeypatch.setenv("_PYTEST_GUARD_FAKE_SDK", "block")
+    monkeypatch.setenv("_PYTEST_GUARD_TRACKING_DIR", str(tmp_path))
+
+    with pytest.raises(ResourceGuardViolation, match="without @pytest.mark.fake_sdk"):
+        FakeClient().send("hello")
+
+    # Allowed: calling send with the mark works and tracks usage
+    monkeypatch.setenv("_PYTEST_GUARD_FAKE_SDK", "allow")
+
+    result = FakeClient().send("hello")
+    assert result == "sent:hello"
+    assert (tmp_path / "fake_sdk").exists()
+
+    # Cleanup restores the original method
+    cleanup_sdk_resource_guards()
+    assert FakeClient().send("hello") == "sent:hello"
+    assert len(originals) == 0
 
 
 # ---------------------------------------------------------------------------
