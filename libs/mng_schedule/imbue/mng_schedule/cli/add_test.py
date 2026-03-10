@@ -2,8 +2,6 @@
 
 import shlex
 
-from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng_schedule.cli.add import _get_provider_ssh_public_key
 from imbue.mng_schedule.cli.add import auto_fix_create_args
 from imbue.mng_schedule.cli.add import check_safe_create_command
 
@@ -16,102 +14,53 @@ class TestAutoFixCreateArgs:
     """Tests for auto_fix_create_args."""
 
     def test_adds_headless_when_missing(self) -> None:
-        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent", "trigger-1")
         parts = shlex.split(result)
         assert "--headless" in parts
 
     def test_skips_headless_when_already_present(self) -> None:
-        result = auto_fix_create_args("my-agent --headless", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --headless", "trigger-1")
         parts = shlex.split(result)
         assert parts.count("--headless") == 1
 
     def test_adds_no_connect_when_missing(self) -> None:
-        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent", "trigger-1")
         parts = shlex.split(result)
         assert "--no-connect" in parts
 
     def test_skips_no_connect_when_connect_present(self) -> None:
-        result = auto_fix_create_args("my-agent --connect", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --connect", "trigger-1")
         parts = shlex.split(result)
         assert "--no-connect" not in parts
         assert "--connect" in parts
 
     def test_skips_no_connect_when_no_connect_already_present(self) -> None:
-        result = auto_fix_create_args("my-agent --no-connect", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --no-connect", "trigger-1")
         parts = shlex.split(result)
         assert parts.count("--no-connect") == 1
 
-    def test_adds_await_ready_when_missing(self) -> None:
-        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
-        parts = shlex.split(result)
-        assert "--await-ready" in parts
-
-    def test_skips_await_ready_when_already_present(self) -> None:
-        result = auto_fix_create_args("my-agent --await-ready", "trigger-1", ssh_public_key=None)
-        parts = shlex.split(result)
-        assert parts.count("--await-ready") == 1
-
-    def test_skips_await_ready_when_no_await_ready_present(self) -> None:
-        result = auto_fix_create_args("my-agent --no-await-ready", "trigger-1", ssh_public_key=None)
-        parts = shlex.split(result)
-        assert "--await-ready" not in parts
-        assert "--no-await-ready" in parts
-
-    def test_adds_authorized_key_when_ssh_key_provided(self) -> None:
-        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key="ssh-rsa AAAAB3... user@host")
-        parts = shlex.split(result)
-        assert "--authorized-key" in parts
-        key_idx = parts.index("--authorized-key")
-        assert parts[key_idx + 1] == "ssh-rsa AAAAB3... user@host"
-
-    def test_skips_authorized_key_when_already_present(self) -> None:
-        result = auto_fix_create_args(
-            "my-agent --authorized-key existing-key",
-            "trigger-1",
-            ssh_public_key="ssh-rsa AAAAB3... user@host",
-        )
-        parts = shlex.split(result)
-        assert parts.count("--authorized-key") == 1
-        key_idx = parts.index("--authorized-key")
-        assert parts[key_idx + 1] == "existing-key"
-
-    def test_skips_authorized_key_when_present_in_equals_form(self) -> None:
-        result = auto_fix_create_args(
-            "my-agent --authorized-key=existing-key",
-            "trigger-1",
-            ssh_public_key="ssh-rsa AAAAB3... user@host",
-        )
-        parts = shlex.split(result)
-        # Should not add a duplicate --authorized-key
-        assert sum(1 for p in parts if p.startswith("--authorized-key")) == 1
-
-    def test_skips_authorized_key_when_no_ssh_key(self) -> None:
-        result = auto_fix_create_args("my-agent", "trigger-1", ssh_public_key=None)
-        parts = shlex.split(result)
-        assert "--authorized-key" not in parts
-
     def test_adds_schedule_tag(self) -> None:
-        result = auto_fix_create_args("my-agent", "nightly-build", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent", "nightly-build")
         parts = shlex.split(result)
-        assert "--tag" in parts
-        tag_idx = parts.index("--tag")
+        assert "--host-label" in parts
+        tag_idx = parts.index("--host-label")
         assert parts[tag_idx + 1] == "SCHEDULE=nightly-build"
 
     def test_skips_schedule_tag_when_already_present(self) -> None:
-        result = auto_fix_create_args("my-agent --tag SCHEDULE=custom", "nightly-build", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --host-label SCHEDULE=custom", "nightly-build")
         parts = shlex.split(result)
-        assert parts.count("--tag") == 1
-        tag_idx = parts.index("--tag")
+        assert parts.count("--host-label") == 1
+        tag_idx = parts.index("--host-label")
         assert parts[tag_idx + 1] == "SCHEDULE=custom"
 
     def test_skips_schedule_tag_when_present_in_equals_form(self) -> None:
-        result = auto_fix_create_args("my-agent --tag=SCHEDULE=custom", "nightly-build", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --host-label=SCHEDULE=custom", "nightly-build")
         parts = shlex.split(result)
-        # Should not add a duplicate --tag SCHEDULE=...
+        # Should not add a duplicate --host-label SCHEDULE=...
         assert sum(1 for p in parts if "SCHEDULE=" in p) == 1
 
     def test_preserves_passthrough_args(self) -> None:
-        result = auto_fix_create_args("my-agent --reuse -- --model opus", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("my-agent --reuse -- --model opus", "trigger-1")
         parts = shlex.split(result)
         assert "--" in parts
         separator_idx = parts.index("--")
@@ -120,20 +69,17 @@ class TestAutoFixCreateArgs:
         assert "opus" in parts[separator_idx + 1 :]
         # Auto-fixed args should be before --
         assert "--no-connect" in parts[:separator_idx]
-        assert "--await-ready" in parts[:separator_idx]
 
     def test_handles_empty_args(self) -> None:
-        result = auto_fix_create_args("", "trigger-1", ssh_public_key=None)
+        result = auto_fix_create_args("", "trigger-1")
         parts = shlex.split(result)
         assert "--no-connect" in parts
-        assert "--await-ready" in parts
-        assert "--tag" in parts
+        assert "--host-label" in parts
 
     def test_preserves_existing_args(self) -> None:
         result = auto_fix_create_args(
             "my-agent --type claude --message 'fix bugs' --in modal",
             "trigger-1",
-            ssh_public_key=None,
         )
         parts = shlex.split(result)
         assert "my-agent" in parts
@@ -156,31 +102,26 @@ class TestCheckSafeCreateCommand:
         result = check_safe_create_command("my-agent --reuse --in modal")
         assert result is None
 
-    def test_passes_with_new_branch_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'agent-run-{DATE}' --in modal")
+    def test_passes_with_branch_date_placeholder(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':agent-run-{DATE}' --in modal")
         assert result is None
 
-    def test_passes_with_new_branch_equals_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch=agent-run-{DATE} --in modal")
+    def test_passes_with_branch_equals_date_placeholder(self) -> None:
+        result = check_safe_create_command("my-agent --branch=:agent-run-{DATE} --in modal")
         assert result is None
 
-    def test_fails_with_new_branch_equals_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch=static-branch --in modal")
+    def test_fails_with_branch_equals_without_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch=:static-branch --in modal")
         assert result is not None
 
-    def test_fails_without_reuse_or_new_branch(self) -> None:
+    def test_fails_without_reuse_or_branch_date(self) -> None:
         result = check_safe_create_command("my-agent --in modal")
         assert result is not None
-        assert "--new-branch" in result
+        assert "--branch" in result
         assert "--reuse" in result
 
-    def test_fails_with_new_branch_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'static-branch' --in modal")
-        assert result is not None
-
-    def test_fails_with_new_branch_flag_only(self) -> None:
-        """--new-branch used as a flag (no value) should fail because there's no {DATE}."""
-        result = check_safe_create_command("my-agent --new-branch --in modal")
+    def test_fails_with_branch_without_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':static-branch' --in modal")
         assert result is not None
 
     def test_passes_with_empty_args_and_reuse(self) -> None:
@@ -196,19 +137,10 @@ class TestCheckSafeCreateCommand:
         result = check_safe_create_command("my-agent -- --reuse")
         assert result is not None
 
-    def test_new_branch_date_before_separator_passes(self) -> None:
-        result = check_safe_create_command("my-agent --new-branch 'run-{DATE}' -- --model opus")
+    def test_branch_date_before_separator_passes(self) -> None:
+        result = check_safe_create_command("my-agent --branch ':run-{DATE}' -- --model opus")
         assert result is None
 
-
-# =============================================================================
-# _get_provider_ssh_public_key tests
-# =============================================================================
-
-
-def test_get_provider_ssh_public_key_returns_none_for_local(
-    local_provider: LocalProviderInstance,
-) -> None:
-    """Local provider should return None since it doesn't use SSH for agent connections."""
-    result = _get_provider_ssh_public_key(local_provider)
-    assert result is None
+    def test_passes_with_branch_base_and_date(self) -> None:
+        result = check_safe_create_command("my-agent --branch 'main:run-{DATE}' --in modal")
+        assert result is None

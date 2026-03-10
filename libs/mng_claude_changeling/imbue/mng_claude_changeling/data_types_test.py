@@ -53,7 +53,7 @@ def test_changeling_event_with_data() -> None:
         timestamp=_TS,
         type=EventType("sub_agent_waiting"),
         event_id=_EID,
-        source=EventSource("mng_agents"),
+        source=EventSource("mng/agents"),
         data={"agent_name": "helper-1"},
     )
     assert event.data["agent_name"] == "helper-1"

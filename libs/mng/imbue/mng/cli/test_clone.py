@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from imbue.mng.cli.clone import clone
 from imbue.mng.cli.list import list_command
+from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
@@ -33,17 +34,20 @@ def test_clone_creates_agent_from_source(
             [
                 source_name,
                 clone_name,
-                "--agent-cmd",
+                "--command",
                 "sleep 482917",
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert clone_result.exit_code == 0, f"Clone failed with: {clone_result.output}"
-        assert tmux_session_exists(clone_session), f"Expected clone session {clone_session} to exist"
+
+        wait_for(
+            lambda: tmux_session_exists(clone_session),
+            timeout=15.0,
+            error_message=f"Expected clone session {clone_session} to exist",
+        )
 
         # Verify both agents appear in list output
         list_result = cli_runner.invoke(

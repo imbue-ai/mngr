@@ -31,10 +31,10 @@ mng create my-agent codex      # named "my-agent", type "codex"
 mng create my-agent opencode   # named "my-agent", type "opencode"
 ```
 
-Or use the `--agent-type` option:
+Or use the `--type` option:
 
 ```bash
-mng create my-agent --agent-type claude
+mng create my-agent --type claude
 ```
 
 Any command in your PATH can also be used as an agent type:

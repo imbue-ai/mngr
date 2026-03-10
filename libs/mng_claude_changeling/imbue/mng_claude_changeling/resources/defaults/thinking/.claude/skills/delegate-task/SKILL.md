@@ -26,7 +26,7 @@ The `--message` flag sends an initial prompt to the agent describing what work t
 
 ## Creating a verifying agent
 
-When a working agent finishes (you will receive an `mng_agents` event), create a verifying agent to check the work:
+When a working agent finishes (you will receive an `mng/agents` event), create a verifying agent to check the work:
 
 ```bash
 mng create verify-<task-name> --message "Verify that the following task was completed successfully: <description>. The agent that performed the work was <agent-name>. Check <specific things to verify>."

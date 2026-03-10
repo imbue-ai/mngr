@@ -25,7 +25,7 @@ def test_parse_agent_identifier_from_jsonl_stdout() -> None:
 
 def test_parse_agent_identifier_from_stderr_fallback() -> None:
     stderr = (
-        "2026-01-15 10:00:00.123 | INFO | Agent creation started in background (PID: 12345)\n"
+        "2026-01-15 10:00:00.123 | INFO | Creating agent...\n"
         "2026-01-15 10:00:00.124 | INFO | Agent name: delightful-phoenix\n"
     )
     result = parse_agent_identifier("", stderr)

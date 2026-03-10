@@ -73,17 +73,17 @@ def _has_flag(mng_args: Sequence[str], flag: str, negative_flag: str | None = No
 
 
 @pure
-def _has_tag_with_key(mng_args: Sequence[str], tag_key: str) -> bool:
-    """Check if a --tag with the given key prefix exists in the args.
+def _has_host_label_with_key(mng_args: Sequence[str], label_key: str) -> bool:
+    """Check if a --host-label with the given key prefix exists in the args.
 
-    Handles both '--tag KEY=VALUE' (two tokens) and '--tag=KEY=VALUE' (single token) forms.
+    Handles both '--host-label KEY=VALUE' (two tokens) and '--host-label=KEY=VALUE' (single token) forms.
     """
     for i, part in enumerate(mng_args):
-        # Two-token form: --tag KEY=VALUE
-        if part == "--tag" and i + 1 < len(mng_args) and mng_args[i + 1].startswith(f"{tag_key}="):
+        # Two-token form: --host-label KEY=VALUE
+        if part == "--host-label" and i + 1 < len(mng_args) and mng_args[i + 1].startswith(f"{label_key}="):
             return True
-        # Single-token form: --tag=KEY=VALUE
-        if part.startswith(f"--tag={tag_key}="):
+        # Single-token form: --host-label=KEY=VALUE
+        if part.startswith(f"--host-label={label_key}="):
             return True
     return False
 
@@ -92,16 +92,13 @@ def _has_tag_with_key(mng_args: Sequence[str], tag_key: str) -> bool:
 def auto_fix_create_args(
     args: str,
     trigger_name: str,
-    ssh_public_key: str | None,
 ) -> str:
     """Auto-fix args for a create command to ensure they work as expected.
 
     Adds the following flags if not already present:
     - --headless: so we never attempt interactive prompts
     - --no-connect: so we don't try to automatically connect
-    - --await-ready: to make sure the command actually worked
-    - --authorized-key <key>: so you can connect to the host via SSH
-    - --tag SCHEDULE=<name>: to make it easy to filter scheduled agents
+    - --host-label SCHEDULE=<name>: to make it easy to filter scheduled agents
 
     Only the mng args (before any '--' separator) are checked and modified.
     """
@@ -115,14 +112,8 @@ def auto_fix_create_args(
     if not _has_flag(mng_args, "--no-connect", "--connect"):
         mng_args.append("--no-connect")
 
-    if not _has_flag(mng_args, "--await-ready", "--no-await-ready"):
-        mng_args.append("--await-ready")
-
-    if ssh_public_key is not None and not _has_flag(mng_args, "--authorized-key"):
-        mng_args.extend(["--authorized-key", ssh_public_key])
-
-    if not _has_tag_with_key(mng_args, "SCHEDULE"):
-        mng_args.extend(["--tag", f"SCHEDULE={trigger_name}"])
+    if not _has_host_label_with_key(mng_args, "SCHEDULE"):
+        mng_args.extend(["--host-label", f"SCHEDULE={trigger_name}"])
 
     return shlex.join(mng_args + passthrough_args)
 
@@ -134,7 +125,7 @@ def check_safe_create_command(args: str) -> str | None:
     Returns None if args are safe, or an error message string if not.
 
     Currently checks:
-    - Either --new-branch with a {DATE} placeholder in its value, or --reuse
+    - Either --branch with a {DATE} placeholder in its NEW part, or --reuse
       must be specified, so that each scheduled run doesn't conflict.
     """
     parts = shlex.split(args) if args else []
@@ -143,46 +134,29 @@ def check_safe_create_command(args: str) -> str | None:
     if _has_flag(mng_args, "--reuse"):
         return None
 
-    # Check for --new-branch with a {DATE} placeholder in its value.
-    # Handles three forms:
-    # 1. "--new-branch value" (two tokens, space-separated)
-    # 2. "--new-branch=value" (single token, equals-separated)
-    # 3. "--new-branch" alone (flag mode, no value -- not sufficient)
+    # Check for --branch with a {DATE} placeholder in the value.
+    # The --branch flag uses [BASE][:NEW] format. We need {DATE} somewhere
+    # in the value to ensure unique branch names per run.
+    # Handles two forms:
+    # 1. "--branch value" (two tokens, space-separated)
+    # 2. "--branch=value" (single token, equals-separated)
     for i, part in enumerate(mng_args):
-        # Single-token form: --new-branch=value
-        if part.startswith("--new-branch="):
-            branch_value = part[len("--new-branch=") :]
+        # Single-token form: --branch=value
+        if part.startswith("--branch="):
+            branch_value = part[len("--branch=") :]
             if "{DATE}" in branch_value:
                 return None
-        # Two-token form: --new-branch value
-        elif part == "--new-branch" and i + 1 < len(mng_args):
+        # Two-token form: --branch value
+        elif part == "--branch" and i + 1 < len(mng_args):
             next_arg = mng_args[i + 1]
-            # If the next arg looks like another flag, --new-branch was used
-            # as a flag (no value), so skip it.
             if not next_arg.startswith("-") and "{DATE}" in next_arg:
                 return None
 
     return (
-        "Create command should either use --new-branch with a {DATE} placeholder "
-        "(e.g. --new-branch 'my-branch-{DATE}') or --reuse to avoid creating "
+        "Create command should either use --branch with a {DATE} placeholder "
+        "(e.g. --branch ':run-{DATE}') or --reuse to avoid creating "
         "conflicting agents/branches on each scheduled run."
     )
-
-
-def _get_provider_ssh_public_key(
-    provider: LocalProviderInstance | ModalProviderInstance,
-) -> str | None:
-    """Get the SSH public key for the given provider, or None if not applicable.
-
-    For modal: returns the provider's SSH public key (for agent --authorized-key).
-    For local: returns None (local provider doesn't use SSH for agent connections).
-    """
-    if isinstance(provider, ModalProviderInstance):
-        return provider.get_ssh_public_key()
-    elif isinstance(provider, LocalProviderInstance):
-        return None
-    else:
-        raise TypeError(f"Unsupported provider type: {type(provider).__name__}")
 
 
 # =============================================================================
@@ -204,14 +178,14 @@ def _get_provider_ssh_public_key(
     default=True,
     show_default=True,
     help="Automatically add args to create commands to make sure they work as expected "
-    "(e.g. --no-connect, --await-ready, --authorized-key, --tag SCHEDULE=<name>).",
+    "(e.g. --headless, --no-connect, --host-label SCHEDULE=<name>).",
 )
 @optgroup.option(
     "--ensure-safe-commands/--no-ensure-safe-commands",
     "ensure_safe_commands",
     default=True,
     show_default=True,
-    help="Error if the scheduled command looks unsafe (e.g. missing --new-branch {DATE} or --reuse). "
+    help="Error if the scheduled command looks unsafe (e.g. missing --branch with {DATE} or --reuse). "
     "Pass --no-ensure-safe-commands to downgrade these errors to warnings.",
 )
 @add_common_options
@@ -281,8 +255,7 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
     # Apply auto-fix and safety checks for create commands
     if command == ScheduledMngCommand.CREATE:
         if opts.auto_fix_args:
-            ssh_public_key = _get_provider_ssh_public_key(provider)
-            final_args = auto_fix_create_args(raw_args, trigger_name, ssh_public_key)
+            final_args = auto_fix_create_args(raw_args, trigger_name)
             logger.info("Auto-fixed args for create command: {}", final_args)
 
         safety_issue = check_safe_create_command(final_args)

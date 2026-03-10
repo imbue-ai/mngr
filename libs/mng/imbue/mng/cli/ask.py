@@ -37,7 +37,7 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I create a container on modal with custom packages installed by default?\n"
     "response: Simply run:\n"
-    '    mng create --in modal --build-arg "--file path/to/Dockerfile"\n'
+    '    mng create --in modal -b "--file path/to/Dockerfile"\n'
     "If you don't have a Dockerfile for your project, run:\n"
     "    mng bootstrap\n"
     "from the repo where you would like a Dockerfile created.\n\n"
@@ -78,15 +78,15 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I destroy all my agents?\n"
     "response: mng destroy --all --force\n\n"
     #
-    "user: How do I create an agent with environment secrets and GitHub SSH access?\n"
-    "response: mng create --env-file .env.secrets --known-host github.com\n\n"
+    "user: How do I create an agent with environment secrets?\n"
+    "response: mng create --env-file .env.secrets\n\n"
     #
     "user: How do I create an agent from a saved template?\n"
     "response: mng create --template gpu-heavy\n\n"
     #
     "user: How do I run a test watcher alongside my agent?\n"
-    "response: Use --add-command to open an extra tmux window:\n"
-    '    mng create --add-command "watch -n5 pytest"\n\n'
+    "response: Use --extra-window (or -w) to open an extra tmux window:\n"
+    '    mng create -w "watch -n5 pytest"\n\n'
     #
     "user: How do I get a list of running agent names as JSON?\n"
     "response: mng list --running --format json\n\n"

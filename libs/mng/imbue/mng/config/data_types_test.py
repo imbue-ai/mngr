@@ -554,11 +554,11 @@ def test_create_template_merge_with_combines_options() -> None:
 
 def test_create_template_merge_with_override_wins_for_same_key() -> None:
     """CreateTemplate.merge_with should let override win for same keys."""
-    base = CreateTemplate(options={"connect": True, "await_ready": True})
+    base = CreateTemplate(options={"connect": True, "reuse": True})
     override = CreateTemplate(options={"connect": False})
     merged = base.merge_with(override)
     assert merged.options["connect"] is False
-    assert merged.options["await_ready"] is True
+    assert merged.options["reuse"] is True
 
 
 def test_create_template_merge_with_empty_base() -> None:

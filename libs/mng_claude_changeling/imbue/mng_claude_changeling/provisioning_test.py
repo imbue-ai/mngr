@@ -598,7 +598,7 @@ def test_create_event_log_directories_creates_all_source_dirs() -> None:
     for source in (
         "messages",
         "scheduled",
-        "mng_agents",
+        "mng/agents",
         "stop",
         "monitor",
         "delivery_failures",
@@ -1106,7 +1106,7 @@ def test_gather_context_first_call_returns_no_context_when_all_empty(
     """Verify gather_context returns 'No context available' when all source dirs are empty."""
     module = _load_fresh_context_tool("gc_all_empty")
     # Create all the log directories but leave them empty (no events.jsonl files)
-    for source in ("messages", "scheduled", "mng_agents", "stop", "monitor"):
+    for source in ("messages", "scheduled", "mng/agents", "stop", "monitor"):
         (tmp_path / "events" / source).mkdir(parents=True)
     (tmp_path / "logs" / "claude_transcript").mkdir(parents=True)
 

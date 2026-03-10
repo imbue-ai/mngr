@@ -564,8 +564,8 @@ def _parse_command_env_vars(environ: Mapping[str, str]) -> dict[str, CommandDefa
     See the comment at _ENV_COMMANDS_PREFIX for details.
 
     Examples:
-        MNG_COMMANDS_CREATE_NEW_BRANCH_PREFIX=agent/
-            -> commands["create"]["new_branch_prefix"] = "agent/"
+        MNG_COMMANDS_CREATE_BRANCH=main:mng/*
+            -> commands["create"]["branch"] = "main:mng/*"
 
         MNG_COMMANDS_CREATE_CONNECT=false
             -> commands["create"]["connect"] = "false"

@@ -8,13 +8,13 @@ mng create my-agent codex         # "codex" is the agent type
 mng create my-agent ./my-script   # any command can be an agent type
 ```
 
-Alternatively, you can use `--agent-cmd` to run a literal command directly without specifying an agent type:
+Alternatively, you can use `--command` to run a literal command directly without specifying an agent type:
 
 ```bash
-mng create my-agent --agent-cmd "sleep 1000"   # run a literal command
+mng create my-agent --command "sleep 1000"   # run a literal command
 ```
 
-Using `--agent-cmd` implicitly uses the "generic" agent type, which simply runs the provided command. This means `--agent-cmd` and `--agent-type` are mutually exclusive.
+Using `--command` implicitly uses the "generic" agent type, which simply runs the provided command. This means `--command` and `--type` are mutually exclusive.
 
 Agent types include any program in your `PATH`, as well as types registered by [plugins](./plugins.md), which can also specify:
 
@@ -26,7 +26,7 @@ Agent types include any program in your `PATH`, as well as types registered by [
 
 ## Resolution
 
-When you run `mng create my-agent <type>` (or `mng create my-agent --agent-type <type>`):
+When you run `mng create my-agent <type>` (or `mng create my-agent --type <type>`):
 
 1. **Custom type lookup**: If you defined `<type>` in your config, use that configuration
 2. **Plugin lookup**: If a plugin registered `<type>` as an agent type, use its configuration

@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
-from typing import NamedTuple
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -25,6 +24,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -208,6 +208,9 @@ class _KanpanState(MutableModel):
     # Refresh hooks loaded from plugin config
     on_before_refresh: list[RefreshHook] = []
     on_after_refresh: list[RefreshHook] = []
+    # CEL filter expressions passed from CLI
+    include_filters: tuple[str, ...] = ()
+    exclude_filters: tuple[str, ...] = ()
 
 
 class _KanpanInputHandler(MutableModel):
@@ -387,7 +390,7 @@ def _execute_marks(state: _KanpanState) -> None:
     _start_batch_execution(state)
 
 
-class _BatchWorkItem(NamedTuple):
+class _BatchWorkItem(FrozenModel):
     name: AgentName
     key: str
     cmd: CustomCommand
@@ -737,7 +740,9 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
     state.refresh_is_local_only = True
-    state.refresh_future = state.executor.submit(fetch_agent_snapshot, state.mng_ctx)
+    state.refresh_future = state.executor.submit(
+        fetch_agent_snapshot, state.mng_ctx, state.include_filters, state.exclude_filters
+    )
     _schedule_spinner_tick(loop, state)
 
 
@@ -755,9 +760,13 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
             state.on_before_refresh,
             state.on_after_refresh,
             state.snapshot,
+            state.include_filters,
+            state.exclude_filters,
         )
     else:
-        state.refresh_future = state.executor.submit(fetch_board_snapshot, state.mng_ctx)
+        state.refresh_future = state.executor.submit(
+            fetch_board_snapshot, state.mng_ctx, state.include_filters, state.exclude_filters
+        )
     _schedule_spinner_tick(loop, state)
 
 
@@ -980,7 +989,9 @@ def _get_link_cell_text(entry: AgentBoardEntry) -> str:
     return ""
 
 
-class _ColumnDef(NamedTuple):
+class _ColumnDef(FrozenModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str
     header: str
     text_fn: Callable[[AgentBoardEntry], str]
@@ -990,12 +1001,16 @@ class _ColumnDef(NamedTuple):
 
 # Single source of truth for all board column definitions (order matters)
 _BOARD_COLUMN_DEFS: list[_ColumnDef] = [
-    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text, flexible=False),
-    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup, flexible=False),
-    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text, flexible=False),
-    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text, flexible=False),
-    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup, flexible=False),
-    _ColumnDef("link", "LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
+    _ColumnDef(
+        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_text, flexible=False
+    ),
+    _ColumnDef(
+        name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
+    ),
+    _ColumnDef(name="git", header="GIT", text_fn=_get_push_cell_text, markup_fn=_get_push_cell_text, flexible=False),
+    _ColumnDef(name="pr", header="PR", text_fn=_get_pr_cell_text, markup_fn=_get_pr_cell_text, flexible=False),
+    _ColumnDef(name="ci", header="CI", text_fn=_get_check_cell_text, markup_fn=_get_check_cell_markup, flexible=False),
+    _ColumnDef(name="link", header="LINK", text_fn=_get_link_cell_text, markup_fn=_get_link_cell_text, flexible=True),
 ]
 
 
@@ -1244,7 +1259,11 @@ def _build_mark_palette(
     return entries, tuple(attr_names)
 
 
-def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
+def run_kanpan(
+    mng_ctx: MngContext,
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> None:  # pragma: no cover
     """Run the kanpan TUI board."""
     commands = _build_command_map(mng_ctx)
     plugin_config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
@@ -1264,9 +1283,13 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     footer_columns = Columns([footer_left_attr, (pack, AttrMap(footer_right, "footer"))])
     footer = Pile([Divider(), footer_columns])
 
+    is_filtered = bool(include_filters or exclude_filters)
+    header_title = "Kanpan - all-seeing agent tracker - 看 πᾶν"
+    if is_filtered:
+        header_title += "  [filtered]"
     header = Pile(
         [
-            AttrMap(Text("Kanpan - all-seeing agent tracker - 看 πᾶν", align="center"), "header"),
+            AttrMap(Text(header_title, align="center"), "header"),
             Divider(),
         ]
     )
@@ -1291,6 +1314,8 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         mark_attr_names=mark_attr_names,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
     )
 
     input_handler = _KanpanInputHandler(state=state)

@@ -46,16 +46,16 @@ mng create my-task --in modal
 # see more details below in "CREATING AGENTS REMOTELY" for relevant options
 
 # you can run *any* literal command instead of a named agent type:
-mng create my-task --agent-command python -- my_script.py
+mng create my-task --command python -- my_script.py
 # remember that the arguments to the "agent" (or command) come after the `--` separator
 
 # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
 # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-mng create my-task --agent-command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
+mng create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
 # see "RUNNING NON-AGENT PROCESSES" below for more details
 
 # alternatively, you can simply add extra tmux windows that run alongside your agent:
-mng create my-task --add-command server="npm run dev" --add-command logs="tail -f app.log"
+mng create my-task -w server="npm run dev" -w logs="tail -f app.log"
 # that command automatically starts two tmux windows named "server" and "logs" that run those commands (in addition to the main window that runs the agent)
 
 ## SENDING MESSAGES ON LAUNCH
@@ -80,29 +80,30 @@ mng create my-task --project my-project
 # mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
 mkdir -p /tmp/my_random_folder
 echo "print('hello world')" > /tmp/my_random_folder/script.py
-mng create my-task --source-path /tmp/my_random_folder --agent-command python -- script.py
+mng create my-task --source-path /tmp/my_random_folder --command python -- script.py
 
 # however, if you do use git, mng makes that convenient
 # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
 mng create my-task
 git branch | grep mng/my-task
 
-# --new-branch-prefix controls the prefix for auto-generated branch names (default: mng/)
-mng create my-task --new-branch-prefix "feature/"
+# --branch controls branch creation. the default is :mng/* which creates a new branch named mng/{agent_name}
+# you can change the pattern (the * is replaced by the agent name):
+mng create my-task --branch ":feature/*"
 git branch | grep feature/my-task
 
 # you can also specify a different base branch (instead of the current branch):
-mng create my-task --base-branch main
+mng create my-task --branch "main:mng/*"
 
 # or set the new branch name explicitly:
-mng create my-task --new-branch feature/my-task
+mng create my-task --branch ":feature/my-task"
 
 # you can create a copy instead of a worktree:
 mng create my-task --copy
 # that is used by default if you're not in a git repo
 
-# you can disable new branch creation entirely with --no-new-branch (requires --in-place or --copy due to how worktrees work, and --in-place implies --no-new-branch):
-mng create my-task --copy --no-new-branch
+# you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
+mng create my-task --copy --branch main
 
 # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
 mng create my-task --clone
@@ -143,30 +144,29 @@ mng create my-task --host my-dev-box
 
 # generally though, you'll want to construct a new Modal host for each agent.
 # build arguments let you customize that new remote host (eg, GPU type, memory, base Docker image for Modal):
-mng create my-task --in modal --build-arg cpu=4 --build-arg memory=16 --build-arg image=python:3.12
-# (-b is an alternative forms of --build-arg; see "mng create --help" for all provider-specific build args)
+mng create my-task --in modal -b cpu=4 -b memory=16 -b image=python:3.12
+# see "mng create --help" for all provider-specific build args
 # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
 
 # the most important build args for Modal are probably "--file" and "--context-dir",
 # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
 # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
-mng create my-task --in modal --build-args "file=./Dockerfile.agent context-dir=./agent-context"
+mng create my-task --in modal -b file=./Dockerfile.agent -b context-dir=./agent-context
 # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
 # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
-# that command also demonstrates how to pass multiple build args in a single --build-args string (instead of using multiple --build-arg flags)
 
 # you can name the host separately from the agent:
 mng create my-task --in modal --host-name my-modal-box
 # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
 
 # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
-mng create my-task --in modal --build-arg volume=my-data:/data
+mng create my-task --in modal -b volume=my-data:/data
 
 # you can use an existing snapshot instead of building a new host from scratch:
 mng create my-task --in modal --snapshot snap-123abc
 
 # some providers (like docker), take "start" args as well as build args:
-mng create my-task --in docker --start-arg "--gpus all"
+mng create my-task --in docker -s "--gpus all"
 # these args are passed to "docker run", whereas the build args are passed to "docker build".
 
 # you can specify the target path where the agent's work directory will be mounted:
@@ -174,12 +174,7 @@ mng create my-task --in modal --target-path /workspace
 
 # you can upload files and run custom commands during host provisioning:
 mng create my-task --in modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
-# (--sudo-command runs as root; --append-to-file, --prepend-to-file, and --create-directory are also available)
-
-# you can add SSH known hosts for outbound SSH from the agent:
-mng create my-task --in modal --known-host "github.com ssh-ed25519 AAAA..."
-# that is particularly helpful when creating agents that you want to share with other people or other installations of mng, since they won't have your local machine's keys automatically
-# it can also be useful for setting up automations in CI (so that you can access them later)
+# (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mng create my-task --in modal --no-start-on-boot
@@ -231,14 +226,14 @@ mng create sisyphus --reuse --in modal
 # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
 
 # you can control connection retries and timeouts:
-mng create my-task --in modal --retry 5 --retry-delay 10s --ready-timeout 30
+mng create my-task --in modal --retry 5 --retry-delay 10s
 # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
 
 # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
 mng create my-task --connect-command "my_script.sh"
 
 # you can add labels to organize your agents and tags for host metadata:
-mng create my-task --label team=backend --tag env=staging
+mng create my-task --label team=backend --host-label env=staging
 
 ## CREATING AND USING AGENTS PROGRAMMATICALLY
 
@@ -258,15 +253,10 @@ mng config set commands.create.in modal
 
 # you can control output format for scripting:
 mng create my-task --no-connect --format json
-# (--json and --jsonl are shorthands; --quiet suppresses all output)
+# (--quiet suppresses all output)
 
-# you can wait for the agent to finish before the command returns (great for scripting):
-mng create my-task --no-connect --await-agent-stopped --message "Do the thing"
-# (--await-ready waits only until the agent is ready, not until it finishes)
-
-# you can send a message when resuming a stopped agent. This is very useful for making more robust agents (eg, that can resume after crashing or being interrupted)
-mng create my-task --resume-message "Continue where you left off"
-# (--resume-message-file reads the resume message from a file)
+# you can send a message when starting the agent (great for scripting):
+mng create my-task --no-connect --message "Do the thing"
 
 ## LEARNING MORE
 

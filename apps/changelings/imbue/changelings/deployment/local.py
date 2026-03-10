@@ -209,7 +209,7 @@ def deploy_changeling(
     The changeling_dir is the permanent changeling directory (e.g.
     ~/.changelings/<agent-id>/) containing the prepared repo. The caller
     generates the agent_id upfront and uses it for both the directory name
-    and the --agent-id flag passed to mng create, ensuring they match.
+    and the --id flag passed to mng create, ensuring they match.
 
     For local deployments, the agent is created with --in-place so it
     runs directly in changeling_dir.
@@ -220,7 +220,7 @@ def deploy_changeling(
 
     This function:
     1. Verifies mng is available and no agent with this name exists
-    2. Creates an mng agent via `mng create --agent-id <id> --agent-type <type> --label changeling=true`
+    2. Creates an mng agent via `mng create --id <id> --type <type> --label changeling=true`
     3. Generates a one-time auth code for the forwarding server
     4. Returns the deployment result with the login URL
 
@@ -271,10 +271,10 @@ def _create_mng_agent(
 ) -> None:
     """Create an mng agent from the changeling's repo directory.
 
-    The agent_id is passed via --agent-id so mng uses the same ID as the
+    The agent_id is passed via --id so mng uses the same ID as the
     changeling directory name (~/.changelings/<agent-id>/).
 
-    The agent_type is passed directly via --agent-type instead of going
+    The agent_type is passed directly via --type instead of going
     through a create template in .mng/settings.toml.
 
     For local deployment, runs `mng create --in-place` so the agent runs
@@ -288,11 +288,10 @@ def _create_mng_agent(
             MNG_BINARY,
             "create",
             agent_name,
-            "--agent-id",
+            "--id",
             str(agent_id),
             "--no-connect",
-            "--await-ready",
-            "--agent-type",
+            "--type",
             agent_type,
             "--env",
             "ROLE=thinking",

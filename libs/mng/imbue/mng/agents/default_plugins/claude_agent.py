@@ -49,6 +49,7 @@ from imbue.mng.interfaces.data_types import FileTransferSpec
 from imbue.mng.interfaces.data_types import RelativePath
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.providers.ssh_host_setup import load_resource_script
@@ -446,16 +447,6 @@ class DialogDetectedError(SendMessageError):
         )
 
 
-class PermissionDialogIndicator(DialogIndicator):
-    """Detects Claude Code permission dialogs (e.g., tool approval prompts)."""
-
-    def get_match_string(self) -> str:
-        return "Do you want to proceed?"
-
-    def get_description(self) -> str:
-        return "permission dialog"
-
-
 class TrustDialogIndicator(DialogIndicator):
     """Detects the Claude Code workspace trust dialog shown on first launch in a directory."""
 
@@ -496,6 +487,19 @@ class ClaudeAgent(BaseAgent):
         # Fall back to default config if not a ClaudeAgentConfig
         return ClaudeAgentConfig()
 
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        """Get lifecycle state, accounting for Claude-specific permissions_waiting file.
+
+        The PermissionRequest hook creates a 'permissions_waiting' file when Claude
+        is blocked on a permission dialog. When present, this overrides RUNNING to
+        WAITING since the agent cannot make progress without user intervention.
+        """
+        state = super().get_lifecycle_state()
+        if state == AgentLifecycleState.RUNNING:
+            if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
+                return AgentLifecycleState.WAITING
+        return state
+
     def get_expected_process_name(self) -> str:
         """Return 'claude' as the expected process name.
 
@@ -524,7 +528,6 @@ class ClaudeAgent(BaseAgent):
         return "Claude Code"
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
-        PermissionDialogIndicator(),
         TrustDialogIndicator(),
         ThemeSelectionIndicator(),
         EffortCalloutIndicator(),
@@ -533,10 +536,13 @@ class ClaudeAgent(BaseAgent):
     def _preflight_send_message(self, tmux_target: str) -> None:
         """Check for blocking dialogs before sending a message.
 
-        Captures the tmux pane and checks for known dialog indicators
-        (permission prompts, trust dialogs, theme selection, effort callout).
+        Checks the permissions_waiting file (set by the PermissionRequest hook)
+        and captures the tmux pane for other dialog indicators (trust, theme, effort).
         Raises DialogDetectedError if any are found.
         """
+        if self._check_file_exists(self._get_agent_dir() / "permissions_waiting"):
+            raise DialogDetectedError(str(self.name), "permission dialog")
+
         content = self._capture_pane_content(tmux_target)
         if content is None:
             return

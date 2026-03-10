@@ -291,7 +291,10 @@ def test_create_agent_with_worktree(
                 agent_type=AgentTypeName("worktree-test"),
                 name=agent_name,
                 command=CommandString("sleep 527146"),
-                git=AgentGitOptions(copy_mode=WorkDirCopyMode.WORKTREE),
+                git=AgentGitOptions(
+                    copy_mode=WorkDirCopyMode.WORKTREE,
+                    new_branch_name=f"mng/{agent_name}",
+                ),
             )
 
             result = create(
@@ -363,7 +366,6 @@ def test_worktree_with_custom_branch_name(
                 git=AgentGitOptions(
                     copy_mode=WorkDirCopyMode.WORKTREE,
                     base_branch=current_branch,
-                    is_new_branch=True,
                     new_branch_name=custom_branch,
                 ),
             )
@@ -518,7 +520,10 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
                 agent_type=AgentTypeName("worktree-gen-test"),
                 name=agent_name,
                 command=CommandString("sleep 60"),
-                git=AgentGitOptions(copy_mode=WorkDirCopyMode.WORKTREE),
+                git=AgentGitOptions(
+                    copy_mode=WorkDirCopyMode.WORKTREE,
+                    new_branch_name=f"mng/{agent_name}",
+                ),
             )
 
             result = create(
