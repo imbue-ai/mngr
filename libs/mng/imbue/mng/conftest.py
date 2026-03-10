@@ -135,7 +135,7 @@ def mng_test_root_name(mng_test_id: str) -> str:
     Format: mng-test-{test_id}
 
     This ensures tests don't load the project's .mng/settings.toml config,
-    which might have settings like add_command that would interfere with tests.
+    which might have settings like extra_window that would interfere with tests.
     """
     return f"mng-test-{mng_test_id}"
 

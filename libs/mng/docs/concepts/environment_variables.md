@@ -50,7 +50,7 @@ Examples:
 
 Values are stored as strings and converted to the appropriate type by click/pydantic based on the parameter's type definition.
 
-**Clearing list/tuple parameters**: For repeatable options (like `--add-command`), setting the environment variable to an empty string clears the list entirely. This is useful for overriding config file defaults on a per-invocation basis.
+**Clearing list/tuple parameters**: For repeatable options (like `--extra-window`), setting the environment variable to an empty string clears the list entirely. This is useful for overriding config file defaults on a per-invocation basis.
 
 These environment variable overrides are applied after config files but before CLI arguments, following the standard precedence order:
 

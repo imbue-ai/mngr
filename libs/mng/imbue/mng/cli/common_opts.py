@@ -57,8 +57,6 @@ class CommonCliOptions(FrozenModel):
 
     headless: bool = False
     output_format: str
-    json_flag: bool = False
-    jsonl_flag: bool = False
     quiet: bool
     verbose: int
     log_file: str | None
@@ -75,8 +73,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
 
     Adds the following options in the "Common" option group:
     - --format: Output format (human/json/jsonl, or a template string)
-    - --json: Alias for --format json
-    - --jsonl: Alias for --format jsonl
     - -q, --quiet: Suppress console output
     - -v, --verbose: Increase verbosity
     - --log-file: Override log file path
@@ -125,20 +121,6 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "-v", "--verbose", count=True, help="Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE"
     )(command)
     command = optgroup.option("-q", "--quiet", is_flag=True, help="Suppress all console output")(command)
-    command = optgroup.option(
-        "--jsonl",
-        "jsonl_flag",
-        is_flag=True,
-        default=False,
-        help="Alias for --format jsonl",
-    )(command)
-    command = optgroup.option(
-        "--json",
-        "json_flag",
-        is_flag=True,
-        default=False,
-        help="Alias for --format json",
-    )(command)
     command = optgroup.option(
         "--format",
         "output_format",
@@ -234,12 +216,9 @@ def setup_command_context(
     # Re-create options with config defaults applied
     opts = command_class(**known_updated_params)
 
-    # Resolve --json / --jsonl flags into output_format before parsing output options.
-    effective_format = _resolve_format_flags(ctx, opts)
-
     # Parse output options and resolve logging config with CLI overrides applied.
     output_opts, resolved_logging_config = parse_output_options(
-        output_format=effective_format,
+        output_format=opts.output_format,
         quiet=opts.quiet,
         verbose=opts.verbose,
         log_file=opts.log_file,
@@ -285,26 +264,6 @@ def setup_command_context(
     pm.hook.on_before_command(command_name=command_name, command_params=updated_params)
 
     return mng_ctx, output_opts, opts
-
-
-def _resolve_format_flags(ctx: click.Context, opts: CommonCliOptions) -> str:
-    """Resolve --json / --jsonl convenience flags into a single format string.
-
-    Validates mutual exclusivity: --json and --jsonl cannot be used together,
-    and neither can be combined with an explicit --format value.
-    """
-    if opts.json_flag and opts.jsonl_flag:
-        raise click.UsageError("--json and --jsonl are mutually exclusive")
-
-    if opts.json_flag or opts.jsonl_flag:
-        format_source = ctx.get_parameter_source("output_format")
-        is_format_explicit = format_source is not None and format_source != ParameterSource.DEFAULT
-        if is_format_explicit:
-            flag_name = "--json" if opts.json_flag else "--jsonl"
-            raise click.UsageError(f"{flag_name} is mutually exclusive with --format")
-        return "json" if opts.json_flag else "jsonl"
-
-    return opts.output_format
 
 
 def parse_output_options(

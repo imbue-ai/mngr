@@ -4,6 +4,25 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mng kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
+## Filtering
+
+Filter which agents appear on the board using CEL expressions:
+
+```bash
+# Show only agents for a specific project
+mng kanpan --project mng
+
+# Show only running agents
+mng kanpan --include 'state == "RUNNING"'
+
+# Exclude done agents
+mng kanpan --exclude 'state == "DONE"'
+```
+
+`--include` and `--exclude` accept arbitrary CEL expressions (repeatable). `--project` is a convenience shorthand that translates to an include filter on `labels.project`. Multiple `--project` flags are OR'd together.
+
+When any filter is active, the header displays a `[filtered]` indicator.
+
 ## Custom commands
 
 Add to your mng settings file (e.g. `.mng/settings.toml`):

@@ -27,7 +27,11 @@ from imbue.mng_kanpan.github import fetch_all_prs
 PLUGIN_NAME = "kanpan"
 
 
-def fetch_agent_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
+def fetch_agent_snapshot(
+    mng_ctx: MngContext,
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> BoardSnapshot:
     """Fetch agent state: agents, git branches, commits ahead, mute state.
 
     Entries have pr=None and create_pr_url=None (no GitHub API calls).
@@ -36,7 +40,13 @@ def fetch_agent_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     errors: list[str] = []
     cg = mng_ctx.concurrency_group
 
-    result = list_agents(mng_ctx, is_streaming=False, error_behavior=ErrorBehavior.CONTINUE)
+    result = list_agents(
+        mng_ctx,
+        is_streaming=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+    )
     for error in result.errors:
         errors.append(f"{error.exception_type}: {error.message}")
 
@@ -123,7 +133,11 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
     )
 
 
-def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
+def fetch_board_snapshot(
+    mng_ctx: MngContext,
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> BoardSnapshot:
     """Full fetch: local snapshot enriched with GitHub PR data.
 
     Lists agents once and uses the result for both local and remote fetching.
@@ -132,7 +146,13 @@ def fetch_board_snapshot(mng_ctx: MngContext) -> BoardSnapshot:
     errors: list[str] = []
     cg = mng_ctx.concurrency_group
 
-    result = list_agents(mng_ctx, is_streaming=False, error_behavior=ErrorBehavior.CONTINUE)
+    result = list_agents(
+        mng_ctx,
+        is_streaming=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
+    )
     for error in result.errors:
         errors.append(f"{error.exception_type}: {error.message}")
 

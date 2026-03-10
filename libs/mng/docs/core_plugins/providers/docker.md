@@ -10,7 +10,7 @@ mng create my-agent --in docker
 
 ## Build Arguments
 
-Build arguments are passed directly to `docker build`. Use `-b` or `--build-arg` to specify them:
+Build arguments are passed directly to `docker build`. Use `-b` (or `--build-arg`) to specify them:
 
 ```bash
 # Build from a Dockerfile
@@ -27,7 +27,7 @@ Run `docker build --help` for the full list of supported flags.
 
 ## Start Arguments
 
-Start arguments are passed directly to `docker run` for container resource limits, networking, volumes, and other runtime configuration. Use `-s` or `--start-arg`:
+Start arguments are passed directly to `docker run` for container resource limits, networking, volumes, and other runtime configuration. Use `-s` (or `--start-arg`):
 
 ```bash
 # Set CPU and memory limits
@@ -82,7 +82,7 @@ mng start my-agent
 Tags are stored as Docker container labels and are immutable after creation. Set tags when creating a host:
 
 ```bash
-mng create my-agent --in docker --tag env=test --tag team=infra
+mng create my-agent --in docker --host-label env=test --host-label team=infra
 ```
 
 Attempting to modify tags after creation will produce an error.

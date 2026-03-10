@@ -574,7 +574,7 @@ def test_create_mng_agent_always_includes_changeling_label(tmp_path: Path) -> No
 
 
 def test_create_mng_agent_includes_agent_type_and_no_connect(tmp_path: Path) -> None:
-    """Verify that the mng create command includes --agent-type and --no-connect."""
+    """Verify that the mng create command includes --type and --no-connect."""
     cg = make_fake_concurrency_group()
 
     _create_mng_agent(
@@ -587,8 +587,8 @@ def test_create_mng_agent_includes_agent_type_and_no_connect(tmp_path: Path) -> 
     )
 
     cmd = cg.commands_run[0]
-    assert "--agent-type" in cmd
-    at_index = cmd.index("--agent-type")
+    assert "--type" in cmd
+    at_index = cmd.index("--type")
     assert cmd[at_index + 1] == "elena-code"
     assert "--no-connect" in cmd
     assert "-t" not in cmd
@@ -599,7 +599,7 @@ def test_create_mng_agent_includes_agent_type_and_no_connect(tmp_path: Path) -> 
 
 
 def test_create_mng_agent_passes_agent_id(tmp_path: Path) -> None:
-    """Verify that the mng create command includes --agent-id with the provided ID."""
+    """Verify that the mng create command includes --id with the provided ID."""
     cg = make_fake_concurrency_group()
     agent_id = AgentId()
 
@@ -613,8 +613,8 @@ def test_create_mng_agent_passes_agent_id(tmp_path: Path) -> None:
     )
 
     cmd = cg.commands_run[0]
-    assert "--agent-id" in cmd
-    id_index = cmd.index("--agent-id")
+    assert "--id" in cmd
+    id_index = cmd.index("--id")
     assert cmd[id_index + 1] == str(agent_id)
 
 

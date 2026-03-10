@@ -18,7 +18,7 @@ mng create -- --model opus  # pass any arguments through to the underlying agent
 mng create --no-connect --message "Speed up one of my tests and make a PR on github"
 
 # or, be super explicit about all of the arguments:
-mng create --name my-task --agent-type claude --in modal
+mng create --name my-task --type claude --in modal
 
 # tons more arguments for anything you could want! Learn more via --help
 mng create --help
@@ -30,8 +30,7 @@ mng --help
 **mng is fast:**
 ```bash
 > time mng create local-hello  --message "Just say hello" --no-connect
-Agent creation started in background (PID: 709262)
-Agent name: local-hello
+Done.
 
 real    0m1.472s
 user    0m1.181s
@@ -111,7 +110,7 @@ mng pair my-agent          # or sync changes continuously!
 > mng ask "How do I create a container on modal with custom packages installed by default?"
 
 Simply run:
-    mng create --in modal --build-arg "--file path/to/Dockerfile"
+    mng create --in modal -b "--file path/to/Dockerfile"
 ```
 
 <!--

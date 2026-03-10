@@ -181,6 +181,55 @@ def test_fetch_agent_snapshot_entries_have_no_pr() -> None:
     assert snapshot.fetch_time_seconds > 0
 
 
+def test_fetch_board_snapshot_passes_filters_to_list_agents() -> None:
+    """Filters should be forwarded to list_agents."""
+    mock_list_result = MagicMock()
+    mock_list_result.agents = []
+    mock_list_result.errors = []
+
+    pr_result = FetchPrsResult(prs=(), error=None)
+
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with (
+        patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result) as mock_list,
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+    ):
+        fetch_board_snapshot(
+            mng_ctx,
+            include_filters=('state == "RUNNING"',),
+            exclude_filters=('state == "DONE"',),
+        )
+
+    mock_list.assert_called_once()
+    call_kwargs = mock_list.call_args
+    assert call_kwargs.kwargs["include_filters"] == ('state == "RUNNING"',)
+    assert call_kwargs.kwargs["exclude_filters"] == ('state == "DONE"',)
+
+
+def test_fetch_agent_snapshot_passes_filters_to_list_agents() -> None:
+    """Filters should be forwarded to list_agents."""
+    mock_list_result = MagicMock()
+    mock_list_result.agents = []
+    mock_list_result.errors = []
+
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result) as mock_list:
+        fetch_agent_snapshot(
+            mng_ctx,
+            include_filters=('labels.project == "mng"',),
+            exclude_filters=(),
+        )
+
+    mock_list.assert_called_once()
+    call_kwargs = mock_list.call_args
+    assert call_kwargs.kwargs["include_filters"] == ('labels.project == "mng"',)
+    assert call_kwargs.kwargs["exclude_filters"] == ()
+
+
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
     init_git_repo_with_config(repo_dir)

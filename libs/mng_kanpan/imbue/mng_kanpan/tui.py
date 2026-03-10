@@ -203,6 +203,9 @@ class _KanpanState(MutableModel):
     retry_cooldown_seconds: float = 60.0
     # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
     mark_attr_names: tuple[str, ...] = ()
+    # CEL filter expressions passed from CLI
+    include_filters: tuple[str, ...] = ()
+    exclude_filters: tuple[str, ...] = ()
 
 
 class _KanpanInputHandler(MutableModel):
@@ -732,7 +735,9 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
     state.refresh_is_local_only = True
-    state.refresh_future = state.executor.submit(fetch_agent_snapshot, state.mng_ctx)
+    state.refresh_future = state.executor.submit(
+        fetch_agent_snapshot, state.mng_ctx, state.include_filters, state.exclude_filters
+    )
     _schedule_spinner_tick(loop, state)
 
 
@@ -743,7 +748,9 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
     state.refresh_is_local_only = False
-    state.refresh_future = state.executor.submit(fetch_board_snapshot, state.mng_ctx)
+    state.refresh_future = state.executor.submit(
+        fetch_board_snapshot, state.mng_ctx, state.include_filters, state.exclude_filters
+    )
     _schedule_spinner_tick(loop, state)
 
 
@@ -1211,7 +1218,11 @@ def _build_mark_palette(
     return entries, tuple(attr_names)
 
 
-def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
+def run_kanpan(
+    mng_ctx: MngContext,
+    include_filters: tuple[str, ...] = (),
+    exclude_filters: tuple[str, ...] = (),
+) -> None:  # pragma: no cover
     """Run the kanpan TUI board."""
     commands = _build_command_map(mng_ctx)
     plugin_config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
@@ -1231,9 +1242,13 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     footer_columns = Columns([footer_left_attr, (pack, AttrMap(footer_right, "footer"))])
     footer = Pile([Divider(), footer_columns])
 
+    is_filtered = bool(include_filters or exclude_filters)
+    header_title = "Kanpan - all-seeing agent tracker - 看 πᾶν"
+    if is_filtered:
+        header_title += "  [filtered]"
     header = Pile(
         [
-            AttrMap(Text("Kanpan - all-seeing agent tracker - 看 πᾶν", align="center"), "header"),
+            AttrMap(Text(header_title, align="center"), "header"),
             Divider(),
         ]
     )
@@ -1253,6 +1268,8 @@ def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         mark_attr_names=mark_attr_names,
+        include_filters=include_filters,
+        exclude_filters=exclude_filters,
     )
 
     input_handler = _KanpanInputHandler(state=state)
