@@ -66,7 +66,20 @@ Only after doing all of the above should you begin writing code.
 - Do NOT create tests that code raises NotImplementedError.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Flaky tests must be fixed as soon as possible. Ideally you should finish your task, then if you are allowed to commit, commit, and try to fix the flaky test in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
+- Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
+
+# Ratchets
+
+Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test.
+
+Ratchets are guidance and reminders about good code, not rules to be blindly obeyed. When a ratchet fires on your code:
+
+1. Understand *why* the ratchet exists by reading its `rule_description`. It explains the principle behind the check.
+2. Fix the code in the spirit of the ratchet. For example, if `PREVENT_MONKEYPATCH_SETATTR` fires, a valid fix could be to use dependency injection -- not to manually save/restore the attribute with `try/finally`, which evades the regex while violating the same principle.
+3. Never evade a ratchet. Restructuring code to dodge the regex pattern while still doing the same bad thing is worse than the original violation, because it hides the problem. Common evasion patterns include splitting a statement across lines, assigning to a temporary variable before the flagged operation, or using a synonym that the regex doesn't catch.
+4. If you cannot find a fix that honors the spirit of the ratchet, **flag this to the user** rather than silently working around it. Do not use type-system escape hatches (e.g. assigning through `Any`, intermediate variables, or synonyms) to bypass a ratchet -- these are evasions even if they dodge the regex.
+5. If the ratchet is a **true misfire** -- the regex pattern matched something that is genuinely not the anti-pattern it was designed to catch (e.g. a variable name that happens to contain a flagged substring, or a string literal / comment that matches the pattern) -- then first try to update the ratchet's regex to be more specific so it no longer misfires (be extra careful not to exclude any real violations in the process). If that's not feasible, bump the ratchet count and explain the misfire to the user. This is distinct from a case where there *is* a real violation but you believe it's "justified"; justified violations are still violations and should be handled per steps 1-4 above.
 
 ## Test fixture discovery
 

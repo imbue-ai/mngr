@@ -10,7 +10,7 @@ The tool tracks which events have already been returned, so each call only
 returns new events since the last invocation. This makes conversations more
 efficient by avoiding redundant context.
 
-Settings are read from $MNG_AGENT_WORK_DIR/.changelings/settings.toml.
+Settings are read from $MNG_AGENT_WORK_DIR/changelings.toml.
 Missing file or keys fall back to built-in defaults.
 
 NOTE: _format_events() is duplicated in extra_context_tool.py because these
@@ -27,7 +27,7 @@ _TAIL_CHUNK_SIZE = 8192
 
 
 def _load_settings() -> dict:
-    """Load settings from .changelings/settings.toml in the agent's work dir.
+    """Load settings from changelings.toml in the agent's work dir.
 
     NOTE: This function is intentionally duplicated (as _load_extra_settings)
     in extra_context_tool.py. These files are deployed as standalone scripts
@@ -41,7 +41,7 @@ def _load_settings() -> dict:
     work_dir = os.environ.get("MNG_AGENT_WORK_DIR", "")
     if not work_dir:
         return {}
-    settings_path = pathlib.Path(work_dir) / ".changelings" / "settings.toml"
+    settings_path = pathlib.Path(work_dir) / "changelings.toml"
     if not settings_path.exists():
         return {}
     try:
@@ -167,7 +167,7 @@ def gather_context() -> str:
     Returns context from:
     - New messages from other active conversations (from events/messages/events.jsonl)
     - New inner monologue entries (from logs/claude_transcript/events.jsonl)
-    - New trigger events (from events/scheduled/, mng_agents/, stop/, monitor/)
+    - New trigger events (from events/scheduled/, mng/agents/, stop/, monitor/)
 
     Call this at the start of each conversation turn for situational awareness.
     If it returns "No new context", nothing has changed since the last call.
@@ -236,7 +236,7 @@ def gather_context() -> str:
                 sections.append(f"## New messages from other conversations ({len(other_msgs)})\n{formatted}")
 
     # Trigger events from all sources
-    for source in ("scheduled", "mng_agents", "stop", "monitor"):
+    for source in ("scheduled", "mng/agents", "stop", "monitor"):
         events_file = agent_data_dir / "events" / source / "events.jsonl"
         if is_first_call:
             recent = _read_tail_lines(events_file, _MAX_TRIGGER_LINES)

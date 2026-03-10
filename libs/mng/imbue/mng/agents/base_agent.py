@@ -521,35 +521,78 @@ class BaseAgent(AgentInterface):
             f"Timeout waiting for message submission signal (waited {self.enter_submission_timeout_seconds}s)",
         )
 
+    # FIXME: this function could be improved by having a single command that is running on the host, checking *either* condition (eg, whether we've seen a new enqueue event OR we've seen the wait-for signal)
+    #  since either one is sufficient for us to call it success
     def _send_enter_and_wait_for_signal(self, tmux_target: str, wait_channel: str) -> bool:
         """Send Enter and wait for the tmux wait-for signal from the hook.
 
-        This starts waiting BEFORE sending Enter to avoid a race condition where
-        the hook might fire before we start listening for the signal.
+        Runs ``tmux wait-for`` in the **foreground** so it registers with the
+        tmux server synchronously, then sends Enter from a backgrounded
+        subshell after a short delay.  This avoids a race where the hook's
+        ``tmux wait-for -S`` signal fires before the waiter has registered
+        (signals wake exactly one waiter; if none exists the signal is lost).
 
-        The sequence is:
-        1. Start tmux wait-for (with timeout) in background
-        2. Send Enter
-        3. Wait for the background process to complete
+        The previous implementation backgrounded the waiter, which required a
+        double-fork (bash -> timeout -> tmux) before the waiter could register.
+        When the agent was actively generating (RUNNING state), the Enter key
+        was processed so quickly that the hook signal often fired before the
+        waiter finished its double-fork, causing a consistent timeout.
 
         Returns True if signal received, False if timeout.
         """
-        timeout_secs = self.enter_submission_timeout_seconds
+        start = time.time()
+        timeout_secs = self.enter_submission_timeout_seconds + 1
+        last_queue_timestamp = self._get_last_queue_timestamp(timeout_secs)
+
+        remaining_time = timeout_secs - (time.time() - start)
+        if remaining_time < 0.0:
+            logger.warning(
+                "Negative remaining time for wait-for command: {:.2f}s (command execution took too long)",
+                remaining_time,
+            )
+            remaining_time = 5.0
+
         cmd = (
             f"bash -c '"
-            f'timeout {timeout_secs} tmux wait-for "$0" & W=$!; '
-            f'tmux send-keys -t "$1" Enter; '
-            f"wait $W"
+            f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
+            f'timeout {timeout_secs} tmux wait-for "$0"'
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
-        start = time.time()
-        result = self.host.execute_command(cmd, timeout_seconds=timeout_secs + 1)
+        result = self.host.execute_command(cmd, timeout_seconds=remaining_time)
         elapsed_ms = (time.time() - start) * 1000
         if result.success:
             logger.trace("Received submission signal in {:.0f}ms", elapsed_ms)
             return True
-        logger.debug("Timeout waiting for submission signal on channel {}", wait_channel)
+
+        # if we send a message while another message was being processed, there seems to be a bug in claude where the UserPromptSubmit hook doesn't always fire
+        # so in this case, we can also check the session log
+        logger.debug("Timeout waiting for submission signal on channel {}, checking session log...", wait_channel)
+        remaining_time = timeout_secs - (time.time() - start)
+        if remaining_time < 5.0:
+            remaining_time = 5.0
+        current_queue_timestamp = self._get_last_queue_timestamp(remaining_time)
+        if current_queue_timestamp is not None and (
+            last_queue_timestamp is None or current_queue_timestamp > last_queue_timestamp
+        ):
+            # looks like it worked out, it was just annoying and we had to wait.
+            logger.trace(
+                "Detected new enqueue event in session log with timestamp {}, confirming message submission",
+                current_queue_timestamp,
+            )
+            return True
+
         return False
+
+    def _get_last_queue_timestamp(self, timeout_secs: float) -> str | None:
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        initial_read_queue_ops_result = self.host.execute_command(
+            f"""bash -c '{env_command_prefix} cat $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl | grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp'""",
+            timeout_seconds=timeout_secs + 1,
+        )
+        last_queue_timestamp = None
+        if initial_read_queue_ops_result.success:
+            last_queue_timestamp = initial_read_queue_ops_result.stdout
+        return last_queue_timestamp
 
     # =========================================================================
     # Status (Reported)

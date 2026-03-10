@@ -10,7 +10,7 @@ mng create my-agent --in modal
 
 ## Build Arguments
 
-Build arguments configure the Modal sandbox. Pass them using `-b` or `--build-args`:
+Build arguments configure the Modal sandbox. Pass them using `-b` (or `--build-arg`):
 
 ```bash
 # Key-value format (recommended)
@@ -18,9 +18,6 @@ mng create my-agent --in modal -b gpu=h100 -b cpu=2 -b memory=8
 
 # Flag format (also supported)
 mng create my-agent --in modal -b --gpu=h100 -b --cpu=2
-
-# Bulk format
-mng create my-agent --in modal --build-args "gpu=h100 cpu=2 memory=8"
 ```
 
 ### Available Build Arguments

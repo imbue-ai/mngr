@@ -17,35 +17,25 @@ derived from the source event's uuid, so re-processing the same input
 never produces duplicate output. The input file is append-only (populated
 by stream_transcript.sh which watches all session files).
 
-Usage: python3 transcript_watcher.py
+Usage: mng changeling-transcript-watcher
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-try:
-    from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
-    from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
-    from imbue.mng_claude_changeling.resources.watcher_common import require_env
-    from imbue.mng_claude_changeling.resources.watcher_common import run_watcher_loop
-    from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).parent))
-    from watcher_common import load_watchers_section  # type: ignore[no-redef]
-    from watcher_common import read_event_ids_from_jsonl  # type: ignore[no-redef]
-    from watcher_common import require_env  # type: ignore[no-redef]
-    from watcher_common import run_watcher_loop  # type: ignore[no-redef]
-    from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
+from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
+from imbue.mng_claude_changeling.resources.watcher_common import require_env
+from imbue.mng_claude_changeling.resources.watcher_common import run_watcher_loop
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 
 # Maximum length for tool input preview and tool output
 _MAX_INPUT_PREVIEW_LENGTH = 200
@@ -296,13 +286,12 @@ def _convert_new_events(
 def main() -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
-    host_dir = Path(require_env("MNG_HOST_DIR"))
 
     input_file = agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
     output_file = agent_state_dir / "events" / "common_transcript" / "events.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("transcript_watcher", host_dir / "events" / "logs")
+    setup_watcher_logging("transcript_watcher", agent_state_dir / "events" / "logs")
 
     poll_interval = _load_poll_interval(agent_work_dir)
 
@@ -318,8 +307,6 @@ def main() -> None:
         converted_count = _convert_new_events(input_file, output_file)
         if converted_count > 0:
             logger.info("Converted {} new event(s) -> events/common_transcript/events.jsonl", converted_count)
-        else:
-            logger.debug("No new events to convert")
 
     run_watcher_loop(
         "Transcript watcher",

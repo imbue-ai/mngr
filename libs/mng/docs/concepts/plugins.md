@@ -360,8 +360,6 @@ Plugins can store per-agent data under `$MNG_AGENT_STATE_DIR/plugin/<plugin_name
 - `agent.list_reported_plugin_files(plugin_name)` -- list files
 - `agent.get_plugin_data(plugin_name)` / `agent.set_plugin_data(plugin_name, data)` -- read/write structured JSON stored in the agent's `data.json`
 
-For example, the `claude` plugin stores transcript offsets at `$MNG_AGENT_STATE_DIR/plugin/claude/.transcript_offsets/` and Anthropic's Claude Code state (sessions, credentials, settings) at `$MNG_AGENT_STATE_DIR/plugin/claude/anthropic/`.
-
 ## Plugin Dependencies
 
 Plugins are Python packages and use standard dependency management. A plugin can depend on other plugins by listing them as package dependencies.

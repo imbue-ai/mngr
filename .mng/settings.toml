@@ -10,17 +10,17 @@ new_host = "docker"
 build_arg = ["--file=libs/mng/imbue/mng/resources/Dockerfile", ".mng/dev/build/"]
 target_path = "/code/mng"
 # the agent added these, but I kinda doubt we need them...
-#pass_agent_env = ["ANTHROPIC_API_KEY"]
+#pass_env = ["ANTHROPIC_API_KEY"]
 #user_command = ["bash -c 'cd /code/mng && uv sync --all-packages'"]
 
 [create_templates.coder]
-agent_type = "coder"
-add_command = ["reviewer_0='export IS_SANDBOX=1 && claude --dangerously-skip-permissions'"]
+type = "coder"
+extra_window = ["reviewer_0='export IS_SANDBOX=1 && claude --dangerously-skip-permissions'"]
 
 [create_templates.modal]
 new_host = "modal"
-build_args = "file=libs/mng/imbue/mng/resources/Dockerfile context-dir=.mng/dev/build/ volume=code-review-json:/code_reviews"
-add_command = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mng.git && gh auth setup-git'"]
+build_arg = ["file=libs/mng/imbue/mng/resources/Dockerfile", "context-dir=.mng/dev/build/", "volume=code-review-json:/code_reviews"]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mng.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
 target_path = "/code/mng"
 

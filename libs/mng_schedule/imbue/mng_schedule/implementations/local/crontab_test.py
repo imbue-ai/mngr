@@ -124,3 +124,20 @@ def test_list_managed_trigger_names_ignores_non_mng_comments() -> None:
 def test_list_managed_trigger_names_ignores_different_prefix() -> None:
     content = "# other-prefix-schedule:nightly\n0 2 * * * /path/run.sh\n"
     assert list_managed_trigger_names(content, _TEST_PREFIX) == []
+
+
+def test_add_crontab_entry_appends_newline_to_existing_content_without_trailing_newline() -> None:
+    """When existing content doesn't end with a newline, one should be added."""
+    existing = "0 1 * * * /some/other/cron/job"
+    result = add_crontab_entry(
+        existing_content=existing,
+        prefix=_TEST_PREFIX,
+        trigger_name="nightly",
+        cron_expression="0 2 * * *",
+        command="/home/user/.mng/schedule/nightly/run.sh",
+    )
+    assert "/some/other/cron/job" in result
+    assert f"# {_TEST_PREFIX}schedule:nightly" in result
+    lines = result.splitlines()
+    assert lines[0] == "0 1 * * * /some/other/cron/job"
+    assert lines[1] == f"# {_TEST_PREFIX}schedule:nightly"

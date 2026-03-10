@@ -42,8 +42,8 @@ class GitCommitError(ChangelingError):
     ...
 
 
-class MissingSettingsError(ChangelingError):
-    """Raised when a changeling repo is missing .mng/settings.toml."""
+class MissingAgentTypeError(ChangelingError):
+    """Raised when no agent type is specified via CLI or changelings.toml."""
 
     ...
 

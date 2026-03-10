@@ -207,13 +207,13 @@ def test_prevent_pytest_mark_integration() -> None:
 
 
 def test_prevent_os_fork() -> None:
-    rc.check_os_fork(_DIR, snapshot(3))
+    rc.check_os_fork(_DIR, snapshot(2))
 
 
 def test_prevent_direct_subprocess_usage() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(23), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(24), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---

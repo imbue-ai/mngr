@@ -22,17 +22,17 @@ def test_send_message_raises_dialog_detected_when_dialog_visible(
 
     try:
         agent.host.execute_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Do you want to proceed?\"; sleep 847601'",
+            f"tmux new-session -d -s '{session_name}' 'echo \"Yes, I trust this folder\"; sleep 847601'",
             timeout_seconds=5.0,
         )
 
         wait_for(
-            lambda: agent._check_pane_contains(session_name, "Do you want to proceed?"),
+            lambda: agent._check_pane_contains(session_name, "Yes, I trust this folder"),
             timeout=5.0,
             error_message="Dialog text not visible in pane",
         )
 
-        with pytest.raises(DialogDetectedError, match="permission dialog"):
+        with pytest.raises(DialogDetectedError, match="trust dialog"):
             agent.send_message("hello")
     finally:
         cleanup_tmux_session(session_name)

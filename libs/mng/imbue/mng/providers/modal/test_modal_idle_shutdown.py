@@ -173,7 +173,6 @@ def test_idle_shutdown_creates_both_initial_and_idle_snapshots(
             "--in",
             "modal",
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(source_dir),

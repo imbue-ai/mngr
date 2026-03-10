@@ -407,3 +407,55 @@ def test_deploy_then_list_round_trip_preserves_all_fields(
     assert record.hostname != ""
     assert record.working_directory != ""
     assert "uv run mng schedule add" in record.full_commandline
+
+
+# =============================================================================
+# list_local_schedule_creation_records edge cases
+# =============================================================================
+
+
+def test_list_local_schedule_creation_records_skips_non_json_files(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """list_local_schedule_creation_records should skip non-JSON files."""
+    trigger = _make_test_trigger("with-non-json")
+    deploy_local_schedule(
+        trigger,
+        temp_mng_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "hash",
+    )
+
+    # Create a non-json file in the records directory
+    records_dir = temp_mng_ctx.config.default_host_dir.expanduser() / "schedule" / "records"
+    (records_dir / "README.txt").write_text("not a record")
+
+    records = list_local_schedule_creation_records(temp_mng_ctx)
+    assert len(records) == 1
+    assert records[0].trigger.name == "with-non-json"
+
+
+def test_list_local_schedule_creation_records_skips_unreadable_files(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """list_local_schedule_creation_records should skip files that cannot be read."""
+    trigger = _make_test_trigger("readable-trigger")
+    deploy_local_schedule(
+        trigger,
+        temp_mng_ctx,
+        crontab_reader=lambda: "",
+        crontab_writer=lambda _: None,
+        git_hash_resolver=lambda: "hash",
+    )
+
+    records_dir = temp_mng_ctx.config.default_host_dir.expanduser() / "schedule" / "records"
+    unreadable = records_dir / "unreadable.json"
+    unreadable.write_text("will be unreadable")
+    unreadable.chmod(0o000)
+
+    records = list_local_schedule_creation_records(temp_mng_ctx)
+    assert len(records) == 1
+    assert records[0].trigger.name == "readable-trigger"
+
+    unreadable.chmod(0o644)

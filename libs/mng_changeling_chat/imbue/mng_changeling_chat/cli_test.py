@@ -61,8 +61,6 @@ def _make_opts(
         allow_unknown_host=False,
         headless=False,
         output_format="human",
-        json_flag=False,
-        jsonl_flag=False,
         quiet=False,
         verbose=0,
         log_file=None,

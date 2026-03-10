@@ -5,30 +5,159 @@ import subprocess
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pluggy
 import pytest
 from dotenv import dotenv_values
+from loguru import logger
 
 from imbue.mng import hookimpl
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.providers.deploy_utils import MngInstallMode
+from imbue.mng.utils.testing import init_git_repo_with_config
+from imbue.mng.utils.testing import run_git_command
 from imbue.mng_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mng_schedule.data_types import ScheduledMngCommand
 from imbue.mng_schedule.errors import ScheduleDeployError
 from imbue.mng_schedule.implementations.modal.deploy import _build_full_commandline
 from imbue.mng_schedule.implementations.modal.deploy import _build_package_mode_dockerfile
 from imbue.mng_schedule.implementations.modal.deploy import _collect_deploy_files
+from imbue.mng_schedule.implementations.modal.deploy import _forward_output
+from imbue.mng_schedule.implementations.modal.deploy import _get_mng_repo_root
+from imbue.mng_schedule.implementations.modal.deploy import _get_mng_schedule_source_dir
 from imbue.mng_schedule.implementations.modal.deploy import _resolve_timezone_from_paths
 from imbue.mng_schedule.implementations.modal.deploy import _stage_consolidated_env
 from imbue.mng_schedule.implementations.modal.deploy import build_deploy_config
+from imbue.mng_schedule.implementations.modal.deploy import detect_local_timezone
 from imbue.mng_schedule.implementations.modal.deploy import detect_mng_install_mode
 from imbue.mng_schedule.implementations.modal.deploy import get_mng_dockerfile_path
+from imbue.mng_schedule.implementations.modal.deploy import get_modal_app_name
+from imbue.mng_schedule.implementations.modal.deploy import get_repo_root
 from imbue.mng_schedule.implementations.modal.deploy import package_directory_as_tarball
+from imbue.mng_schedule.implementations.modal.deploy import package_repo_at_commit
 from imbue.mng_schedule.implementations.modal.deploy import parse_upload_spec
 from imbue.mng_schedule.implementations.modal.deploy import resolve_commit_hash_for_deploy
+from imbue.mng_schedule.implementations.modal.deploy import resolve_mng_install_mode
 from imbue.mng_schedule.implementations.modal.deploy import stage_deploy_files
 from imbue.mng_schedule.implementations.modal.deploy import try_get_repo_root
+
+
+def test_get_modal_app_name_prefixes_with_mng_schedule() -> None:
+    """get_modal_app_name should prefix the trigger name with 'mng-schedule-'."""
+    assert get_modal_app_name("nightly") == "mng-schedule-nightly"
+    assert get_modal_app_name("my-trigger") == "mng-schedule-my-trigger"
+
+
+def test_forward_output_writes_stderr_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    """_forward_output should write stderr lines to sys.stderr."""
+    _forward_output("some stderr line\n", is_stdout=False)
+    captured = capsys.readouterr()
+    assert "some stderr line" in captured.err
+
+
+def test_forward_output_logs_stdout_via_loguru() -> None:
+    """_forward_output should log stdout lines via loguru at BUILD level."""
+    captured: list[str] = []
+
+    def sink(message: Any) -> None:
+        captured.append(message.record["message"])
+
+    handler_id = logger.add(sink, level=0, format="{message}")
+    try:
+        _forward_output("build output line\n", is_stdout=True)
+    finally:
+        logger.remove(handler_id)
+    assert any("build output line" in msg for msg in captured)
+
+
+def test_detect_local_timezone_returns_string() -> None:
+    """detect_local_timezone should return a non-empty timezone string."""
+    result = detect_local_timezone()
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_get_repo_root_returns_path_in_git_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_repo_root should return a Path when inside a git repository."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+    monkeypatch.chdir(repo_dir)
+    result = get_repo_root()
+    assert result.is_dir()
+
+
+def test_get_repo_root_raises_outside_git_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_repo_root should raise ScheduleDeployError when not inside a git repo."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ScheduleDeployError, match="Could not find git repository root"):
+        get_repo_root()
+
+
+def test_package_repo_at_commit_succeeds_with_valid_script(tmp_path: Path) -> None:
+    """package_repo_at_commit should succeed when the packaging script exists."""
+    repo_root = tmp_path / "repo"
+    init_git_repo_with_config(repo_root)
+
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir()
+    script = scripts_dir / "make_tar_of_repo.sh"
+    script.write_text("#!/bin/bash\ntouch $2/current.tar.gz\n")
+    script.chmod(0o755)
+    run_git_command(repo_root, "add", ".")
+    run_git_command(repo_root, "commit", "-m", "add script")
+
+    commit = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    dest_dir = tmp_path / "dest"
+    package_repo_at_commit(commit, dest_dir, repo_root)
+    assert (dest_dir / "current.tar.gz").exists()
+
+
+def test_package_repo_at_commit_raises_when_script_fails(tmp_path: Path) -> None:
+    """package_repo_at_commit should raise when the packaging script exits non-zero."""
+    repo_root = tmp_path / "repo"
+    init_git_repo_with_config(repo_root)
+
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir()
+    script = scripts_dir / "make_tar_of_repo.sh"
+    script.write_text("#!/bin/bash\nexit 1\n")
+    script.chmod(0o755)
+    run_git_command(repo_root, "add", ".")
+    run_git_command(repo_root, "commit", "-m", "add failing script")
+
+    commit = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    dest_dir = tmp_path / "dest"
+    with pytest.raises(ScheduleDeployError, match="Failed to package repo"):
+        package_repo_at_commit(commit, dest_dir, repo_root)
+
+
+def test_package_repo_at_commit_raises_when_script_missing(tmp_path: Path) -> None:
+    """package_repo_at_commit should raise when the packaging script is missing."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    dest_dir = tmp_path / "dest"
+    with pytest.raises(ScheduleDeployError, match="Packaging script not found"):
+        package_repo_at_commit("abc123", dest_dir, repo_root)
 
 
 def test_build_deploy_config_returns_all_keys() -> None:
@@ -792,6 +921,31 @@ def test_detect_mng_install_mode_returns_valid_mode() -> None:
     """detect_mng_install_mode should return either PACKAGE or EDITABLE."""
     result = detect_mng_install_mode()
     assert result in (MngInstallMode.PACKAGE, MngInstallMode.EDITABLE)
+
+
+def test_resolve_mng_install_mode_passes_through_concrete_modes() -> None:
+    """resolve_mng_install_mode should pass through EDITABLE and PACKAGE unchanged."""
+    assert resolve_mng_install_mode(MngInstallMode.EDITABLE) == MngInstallMode.EDITABLE
+    assert resolve_mng_install_mode(MngInstallMode.PACKAGE) == MngInstallMode.PACKAGE
+
+
+def test_resolve_mng_install_mode_resolves_auto() -> None:
+    """resolve_mng_install_mode should resolve AUTO to a concrete mode."""
+    result = resolve_mng_install_mode(MngInstallMode.AUTO)
+    assert result in (MngInstallMode.PACKAGE, MngInstallMode.EDITABLE)
+
+
+def test_get_mng_schedule_source_dir_returns_dir_with_pyproject() -> None:
+    """_get_mng_schedule_source_dir should return a directory containing pyproject.toml."""
+    result = _get_mng_schedule_source_dir()
+    assert (result / "pyproject.toml").exists()
+
+
+def test_get_mng_repo_root_returns_git_repo_root() -> None:
+    """_get_mng_repo_root should return the git repo root of the mng monorepo."""
+    result = _get_mng_repo_root()
+    assert result.is_dir()
+    assert (result / ".git").exists()
 
 
 def test_stage_deploy_files_does_not_stage_mng_source(

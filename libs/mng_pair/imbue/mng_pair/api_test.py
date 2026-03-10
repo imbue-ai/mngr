@@ -306,6 +306,65 @@ def test_determine_git_sync_detects_both_diverged(tmp_path: Path, cg: Concurrenc
 # =============================================================================
 
 
+def _make_syncer(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    conflict_mode: ConflictMode = ConflictMode.NEWER,
+    include_patterns: tuple[str, ...] = (),
+) -> UnisonSyncer:
+    """Create a UnisonSyncer with source/target dirs for testing."""
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir(exist_ok=True)
+    target.mkdir(exist_ok=True)
+    return UnisonSyncer(
+        source_path=source,
+        target_path=target,
+        sync_direction=SyncDirection.BOTH,
+        conflict_mode=conflict_mode,
+        include_patterns=include_patterns,
+        cg=cg,
+    )
+
+
+def test_unison_syncer_builds_command_with_source_conflict_mode(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that UnisonSyncer adds -prefer source_path for SOURCE conflict mode."""
+    syncer = _make_syncer(tmp_path, cg, conflict_mode=ConflictMode.SOURCE)
+    cmd = syncer._build_unison_command()
+    assert "-prefer" in cmd
+    assert cmd[cmd.index("-prefer") + 1] == str(syncer.source_path)
+
+
+def test_unison_syncer_builds_command_with_target_conflict_mode(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that UnisonSyncer adds -prefer target_path for TARGET conflict mode."""
+    syncer = _make_syncer(tmp_path, cg, conflict_mode=ConflictMode.TARGET)
+    cmd = syncer._build_unison_command()
+    assert "-prefer" in cmd
+    assert cmd[cmd.index("-prefer") + 1] == str(syncer.target_path)
+
+
+def test_unison_syncer_builds_command_with_include_patterns(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that UnisonSyncer adds include patterns as -path arguments."""
+    syncer = _make_syncer(tmp_path, cg, include_patterns=("src", "lib"))
+    cmd = syncer._build_unison_command()
+    path_indices = [i for i, arg in enumerate(cmd) if arg == "-path"]
+    assert len(path_indices) == 2
+    assert cmd[path_indices[0] + 1] == "src"
+    assert cmd[path_indices[1] + 1] == "lib"
+
+
+def test_unison_syncer_wait_returns_zero_when_not_started(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that wait() returns 0 when no process has been started."""
+    syncer = _make_syncer(tmp_path, cg)
+    assert syncer.wait() == 0
+
+
+def test_unison_syncer_stop_is_noop_when_not_started(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that stop() is a no-op when no process has been started."""
+    syncer = _make_syncer(tmp_path, cg)
+    syncer.stop()
+
+
 def test_git_sync_action_default_values() -> None:
     """Test that GitSyncAction has correct default values."""
     action = GitSyncAction(

@@ -61,13 +61,14 @@ class ConversationSelectorState(MutableModel):
 
 def _create_selectable_conversation_item(  # pragma: no cover
     conversation: ConversationInfo,
-    cid_width: int,
+    name_width: int,
     model_width: int,
 ) -> AttrMap:
     """Create a selectable list item representing a conversation."""
-    cid_padded = conversation.conversation_id.ljust(cid_width)
+    name = conversation.name or conversation.conversation_id
+    name_padded = name.ljust(name_width)
     model_padded = conversation.model.ljust(model_width)
-    display_text = f"{cid_padded}  {model_padded}  {conversation.updated_at}"
+    display_text = f"{name_padded}  {model_padded}  {conversation.updated_at}"
     selectable_item = SelectableIcon(display_text, cursor_position=0)
     return AttrMap(selectable_item, None, focus_map="reversed")
 
@@ -117,16 +118,16 @@ def _run_conversation_selector(  # pragma: no cover
 
     Returns (selected_conversation, is_new_requested).
     """
-    cid_width = max((len(c.conversation_id) for c in conversations), default=10)
+    name_width = max((len(c.name or c.conversation_id) for c in conversations), default=10)
     model_width = max((len(c.model) for c in conversations), default=10)
 
-    cid_width = min(cid_width, 50)
+    name_width = min(name_width, 50)
     model_width = min(model_width, 25)
 
     list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker([])
 
     for conversation in conversations:
-        list_walker.append(_create_selectable_conversation_item(conversation, cid_width, model_width))
+        list_walker.append(_create_selectable_conversation_item(conversation, name_width, model_width))
 
     # Add "[New conversation]" at the bottom
     new_conv_text = "[New conversation]"
@@ -145,7 +146,7 @@ def _run_conversation_selector(  # pragma: no cover
     instructions_text = "Instructions:\n  Up/Down - Navigate the list\n  Enter - Select\n  Ctrl+C - Cancel"
     instructions = Text(instructions_text)
 
-    header_text = f"{'CONVERSATION'.ljust(cid_width)}  {'MODEL'.ljust(model_width)}  UPDATED"
+    header_text = f"{'NAME'.ljust(name_width)}  {'MODEL'.ljust(model_width)}  UPDATED"
     header_row = AttrMap(Text(("table_header", header_text)), "table_header")
 
     header = Pile(

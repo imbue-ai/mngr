@@ -275,17 +275,6 @@ class AgentInterface(MutableModel, ABC):
     # Provisioning Lifecycle
     # =========================================================================
 
-    def get_extra_env_vars(self) -> dict[str, str]:
-        """Return additional env vars for this agent type.
-
-        Called during provisioning to collect agent-type-specific environment
-        variables (e.g., CLAUDE_CONFIG_DIR for claude agents). These are written
-        to the agent's env file and sourced before the agent command runs.
-
-        Default returns an empty dict.
-        """
-        return {}
-
     @abstractmethod
     def on_before_provisioning(
         self,
@@ -330,6 +319,22 @@ class AgentInterface(MutableModel, ABC):
 
         All collected file transfers are executed before package installation
         and other provisioning steps.
+        """
+        ...
+
+    def modify_env_vars(
+        self,
+        host: OnlineHostInterface,
+        env_vars: dict[str, str],
+    ) -> None:
+        """Mutate the agent's environment variables before they are written.
+
+        Called during provisioning after the base env vars (MNG_HOST_DIR,
+        MNG_AGENT_STATE_DIR, etc.) and user-provided env vars have been
+        collected, but before the env file is written to disk. Subclasses
+        can add, update, or remove entries in env_vars.
+
+        The default implementation is a no-op.
         """
         ...
 

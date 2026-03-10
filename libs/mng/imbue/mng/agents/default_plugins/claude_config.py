@@ -197,58 +197,6 @@ def add_claude_trust_for_path(config_path: Path, source_path: Path) -> None:
     logger.trace("Added Claude trust for {}", source_path)
 
 
-def extend_claude_trust_to_worktree(config_path: Path, source_path: Path, worktree_path: Path) -> None:
-    """Extend Claude's trust settings from source_path to a new worktree.
-
-    Reads the config file, finds the project entry for source_path (or the closest
-    ancestor with a config entry), and creates a new entry for worktree_path with
-    the same settings (allowedTools, hasTrustDialogAccepted, etc.).
-
-    Raises ClaudeDirectoryNotTrustedError if the source config does not have
-    hasTrustDialogAccepted=true.
-    """
-    source_path = source_path.resolve()
-    worktree_path = worktree_path.resolve()
-
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if not config:
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        # Find the source project config
-        projects = config.get("projects", {})
-        source_config = find_project_config(projects, source_path)
-
-        if source_config is None:
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        # Verify the source directory was actually trusted
-        if not source_config.get("hasTrustDialogAccepted", False):
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        worktree_path_str = str(worktree_path)
-        if worktree_path_str in projects:
-            logger.trace(
-                "Found existing Claude trust for worktree {}",
-                worktree_path,
-            )
-            return
-
-        worktree_config = copy.deepcopy(source_config)
-        worktree_config["_mngCreated"] = True
-        worktree_config["_mngSourcePath"] = str(source_path)
-        projects[worktree_path_str] = worktree_config
-        config["projects"] = projects
-
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace(
-        "Extended Claude trust from {} to worktree {}",
-        source_path,
-        worktree_path,
-    )
-
-
 def remove_claude_trust_for_path(config_path: Path, path: Path) -> bool:
     """Remove Claude's trust entry for a path from the given config file.
 
@@ -461,8 +409,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
 
     - SessionStart: creates 'session_started' file AND tracks the current session ID
       (writes to claude_session_id and appends to claude_session_id_history)
-    - UserPromptSubmit: creates 'active' file AND signals tmux wait-for channel
-    - Notification (idle_prompt): removes 'active' file (Claude finished processing, waiting for input)
+    - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
+    - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
+    - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
+    - PostToolUseFailure: removes 'permissions_waiting' file (tool failed/denied, permission resolved)
+    - Notification (idle_prompt): removes 'active' and 'permissions_waiting' files
 
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)
@@ -470,6 +421,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     - claude_session_id_history: append-only log of session entries (one per line,
       format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
+    - permissions_waiting: Claude is blocked on a permission dialog (always WAITING when present)
 
     The tmux wait-for signal on UserPromptSubmit allows instant detection of
     message submission without polling.
@@ -506,7 +458,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'touch "$MNG_AGENT_STATE_DIR/active"',
+                            "command": 'touch "$MNG_AGENT_STATE_DIR/active" && rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting"',
                         },
                         {
                             "type": "command",
@@ -515,13 +467,43 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     ]
                 }
             ],
+            "PermissionRequest": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'touch "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                        },
+                    ],
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                        },
+                    ],
+                }
+            ],
+            "PostToolUseFailure": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                        },
+                    ],
+                }
+            ],
             "Notification": [
                 {
                     "matcher": "idle_prompt",
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/active"',
+                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/active" "$MNG_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }

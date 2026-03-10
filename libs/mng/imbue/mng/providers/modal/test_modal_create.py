@@ -53,7 +53,7 @@ def test_mng_create_echo_command_on_modal(
     expected_output = f"hello-from-modal-{get_short_random_string()}"
 
     # Run mng create with echo command on modal
-    # Using --no-connect and --await-ready to run synchronously without attaching
+    # Using --no-connect to create without attaching
     # Using --no-ensure-clean since temp dir won't be a git repo
     result = subprocess.run(
         [
@@ -68,7 +68,6 @@ def test_mng_create_echo_command_on_modal(
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
@@ -112,7 +111,6 @@ def test_mng_create_with_worktree_flag_on_modal_raises_error(
             agent_name,
             "--worktree",
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
@@ -159,7 +157,6 @@ def test_mng_create_with_build_args_on_modal(
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
@@ -232,7 +229,6 @@ RUN echo "custom-dockerfile-marker" > /dockerfile-marker.txt
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
@@ -292,7 +288,6 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),
@@ -362,7 +357,6 @@ def test_mng_create_transfers_git_repo_with_untracked_files(
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
@@ -406,11 +400,9 @@ def test_mng_create_transfers_git_repo_with_new_branch(
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_git_repo),
-            "--new-branch=",
             "--",
             "git rev-parse --abbrev-ref HEAD && sleep 3600",
         ],
@@ -487,7 +479,6 @@ def test_mng_create_with_default_dockerfile_on_modal(
             "--host-name",
             agent_name,
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),

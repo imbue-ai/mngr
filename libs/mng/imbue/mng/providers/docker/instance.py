@@ -660,7 +660,12 @@ kill -TERM 1
         return containers[0] if containers else None
 
     def _list_containers(self) -> list[docker.models.containers.Container]:
-        """List all Docker containers managed by this provider instance."""
+        """List all Docker containers managed by this provider instance.
+
+        Filters by LABEL_PROVIDER and also by the MNG prefix in the container
+        name.  The prefix filter prevents stale containers from other
+        environments (e.g. interrupted test runs) from polluting discovery.
+        """
         try:
             containers = self._docker_client.containers.list(
                 all=True,
@@ -668,7 +673,16 @@ kill -TERM 1
             )
         except docker.errors.DockerException as e:
             raise MngError(f"Cannot connect to Docker daemon: {e}") from e
-        return containers
+
+        prefix = self.mng_ctx.config.prefix
+        filtered: list[docker.models.containers.Container] = []
+        for container in containers:
+            name = container.name or ""
+            if name.startswith(prefix):
+                filtered.append(container)
+            else:
+                logger.trace("Ignoring container {} (prefix mismatch: expected {})", name, prefix)
+        return filtered
 
     def _is_container_running(self, container: docker.models.containers.Container) -> bool:
         """Check if a container is running."""

@@ -32,14 +32,14 @@ mng create my-agent claude --idle-timeout 1h      # Override timeout
 
 ## Running a Custom Command
 
-Use `--agent-cmd` (or `--agent-command`) to run a literal command instead of using an agent type:
+Use `--command` to run a literal command instead of using an agent type:
 
 ```bash
-mng create my-agent --agent-cmd "sleep 1000"      # Run a simple command
-mng create my-agent --agent-cmd "./my-script.sh"  # Run a custom script
+mng create my-agent --command "sleep 1000"      # Run a simple command
+mng create my-agent --command "./my-script.sh"  # Run a custom script
 ```
 
-The `--agent-cmd` flag implicitly uses the "generic" agent type, which simply runs the provided command without any special handling. This means `--agent-cmd` and `--agent-type` are mutually exclusive: you either specify an agent type (like `claude` or `codex`), or you provide a literal command to run.
+The `--command` flag implicitly uses the "generic" agent type, which simply runs the provided command without any special handling. This means `--command` and `--type` are mutually exclusive: you either specify an agent type (like `claude` or `codex`), or you provide a literal command to run.
 
 See [`mng create`](../commands/primary/create.md) for all available options.
 

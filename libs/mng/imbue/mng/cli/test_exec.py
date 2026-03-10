@@ -34,7 +34,6 @@ def _create_modal_agent(
             "--in",
             "modal",
             "--no-connect",
-            "--await-ready",
             "--no-ensure-clean",
             "--source",
             str(temp_source_dir),

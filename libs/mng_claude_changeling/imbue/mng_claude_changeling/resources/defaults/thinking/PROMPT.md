@@ -18,7 +18,7 @@ Instead, *ALWAYS* delegate the work to other agents--do *NOT* do tasks yourself!
 *ALWAYS* delegate by using your "delegate-task" skill, which uses `mng` to create an agent and returns a URL.
 *ALWAYS* display that resulting URL to the user so that they can easily track the work.
 
-When an agent created via "delegate-task" finishes with its work (or fails), you will receive an event from the `mng_agents` source.
+When an agent created via "delegate-task" finishes with its work (or fails), you will receive an event from the `mng/agents` source.
 See [Instructions for specific events](#instructions-for-specific-events) below for how to handle tasks that have finished.
 
 ## Event processing
@@ -73,7 +73,7 @@ If the user asked for you to do something, you should do that thing (by delegati
 
 If the user asked for something that you don't understand, or that is too complex to do in one step, you should ask the user clarifying questions (by sending any follow-up messages to the user with those questions).
 
-### Events from the `mng_agents` source
+### Events from the `mng/agents` source
 
 These events represent state changes for any sub-agents that you have launched via "delegate-task".
 Each event includes the `agent_id`, the new `state` (eg, "finished", "blocked", "crashed"), and any relevant metadata about the transition (eg, error message if it crashed).

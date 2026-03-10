@@ -1,6 +1,8 @@
 """Unit tests for the kanpan TUI."""
 
 import subprocess
+import time
+from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ from typing import Any
 
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
+from urwid.event_loop.main_loop import MainLoop
 from urwid.widget.attr_map import AttrMap
 from urwid.widget.columns import Columns
 from urwid.widget.text import Text
@@ -25,40 +28,39 @@ from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.testing import make_pr_info
+from imbue.mng_kanpan.tui import DEFAULT_REFRESH_INTERVAL_SECONDS
 from imbue.mng_kanpan.tui import _KanpanInputHandler
 from imbue.mng_kanpan.tui import _KanpanState
 from imbue.mng_kanpan.tui import _build_board_widgets
 from imbue.mng_kanpan.tui import _build_command_map
-from imbue.mng_kanpan.tui import _cancel_delete
+from imbue.mng_kanpan.tui import _build_mark_palette
 from imbue.mng_kanpan.tui import _carry_forward_pr_data
 from imbue.mng_kanpan.tui import _classify_entry
 from imbue.mng_kanpan.tui import _clear_focus
-from imbue.mng_kanpan.tui import _confirm_delete
-from imbue.mng_kanpan.tui import _delete_focused_agent
 from imbue.mng_kanpan.tui import _dispatch_command
-from imbue.mng_kanpan.tui import _finish_delete
-from imbue.mng_kanpan.tui import _finish_push
 from imbue.mng_kanpan.tui import _finish_refresh
 from imbue.mng_kanpan.tui import _format_section_heading
 from imbue.mng_kanpan.tui import _get_focused_entry
+from imbue.mng_kanpan.tui import _get_name_cell_markup
 from imbue.mng_kanpan.tui import _get_state_attr
 from imbue.mng_kanpan.tui import _is_focus_on_first_selectable
-from imbue.mng_kanpan.tui import _is_safe_to_delete
 from imbue.mng_kanpan.tui import _load_user_commands
 from imbue.mng_kanpan.tui import _mute_focused_agent
 from imbue.mng_kanpan.tui import _on_auto_refresh_alarm
 from imbue.mng_kanpan.tui import _on_custom_command_poll
-from imbue.mng_kanpan.tui import _on_delete_poll
 from imbue.mng_kanpan.tui import _on_mute_persist_poll
-from imbue.mng_kanpan.tui import _on_push_poll
 from imbue.mng_kanpan.tui import _on_restore_footer
 from imbue.mng_kanpan.tui import _on_spinner_tick
-from imbue.mng_kanpan.tui import _push_focused_agent
 from imbue.mng_kanpan.tui import _refresh_display
+from imbue.mng_kanpan.tui import _request_refresh
 from imbue.mng_kanpan.tui import _restore_footer
 from imbue.mng_kanpan.tui import _run_shell_command
 from imbue.mng_kanpan.tui import _schedule_next_refresh
 from imbue.mng_kanpan.tui import _show_transient_message
+from imbue.mng_kanpan.tui import _start_local_refresh
+from imbue.mng_kanpan.tui import _toggle_mark
+from imbue.mng_kanpan.tui import _unmark_all
+from imbue.mng_kanpan.tui import _unmark_focused
 from imbue.mng_kanpan.tui import _update_snapshot_mute
 
 # =============================================================================
@@ -86,11 +88,14 @@ def _make_entry(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
     pr: PrInfo | None = None,
+    pr_state: PrState | None = None,
     work_dir: Path | None = None,
     commits_ahead: int | None = None,
     create_pr_url: str | None = None,
     is_muted: bool = False,
 ) -> AgentBoardEntry:
+    if pr is None and pr_state is not None:
+        pr = _make_pr(state=pr_state)
     return AgentBoardEntry(
         name=AgentName(name),
         state=state,
@@ -145,16 +150,15 @@ def _make_state(
         commands=commands or {},
         spinner_index=0,
         refresh_future=None,
-        delete_future=None,
-        deleting_agent_name=None,
-        pending_delete_name=None,
-        push_future=None,
-        pushing_agent_name=None,
         executor=None,
+        marks={},
+        executing=False,
+        execute_status="",
         index_to_entry={},
         list_walker=None,
         focused_agent_name=None,
         steady_footer_text="  Loading...",
+        mark_attr_names=(),
     )
 
 
@@ -183,6 +187,37 @@ def _make_failed_future(error: Exception) -> Future[subprocess.CompletedProcess[
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_exception(error)
     return future
+
+
+def _text_from_widget(widget: Text) -> str:
+    """Extract plain text content from a single Text widget."""
+    raw = widget.text
+    if isinstance(raw, str):
+        return raw
+    parts: list[str] = []
+    for seg in raw:
+        if isinstance(seg, tuple):
+            parts.append(str(seg[1]))
+        else:
+            parts.append(str(seg))
+    return "".join(parts)
+
+
+def _extract_text(walker: list[object]) -> list[str]:
+    """Extract plain text from all Text and Columns widgets in a walker."""
+    texts: list[str] = []
+    for widget in walker:
+        inner = widget.original_widget if isinstance(widget, AttrMap) else widget
+        if isinstance(inner, Text):
+            texts.append(_text_from_widget(inner))
+        elif isinstance(inner, Columns):
+            cell_texts = [_text_from_widget(child) for child, _options in inner.contents if isinstance(child, Text)]
+            texts.append(" ".join(cell_texts))
+    return texts
+
+
+def _text_contains(texts: list[str], substring: str) -> bool:
+    return any(substring in t for t in texts)
 
 
 # =============================================================================
@@ -250,23 +285,6 @@ def test_format_section_heading_still_cooking() -> None:
     markup = _format_section_heading(BoardSection.STILL_COOKING, 1)
     assert markup[0] == ("section_in_progress", "In progress")
     assert "no PR yet" in markup[1]
-
-
-# =============================================================================
-# Tests for _is_safe_to_delete
-# =============================================================================
-
-
-def test_is_safe_to_delete_merged_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=_make_pr(state=PrState.MERGED))) is True
-
-
-def test_is_safe_to_delete_open_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=_make_pr(state=PrState.OPEN))) is False
-
-
-def test_is_safe_to_delete_no_pr() -> None:
-    assert _is_safe_to_delete(_make_entry(pr=None)) is False
 
 
 # =============================================================================
@@ -378,11 +396,6 @@ def test_input_handler_q_exits() -> None:
         _KanpanInputHandler(state=_make_state())("q")
 
 
-def test_input_handler_uppercase_q_exits() -> None:
-    with pytest.raises(ExitMainLoop):
-        _KanpanInputHandler(state=_make_state())("Q")
-
-
 def test_input_handler_ctrl_c_exits() -> None:
     with pytest.raises(ExitMainLoop):
         _KanpanInputHandler(state=_make_state())("ctrl c")
@@ -392,7 +405,6 @@ def test_input_handler_ignores_mouse_events() -> None:
     state = _make_state()
     result = _KanpanInputHandler(state=state)(("mouse press", 1, 0, 0))
     assert result is None
-    assert state.pending_delete_name is None
 
 
 def test_input_handler_passes_through_navigation_keys() -> None:
@@ -402,25 +414,7 @@ def test_input_handler_passes_through_navigation_keys() -> None:
 
 
 def test_input_handler_swallows_unknown_keys() -> None:
-    assert _KanpanInputHandler(state=_make_state())("x") is True
-
-
-def test_input_handler_pending_delete_y_confirms() -> None:
-    state = _make_state()
-    state.pending_delete_name = AgentName("doomed-agent")
-    result = _KanpanInputHandler(state=state)("y")
-    assert result is True
-    assert state.pending_delete_name is None
-
-
-def test_input_handler_pending_delete_other_key_cancels() -> None:
-    state = _make_state()
-    state.pending_delete_name = AgentName("doomed-agent")
-    state.steady_footer_text = "  Steady"
-    result = _KanpanInputHandler(state=state)("n")
-    assert result is True
-    assert state.pending_delete_name is None
-    assert state.footer_left_text.get_text()[0] == "  Steady"
+    assert _KanpanInputHandler(state=_make_state())("z") is True
 
 
 def test_input_handler_up_on_first_selectable_clears_focus() -> None:
@@ -491,6 +485,33 @@ def test_load_user_commands_handles_dict_values() -> None:
 
 
 # =============================================================================
+# Tests for _build_mark_palette
+# =============================================================================
+
+
+def test_build_mark_palette_returns_entries_for_markable_commands() -> None:
+    commands = {"d": CustomCommand(name="delete", markable="light red"), "r": CustomCommand(name="refresh")}
+    entries, attr_names = _build_mark_palette(commands)
+    assert ("mark_d", "light red", "") in entries
+    assert ("mark_d_focus", "light red,standout", "") in entries
+    assert attr_names == ("mark_d",)
+
+
+def test_build_mark_palette_uses_default_color_for_bare_true() -> None:
+    commands = {"s": CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)}
+    entries, attr_names = _build_mark_palette(commands)
+    assert ("mark_s", "light cyan", "") in entries
+    assert attr_names == ("mark_s",)
+
+
+def test_build_mark_palette_skips_non_markable() -> None:
+    commands = {"m": CustomCommand(name="mute")}
+    entries, attr_names = _build_mark_palette(commands)
+    assert entries == []
+    assert attr_names == ()
+
+
+# =============================================================================
 # Tests for _show_transient_message, _restore_footer, _on_restore_footer
 # =============================================================================
 
@@ -525,34 +546,6 @@ def test_on_restore_footer_callback_restores_footer() -> None:
 
 
 # =============================================================================
-# Tests for _cancel_delete and _confirm_delete
-# =============================================================================
-
-
-def test_cancel_delete_clears_pending_and_restores_footer() -> None:
-    state = _make_state()
-    state.pending_delete_name = AgentName("agent-to-cancel")
-    state.steady_footer_text = "  Steady state"
-    _cancel_delete(state)
-    assert state.pending_delete_name is None
-    assert state.footer_left_text.get_text()[0] == "  Steady state"
-
-
-def test_confirm_delete_clears_pending() -> None:
-    state = _make_state()
-    state.pending_delete_name = AgentName("agent-to-delete")
-    _confirm_delete(state)
-    assert state.pending_delete_name is None
-
-
-def test_confirm_delete_with_none_pending_does_not_create_executor() -> None:
-    state = _make_state()
-    state.pending_delete_name = None
-    _confirm_delete(state)
-    assert state.executor is None
-
-
-# =============================================================================
 # Tests for _dispatch_command (no-focus and no-loop paths)
 # =============================================================================
 
@@ -563,98 +556,11 @@ def test_dispatch_command_refresh_without_loop_does_not_start_refresh() -> None:
     assert state.refresh_future is None
 
 
-def test_dispatch_command_delete_without_focus_does_not_set_pending() -> None:
-    state = _make_state()
-    _dispatch_command(state, "d", CustomCommand(name="delete"))
-    assert state.pending_delete_name is None
-    assert state.delete_future is None
-
-
-def test_dispatch_command_push_without_focus_does_not_start_push() -> None:
-    state = _make_state()
-    _dispatch_command(state, "p", CustomCommand(name="push"))
-    assert state.push_future is None
-
-
 def test_dispatch_command_mute_without_focus_does_not_change_snapshot() -> None:
     state = _make_state(snapshot=_make_snapshot())
     original_snapshot = state.snapshot
     _dispatch_command(state, "m", CustomCommand(name="mute"))
     assert state.snapshot is original_snapshot
-
-
-# =============================================================================
-# Tests for _delete_focused_agent
-# =============================================================================
-
-
-def test_delete_focused_agent_already_deleting_does_not_start_new() -> None:
-    state = _make_state()
-    existing_future: Future[subprocess.CompletedProcess[str]] = Future()
-    state.delete_future = existing_future
-    _delete_focused_agent(state)
-    assert state.delete_future is existing_future
-
-
-def test_delete_focused_agent_no_focus_does_not_set_pending() -> None:
-    state = _make_state()
-    _delete_focused_agent(state)
-    assert state.pending_delete_name is None
-    assert state.delete_future is None
-
-
-def test_delete_focused_agent_non_merged_prompts_confirmation() -> None:
-    state = _make_state_with_focus(entries=(_make_entry(name="unmerged-agent", pr=_make_pr(state=PrState.OPEN)),))
-    _delete_focused_agent(state)
-    assert state.pending_delete_name == AgentName("unmerged-agent")
-    assert "confirm" in state.footer_left_text.get_text()[0].lower()
-
-
-def test_delete_focused_agent_merged_pr_executes_immediately() -> None:
-    """Safe-to-delete agents (merged PR) skip confirmation and start delete."""
-    state = _make_state_with_focus(entries=(_make_entry(name="merged-agent", pr=_make_pr(state=PrState.MERGED)),))
-    _delete_focused_agent(state)
-    assert state.pending_delete_name is None
-    assert state.deleting_agent_name == AgentName("merged-agent")
-    assert state.delete_future is not None
-    assert state.executor is not None
-    state.executor.shutdown(wait=False, cancel_futures=True)
-
-
-# =============================================================================
-# Tests for _push_focused_agent
-# =============================================================================
-
-
-def test_push_focused_agent_already_pushing_does_not_start_new() -> None:
-    state = _make_state()
-    existing_future: Future[subprocess.CompletedProcess[str]] = Future()
-    state.push_future = existing_future
-    _push_focused_agent(state)
-    assert state.push_future is existing_future
-
-
-def test_push_focused_agent_no_focus_does_not_set_pushing() -> None:
-    state = _make_state()
-    _push_focused_agent(state)
-    assert state.pushing_agent_name is None
-
-
-def test_push_focused_agent_no_work_dir_shows_message() -> None:
-    state = _make_state_with_focus(entries=(_make_entry(name="remote-agent", work_dir=None),))
-    _push_focused_agent(state)
-    assert "Cannot push" in state.footer_left_text.get_text()[0]
-
-
-def test_push_focused_agent_with_work_dir_starts_push() -> None:
-    """Push with a real work_dir creates an executor and submits a push future."""
-    state = _make_state_with_focus(entries=(_make_entry(name="local-agent", work_dir=Path("/tmp/nonexistent")),))
-    _push_focused_agent(state)
-    assert state.pushing_agent_name == AgentName("local-agent")
-    assert "Pushing local-agent" in state.footer_left_text.get_text()[0]
-    assert state.push_future is not None
-    assert state.executor is not None
-    state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 # =============================================================================
@@ -681,125 +587,6 @@ def test_refresh_display_preserves_focus_by_name() -> None:
     focused = _get_focused_entry(state)
     assert focused is not None
     assert focused.name == AgentName("agent-b")
-
-
-# =============================================================================
-# Tests for _on_delete_poll and _finish_delete
-# =============================================================================
-
-
-def test_on_delete_poll_no_future_does_not_schedule() -> None:
-    state = _make_state()
-    state.delete_future = None
-    loop = _make_mock_loop()
-    _on_delete_poll(loop, state)
-    assert loop._alarm_tracker.call_count == 0
-
-
-def test_on_delete_poll_with_done_future_clears_it() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.delete_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=0))
-    state.deleting_agent_name = AgentName("agent-a")
-    _on_delete_poll(_make_mock_loop(), state)
-    assert state.delete_future is None
-
-
-def test_on_delete_poll_not_done_schedules_next_tick() -> None:
-    state = _make_state()
-    state.delete_future = Future()
-    state.deleting_agent_name = AgentName("agent-a")
-    loop = _make_mock_loop()
-    _on_delete_poll(loop, state)
-    assert loop._alarm_tracker.call_count == 1
-
-
-def test_finish_delete_success_shows_message() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.delete_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=0))
-    state.deleting_agent_name = AgentName("agent-a")
-    _finish_delete(_make_mock_loop(), state)
-    assert state.delete_future is None
-    assert state.deleting_agent_name is None
-    assert "Deleted agent-a" in state.footer_left_text.get_text()[0]
-
-
-def test_finish_delete_failure_shows_error() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.delete_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=1, stderr="some error"))
-    state.deleting_agent_name = AgentName("agent-a")
-    _finish_delete(_make_mock_loop(), state)
-    assert "Failed to delete" in state.footer_left_text.get_text()[0]
-
-
-def test_finish_delete_exception_shows_error() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.delete_future = _make_failed_future(RuntimeError("connection lost"))
-    state.deleting_agent_name = AgentName("agent-a")
-    _finish_delete(_make_mock_loop(), state)
-    assert "Failed to delete" in state.footer_left_text.get_text()[0]
-
-
-def test_finish_delete_no_future_does_not_change_state() -> None:
-    state = _make_state()
-    state.delete_future = None
-    original_text = state.footer_left_text.get_text()[0]
-    _finish_delete(_make_mock_loop(), state)
-    assert state.footer_left_text.get_text()[0] == original_text
-
-
-# =============================================================================
-# Tests for _on_push_poll and _finish_push
-# =============================================================================
-
-
-def test_on_push_poll_no_future_does_not_schedule() -> None:
-    state = _make_state()
-    state.push_future = None
-    loop = _make_mock_loop()
-    _on_push_poll(loop, state)
-    assert loop._alarm_tracker.call_count == 0
-
-
-def test_on_push_poll_done_future_clears_it() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.push_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=0))
-    state.pushing_agent_name = AgentName("agent-a")
-    _on_push_poll(_make_mock_loop(), state)
-    assert state.push_future is None
-
-
-def test_on_push_poll_not_done_schedules_next() -> None:
-    state = _make_state()
-    state.push_future = Future()
-    state.pushing_agent_name = AgentName("agent-a")
-    loop = _make_mock_loop()
-    _on_push_poll(loop, state)
-    assert loop._alarm_tracker.call_count == 1
-
-
-def test_finish_push_success_shows_message() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.push_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=0))
-    state.pushing_agent_name = AgentName("agent-a")
-    _finish_push(_make_mock_loop(), state)
-    assert state.push_future is None
-    assert "Pushed agent-a" in state.footer_left_text.get_text()[0]
-
-
-def test_finish_push_failure_shows_error() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.push_future = _make_done_future(subprocess.CompletedProcess(args=[], returncode=1, stderr="rejected"))
-    state.pushing_agent_name = AgentName("agent-a")
-    _finish_push(_make_mock_loop(), state)
-    assert "Failed to push" in state.footer_left_text.get_text()[0]
-
-
-def test_finish_push_exception_shows_error() -> None:
-    state = _make_state(snapshot=_make_snapshot(entries=(_make_entry(name="agent-a"),)))
-    state.push_future = _make_failed_future(RuntimeError("timeout"))
-    state.pushing_agent_name = AgentName("agent-a")
-    _finish_push(_make_mock_loop(), state)
-    assert "Failed to push" in state.footer_left_text.get_text()[0]
 
 
 # =============================================================================
@@ -991,7 +778,7 @@ def test_dispatch_command_custom_shell_command() -> None:
     """Dispatching a custom command routes to shell execution."""
     state = _make_state_with_focus(entries=(_make_entry(name="agent-a"),))
     cmd = CustomCommand(name="custom", command="echo hello")
-    _dispatch_command(state, "x", cmd)
+    _dispatch_command(state, "c", cmd)
     assert "Running custom" in state.footer_left_text.get_text()[0]
     assert state.executor is not None
     state.executor.shutdown(wait=True)
@@ -1011,40 +798,157 @@ def test_on_auto_refresh_alarm_skips_if_already_refreshing() -> None:
 
 
 # =============================================================================
-# Tests for _carry_forward_pr_data and _build_board_widgets PR failure handling
-# (merged from main)
+# Tests for _get_name_cell_markup with marks
 # =============================================================================
 
 
-def _text_from_widget(widget: Text) -> str:
-    """Extract plain text content from a single Text widget."""
-    raw = widget.text
-    if isinstance(raw, str):
-        return raw
-    parts: list[str] = []
-    for seg in raw:
-        if isinstance(seg, tuple):
-            parts.append(str(seg[1]))
-        else:
-            parts.append(str(seg))
-    return "".join(parts)
+def test_name_cell_markup_no_mark() -> None:
+    entry = _make_entry()
+    result = _get_name_cell_markup(entry)
+    assert isinstance(result, str)
+    assert result.startswith("  test-agent")
 
 
-def _extract_text(walker: list[object]) -> list[str]:
-    """Extract plain text from all Text and Columns widgets in a walker."""
-    texts: list[str] = []
-    for widget in walker:
-        inner = widget.original_widget if isinstance(widget, AttrMap) else widget
-        if isinstance(inner, Text):
-            texts.append(_text_from_widget(inner))
-        elif isinstance(inner, Columns):
-            cell_texts = [_text_from_widget(child) for child, _options in inner.contents if isinstance(child, Text)]
-            texts.append(" ".join(cell_texts))
-    return texts
+def test_name_cell_markup_delete_mark() -> None:
+    entry = _make_entry()
+    result = _get_name_cell_markup(entry, mark_key="d")
+    assert isinstance(result, list)
+    assert result[0] == ("mark_d", "d")
+    assert "test-agent" in result[1]
 
 
-def _text_contains(texts: list[str], substring: str) -> bool:
-    return any(substring in t for t in texts)
+def test_name_cell_markup_push_mark() -> None:
+    entry = _make_entry(work_dir=Path("/tmp/work"))
+    result = _get_name_cell_markup(entry, mark_key="p")
+    assert isinstance(result, list)
+    assert result[0] == ("mark_p", "p")
+
+
+def test_name_cell_markup_custom_mark_uses_command_color() -> None:
+    entry = _make_entry()
+    result = _get_name_cell_markup(entry, mark_key="s")
+    assert isinstance(result, list)
+    assert result[0] == ("mark_s", "s")
+    assert "test-agent" in result[1]
+
+
+# =============================================================================
+# Tests for _toggle_mark
+# =============================================================================
+
+
+def test_toggle_mark_adds_mark() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    _toggle_mark(state, "d")
+    assert state.marks == {AgentName("test-agent"): "d"}
+
+
+def test_toggle_mark_removes_same_mark() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    state.marks[AgentName("test-agent")] = "d"
+    _toggle_mark(state, "d")
+    assert AgentName("test-agent") not in state.marks
+
+
+def test_toggle_mark_replaces_different_mark() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(work_dir=Path("/tmp/work")),))
+    state.marks[AgentName("test-agent")] = "d"
+    _toggle_mark(state, "p")
+    assert state.marks[AgentName("test-agent")] == "p"
+
+
+def test_toggle_push_mark_rejected_without_work_dir() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    _toggle_mark(state, "p")
+    assert AgentName("test-agent") not in state.marks
+
+
+# =============================================================================
+# Tests for _unmark_focused and _unmark_all
+# =============================================================================
+
+
+def test_unmark_focused_removes_mark() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    state.marks[AgentName("test-agent")] = "d"
+    _unmark_focused(state)
+    assert AgentName("test-agent") not in state.marks
+
+
+def test_unmark_focused_noop_without_mark() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    _unmark_focused(state)
+    assert state.marks == {}
+
+
+def test_unmark_all_clears_all_marks() -> None:
+    e1 = _make_entry(name="agent-1")
+    e2 = _make_entry(name="agent-2")
+    state = _make_state_with_focus(entries=(e1, e2))
+    state.marks[AgentName("agent-1")] = "d"
+    state.marks[AgentName("agent-2")] = "p"
+    _unmark_all(state)
+    assert state.marks == {}
+
+
+def test_unmark_all_noop_when_empty() -> None:
+    state = _make_state_with_focus(entries=(_make_entry(),))
+    _unmark_all(state)
+    assert state.marks == {}
+
+
+# =============================================================================
+# Tests for _build_board_widgets with marks
+# =============================================================================
+
+
+def test_build_board_widgets_shows_mark_indicator() -> None:
+    entry = _make_entry()
+    snapshot = BoardSnapshot(entries=(entry,), fetch_time_seconds=0.1)
+    marks = {AgentName("test-agent"): "d"}
+    walker, index_to_entry = _build_board_widgets(snapshot, marks)
+    agent_idx = min(index_to_entry.keys())
+    texts = _extract_text([walker[agent_idx]])
+    assert len(texts) == 1
+    assert texts[0].startswith("d")
+
+
+# =============================================================================
+# Tests for custom command dispatch (markable vs immediate)
+# =============================================================================
+
+
+def test_dispatch_markable_custom_command_toggles_mark() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)
+    commands = {"s": cmd}
+    state = _make_state_with_focus(entries=(entry,), commands=commands)
+    _dispatch_command(state, "s", cmd)
+    assert state.marks == {AgentName("test-agent"): "s"}
+
+
+def test_dispatch_markable_custom_command_toggles_off() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="stop", command="mng stop $MNG_AGENT_NAME", markable=True)
+    commands = {"s": cmd}
+    state = _make_state_with_focus(entries=(entry,), commands=commands)
+    state.marks[AgentName("test-agent")] = "s"
+    _dispatch_command(state, "s", cmd)
+    assert AgentName("test-agent") not in state.marks
+
+
+def test_dispatch_immediate_custom_command_does_not_mark() -> None:
+    entry = _make_entry()
+    cmd = CustomCommand(name="connect", command="mng connect $MNG_AGENT_NAME")
+    commands = {"c": cmd}
+    state = _make_state_with_focus(entries=(entry,), commands=commands)
+    _dispatch_command(state, "c", cmd)
+    assert state.marks == {}
+
+
+# =============================================================================
+# Tests for _carry_forward_pr_data and _build_board_widgets PR failure handling
+# =============================================================================
 
 
 def test_carry_forward_pr_data_preserves_old_prs() -> None:
@@ -1205,3 +1109,234 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
     assert not _text_contains(texts, "no PR yet")
     assert not _text_contains(texts, "create PR")
     assert _text_contains(texts, "network error")
+
+
+# === Debounce / refresh tests ===
+
+
+class _AlarmRecord(SimpleNamespace):
+    """Record of a set_alarm_in call."""
+
+    delay: float
+    callback: object
+    user_data: object
+
+
+class _TestableLoop(MainLoop):
+    """MainLoop subclass that records alarm operations instead of registering with the event loop."""
+
+    def __init__(self) -> None:
+        super().__init__(Text(""))
+        self.alarms: list[_AlarmRecord] = []
+        self.removed_alarms: list[object] = []
+        self._next_handle = 0
+
+    def set_alarm_in(self, sec: float, callback: Callable[..., Any], user_data: Any = None) -> int:
+        handle = self._next_handle
+        self._next_handle += 1
+        self.alarms.append(_AlarmRecord(delay=sec, callback=callback, user_data=user_data))
+        return handle
+
+    def remove_alarm(self, handle: object) -> bool:
+        self.removed_alarms.append(handle)
+        return True
+
+
+class _FakeExecutor:
+    """Executor whose submit() always returns a pre-built future."""
+
+    def __init__(self, future: Future[BoardSnapshot]) -> None:
+        self._future = future
+
+    def submit(self, fn: object, *args: object, **kwargs: object) -> Future[BoardSnapshot]:
+        return self._future
+
+
+def _make_dummy_snapshot(**overrides: Any) -> BoardSnapshot:
+    """Build a BoardSnapshot with a single dummy entry to avoid empty-entries edge cases."""
+    defaults: dict[str, Any] = {
+        "entries": (
+            AgentBoardEntry(
+                name=AgentName("dummy"),
+                state=AgentLifecycleState.DONE,
+                provider_name=ProviderInstanceName("modal"),
+            ),
+        ),
+        "fetch_time_seconds": 0.1,
+    }
+    defaults.update(overrides)
+    return BoardSnapshot(**defaults)
+
+
+def _make_debounce_state(**overrides: Any) -> _KanpanState:
+    """Build a _KanpanState with fake urwid widgets and sensible defaults for debounce tests."""
+    defaults: dict[str, Any] = {
+        "mng_ctx": SimpleNamespace(config=SimpleNamespace(plugins={})),
+        "frame": SimpleNamespace(body=None),
+        "footer_left_text": SimpleNamespace(set_text=lambda text: None),
+        "footer_left_attr": SimpleNamespace(set_attr_map=lambda m: None),
+        "footer_right": SimpleNamespace(set_text=lambda text: None),
+    }
+    defaults.update(overrides)
+    return _KanpanState.model_construct(**defaults)
+
+
+def test_request_refresh_starts_immediately_when_cooldown_expired() -> None:
+    loop = _TestableLoop()
+    pre_built_future: Future[BoardSnapshot] = Future()
+    pre_built_future.set_result(_make_dummy_snapshot())
+    executor = _FakeExecutor(pre_built_future)
+    state = _make_debounce_state(
+        last_refresh_time=time.monotonic() - 100,
+        executor=executor,
+    )
+
+    _request_refresh(loop, state, cooldown_seconds=5.0)
+
+    assert state.refresh_future is pre_built_future
+
+
+def test_request_refresh_defers_when_within_cooldown() -> None:
+    loop = _TestableLoop()
+    state = _make_debounce_state(last_refresh_time=time.monotonic())
+
+    _request_refresh(loop, state, cooldown_seconds=60.0)
+
+    assert state.refresh_future is None
+    assert state.deferred_refresh_alarm is not None
+    assert len(loop.alarms) == 1
+    delay = loop.alarms[0].delay
+    assert 59.0 < delay <= 60.0
+
+
+def test_request_refresh_replaces_deferred_with_sooner_alarm() -> None:
+    """A manual refresh (short cooldown) should replace a pending auto refresh (long cooldown)."""
+    loop = _TestableLoop()
+    now = time.monotonic()
+    state = _make_debounce_state(
+        last_refresh_time=now - 2,
+        deferred_refresh_alarm=999,
+        deferred_refresh_fire_at=now + 58,
+    )
+
+    _request_refresh(loop, state, cooldown_seconds=5.0)
+
+    assert 999 in loop.removed_alarms
+    assert state.deferred_refresh_alarm is not None
+    assert len(loop.alarms) == 1
+    delay = loop.alarms[0].delay
+    assert 2.0 < delay <= 3.0
+
+
+def test_request_refresh_keeps_existing_if_sooner() -> None:
+    """An auto refresh request should not replace a sooner pending manual refresh."""
+    loop = _TestableLoop()
+    now = time.monotonic()
+    state = _make_debounce_state(
+        last_refresh_time=now - 2,
+        deferred_refresh_alarm=777,
+        deferred_refresh_fire_at=now + 3,
+    )
+
+    _request_refresh(loop, state, cooldown_seconds=60.0)
+
+    assert len(loop.removed_alarms) == 0
+    assert len(loop.alarms) == 0
+    assert state.deferred_refresh_alarm == 777
+
+
+def test_request_refresh_noop_when_already_refreshing() -> None:
+    loop = _TestableLoop()
+    existing_future: Future[BoardSnapshot] = Future()
+    state = _make_debounce_state(refresh_future=existing_future)
+
+    _request_refresh(loop, state, cooldown_seconds=0.0)
+
+    assert state.refresh_future is existing_future
+    assert len(loop.alarms) == 0
+
+
+def test_finish_refresh_schedules_normal_interval_on_success() -> None:
+    loop = _TestableLoop()
+    snapshot = _make_dummy_snapshot(fetch_time_seconds=1.0)
+    future: Future[BoardSnapshot] = Future()
+    future.set_result(snapshot)
+    state = _make_debounce_state(refresh_future=future)
+
+    _finish_refresh(loop, state)
+
+    assert state.snapshot == snapshot
+    assert state.refresh_future is None
+    auto_refresh_alarms = [a for a in loop.alarms if a.delay == DEFAULT_REFRESH_INTERVAL_SECONDS]
+    assert len(auto_refresh_alarms) == 1
+
+
+def test_finish_refresh_uses_auto_cooldown_on_failure() -> None:
+    """After a failed refresh, the next refresh should be deferred by retry_cooldown_seconds."""
+    loop = _TestableLoop()
+    future: Future[BoardSnapshot] = Future()
+    future.set_exception(RuntimeError("GitHub API error"))
+    state = _make_debounce_state(
+        refresh_future=future,
+        retry_cooldown_seconds=30.0,
+    )
+
+    _finish_refresh(loop, state)
+
+    assert state.refresh_future is None
+    assert state.deferred_refresh_alarm is not None
+    assert len(loop.alarms) == 1
+    delay = loop.alarms[0].delay
+    assert 29.0 < delay <= 30.0
+
+
+# === local-only refresh ===
+
+
+def test_local_refresh_does_not_reset_last_refresh_time() -> None:
+    """A local-only refresh should not update last_refresh_time."""
+    loop = _TestableLoop()
+    snapshot = _make_dummy_snapshot(prs_loaded=False)
+    future: Future[BoardSnapshot] = Future()
+    future.set_result(snapshot)
+    original_time = 1000.0
+    state = _make_debounce_state(
+        refresh_future=future,
+        refresh_is_local_only=True,
+        last_refresh_time=original_time,
+    )
+
+    _finish_refresh(loop, state)
+
+    assert state.last_refresh_time == original_time
+    assert state.refresh_future is None
+    assert state.refresh_is_local_only is False
+
+
+def test_local_refresh_does_not_schedule_next_auto_refresh() -> None:
+    """A local-only refresh should not schedule the next periodic auto-refresh."""
+    loop = _TestableLoop()
+    snapshot = _make_dummy_snapshot(prs_loaded=False)
+    future: Future[BoardSnapshot] = Future()
+    future.set_result(snapshot)
+    state = _make_debounce_state(
+        refresh_future=future,
+        refresh_is_local_only=True,
+    )
+
+    _finish_refresh(loop, state)
+
+    auto_refresh_alarms = [a for a in loop.alarms if a.delay == DEFAULT_REFRESH_INTERVAL_SECONDS]
+    assert len(auto_refresh_alarms) == 0
+
+
+def test_start_local_refresh_noop_when_already_refreshing() -> None:
+    """_start_local_refresh should do nothing if a refresh is already in flight."""
+    loop = _TestableLoop()
+    existing_future: Future[BoardSnapshot] = Future()
+    state = _make_debounce_state(refresh_future=existing_future)
+
+    _start_local_refresh(loop, state)
+
+    assert state.refresh_future is existing_future
+    assert len(loop.alarms) == 0

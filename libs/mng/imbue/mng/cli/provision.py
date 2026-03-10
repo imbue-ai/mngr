@@ -43,9 +43,9 @@ class ProvisionCliOptions(CommonCliOptions):
     prepend_to_file: tuple[str, ...]
     create_directory: tuple[str, ...]
     # Environment options
-    agent_env: tuple[str, ...]
-    agent_env_file: tuple[str, ...]
-    pass_agent_env: tuple[str, ...]
+    env: tuple[str, ...]
+    env_file: tuple[str, ...]
+    pass_env: tuple[str, ...]
 
 
 def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
@@ -133,23 +133,17 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
 @optgroup.group("Agent Environment Variables")
 @optgroup.option(
     "--env",
-    "--agent-env",
-    "agent_env",
     multiple=True,
     help="Set environment variable KEY=VALUE",
 )
 @optgroup.option(
     "--env-file",
-    "--agent-env-file",
-    "agent_env_file",
     type=click.Path(exists=True),
     multiple=True,
     help="Load env file",
 )
 @optgroup.option(
     "--pass-env",
-    "--pass-agent-env",
-    "pass_agent_env",
     multiple=True,
     help="Forward variable from shell",
 )
@@ -208,8 +202,8 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     # Parse environment options
-    env_vars = resolve_env_vars(opts.pass_agent_env, opts.agent_env)
-    env_files = tuple(Path(f) for f in opts.agent_env_file)
+    env_vars = resolve_env_vars(opts.pass_env, opts.env)
+    env_files = tuple(Path(f) for f in opts.env_file)
 
     environment = AgentEnvironmentOptions(
         env_vars=env_vars,
