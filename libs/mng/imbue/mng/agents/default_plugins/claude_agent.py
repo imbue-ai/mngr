@@ -76,11 +76,6 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
     "plugins",
 )
 
-# Whether to symlink (True) or copy (False) user resources from ~/.claude/
-# into local per-agent config dirs. Symlinks avoid duplication and keep the
-# per-agent dir lightweight; copies provide full isolation.
-_SYMLINK_LOCAL_USER_RESOURCES: Final[bool] = True
-
 
 class ClaudeAgentConfig(AgentTypeConfig):
     """Config for the claude agent type."""
@@ -110,6 +105,12 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="Extra folder to sync to the repo .claude/ folder in the agent work_dir."
         "(files are transferred after user settings, so they can override)",
     )
+    symlink_user_resources: bool = Field(
+        default=True,
+        description="Whether to symlink (True) or copy (False) user resources from ~/.claude/ "
+        "into local per-agent config dirs. Symlinks avoid duplication and keep the "
+        "per-agent dir lightweight; copies provide full isolation.",
+    )
     convert_macos_credentials: bool = Field(
         default=True,
         description="Whether to convert macOS keychain credentials to flat files for remote hosts",
@@ -138,15 +139,15 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
 
 
-def _collect_claude_home_dir_files(claude_dir: Path) -> dict[str, Path]:
+def _collect_claude_home_dir_files(claude_dir: Path) -> dict[Path, Path]:
     """Collect files from ~/.claude/ directory items for deployment.
 
-    Returns dict mapping relative path strings (e.g., "settings.json",
-    "skills/my-skill/SKILL.md") to local source paths. Iterates over
+    Returns dict mapping relative paths (e.g., Path("settings.json"),
+    Path("skills/my-skill/SKILL.md")) to local source paths. Iterates over
     _CLAUDE_HOME_SYNC_ITEMS to collect files from both regular files
     and directories (recursively).
     """
-    files: dict[str, Path] = {}
+    files: dict[Path, Path] = {}
     for item_name in _CLAUDE_HOME_SYNC_ITEMS:
         item_path = claude_dir / item_name
         if not item_path.exists():
@@ -154,10 +155,9 @@ def _collect_claude_home_dir_files(claude_dir: Path) -> dict[str, Path]:
         if item_path.is_dir():
             for file_path in item_path.rglob("*"):
                 if file_path.is_file():
-                    relative = str(file_path.relative_to(claude_dir))
-                    files[relative] = file_path
+                    files[file_path.relative_to(claude_dir)] = file_path
         else:
-            files[item_name] = item_path
+            files[Path(item_name)] = item_path
     return files
 
 
@@ -517,11 +517,11 @@ def _provision_remote_api_key(
     host.write_text_file(config_dir / ".claude.json", json.dumps(claude_json_data, indent=2) + "\n")
 
 
-def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path) -> None:
+def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
     """Sync user resources from ~/.claude/ into the per-agent config dir.
 
     Symlinks or copies settings.json, skills/, agents/, commands/, plugins/
-    depending on _SYMLINK_LOCAL_USER_RESOURCES.
+    depending on the ``symlink`` flag.
     """
     home_claude = Path.home() / ".claude"
     for item_name in _CLAUDE_HOME_SYNC_ITEMS:
@@ -529,7 +529,7 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path) -> N
         if not source.exists():
             continue
         dest = config_dir / item_name
-        if _SYMLINK_LOCAL_USER_RESOURCES:
+        if symlink:
             host.execute_command(f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
         elif source.is_dir():
             host.execute_command(f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
@@ -1100,7 +1100,7 @@ class ClaudeAgent(BaseAgent):
             _provision_file_credentials(host, config_dir)
 
         if config.sync_home_settings:
-            _sync_local_user_resources(host, config_dir)
+            _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
 
     def _setup_remote_config_dir(
         self,
@@ -1124,7 +1124,7 @@ class ClaudeAgent(BaseAgent):
             local_claude_dir = Path.home() / ".claude"
             for relative_path, source_path in _collect_claude_home_dir_files(local_claude_dir).items():
                 # settings.json is handled separately above
-                if relative_path == "settings.json":
+                if relative_path == Path("settings.json"):
                     continue
                 host.write_text_file(config_dir / relative_path, source_path.read_text())
 
@@ -1404,9 +1404,9 @@ def get_files_for_deploy(
     if include_user_settings:
         # Skills, agents, commands (skip settings.json, handled above)
         for relative_path, source_path in _collect_claude_home_dir_files(local_claude_dir).items():
-            if relative_path == "settings.json":
+            if relative_path == Path("settings.json"):
                 continue
-            files[Path(f"~/.claude/{relative_path}")] = source_path
+            files[Path("~/.claude") / relative_path] = source_path
 
         # ~/.claude/.credentials.json (OAuth tokens)
         credentials = local_claude_dir / ".credentials.json"
