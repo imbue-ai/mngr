@@ -167,7 +167,7 @@ def gather_context() -> str:
     Returns context from:
     - New messages from other active conversations (from events/messages/events.jsonl)
     - New inner monologue entries (from logs/claude_transcript/events.jsonl)
-    - New trigger events (from events/scheduled/, mng_agents/, stop/, monitor/)
+    - New trigger events (from events/scheduled/, mng/agents/, stop/, monitor/)
 
     Call this at the start of each conversation turn for situational awareness.
     If it returns "No new context", nothing has changed since the last call.
@@ -236,7 +236,7 @@ def gather_context() -> str:
                 sections.append(f"## New messages from other conversations ({len(other_msgs)})\n{formatted}")
 
     # Trigger events from all sources
-    for source in ("scheduled", "mng_agents", "stop", "monitor"):
+    for source in ("scheduled", "mng/agents", "stop", "monitor"):
         events_file = agent_data_dir / "events" / source / "events.jsonl"
         if is_first_call:
             recent = _read_tail_lines(events_file, _MAX_TRIGGER_LINES)

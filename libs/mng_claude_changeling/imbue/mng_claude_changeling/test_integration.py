@@ -140,7 +140,7 @@ def test_provisioning_creates_event_log_directories(
     expected_sources = (
         "messages",
         "scheduled",
-        "mng_agents",
+        "mng/agents",
         "stop",
         "monitor",
     )
