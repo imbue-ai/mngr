@@ -37,13 +37,7 @@ class ClaudeDirectoryNotTrustedError(ConfigError):
 
 
 class ClaudeEffortCalloutNotDismissedError(ConfigError):
-    """The effort callout has not been dismissed in Claude's global config.
-
-    Claude Code shows an effort callout on startup when effortCalloutDismissed
-    is not set to true in ~/.claude.json. When mng uses tmux send-keys to
-    deliver the initial prompt, the keystrokes may interact with this callout
-    instead of the prompt, causing the intended message to be lost.
-    """
+    """The effort callout has not been dismissed in Claude's global config."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -53,42 +47,64 @@ class ClaudeEffortCalloutNotDismissedError(ConfigError):
         )
 
 
+class ClaudeOnboardingNotCompletedError(ConfigError):
+    """Claude Code onboarding has not been completed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claude Code onboarding has not been completed in ~/.claude.json. "
+            "Run `mng create` interactively (without --no-connect) to be prompted, "
+            "or run Claude Code manually to complete onboarding."
+        )
+
+
+class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
+    """The dangerous-mode safety warning has not been dismissed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Claude Code's dangerous-mode safety warning has not been dismissed in ~/.claude.json. "
+            "Run `mng create` interactively (without --no-connect) to be prompted, "
+            "or run Claude Code manually and dismiss the warning."
+        )
+
+
 def get_claude_config_path() -> Path:
-    """Return the path to the Claude config file (~/.claude.json)."""
+    """Return the path to the global Claude config file (~/.claude.json)."""
     return Path.home() / ".claude.json"
 
 
 def get_claude_config_backup_path() -> Path:
-    """Return the path to the Claude config backup file."""
+    """Return the path to the global Claude config backup file."""
     return Path.home() / ".claude.json.bak"
 
 
 # =============================================================================
-# Shared helpers for reading/writing ~/.claude.json
+# Shared helpers for reading/writing claude config JSON
 # =============================================================================
 
 
 @contextmanager
-def _claude_config_lock() -> Generator[Path, None, None]:
-    """Acquire exclusive lock on ~/.claude.json and yield the config path.
+def _claude_config_lock(config_path: Path) -> Generator[None, None, None]:
+    """Acquire exclusive lock for the given config file and yield.
 
-    Uses a separate .claude.json.lock file to avoid issues with atomic replacement
-    of the config file itself.
+    Uses a separate .lock file (next to the config file) to avoid issues
+    with atomic replacement of the config file itself.
     """
-    config_path = get_claude_config_path()
-    lock_path = config_path.parent / ".claude.json.lock"
+    lock_path = config_path.parent / (config_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
 
     with open(lock_path, "r") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            yield config_path
+            yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _read_claude_config(config_path: Path) -> dict[str, Any]:
-    """Read and parse ~/.claude.json, returning empty dict if missing or empty."""
+def read_claude_config(config_path: Path) -> dict[str, Any]:
+    """Read and parse a claude config JSON file, returning empty dict if missing or empty."""
     if not config_path.exists():
         return {}
     content = config_path.read_text()
@@ -98,16 +114,17 @@ def _read_claude_config(config_path: Path) -> dict[str, Any]:
 
 
 def _write_claude_config_atomic(config_path: Path, config: dict[str, Any]) -> None:
-    """Atomically write config to ~/.claude.json with backup.
+    """Atomically write config to the given path with backup.
 
     Creates a backup of the existing file (if any), then atomically writes
     the new content. Caller must hold the config lock.
     """
     if config_path.exists():
-        backup_path = get_claude_config_backup_path()
+        backup_path = config_path.parent / (config_path.name + ".bak")
         shutil.copy2(config_path, backup_path)
         logger.trace("Created backup of Claude config at {}", backup_path)
 
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(config_path, json.dumps(config, indent=2) + "\n")
 
 
@@ -116,50 +133,49 @@ def _write_claude_config_atomic(config_path: Path, config: dict[str, Any]) -> No
 # =============================================================================
 
 
-def is_source_directory_trusted(source_path: Path) -> bool:
-    """Check whether the source directory is trusted in Claude's config.
+def is_source_directory_trusted(config_path: Path, source_path: Path) -> bool:
+    """Check whether the source directory is trusted in the given config file.
 
     Returns True if source_path (or an ancestor) has hasTrustDialogAccepted=true
-    in ~/.claude.json.
+    in the config file at config_path.
     """
-    config_path = get_claude_config_path()
     source_path = source_path.resolve()
 
-    config = _read_claude_config(config_path)
+    config = read_claude_config(config_path)
     if not config:
         return False
 
     projects = config.get("projects", {})
-    source_config = _find_project_config(projects, source_path)
+    source_config = find_project_config(projects, source_path)
     if source_config is None:
         return False
 
     return bool(source_config.get("hasTrustDialogAccepted", False))
 
 
-def check_source_directory_trusted(source_path: Path) -> None:
-    """Check that the source directory is trusted in Claude's config.
+def check_source_directory_trusted(config_path: Path, source_path: Path) -> None:
+    """Check that the source directory is trusted in the given config file.
 
-    Reads ~/.claude.json and verifies that source_path (or an ancestor) has
+    Reads the config file and verifies that source_path (or an ancestor) has
     hasTrustDialogAccepted=true.
 
     Raises ClaudeDirectoryNotTrustedError if the source is not trusted.
     """
-    if not is_source_directory_trusted(source_path):
+    if not is_source_directory_trusted(config_path, source_path):
         raise ClaudeDirectoryNotTrustedError(str(source_path.resolve()))
 
 
-def add_claude_trust_for_path(source_path: Path) -> None:
-    """Add trust for a directory in Claude's config.
+def add_claude_trust_for_path(config_path: Path, source_path: Path) -> None:
+    """Add trust for a directory in the given config file.
 
-    Creates or updates ~/.claude.json to mark the given path as trusted
+    Creates or updates the config file to mark the given path as trusted
     (hasTrustDialogAccepted=true). If the config file doesn't exist, it is
     created. If the path is already trusted, this is a no-op.
     """
     source_path = source_path.resolve()
 
-    with _claude_config_lock() as config_path:
-        config = _read_claude_config(config_path)
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
         projects = config.get("projects", {})
         source_path_str = str(source_path)
 
@@ -181,62 +197,10 @@ def add_claude_trust_for_path(source_path: Path) -> None:
     logger.trace("Added Claude trust for {}", source_path)
 
 
-def extend_claude_trust_to_worktree(source_path: Path, worktree_path: Path) -> None:
-    """Extend Claude's trust settings from source_path to a new worktree.
+def remove_claude_trust_for_path(config_path: Path, path: Path) -> bool:
+    """Remove Claude's trust entry for a path from the given config file.
 
-    Reads ~/.claude.json, finds the project entry for source_path (or the closest
-    ancestor with a config entry), and creates a new entry for worktree_path with
-    the same settings (allowedTools, hasTrustDialogAccepted, etc.).
-
-    Raises ClaudeDirectoryNotTrustedError if the source config does not have
-    hasTrustDialogAccepted=true.
-    """
-    source_path = source_path.resolve()
-    worktree_path = worktree_path.resolve()
-
-    with _claude_config_lock() as config_path:
-        config = _read_claude_config(config_path)
-        if not config:
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        # Find the source project config
-        projects = config.get("projects", {})
-        source_config = _find_project_config(projects, source_path)
-
-        if source_config is None:
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        # Verify the source directory was actually trusted
-        if not source_config.get("hasTrustDialogAccepted", False):
-            raise ClaudeDirectoryNotTrustedError(str(source_path))
-
-        worktree_path_str = str(worktree_path)
-        if worktree_path_str in projects:
-            logger.trace(
-                "Found existing Claude trust for worktree {}",
-                worktree_path,
-            )
-            return
-
-        worktree_config = copy.deepcopy(source_config)
-        worktree_config["_mngCreated"] = True
-        worktree_config["_mngSourcePath"] = str(source_path)
-        projects[worktree_path_str] = worktree_config
-        config["projects"] = projects
-
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace(
-        "Extended Claude trust from {} to worktree {}",
-        source_path,
-        worktree_path,
-    )
-
-
-def remove_claude_trust_for_path(path: Path) -> bool:
-    """Remove Claude's trust entry for a path.
-
-    Removes the project entry for the given path from ~/.claude.json.
+    Removes the project entry for the given path from the config file.
     Used during agent cleanup to remove worktree trust entries.
 
     Returns True if the entry was removed, False if it didn't exist.
@@ -244,9 +208,9 @@ def remove_claude_trust_for_path(path: Path) -> bool:
     """
     path = path.resolve()
 
-    with _claude_config_lock() as config_path:
+    with _claude_config_lock(config_path):
         try:
-            config = _read_claude_config(config_path)
+            config = read_claude_config(config_path)
         except json.JSONDecodeError as e:
             logger.warning("Failed to remove Claude trust entry for {}: {}", path, e)
             return False
@@ -275,36 +239,34 @@ def remove_claude_trust_for_path(path: Path) -> bool:
     return True
 
 
-def is_effort_callout_dismissed() -> bool:
-    """Check whether the effort callout has been dismissed in Claude's config.
+def is_effort_callout_dismissed(config_path: Path) -> bool:
+    """Check whether the effort callout has been dismissed in the given config file.
 
-    Returns True if effortCalloutDismissed is true in ~/.claude.json.
+    Returns True if effortCalloutDismissed is true in the config file.
     """
-    config_path = get_claude_config_path()
-    config = _read_claude_config(config_path)
+    config = read_claude_config(config_path)
     return bool(config.get("effortCalloutDismissed", False))
 
 
-def check_effort_callout_dismissed() -> None:
-    """Check that the effort callout has been dismissed in Claude's config.
+def check_effort_callout_dismissed(config_path: Path) -> None:
+    """Check that the effort callout has been dismissed in the given config file.
 
-    Reads ~/.claude.json and verifies that effortCalloutDismissed is true.
+    Reads the config file and verifies that effortCalloutDismissed is true.
 
     Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
     been dismissed.
     """
-    if not is_effort_callout_dismissed():
+    if not is_effort_callout_dismissed(config_path):
         raise ClaudeEffortCalloutNotDismissedError()
 
 
-def dismiss_effort_callout() -> None:
-    """Set effortCalloutDismissed=true in Claude's config.
+def dismiss_effort_callout(config_path: Path) -> None:
+    """Set effortCalloutDismissed=true in the given config file.
 
-    Acquires the config lock and sets the field in ~/.claude.json.
-    No-op if already set.
+    Acquires the config lock and sets the field. No-op if already set.
     """
-    with _claude_config_lock() as config_path:
-        config = _read_claude_config(config_path)
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
         if config.get("effortCalloutDismissed", False):
             return
         config["effortCalloutDismissed"] = True
@@ -313,40 +275,85 @@ def dismiss_effort_callout() -> None:
     logger.trace("Dismissed effort callout in Claude config")
 
 
-def check_claude_dialogs_dismissed(source_path: Path) -> None:
+def is_onboarding_completed(config_path: Path) -> bool:
+    """Check whether onboarding has been completed in the given config file."""
+    config = read_claude_config(config_path)
+    return bool(config.get("hasCompletedOnboarding", False))
+
+
+def check_onboarding_completed(config_path: Path) -> None:
+    """Check that onboarding has been completed. Raises ClaudeOnboardingNotCompletedError if not."""
+    if not is_onboarding_completed(config_path):
+        raise ClaudeOnboardingNotCompletedError()
+
+
+def complete_onboarding(config_path: Path) -> None:
+    """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get("hasCompletedOnboarding", False):
+            return
+        config["hasCompletedOnboarding"] = True
+        _write_claude_config_atomic(config_path, config)
+
+    logger.trace("Marked onboarding as completed in Claude config")
+
+
+def is_bypass_permissions_accepted(config_path: Path) -> bool:
+    """Check whether the bypass permissions prompt has been accepted in the given config file."""
+    config = read_claude_config(config_path)
+    return bool(config.get("bypassPermissionsModeAccepted", False))
+
+
+def check_bypass_permissions_accepted(config_path: Path) -> None:
+    """Check that bypass permissions has been accepted. Raises ClaudeBypassPermissionsNotAcceptedError if not."""
+    if not is_bypass_permissions_accepted(config_path):
+        raise ClaudeBypassPermissionsNotAcceptedError()
+
+
+def accept_bypass_permissions(config_path: Path) -> None:
+    """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get("bypassPermissionsModeAccepted", False):
+            return
+        config["bypassPermissionsModeAccepted"] = True
+        _write_claude_config_atomic(config_path, config)
+
+    logger.trace("Accepted bypass permissions in Claude config")
+
+
+def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
     """Check that all known Claude startup dialogs have been dismissed.
 
-    Verifies that ~/.claude.json is configured so that Claude Code can start
+    Verifies that the config file is configured so that Claude Code can start
     without showing any dialogs that could intercept automated input.
 
-    Checks:
-    - Trust dialog: source_path (or ancestor) has hasTrustDialogAccepted=true
-    - Effort callout: global effortCalloutDismissed is true
-
-    Raises ClaudeDirectoryNotTrustedError if the source is not trusted.
-    Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
-    been dismissed.
+    Raises the appropriate error for the first undismissed dialog found.
     """
-    check_source_directory_trusted(source_path)
-    check_effort_callout_dismissed()
+    check_source_directory_trusted(config_path, source_path)
+    check_effort_callout_dismissed(config_path)
+    check_onboarding_completed(config_path)
+    # Note: bypassPermissionsModeAccepted is NOT checked because Claude Code
+    # periodically resets it to null. The bypass-permissions warning is handled
+    # by skipDangerousModePermissionPrompt in settings.json instead.
 
 
-def ensure_claude_dialogs_dismissed(source_path: Path) -> None:
+def ensure_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
     """Ensure all known Claude startup dialogs are marked as dismissed.
 
-    Sets the necessary fields in ~/.claude.json so that Claude Code can start
+    Sets the necessary fields in the config file so that Claude Code can start
     without showing any dialogs. This is the remediation for errors raised by
     check_claude_dialogs_dismissed.
-
-    Sets:
-    - Trust: marks source_path as trusted (hasTrustDialogAccepted=true)
-    - Effort callout: sets effortCalloutDismissed=true
     """
-    add_claude_trust_for_path(source_path)
-    dismiss_effort_callout()
+    add_claude_trust_for_path(config_path, source_path)
+    dismiss_effort_callout(config_path)
+    complete_onboarding(config_path)
+    # bypassPermissionsModeAccepted: not set here (Claude Code resets it).
+    # skipDangerousModePermissionPrompt in settings.json handles this instead.
 
 
-def _find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, Any] | None:
+def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, Any] | None:
     """Find the project configuration for a path or its closest ancestor.
 
     Searches for an exact match first, then walks up the directory tree

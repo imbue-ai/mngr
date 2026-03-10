@@ -351,6 +351,15 @@ Utility plugins [future] for additional features:
 
 These are enabled by default but can be disabled like any other plugin.
 
+## Per-Agent Plugin Data
+
+Plugins can store per-agent data under `$MNG_AGENT_STATE_DIR/plugin/<plugin_name>/`. Use the agent interface methods:
+
+- `agent.get_reported_plugin_file(plugin_name, filename)` -- read a file
+- `agent.set_reported_plugin_file(plugin_name, filename, data)` -- write a file
+- `agent.list_reported_plugin_files(plugin_name)` -- list files
+- `agent.get_plugin_data(plugin_name)` / `agent.set_plugin_data(plugin_name, data)` -- read/write structured JSON stored in the agent's `data.json`
+
 ## Plugin Dependencies
 
 Plugins are Python packages and use standard dependency management. A plugin can depend on other plugins by listing them as package dependencies.
