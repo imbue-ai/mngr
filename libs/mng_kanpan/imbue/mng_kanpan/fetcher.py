@@ -1,4 +1,3 @@
-import json
 import os
 import time
 from pathlib import Path
@@ -255,7 +254,6 @@ def _build_hook_env(entry: AgentBoardEntry) -> dict[str, str]:
         "MNG_AGENT_PR_NUMBER": str(entry.pr.number) if entry.pr else "",
         "MNG_AGENT_PR_URL": entry.pr.url if entry.pr else "",
         "MNG_AGENT_PR_STATE": str(entry.pr.state) if entry.pr else "",
-        "MNG_AGENT_LABELS_JSON": json.dumps(entry.labels),
     }
 
 

@@ -64,7 +64,6 @@ class AgentBoardEntry(FrozenModel):
     )
     create_pr_url: str | None = Field(default=None, description="URL to create a new PR for this branch")
     is_muted: bool = Field(default=False, description="Whether the agent is muted (relegated to bottom)")
-    labels: dict[str, str] = Field(default_factory=dict, description="Custom key-value labels for this agent")
 
 
 class BoardSnapshot(FrozenModel):

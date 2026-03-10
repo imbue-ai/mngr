@@ -128,25 +128,6 @@ def test_board_snapshot_with_errors() -> None:
     assert snapshot.errors[0] == "Connection failed"
 
 
-def test_agent_board_entry_labels_default_empty() -> None:
-    entry = AgentBoardEntry(
-        name=AgentName("my-agent"),
-        state=AgentLifecycleState.RUNNING,
-        provider_name=ProviderInstanceName("local"),
-    )
-    assert entry.labels == {}
-
-
-def test_agent_board_entry_with_labels() -> None:
-    entry = AgentBoardEntry(
-        name=AgentName("my-agent"),
-        state=AgentLifecycleState.RUNNING,
-        provider_name=ProviderInstanceName("local"),
-        labels={"review_status": "waiting", "priority": "high"},
-    )
-    assert entry.labels == {"review_status": "waiting", "priority": "high"}
-
-
 def test_refresh_hook_construction() -> None:
     hook = RefreshHook(name="Check review", command="my-script")
     assert hook.name == "Check review"

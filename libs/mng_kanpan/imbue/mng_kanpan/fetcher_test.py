@@ -1,4 +1,3 @@
-import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -234,14 +233,12 @@ def _make_entry(
     name: str = "test-agent",
     branch: str | None = "mng/test",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
-    labels: dict[str, str] | None = None,
 ) -> AgentBoardEntry:
     return AgentBoardEntry(
         name=AgentName(name),
         state=state,
         provider_name=ProviderInstanceName("local"),
         branch=branch,
-        labels=labels or {},
     )
 
 
@@ -281,19 +278,6 @@ def test_build_hook_env_no_branch() -> None:
     entry = _make_entry(branch=None)
     env = _build_hook_env(entry)
     assert env["MNG_AGENT_BRANCH"] == ""
-
-
-def test_build_hook_env_labels_json() -> None:
-    entry = _make_entry(labels={"review": "approved", "priority": "high"})
-    env = _build_hook_env(entry)
-    labels = json.loads(env["MNG_AGENT_LABELS_JSON"])
-    assert labels == {"review": "approved", "priority": "high"}
-
-
-def test_build_hook_env_empty_labels() -> None:
-    entry = _make_entry()
-    env = _build_hook_env(entry)
-    assert env["MNG_AGENT_LABELS_JSON"] == "{}"
 
 
 # === run_refresh_hooks ===
