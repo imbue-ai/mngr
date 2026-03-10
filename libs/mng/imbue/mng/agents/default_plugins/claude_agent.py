@@ -81,6 +81,41 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
 )
 
 
+def _find_session_project_dir(session_id: str) -> Path:
+    """Find the project directory containing a session by ID.
+
+    Searches $CLAUDE_CONFIG_DIR/projects/ (or ~/.claude/projects/) for a
+    .jsonl file matching the session ID.
+    """
+    source_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+    source_projects_dir = source_config_dir / "projects"
+    if not source_projects_dir.exists():
+        raise UserInputError(f"No projects directory found at {source_projects_dir}. Cannot find session to adopt.")
+
+    matches = list(source_projects_dir.glob(f"*/{session_id}.jsonl"))
+    if not matches:
+        raise UserInputError(
+            f"Session {session_id} not found in {source_projects_dir}. Check that the session ID is correct."
+        )
+
+    return matches[0].parent
+
+
+def _copy_directory(host: OnlineHostInterface, source: Path, dest: Path, *, label: str | None = None) -> None:
+    """Copy a directory tree from source to dest, using rsync for local hosts."""
+    with log_span(label or "Copying {} to {}", source, dest):
+        if host.is_local:
+            host.execute_command(
+                f"rsync -a {shlex.quote(str(source))}/ {shlex.quote(str(dest))}/",
+                timeout_seconds=60.0,
+            )
+        else:
+            for file_path in source.rglob("*"):
+                if file_path.is_file():
+                    relative_path = file_path.relative_to(source)
+                    host.write_file(dest / relative_path, file_path.read_bytes())
+
+
 class ClaudeAgentConfig(AgentTypeConfig):
     """Config for the claude agent type."""
 
@@ -1316,43 +1351,11 @@ class ClaudeAgent(BaseAgent):
         if session_id is None:
             return
 
-        # Find the session file in the user's Claude config dir
-        source_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
-        source_projects_dir = source_config_dir / "projects"
-        if not source_projects_dir.exists():
-            raise UserInputError(
-                f"No projects directory found at {source_projects_dir}. Cannot find session to adopt."
-            )
+        source_project_dir = _find_session_project_dir(session_id)
+        dest_project_dir = self.get_claude_config_dir() / "projects" / source_project_dir.name
+        _copy_directory(host, source_project_dir, dest_project_dir, label=f"Adopting session {session_id}")
 
-        # Search for the session file across all project directories
-        matches = list(source_projects_dir.glob(f"*/{session_id}.jsonl"))
-        if not matches:
-            raise UserInputError(
-                f"Session {session_id} not found in {source_projects_dir}. Check that the session ID is correct."
-            )
-
-        source_session_file = matches[0]
-        source_project_dir = source_session_file.parent
-
-        # Copy the entire project directory into the per-agent config dir
-        config_dir = self.get_claude_config_dir()
-        dest_project_dir = config_dir / "projects" / source_project_dir.name
-
-        with log_span("Adopting session {} from {}", session_id, source_project_dir):
-            if host.is_local:
-                host.execute_command(
-                    f"rsync -a {shlex.quote(str(source_project_dir))}/ {shlex.quote(str(dest_project_dir))}/",
-                    timeout_seconds=60.0,
-                )
-            else:
-                for file_path in source_project_dir.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(source_project_dir)
-                        host.write_file(dest_project_dir / relative_path, file_path.read_bytes())
-
-        # Write the session ID so --resume picks it up
-        agent_state_dir = self._get_agent_dir()
-        host.write_text_file(agent_state_dir / "claude_session_id", session_id)
+        host.write_text_file(self._get_agent_dir() / "claude_session_id", session_id)
         logger.info("Adopted session {}", session_id)
 
     def _transfer_source_plugin_data(
@@ -1374,17 +1377,7 @@ class ClaudeAgent(BaseAgent):
             logger.debug("No plugin directory in source agent, skipping clone transfer")
             return
 
-        with log_span("Transferring plugin data from {} to {}", source_plugin_dir, dest_plugin_dir):
-            if host.is_local:
-                host.execute_command(
-                    f"rsync -a {shlex.quote(str(source_plugin_dir))}/ {shlex.quote(str(dest_plugin_dir))}/",
-                    timeout_seconds=60.0,
-                )
-            else:
-                for file_path in source_plugin_dir.rglob("*"):
-                    if file_path.is_file():
-                        relative_path = file_path.relative_to(source_plugin_dir)
-                        host.write_file(dest_plugin_dir / relative_path, file_path.read_bytes())
+        _copy_directory(host, source_plugin_dir, dest_plugin_dir, label="Transferring source plugin data")
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Clean up per-agent credentials and trust entries.
