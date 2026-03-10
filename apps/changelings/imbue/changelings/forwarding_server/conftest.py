@@ -1,4 +1,10 @@
 import json
+import shutil
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import parse_agents_from_json
@@ -7,6 +13,19 @@ from imbue.changelings.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
+
+
+@pytest.fixture
+def short_tmp_path() -> Iterator[Path]:
+    """Temp directory with a short path, suitable for AF_UNIX sockets.
+
+    pytest's tmp_path includes the full test name in the directory path, which
+    can exceed the ~104-byte AF_UNIX socket path limit on macOS. This fixture
+    uses tempfile.mkdtemp for a short, stable path.
+    """
+    path = Path(tempfile.mkdtemp(prefix="mng-"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def make_agents_json(*agent_ids: AgentId) -> str:

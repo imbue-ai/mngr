@@ -261,7 +261,11 @@ class CreateCliOptions(CommonCliOptions):
     multiple=True,
     help="Use a named template from create_templates config [repeatable, stacks in order]",
 )
-@optgroup.option("-n", "--name", help="Agent name (overrides name from positional address) [default: auto-generated]")
+@optgroup.option(
+    "-n",
+    "--name",
+    help="Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated]",
+)
 @optgroup.option("--id", help="Explicit agent ID [default: auto-generated]")
 @optgroup.option(
     "--name-style",
@@ -484,9 +488,11 @@ def create(ctx: click.Context, **kwargs) -> None:
     )
     logging_config: LoggingConfig = ctx.meta["logging_config"]
 
-    # Parse agent address from the positional argument.
-    # The positional can be a simple name ("foo") or a full address ("foo@host.provider").
-    address = _parse_agent_address(opts.positional_name or "")
+    # Parse agent address from the positional argument or --name flag.
+    # Both accept agent addresses; they are equivalent but mutually exclusive.
+    if opts.positional_name and opts.name:
+        raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
+    address = _parse_agent_address(opts.positional_name or opts.name or "")
 
     # Apply --yes flag to auto-approve prompts (e.g., skill installation)
     if opts.yes:
@@ -1040,12 +1046,11 @@ def _parse_agent_opts(
     source_location: HostLocation,
     mng_ctx: MngContext,
 ) -> tuple[CreateAgentOptions, bool]:
-    # Get agent name from address or --name flag, otherwise auto-generate
+    # Get agent name from address (which incorporates both positional and --name),
+    # otherwise auto-generate
     parsed_agent_name: AgentName
     if address.agent_name is not None:
         parsed_agent_name = address.agent_name
-    elif opts.name:
-        parsed_agent_name = AgentName(opts.name)
     else:
         parsed_name_style = AgentNameStyle(opts.name_style.upper())
         parsed_agent_name = generate_agent_name(parsed_name_style)
@@ -1373,6 +1378,9 @@ def _parse_agent_address(address_str: str) -> AgentAddress:
 
     Format: [AGENT_NAME][@[HOST_NAME][.PROVIDER_NAME]]
 
+    The host part (after @) may contain at most one dot separating the host name
+    from the provider name. Additional dots are not allowed.
+
     Examples:
       - "" -> everything None (auto-generate name, local host)
       - "foo" -> agent_name="foo"
@@ -1395,7 +1403,14 @@ def _parse_agent_address(address_str: str) -> AgentAddress:
         # "foo@" -> just agent name, trailing @ is ignored
         return AgentAddress(agent_name=agent_name)
 
-    if "." in host_part:
+    dot_count = host_part.count(".")
+    if dot_count > 1:
+        raise UserInputError(
+            f"Invalid agent address: host part '{host_part}' contains more than one dot. "
+            "Expected format: [NAME][@[HOST][.PROVIDER]]"
+        )
+
+    if dot_count == 1:
         host_str, provider_str = host_part.split(".", 1)
         host_name = HostName(host_str) if host_str else None
         provider_name = ProviderInstanceName(provider_str) if provider_str else None

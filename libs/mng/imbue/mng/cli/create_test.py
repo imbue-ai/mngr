@@ -847,3 +847,15 @@ def test_parse_agent_address_is_creating_new_host() -> None:
     # No host component at all
     addr = _parse_agent_address("foo")
     assert addr.is_creating_new_host(new_host_flag=False) is False
+
+
+def test_parse_agent_address_rejects_multiple_dots() -> None:
+    """Addresses with more than one dot in the host part are invalid."""
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("foo@host.provider.extra")
+
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("foo@a.b.c")
+
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("@host.provider.extra")
