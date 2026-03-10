@@ -81,24 +81,35 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
 )
 
 
-def _find_session_project_dir(session_id: str) -> Path:
-    """Find the project directory containing a session by ID.
+def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
+    """Resolve an --adopt-session argument to a (session_id, project_dir) pair.
 
-    Searches $CLAUDE_CONFIG_DIR/projects/ (or ~/.claude/projects/) for a
-    .jsonl file matching the session ID.
+    Accepts either:
+    - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
+    - A session ID string (searched in $CLAUDE_CONFIG_DIR/projects/ or ~/.claude/projects/)
+
+    Returns (session_id, source_project_dir).
     """
+    if adopt_session_arg.endswith(".jsonl"):
+        session_file = Path(adopt_session_arg).resolve()
+        if not session_file.exists():
+            raise UserInputError(f"Session file not found: {session_file}")
+        return session_file.stem, session_file.parent
+
+    # Search by session ID
     source_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
     source_projects_dir = source_config_dir / "projects"
     if not source_projects_dir.exists():
         raise UserInputError(f"No projects directory found at {source_projects_dir}. Cannot find session to adopt.")
 
-    matches = list(source_projects_dir.glob(f"*/{session_id}.jsonl"))
+    matches = list(source_projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
     if not matches:
         raise UserInputError(
-            f"Session {session_id} not found in {source_projects_dir}. Check that the session ID is correct."
+            f"Session {adopt_session_arg} not found in {source_projects_dir}. "
+            "Check that the session ID is correct, or pass a path to the .jsonl file."
         )
 
-    return matches[0].parent
+    return adopt_session_arg, matches[0].parent
 
 
 def _copy_directory(host: OnlineHostInterface, source: Path, dest: Path, *, label: str | None = None) -> None:
@@ -1347,11 +1358,11 @@ class ClaudeAgent(BaseAgent):
         copies the containing project directory into the per-agent config dir,
         and writes the session ID so --resume picks it up.
         """
-        session_id = options.plugin_data.get("adopt_session")
-        if session_id is None:
+        adopt_session_arg = options.plugin_data.get("adopt_session")
+        if adopt_session_arg is None:
             return
 
-        source_project_dir = _find_session_project_dir(session_id)
+        session_id, source_project_dir = _resolve_adopt_session(adopt_session_arg)
         dest_project_dir = self.get_claude_config_dir() / "projects" / source_project_dir.name
         _copy_directory(host, source_project_dir, dest_project_dir, label=f"Adopting session {session_id}")
 
@@ -1465,9 +1476,8 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
                 OptionStackItem(
                     param_decls=("--adopt-session",),
                     default=None,
-                    help="Adopt an existing Claude Code session by ID into this agent. "
-                    "Searches for the session in the current Claude config directory and "
-                    "copies it into the new agent's per-agent config.",
+                    help="Adopt an existing Claude Code session into this agent. "
+                    "Accepts a session ID or a path to a .jsonl session file.",
                 ),
             ]
         }

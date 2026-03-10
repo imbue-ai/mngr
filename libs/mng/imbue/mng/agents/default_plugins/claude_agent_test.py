@@ -2299,6 +2299,40 @@ def test_on_after_provisioning_raises_when_session_not_found(
             agent.on_after_provisioning(host=host, options=options, mng_ctx=temp_mng_ctx)
 
 
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_jsonl_path(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """on_after_provisioning should accept a .jsonl file path and extract the session ID."""
+    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx, agent_config=config)
+    _init_git_with_gitignore(agent.work_dir)
+
+    # Create a session file at an arbitrary path
+    project_dir = tmp_path / "my_sessions" / "some-project"
+    project_dir.mkdir(parents=True)
+    session_file = project_dir / "abc123-def456.jsonl"
+    session_file.write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": str(session_file)},
+    )
+
+    agent.provision(host=host, options=options, mng_ctx=temp_mng_ctx)
+    agent.on_after_provisioning(host=host, options=options, mng_ctx=temp_mng_ctx)
+
+    # Session ID should be the stem of the file
+    assert (agent_state_dir / "claude_session_id").read_text() == "abc123-def456"
+
+    # Project dir should be copied
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / "some-project"
+    assert (dest_project_dir / "abc123-def456.jsonl").exists()
+
+
 # =============================================================================
 # _transfer_source_plugin_data Tests
 # =============================================================================
