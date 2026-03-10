@@ -492,7 +492,7 @@ class AgentGitOptions(FrozenModel):
     )
     transfer_mode: TransferMode = Field(
         default=TransferMode.RSYNC,
-        description="How to transfer source code to the work_dir: copy (rsync), git-push (git push --mirror), or git-worktree",
+        description="How to transfer source code to the work_dir: rsync (direct file copy), git-push (git push --mirror), or git-worktree",
     )
     base_branch: str | None = Field(
         default=None,

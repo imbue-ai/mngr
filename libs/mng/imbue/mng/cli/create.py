@@ -991,7 +991,7 @@ def _parse_agent_opts(
 
     # Determine transfer_mode from CLI flags
     # Priority: explicit --transfer flag > --in-place > default behavior
-    # Default: git-worktree for local git repos, git-push for remote git repos, copy for non-git
+    # Default: git-worktree for local git repos, git-push for remote git repos, rsync for non-git
     transfer_mode: TransferMode | None
     # None means "in-place" (no transfer)
     if opts.in_place:

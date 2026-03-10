@@ -1023,17 +1023,17 @@ class Host(BaseHost, OnlineHostInterface):
                 created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
                 self._transfer_extra_files(source_host, source_path, target_path, options)
 
-        # Run a supplementary rsync for adding extra files (e.g., data files not in git).
-        # By default, rsync does NOT use --delete, so existing files in the target won't
-        # be removed. Users can add --delete to rsync_args if they want full sync behavior.
-        # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
-        self._rsync_files(
-            source_host,
-            source_path,
-            target_path,
-            extra_args=options.data_options.rsync_args,
-            exclude_git=has_git_options,
-        )
+        # Run a supplementary rsync if the user provided custom rsync_args (e.g., to add
+        # data files not in git). By default, rsync does NOT use --delete, so existing
+        # files in the target won't be removed.
+        if options.data_options.rsync_args:
+            self._rsync_files(
+                source_host,
+                source_path,
+                target_path,
+                extra_args=options.data_options.rsync_args,
+                exclude_git=has_git_options,
+            )
 
         return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
 
@@ -1080,7 +1080,7 @@ class Host(BaseHost, OnlineHostInterface):
             if source_host.is_local:
                 source_has_git = (source_path / ".git").exists()
             else:
-                result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
+                result = source_host.execute_command(f"test -e {shlex.quote(str(source_path / '.git'))}")
                 source_has_git = result.success
 
             if source_has_git and options.git and options.git.new_branch_name:
