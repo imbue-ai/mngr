@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from typing import Any
-from typing import NamedTuple
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -25,6 +24,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -385,7 +385,7 @@ def _execute_marks(state: _KanpanState) -> None:
     _start_batch_execution(state)
 
 
-class _BatchWorkItem(NamedTuple):
+class _BatchWorkItem(FrozenModel):
     name: AgentName
     key: str
     cmd: CustomCommand
@@ -973,7 +973,9 @@ def _get_link_cell_text(entry: AgentBoardEntry) -> str:
     return ""
 
 
-class _ColumnDef(NamedTuple):
+class _ColumnDef(FrozenModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str
     header: str
     text_fn: Callable[[AgentBoardEntry], str]
@@ -983,12 +985,16 @@ class _ColumnDef(NamedTuple):
 
 # Single source of truth for all board column definitions (order matters)
 _BOARD_COLUMN_DEFS: list[_ColumnDef] = [
-    _ColumnDef("name", "  NAME", _get_name_cell_text, _get_name_cell_text, flexible=False),
-    _ColumnDef("state", "STATE", _get_state_cell_text, _get_state_cell_markup, flexible=False),
-    _ColumnDef("git", "GIT", _get_push_cell_text, _get_push_cell_text, flexible=False),
-    _ColumnDef("pr", "PR", _get_pr_cell_text, _get_pr_cell_text, flexible=False),
-    _ColumnDef("ci", "CI", _get_check_cell_text, _get_check_cell_markup, flexible=False),
-    _ColumnDef("link", "LINK", _get_link_cell_text, _get_link_cell_text, flexible=True),
+    _ColumnDef(
+        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_text, flexible=False
+    ),
+    _ColumnDef(
+        name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
+    ),
+    _ColumnDef(name="git", header="GIT", text_fn=_get_push_cell_text, markup_fn=_get_push_cell_text, flexible=False),
+    _ColumnDef(name="pr", header="PR", text_fn=_get_pr_cell_text, markup_fn=_get_pr_cell_text, flexible=False),
+    _ColumnDef(name="ci", header="CI", text_fn=_get_check_cell_text, markup_fn=_get_check_cell_markup, flexible=False),
+    _ColumnDef(name="link", header="LINK", text_fn=_get_link_cell_text, markup_fn=_get_link_cell_text, flexible=True),
 ]
 
 

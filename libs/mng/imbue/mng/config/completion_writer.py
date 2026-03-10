@@ -65,7 +65,7 @@ _AGENT_NAME_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
 # to offer git branch completions.
 _GIT_BRANCH_OPTIONS: Final[frozenset[str]] = frozenset(
     {
-        "create.--base-branch",
+        "create.--branch",
     }
 )
 
