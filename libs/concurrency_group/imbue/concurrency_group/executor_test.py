@@ -1,10 +1,10 @@
 import threading
+from threading import Event
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.concurrency_group.test_utils import wait_interval
 
 SMALL_SLEEP = 0.05
 
@@ -14,7 +14,7 @@ def _return_value(value: int) -> int:
 
 
 def _sleep_and_return(value: int) -> int:
-    wait_interval(SMALL_SLEEP)
+    Event().wait(timeout=SMALL_SLEEP)
     return value
 
 
@@ -47,7 +47,7 @@ def test_executor_respects_max_workers() -> None:
         with lock:
             current_concurrent += 1
             max_concurrent = max(max_concurrent, current_concurrent)
-        wait_interval(SMALL_SLEEP)
+        Event().wait(timeout=SMALL_SLEEP)
         with lock:
             current_concurrent -= 1
 

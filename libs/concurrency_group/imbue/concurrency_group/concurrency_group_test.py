@@ -17,7 +17,6 @@ from imbue.concurrency_group.concurrency_group import StrandTimedOutError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.test_utils import poll_until
-from imbue.concurrency_group.test_utils import wait_interval
 from imbue.concurrency_group.thread_utils import ObservableThread
 
 TINY_SLEEP = 0.001
@@ -39,7 +38,7 @@ LONG_RUNNING_COMMAND: Final[tuple[str, ...]] = ("sleep", "30")
 
 def _sleep_and_return_1() -> int:
     """Thread target that takes a while to run, then returns 1."""
-    wait_interval(0.3)
+    Event().wait(timeout=0.3)
     return 1
 
 
@@ -107,7 +106,7 @@ def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:
     thread: ObservableThread | None = None
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
-            thread = cg.start_new_thread(target=lambda: wait_interval(100.0))
+            thread = cg.start_new_thread(target=lambda: Event().wait(timeout=100.0))
     assert exception_info.value.only_exception_is_instance_of(StrandTimedOutError)
     assert thread is not None
     assert thread.is_alive()
@@ -420,7 +419,7 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
             process_started_event.set()
-            wait_interval(SMALL_SLEEP)
+            Event().wait(timeout=SMALL_SLEEP)
             closure["i"] += 1
             process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
             process.wait()
