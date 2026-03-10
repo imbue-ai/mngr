@@ -1,7 +1,7 @@
 import os
 import shutil
 import tempfile
-import typing
+from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
 
@@ -14,6 +14,9 @@ from imbue.skitwright.session import Session
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
 _TRANSCRIPT_OUTPUT_DIR = Path(__file__).resolve().parent / ".test_output" / "transcripts"
+
+MngRunFn = Callable[..., CommandResult]
+"""Type alias for the mng fixture: callable(args, timeout=30.0) -> CommandResult."""
 
 
 @pytest.fixture
@@ -81,22 +84,12 @@ def e2e(
     transcript_path.write_text(session.transcript)
 
 
-def _mng(args: str) -> str:
+def _mng_command(args: str) -> str:
     """Build a 'uv run mng ...' command string."""
     return f"uv run --project {_REPO_ROOT} mng {args}"
 
 
 @pytest.fixture
-def mng(e2e: Session) -> "MngRunner":
-    """Provide a helper for running mng commands through the e2e session."""
-    return MngRunner(e2e)
-
-
-class MngRunner(typing.NamedTuple):
-    """Convenience wrapper that prefixes commands with 'uv run --project <root> mng'."""
-
-    session: Session
-
-    def run(self, args: str, timeout: float = 30.0) -> CommandResult:
-        """Run 'uv run mng <args>' and return the result."""
-        return self.session.run(_mng(args), timeout=timeout)
+def mng(e2e: Session) -> MngRunFn:
+    """Run 'uv run mng <args>' via the e2e session and return the result."""
+    return lambda args, timeout=30.0: e2e.run(_mng_command(args), timeout=timeout)
