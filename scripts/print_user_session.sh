@@ -1,30 +1,22 @@
 #!/bin/bash
-# Print out Claude Code conversation history in a way that is easier to read and analyze.
-# Prints all sessions in chronological order using the session ID history file.
+# Print the conversation history for the current agent session.
+# Wrapper around filter_transcript.py that discovers session files
+# and feeds them through the filter.
 #
-# Uses export_transcript.sh (from the mng resources) for raw JSONL extraction,
-# then applies filtering and formatting.
+# Usage: print_user_session.sh [filter_transcript.py options...]
 
 set -euo pipefail
 
-# Locate the export_transcript.sh script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-EXPORT_SCRIPT="$REPO_ROOT/libs/mng/imbue/mng/resources/export_transcript.sh"
+FILTER="$SCRIPT_DIR/filter_transcript.py"
+PATHS_SCRIPT="$SCRIPT_DIR/export_transcript_paths.sh"
 
-if [ ! -f "$EXPORT_SCRIPT" ]; then
-    echo "export_transcript.sh not found at $EXPORT_SCRIPT" >&2
+if [ ! -f "$FILTER" ]; then
+    echo "filter_transcript.py not found at $FILTER" >&2
     exit 1
 fi
 
-# Extract raw JSONL, then filter and format
-bash "$EXPORT_SCRIPT" | \
-  grep -v "tool_use_id" | \
-  grep -v 'content":"<' | \
-  grep -v '"type":"progress"' | \
-  grep -v '"type":"thinking"' | \
-  grep -v '"type":"tool_use"' | \
-  grep -v '"type":"system"' | \
-  grep user | \
-  jq '{type: .type, content:  .message.content}' | \
-  jq -s 'reduce .[] as $msg ([]; if length > 0 and .[-1].type == "assistant" and $msg.type == "assistant" then .[-1].content[0].text += "\n\n" + $msg.content[0].text else . + [$msg] end)'
+# Discover session files (only tracked + current, no agent_dir scan)
+INCLUDE_AGENT_DIR=false bash "$PATHS_SCRIPT" 2>/dev/null | while IFS=$'\t' read -r _source path; do
+    [ -f "$path" ] && python3 "$FILTER" "$@" "$path"
+done

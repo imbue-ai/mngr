@@ -37,13 +37,13 @@ If this outputs nothing (no sessions found), skip to Step 5 and write an empty m
 
 ### Step 2: Check Size and Choose Model
 
-For each session file found, get its size:
+For each session file found, get the filtered size (which is what the reviewer will actually see):
 
 ```bash
-wc -c <file_path>
+python3 scripts/filter_transcript.py --size <file_path>
 ```
 
-Sum the total bytes across all session files.
+Sum the filtered sizes across all session files.
 
 - If total size exceeds 3MB (3000000 bytes), STOP and warn the user. The transcripts are too large for even the 1M context window. Suggest narrowing scope, for example:
   - `/verify-conversation only review tracked sessions`
