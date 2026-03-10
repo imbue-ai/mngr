@@ -16,7 +16,7 @@ def test_build_state_transition_command_produces_valid_jsonl(tmp_path: Path, age
     command = build_state_transition_command("RUNNING", "WAITING")
     _run_bash(command, agent_event_env)
 
-    event_file = tmp_path / "events" / "mng_agents" / "events.jsonl"
+    event_file = tmp_path / "events" / "mng/agents" / "events.jsonl"
     assert event_file.exists()
 
     lines = event_file.read_text().splitlines()
@@ -24,7 +24,7 @@ def test_build_state_transition_command_produces_valid_jsonl(tmp_path: Path, age
 
     event = json.loads(lines[0])
     assert event["type"] == "agent_state_transition"
-    assert event["source"] == "mng_agents"
+    assert event["source"] == "mng/agents"
     assert event["agent_id"] == "agent-test-fixture"
     assert event["agent_name"] == "test-agent"
     assert event["from_state"] == "RUNNING"
@@ -38,7 +38,7 @@ def test_build_state_transition_command_waiting_to_running(tmp_path: Path, agent
     command = build_state_transition_command("WAITING", "RUNNING")
     _run_bash(command, agent_event_env)
 
-    event_file = tmp_path / "events" / "mng_agents" / "events.jsonl"
+    event_file = tmp_path / "events" / "mng/agents" / "events.jsonl"
     event = json.loads(event_file.read_text().splitlines()[0])
 
     assert event["from_state"] == "WAITING"
@@ -55,7 +55,7 @@ def test_build_state_transition_command_appends_multiple_events(
 
     _run_bash(combined, agent_event_env)
 
-    event_file = tmp_path / "events" / "mng_agents" / "events.jsonl"
+    event_file = tmp_path / "events" / "mng/agents" / "events.jsonl"
     lines = event_file.read_text().splitlines()
     assert len(lines) == 2
 

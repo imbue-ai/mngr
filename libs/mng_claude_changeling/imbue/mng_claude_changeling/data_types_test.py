@@ -61,7 +61,7 @@ def test_agent_state_transition_event_serialization() -> None:
     )
     data = json.loads(event.model_dump_json())
     assert data["type"] == "agent_state_transition"
-    assert data["source"] == "mng_agents"
+    assert data["source"] == "mng/agents"
     assert data["agent_id"] == "agent-abc123"
     assert data["agent_name"] == "my-helper"
     assert data["from_state"] == "RUNNING"
@@ -74,7 +74,7 @@ def test_agent_state_transition_event_roundtrips_from_json() -> None:
             "timestamp": "2026-03-04T00:00:00.000000000Z",
             "type": "agent_state_transition",
             "event_id": "evt-xyz",
-            "source": "mng_agents",
+            "source": "mng/agents",
             "agent_id": "agent-456",
             "agent_name": "worker",
             "from_state": "WAITING",

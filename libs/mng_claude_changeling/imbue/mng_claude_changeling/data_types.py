@@ -57,7 +57,7 @@ class MessageEvent(EventEnvelope):
 class AgentStateTransitionEvent(EventEnvelope):
     """An event recording an agent lifecycle state transition.
 
-    Written to events/mng_agents/events.jsonl by Claude Code hooks when the
+    Written to events/mng/agents/events.jsonl by Claude Code hooks when the
     agent transitions between RUNNING and WAITING states. The shell hooks
     produce matching JSON directly (they cannot import this class).
     """
