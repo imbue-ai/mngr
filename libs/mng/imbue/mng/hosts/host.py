@@ -1591,13 +1591,13 @@ class Host(BaseHost, OnlineHostInterface):
         # 2. Add programmatic defaults
         env_vars["GIT_BASE_BRANCH"] = (options.git.base_branch if options.git else None) or ""
 
-        # 4. Load from env_files
+        # 3. Load from env_files
         for env_file in options.environment.env_files:
             content = env_file.read_text()
             file_vars = parse_env_file(content)
             env_vars.update(file_vars)
 
-        # 5. Add explicit env_vars
+        # 4. Add explicit env_vars
         for env_var in options.environment.env_vars:
             env_vars[env_var.key] = env_var.value
 
