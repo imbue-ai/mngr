@@ -1695,77 +1695,15 @@ Tests should be careful to fully isolate themselves. They should be able to run 
 
 This means that base level test fixtures should do things like override the HOME directory to a temp directory. All tests should use unique identifiers for any resources they create and avoid any shared state between tests.
 
-### Avoiding trivial and tautological tests
+### Test quality
 
-Tests should verify meaningful behavior, not just confirm that code runs without crashing or that values you just constructed come back unchanged.
-
-- **Every assertion should be able to fail if the code under test has a bug.** If an assertion can never fail regardless of the implementation, it is tautological and provides no value.
-- **Don't test that a constructor sets fields** (unless the constructor has non-trivial logic like validation or transformation).
-- **Don't assert on return values you just passed in or constructed yourself** -- assert on the *effect* of the operation. For example, if you create an object and immediately check its fields, you are testing Python's attribute assignment, not your code.
-- **Test behavior and outcomes, not implementation details.** If a test would break when refactoring the implementation without changing externally visible behavior, it is too tightly coupled.
-- **A test that only checks "no exception was raised" is usually insufficient** -- verify the actual result. Assert on things that are true if and only if the feature worked correctly.
-- **When testing error cases, verify the specific error type and message**, not just that "some error" occurred.
-
-```python
-# Bad: tautological -- this can never fail
-def test_todo_item_has_title() -> None:
-    todo = TodoItem(todo_id=TodoId.generate(), title=TodoTitle("Buy milk"))
-    assert todo.title == TodoTitle("Buy milk")  # just testing Python attribute assignment
-
-
-# Good: tests meaningful behavior
-def test_mark_todo_complete_sets_completion_timestamp() -> None:
-    todo = create_test_todo(title="Buy milk")
-    completed = todo.mark_complete(completed_at=now)
-    assert completed.is_completed is True
-    assert completed.completed_at == now
-```
-
-### Parameterization vs repetition
-
-When multiple test cases exercise the same logic with different inputs:
-
-- **Use `pytest.mark.parametrize`** when the test body is identical across cases and only the inputs and expected outputs differ.
-- **Use separate test functions** when the cases have meaningfully different setup, assertions, or the test name needs to describe a distinct scenario.
-- **Don't create a dozen near-identical test functions** that differ only in one input value -- parametrize them.
-- **Don't parametrize when it obscures what is being tested**, e.g., if the parametrized cases require different assertion logic crammed into conditionals inside the test body.
-- **Factor shared setup into fixtures** rather than duplicating it across test functions.
-
-```python
-# Good: parametrize when only inputs/outputs differ
-@pytest.mark.parametrize(
-    ("input_status", "expected_label"),
-    [
-        (TodoStatus.PENDING, "[ ]"),
-        (TodoStatus.IN_PROGRESS, "[~]"),
-        (TodoStatus.COMPLETED, "[x]"),
-    ],
-)
-def test_format_status_label(input_status: TodoStatus, expected_label: str) -> None:
-    assert format_status_label(input_status) == expected_label
-
-
-# Good: separate functions when the scenarios are meaningfully different
-def test_add_todo_to_empty_list_creates_first_entry() -> None:
-    empty_list = TodoList(list_id=TodoListId.generate(), todos=())
-    updated = empty_list.with_added_todo(create_test_todo())
-    assert len(updated.todos) == 1
-
-
-def test_add_duplicate_todo_raises_already_exists_error() -> None:
-    todo = create_test_todo()
-    todo_list = TodoList(list_id=TodoListId.generate(), todos=(todo,))
-    with pytest.raises(TodoAlreadyExistsError):
-        todo_list.with_added_todo(todo)
-```
-
-### Coverage strategy and edge cases
-
-- **Cover behavioral paths, not just lines.** A test that exercises a code path but does not assert on the result provides line coverage but not confidence. Every test should assert on something meaningful.
-- **Prioritize testing by risk:** error paths and edge cases > happy-path variations > trivial operations.
-- **For functions that handle collections**, test with: empty input, single element, typical input, and boundary conditions (e.g., maximum size, `None` values if applicable).
-- **For functions with conditional logic**, ensure each branch has at least one test that specifically targets it and asserts on the branch-specific outcome.
-- **Don't write tests just to hit a coverage number** -- each test should exist because it verifies something that could plausibly break.
+- Every assertion must be able to fail if the code under test has a bug. Tautological assertions (e.g., asserting a constructor field equals the value you just passed in) provide no value.
+- Assert on the *effect* of an operation, not on values you constructed yourself. Test behavior, not implementation details.
+- "No exception raised" is not a sufficient assertion -- verify the actual result.
+- When testing errors, verify the specific error type/message.
+- Use `pytest.mark.parametrize` when multiple cases share identical test logic and differ only in inputs/outputs. Use separate test functions when cases have meaningfully different setup or assertions.
+- Don't write tests just to hit a coverage number. Prioritize: error paths and edge cases > happy-path variations > trivial operations.
+- For collections: test empty, single element, typical, and boundary inputs. For conditionals: test each branch with assertions specific to that branch.
 
 ## Test organization
 
