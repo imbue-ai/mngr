@@ -165,6 +165,19 @@ def _extract_choices_for_command(cmd: click.Command, key_prefix: str) -> dict[st
     return choices
 
 
+def _filter_keys_by_registered_commands(
+    dotted_keys: frozenset[str],
+    canonical_names: set[str],
+) -> set[str]:
+    """Return the subset of dotted keys whose top-level command is in canonical_names.
+
+    Works for both "command.--option" keys (e.g. "create.--host") and
+    "group.subcommand" keys (e.g. "plugin.enable"). The first component
+    before the dot is always the command/group name.
+    """
+    return {key for key in dotted_keys if key.split(".")[0] in canonical_names}
+
+
 def _extract_plugin_name_options_for_command(cmd: click.Command, key_prefix: str) -> list[str]:
     """Extract option names that should complete against plugin names.
 
@@ -273,42 +286,15 @@ def write_cli_completions_cache(
                 plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
 
         # Include both top-level commands and group subcommands that take agent names
-        agent_name_args = _AGENT_NAME_COMMANDS & canonical_names
-        for sub_key in _AGENT_NAME_SUBCOMMANDS:
-            group_name = sub_key.split(".")[0]
-            if group_name in canonical_names:
-                agent_name_args = agent_name_args | {sub_key}
+        agent_name_args = (_AGENT_NAME_COMMANDS & canonical_names) | _filter_keys_by_registered_commands(
+            _AGENT_NAME_SUBCOMMANDS, canonical_names
+        )
 
-        # Include git branch options for commands that are actually registered
-        git_branch_opts: set[str] = set()
-        for opt_key in _GIT_BRANCH_OPTIONS:
-            cmd_name = opt_key.split(".")[0]
-            if cmd_name in canonical_names:
-                git_branch_opts.add(opt_key)
-
-        # Include host name options for commands that are actually registered
-        host_name_opts: set[str] = set()
-        for opt_key in _HOST_NAME_OPTIONS:
-            cmd_name = opt_key.split(".")[0]
-            if cmd_name in canonical_names:
-                host_name_opts.add(opt_key)
-
-        # Include commands whose positional args complete against host names
+        git_branch_opts = _filter_keys_by_registered_commands(_GIT_BRANCH_OPTIONS, canonical_names)
+        host_name_opts = _filter_keys_by_registered_commands(_HOST_NAME_OPTIONS, canonical_names)
         host_name_args = _HOST_NAME_COMMANDS & canonical_names
-
-        # Include subcommands whose positional args complete against plugin names
-        plugin_name_args: set[str] = set()
-        for sub_key in _PLUGIN_NAME_SUBCOMMANDS:
-            group_name = sub_key.split(".")[0]
-            if group_name in canonical_names:
-                plugin_name_args.add(sub_key)
-
-        # Include subcommands whose positional args complete against config keys
-        config_key_args: set[str] = set()
-        for sub_key in _CONFIG_KEY_SUBCOMMANDS:
-            group_name = sub_key.split(".")[0]
-            if group_name in canonical_names:
-                config_key_args.add(sub_key)
+        plugin_name_args = _filter_keys_by_registered_commands(_PLUGIN_NAME_SUBCOMMANDS, canonical_names)
+        config_key_args = _filter_keys_by_registered_commands(_CONFIG_KEY_SUBCOMMANDS, canonical_names)
 
         # Inject dynamic choice values from runtime context (config, registries)
         if dynamic_completions:
