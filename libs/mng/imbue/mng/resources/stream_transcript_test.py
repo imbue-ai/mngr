@@ -2,8 +2,7 @@
 
 Exercises the script's core behaviors by running it with --single-pass in a
 controlled filesystem layout. Each test sets up:
-  - A fake agent state dir with session history and session JSONL files
-  - A fake host dir with a stub mng_log.sh
+  - A fake agent state dir with session history, session JSONL files, and a stub mng_log.sh
   - A fake ~/.claude/projects/ directory (via HOME override)
 
 The --single-pass flag makes the script run initialization + one poll cycle
@@ -68,20 +67,18 @@ class ScriptRunner:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
-        self.host_dir = tmp_path / "host"
         # Fake HOME so ~/.claude/projects/ resolves to our test dir
         self.fake_home = tmp_path / "fakehome"
         self.claude_projects_dir = self.fake_home / ".claude" / "projects"
 
         # Create directory structure
         self.agent_state_dir.mkdir(parents=True)
-        self.host_dir.mkdir(parents=True)
         self.claude_projects_dir.mkdir(parents=True)
-        (self.host_dir / "commands").mkdir(parents=True)
-        (self.host_dir / "events" / "logs" / "stream_transcript").mkdir(parents=True)
+        (self.agent_state_dir / "commands").mkdir(parents=True)
+        (self.agent_state_dir / "events" / "logs" / "stream_transcript").mkdir(parents=True)
 
         # Write stub mng_log.sh
-        log_path = self.host_dir / "commands" / "mng_log.sh"
+        log_path = self.agent_state_dir / "commands" / "mng_log.sh"
         log_path.write_text(_STUB_LOG_SH)
         log_path.chmod(0o755)
 
@@ -126,7 +123,6 @@ class ScriptRunner:
         env = {
             **os.environ,
             "MNG_AGENT_STATE_DIR": str(self.agent_state_dir),
-            "MNG_HOST_DIR": str(self.host_dir),
             "HOME": str(self.fake_home),
         }
         result = subprocess.run(

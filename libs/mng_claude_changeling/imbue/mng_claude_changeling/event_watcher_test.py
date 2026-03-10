@@ -11,12 +11,14 @@ from typing import Any
 import pytest
 
 from imbue.mng_claude_changeling.conftest import EventWatcherSubprocessCapture
+from imbue.mng_claude_changeling.conftest import create_changeling_conversations_table_in_test_db
 from imbue.mng_claude_changeling.conftest import write_changelings_settings_toml
+from imbue.mng_claude_changeling.conftest import write_conversation_to_db
 from imbue.mng_claude_changeling.data_types import WatcherSettings
 from imbue.mng_claude_changeling.resources import event_watcher as event_watcher_module
+from imbue.mng_claude_changeling.resources.event_watcher import DEFAULT_CEL_FILTER
 from imbue.mng_claude_changeling.resources.event_watcher import _CHAT_PAIR_TIMEOUT_SECONDS
 from imbue.mng_claude_changeling.resources.event_watcher import _DEFAULT_BURST_SIZE
-from imbue.mng_claude_changeling.resources.event_watcher import _DEFAULT_CEL_FILTER
 from imbue.mng_claude_changeling.resources.event_watcher import _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
 from imbue.mng_claude_changeling.resources.event_watcher import _DEFAULT_MAX_DELIVERY_RETRIES
 from imbue.mng_claude_changeling.resources.event_watcher import _DEFAULT_MAX_MESSAGES_PER_MINUTE
@@ -62,7 +64,7 @@ class _FakeClock:
 def test_defaults_match_between_data_types_and_event_watcher() -> None:
     """Verify that event_watcher.py constants stay in sync with WatcherSettings defaults."""
     model_defaults = WatcherSettings()
-    assert model_defaults.event_cel_filter == _DEFAULT_CEL_FILTER
+    assert model_defaults.event_cel_filter == DEFAULT_CEL_FILTER
     assert model_defaults.event_burst_size == _DEFAULT_BURST_SIZE
     assert model_defaults.max_event_messages_per_minute == _DEFAULT_MAX_MESSAGES_PER_MINUTE
     assert model_defaults.high_rate_warning_threshold_per_minute == _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
@@ -380,7 +382,7 @@ def test_send_message_returns_true_on_success(mock_subprocess_success: EventWatc
     assert _send_message("my-agent", "hello") is True
     assert len(mock_subprocess_success.calls) == 1
     cmd = mock_subprocess_success.calls[0][0]
-    assert "mng" in cmd
+    assert any("mng" in c for c in cmd)
     assert "message" in cmd
     assert "my-agent" in cmd
 
@@ -518,52 +520,69 @@ def test_write_notification_event_creates_file(tmp_path: Path) -> None:
 # -- _get_system_notifications_conversation_id tests --
 
 
-def test_get_system_notifications_conversation_id_returns_first_conversation_id(tmp_path: Path) -> None:
-    events_dir = tmp_path / "events"
-    conv_dir = events_dir / "conversations"
-    conv_dir.mkdir(parents=True)
-    events_file = conv_dir / "events.jsonl"
-    events_file.write_text(
-        json.dumps({"conversation_id": "sys-notif-123", "type": "conversation_created"})
-        + "\n"
-        + json.dumps({"conversation_id": "other-conv", "type": "conversation_created"})
-        + "\n"
-    )
-    assert _get_system_notifications_conversation_id(events_dir) == "sys-notif-123"
+def test_get_system_notifications_conversation_id_returns_tagged_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm_data_dir = tmp_path / "llm_data"
+    db_path = llm_data_dir / "logs.db"
+    monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
+
+    create_changeling_conversations_table_in_test_db(db_path)
+    write_conversation_to_db(db_path, "sys-notif-123", model="echo", tags='{"internal":"system_notifications"}')
+    write_conversation_to_db(db_path, "other-conv", model="claude-opus-4.6")
+
+    assert _get_system_notifications_conversation_id() == "sys-notif-123"
 
 
-def test_get_system_notifications_conversation_id_returns_none_when_no_file(tmp_path: Path) -> None:
-    events_dir = tmp_path / "events"
-    assert _get_system_notifications_conversation_id(events_dir) is None
+def test_get_system_notifications_conversation_id_returns_none_when_no_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_USER_PATH", str(tmp_path / "nonexistent_llm"))
+    assert _get_system_notifications_conversation_id() is None
 
 
-def test_get_system_notifications_conversation_id_returns_none_when_empty_file(tmp_path: Path) -> None:
-    events_dir = tmp_path / "events"
-    conv_dir = events_dir / "conversations"
-    conv_dir.mkdir(parents=True)
-    (conv_dir / "events.jsonl").write_text("\n")
-    assert _get_system_notifications_conversation_id(events_dir) is None
+def test_get_system_notifications_conversation_id_returns_none_when_no_tagged_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm_data_dir = tmp_path / "llm_data"
+    db_path = llm_data_dir / "logs.db"
+    monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
+
+    create_changeling_conversations_table_in_test_db(db_path)
+
+    assert _get_system_notifications_conversation_id() is None
 
 
 # -- _send_chat_notification tests --
 
 
-def _setup_conversations_file(tmp_path: Path, conversation_id: str = "sys-notif-test") -> Path:
-    """Create a conversations events file with one entry and return events_dir."""
+def _setup_conversations_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    conversation_id: str = "sys-notif-test",
+) -> Path:
+    """Create a llm DB with a system_notifications conversation and return events_dir."""
+    llm_data_dir = tmp_path / "llm_data"
+    db_path = llm_data_dir / "logs.db"
+    monkeypatch.setenv("LLM_USER_PATH", str(llm_data_dir))
+
+    create_changeling_conversations_table_in_test_db(db_path)
+    write_conversation_to_db(db_path, conversation_id, model="echo", tags='{"internal":"system_notifications"}')
+
     events_dir = tmp_path / "events"
-    conv_dir = events_dir / "conversations"
-    conv_dir.mkdir(parents=True)
-    events_file = conv_dir / "events.jsonl"
-    events_file.write_text(json.dumps({"conversation_id": conversation_id, "type": "conversation_created"}) + "\n")
     return events_dir
 
 
 def test_send_chat_notification_returns_true_on_success(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mock_subprocess_success: EventWatcherSubprocessCapture,
 ) -> None:
     """_send_chat_notification returns True when llm succeeds."""
-    events_dir = _setup_conversations_file(tmp_path)
+    events_dir = _setup_conversations_db(tmp_path, monkeypatch)
     assert _send_chat_notification(events_dir, "test message") is True
     assert len(mock_subprocess_success.calls) == 1
     cmd = mock_subprocess_success.calls[0][0]
@@ -574,18 +593,21 @@ def test_send_chat_notification_returns_true_on_success(
 
 def test_send_chat_notification_returns_false_on_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mock_subprocess_failure: EventWatcherSubprocessCapture,
 ) -> None:
     """_send_chat_notification returns False when llm fails."""
-    events_dir = _setup_conversations_file(tmp_path)
+    events_dir = _setup_conversations_db(tmp_path, monkeypatch)
     assert _send_chat_notification(events_dir, "test message") is False
 
 
 def test_send_chat_notification_returns_false_when_no_conversation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     mock_subprocess_success: EventWatcherSubprocessCapture,
 ) -> None:
-    """_send_chat_notification returns False when no conversations file exists."""
+    """_send_chat_notification returns False when no DB exists."""
+    monkeypatch.setenv("LLM_USER_PATH", str(tmp_path / "nonexistent_llm"))
     events_dir = tmp_path / "events"
     assert _send_chat_notification(events_dir, "test message") is False
     assert len(mock_subprocess_success.calls) == 0

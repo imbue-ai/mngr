@@ -6,6 +6,9 @@ from datetime import timezone
 import pytest
 
 from imbue.imbue_common.errors import SwitchError
+from imbue.mng_schedule.cli.list import _emit_schedule_list_human
+from imbue.mng_schedule.cli.list import _emit_schedule_list_json
+from imbue.mng_schedule.cli.list import _emit_schedule_list_jsonl
 from imbue.mng_schedule.cli.list import _get_schedule_field_value
 from imbue.mng_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mng_schedule.data_types import ScheduleCreationRecord
@@ -107,3 +110,41 @@ def test_get_schedule_field_value_unknown_field_raises_switch_error() -> None:
     record = _make_test_record()
     with pytest.raises(SwitchError, match="Unknown schedule display field"):
         _get_schedule_field_value(record, "nonexistent")
+
+
+# =============================================================================
+# Tests for list output helpers
+# =============================================================================
+
+
+def test_emit_schedule_list_human_with_records(capsys: pytest.CaptureFixture[str]) -> None:
+    """Human output should emit a table containing the schedule name."""
+    records = [_make_test_record()]
+    _emit_schedule_list_human(records)
+    captured = capsys.readouterr()
+    assert "nightly-build" in captured.out
+    assert "0 2 * * *" in captured.out
+
+
+def test_emit_schedule_list_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    """Human output with no records should emit 'No schedules found'."""
+    _emit_schedule_list_human([])
+    captured = capsys.readouterr()
+    assert "No schedules found" in captured.out
+
+
+def test_emit_schedule_list_json_with_records(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON output should emit a JSON object with a 'schedules' key."""
+    records = [_make_test_record()]
+    _emit_schedule_list_json(records)
+    captured = capsys.readouterr()
+    assert '"schedules"' in captured.out
+
+
+def test_emit_schedule_list_jsonl_with_records(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL output should emit one JSON line per record."""
+    records = [_make_test_record(), _make_test_record()]
+    _emit_schedule_list_jsonl(records)
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.strip().splitlines() if line.strip()]
+    assert len(lines) == 2

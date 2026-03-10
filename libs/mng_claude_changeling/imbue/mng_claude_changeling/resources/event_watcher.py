@@ -12,21 +12,21 @@ to the ``mng events`` command (run as a subprocess). This script handles:
 - Delivery envelope formatting (time since last message, rate warnings)
 - Subprocess lifecycle (restart on exit)
 
-Usage: python3 event_watcher.py
+Usage: mng changeling-event-watcher
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-  MNG_AGENT_WORK_DIR   - agent working directory (contains .changelings/)
+  MNG_AGENT_WORK_DIR   - agent working directory (contains changelings.toml)
   MNG_AGENT_NAME       - name of the primary agent to send messages to
-  MNG_HOST_DIR         - host data directory (for log output)
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import sqlite3
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -39,29 +39,18 @@ from uuid import uuid4
 
 from loguru import logger
 
-try:
-    from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
-    from imbue.mng_claude_changeling.resources.watcher_common import require_env
-    from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).parent))
-    from watcher_common import load_watchers_section  # type: ignore[no-redef]
-    from watcher_common import require_env  # type: ignore[no-redef]
-    from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
-
+from imbue.mng_claude_changeling.resources.watcher_common import DEFAULT_CEL_FILTER
+from imbue.mng_claude_changeling.resources.watcher_common import MngNotInstalledError
+from imbue.mng_claude_changeling.resources.watcher_common import get_mng_command
+from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+from imbue.mng_claude_changeling.resources.watcher_common import require_env
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 
 # -- Constants --
 # NOTE: These defaults must be kept in sync with the Field defaults in
 # data_types.py WatcherSettings. They are duplicated here because this
 # script runs standalone on the host and cannot import from data_types.py.
 
-_DEFAULT_CEL_FILTER: Final[str] = (
-    'source != "common_transcript"'
-    ' && source != "conversations" && source != "delivery_failures"'
-    " && ("
-    '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
-    ")"
-)
 
 _DEFAULT_BURST_SIZE: Final[int] = 5
 _DEFAULT_MAX_MESSAGES_PER_MINUTE: Final[int] = 10
@@ -89,7 +78,7 @@ _BACKOFF_MAX_SECONDS: Final[float] = 60.0
 class _EventWatcherSettings:
     """Parsed event watcher settings from settings.toml."""
 
-    cel_filter: str = _DEFAULT_CEL_FILTER
+    cel_filter: str = DEFAULT_CEL_FILTER
     burst_size: int = _DEFAULT_BURST_SIZE
     max_messages_per_minute: int = _DEFAULT_MAX_MESSAGES_PER_MINUTE
     high_rate_warning_threshold: int = _DEFAULT_HIGH_RATE_WARNING_THRESHOLD
@@ -102,7 +91,7 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
     if not watchers:
         return _EventWatcherSettings()
     return _EventWatcherSettings(
-        cel_filter=watchers.get("event_cel_filter", _DEFAULT_CEL_FILTER),
+        cel_filter=watchers.get("event_cel_filter", DEFAULT_CEL_FILTER),
         burst_size=watchers.get("event_burst_size", _DEFAULT_BURST_SIZE),
         max_messages_per_minute=watchers.get("max_event_messages_per_minute", _DEFAULT_MAX_MESSAGES_PER_MINUTE),
         high_rate_warning_threshold=watchers.get(
@@ -289,7 +278,7 @@ def _send_message(agent_name: str, message: str) -> bool:
     """Send a message to the agent via mng message. Returns True on success."""
     try:
         result = subprocess.run(
-            ["uv", "run", "mng", "message", agent_name, "--provider", "local", "-m", message],
+            [*get_mng_command(), "message", agent_name, "--provider", "local", "-m", message],
             capture_output=True,
             text=True,
             timeout=_MESSAGE_SEND_TIMEOUT_SECONDS,
@@ -297,7 +286,7 @@ def _send_message(agent_name: str, message: str) -> bool:
     except subprocess.TimeoutExpired:
         logger.error("Timed out sending message to {}", agent_name)
         return False
-    except OSError as exc:
+    except (OSError, MngNotInstalledError) as exc:
         logger.error("Failed to invoke mng message subprocess: {}", exc)
         return False
 
@@ -336,47 +325,53 @@ def _write_notification_event(events_dir: Path, message: str, level: str = "WARN
 _CHAT_NOTIFICATION_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
-def _get_system_notifications_conversation_id(events_dir: Path) -> str | None:
-    """Read the first conversation_id from events/conversations/events.jsonl.
+def _get_system_notifications_conversation_id() -> str | None:
+    """Read the system_notifications conversation ID from the changeling_conversations table.
 
-    The system_notifications conversation is always created first during
-    provisioning, so its ID is the first entry in the conversations event log.
-
-    Returns None if the file does not exist or contains no valid entries.
+    Looks for a conversation tagged with ``{"internal": "system_notifications"}``
+    in the llm database at ``$LLM_USER_PATH/logs.db``.
+    Falls back to None if the database or table does not exist.
     """
-    conversations_file = events_dir / "conversations" / "events.jsonl"
+    llm_user_path = os.environ.get("LLM_USER_PATH", "")
+    if not llm_user_path:
+        logger.warning("LLM_USER_PATH not set, cannot look up system_notifications conversation")
+        return None
+    db_path = Path(llm_user_path) / "logs.db"
+
+    if not db_path.is_file():
+        logger.debug("LLM database not found at {}", db_path)
+        return None
+
     try:
-        if not conversations_file.is_file():
-            return None
-        with conversations_file.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    conversation_id = event.get("conversation_id")
-                    if conversation_id:
-                        return str(conversation_id)
-                except (json.JSONDecodeError, KeyError):
-                    continue
-    except OSError as exc:
-        logger.warning("Failed to read conversations file for notification CID: {}", exc)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT conversation_id FROM changeling_conversations "
+                "WHERE json_extract(tags, '$.internal') = 'system_notifications'",
+            ).fetchall()
+            if rows:
+                return str(rows[0][0])
+        except sqlite3.Error as exc:
+            logger.debug("Failed to query changeling_conversations: {}", exc)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("Failed to read system_notifications conversation from DB: {}", exc)
     return None
 
 
 def _send_chat_notification(events_dir: Path, message: str) -> bool:
     """Send a notification as a chat message via ``llm``.
 
-    Uses the system_notifications conversation (the first conversation
-    created during provisioning) so that all system notifications appear
+    Uses the system_notifications conversation (found by tag in the
+    changeling_conversations table) so that all system notifications appear
     in the same thread. The message is sent as the user prompt; the model
     response is discarded.
 
     Returns True on success, False if ``llm`` is not available or fails.
     This is best-effort: the caller should not depend on success.
     """
-    conversation_id = _get_system_notifications_conversation_id(events_dir)
+    conversation_id = _get_system_notifications_conversation_id()
     if conversation_id is None:
         logger.warning("No system_notifications conversation found, skipping chat notification")
         return False
@@ -389,12 +384,13 @@ def _send_chat_notification(events_dir: Path, message: str) -> bool:
                 "--cid",
                 conversation_id,
                 "-m",
-                "echo",
+                "matched-responses",
                 message,
             ],
             capture_output=True,
             text=True,
             timeout=_CHAT_NOTIFICATION_TIMEOUT_SECONDS,
+            env={**os.environ, "LLM_MATCHED_RESPONSE": ""},
         )
         if result.returncode == 0:
             logger.info("Sent chat notification via llm")
@@ -430,7 +426,7 @@ def _compute_backoff_seconds(consecutive_failures: int) -> float:
 
 def _start_events_subprocess(agent_name: str, cel_filter: str) -> subprocess.Popen[str]:
     """Start ``mng events <agent_name> --follow --filter <cel_filter>`` as a subprocess."""
-    cmd = ["uv", "run", "mng", "events", agent_name, "--follow"]
+    cmd = [*get_mng_command(), "events", agent_name, "--follow"]
     if cel_filter:
         cmd.extend(["--filter", cel_filter])
     logger.info("Starting events subprocess: {}", " ".join(cmd))
@@ -826,9 +822,8 @@ def main() -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
     agent_name = require_env("MNG_AGENT_NAME")
-    host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    setup_watcher_logging("event_watcher", host_dir / "events" / "logs")
+    setup_watcher_logging("event_watcher", agent_state_dir / "events" / "logs")
 
     settings = _load_watcher_settings(agent_work_dir)
 

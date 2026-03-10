@@ -6,8 +6,13 @@ from typing import cast
 
 import pytest
 
+from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
+from imbue.mng.config.data_types import EnvVar
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NamedCommand
+from imbue.mng.primitives import CommandString
 from imbue.mng_claude_changeling.plugin import CHAT_TTYD_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_changeling.plugin import CONV_WATCHER_WINDOW_NAME
@@ -17,12 +22,12 @@ from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_COMMAND
 from imbue.mng_claude_changeling.plugin import EVENT_WATCHER_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import WEB_SERVER_WINDOW_NAME
 from imbue.mng_claude_changeling.plugin import get_agent_type_from_params
-from imbue.mng_claude_changeling.plugin import inject_changeling_windows
+from imbue.mng_claude_changeling.plugin import inject_supporting_services
 from imbue.mng_claude_changeling.plugin import override_command_options
 
-# Total number of tmux windows injected by inject_changeling_windows:
+# Total number of tmux windows injected by inject_supporting_services:
 # agent ttyd, conv_watcher, events, web_server, transcript, chat ttyd
-_CHANGELING_WINDOW_COUNT = 6
+_SUPPORTING_SERVICE_COUNT = 6
 
 
 class _DummyCommandClass:
@@ -44,33 +49,33 @@ def changeling_create_params() -> dict[str, Any]:
 # -- override_command_options hook tests --
 
 
-def test_adds_all_changeling_windows(changeling_create_params: dict[str, Any]) -> None:
-    """Verify that the plugin adds all 5 changeling windows."""
-    assert len(changeling_create_params["add_command"]) == _CHANGELING_WINDOW_COUNT
+def test_adds_all_supporting_services(changeling_create_params: dict[str, Any]) -> None:
+    """Verify that the plugin adds all supporting services."""
+    assert len(changeling_create_params["add_command"]) == _SUPPORTING_SERVICE_COUNT
 
 
-def test_adds_conv_watcher_window(changeling_create_params: dict[str, Any]) -> None:
+def test_adds_conv_watcher_service(changeling_create_params: dict[str, Any]) -> None:
     entries = [c for c in changeling_create_params["add_command"] if CONV_WATCHER_WINDOW_NAME in c]
     assert len(entries) == 1
     assert CONV_WATCHER_COMMAND in entries[0]
 
 
-def test_adds_event_watcher_window(changeling_create_params: dict[str, Any]) -> None:
+def test_adds_event_watcher_service(changeling_create_params: dict[str, Any]) -> None:
     prefix = f'{EVENT_WATCHER_WINDOW_NAME}="'
     entries = [c for c in changeling_create_params["add_command"] if c.startswith(prefix)]
     assert len(entries) == 1
     assert EVENT_WATCHER_COMMAND in entries[0]
 
 
-def test_adds_web_server_window(changeling_create_params: dict[str, Any]) -> None:
+def test_adds_web_server_service(changeling_create_params: dict[str, Any]) -> None:
     entries = [c for c in changeling_create_params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(entries) == 1
 
 
-def test_adds_changeling_windows_for_positional_agent_type() -> None:
+def test_adds_supporting_services_for_positional_agent_type() -> None:
     params: dict[str, Any] = {"add_command": (), "positional_agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
+    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
 
 
 def test_does_not_modify_non_create_commands() -> None:
@@ -91,8 +96,8 @@ def test_does_not_modify_when_no_agent_type() -> None:
     assert params["add_command"] == ()
 
 
-def test_injects_windows_for_registered_subclass() -> None:
-    """Verify that a registered agent type that subclasses ClaudeChangelingAgent gets changeling windows."""
+def test_injects_supporting_services_for_registered_subclass() -> None:
+    """Verify that a registered agent type that subclasses ClaudeChangelingAgent gets supporting services."""
     from imbue.mng.config.agent_class_registry import register_agent_class
     from imbue.mng.config.agent_class_registry import reset_agent_class_registry
 
@@ -103,7 +108,7 @@ def test_injects_windows_for_registered_subclass() -> None:
         register_agent_class("test-subclass-82741", _TestSubclassAgent)
         params: dict[str, Any] = {"add_command": (), "agent_type": "test-subclass-82741"}
         override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-        assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
+        assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
     finally:
         reset_agent_class_registry()
 
@@ -111,24 +116,24 @@ def test_injects_windows_for_registered_subclass() -> None:
 def test_preserves_existing_add_commands() -> None:
     params: dict[str, Any] = {"add_command": ('monitor="htop"',), "agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT + 1
+    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT + 1
     assert params["add_command"][0] == 'monitor="htop"'
 
 
-# -- inject_changeling_windows tests --
+# -- inject_supporting_services tests --
 
 
-def test_inject_changeling_windows_adds_all_windows() -> None:
-    """Verify that inject_changeling_windows adds all expected windows."""
+def test_inject_supporting_services_adds_all() -> None:
+    """Verify that inject_supporting_services adds all expected services."""
     params: dict[str, Any] = {}
-    inject_changeling_windows(params)
-    assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT
+    inject_supporting_services(params)
+    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
 
 
-def test_inject_changeling_windows_preserves_existing() -> None:
+def test_inject_supporting_services_preserves_existing() -> None:
     params: dict[str, Any] = {"add_command": ('foo="bar"',)}
-    inject_changeling_windows(params)
-    assert len(params["add_command"]) == _CHANGELING_WINDOW_COUNT + 1
+    inject_supporting_services(params)
+    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT + 1
     assert params["add_command"][0] == 'foo="bar"'
 
 
@@ -172,22 +177,60 @@ def test_get_agent_type_from_params_returns_none_when_absent() -> None:
     assert get_agent_type_from_params({}) is None
 
 
-# -- Web server additional tests --
+# -- Web server service tests --
 
 
 def test_web_server_command_is_parseable_as_named_command() -> None:
     """Verify the web server command is parseable as a NamedCommand."""
     params: dict[str, Any] = {}
-    inject_changeling_windows(params)
+    inject_supporting_services(params)
     web_entries = [c for c in params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(web_entries) == 1
     named_cmd = NamedCommand.from_string(web_entries[0])
     assert named_cmd.window_name == WEB_SERVER_WINDOW_NAME
 
 
-# -- Chat ttyd tests --
+# -- Chat ttyd service tests --
 
 
-def test_adds_chat_ttyd_window(changeling_create_params: dict[str, Any]) -> None:
+def test_adds_chat_ttyd_service(changeling_create_params: dict[str, Any]) -> None:
     entries = [c for c in changeling_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
     assert len(entries) == 1
+
+
+# -- assemble_command tests --
+
+
+def test_assemble_command_prepends_cd_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that assemble_command prepends 'cd "$ROLE" &&' to the base command."""
+    base_cmd = CommandString("claude --resume $SID || claude --session-id UUID")
+
+    monkeypatch.setattr(ClaudeAgent, "assemble_command", lambda self, host, args, override: base_cmd)
+
+    agent = ClaudeChangelingAgent.model_construct(
+        agent_config=ClaudeChangelingConfig(),
+    )
+    result = agent.assemble_command(cast(Any, None), (), None)
+
+    assert str(result).startswith('cd "$ROLE" && ')
+    assert str(base_cmd) in str(result)
+
+
+# -- _get_role_from_env tests --
+
+
+def test_get_role_from_env_returns_role() -> None:
+    """Verify _get_role_from_env reads the ROLE env var from options."""
+    options = CreateAgentOptions.model_construct(
+        environment=AgentEnvironmentOptions(env_vars=(EnvVar(key="ROLE", value="working"),)),
+    )
+    assert ClaudeChangelingAgent._get_role_from_env(options) == "working"
+
+
+def test_get_role_from_env_raises_when_missing() -> None:
+    """Verify _get_role_from_env raises RuntimeError when ROLE is not set."""
+    options = CreateAgentOptions.model_construct(
+        environment=AgentEnvironmentOptions(env_vars=()),
+    )
+    with pytest.raises(RuntimeError, match="ROLE environment variable is required"):
+        ClaudeChangelingAgent._get_role_from_env(options)

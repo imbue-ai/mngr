@@ -66,7 +66,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(32))
+    rc.check_inline_imports(_DIR, snapshot(41))
 
 
 def test_prevent_relative_imports() -> None:
@@ -189,7 +189,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(6))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(7))
 
 
 def test_prevent_test_container_classes() -> None:

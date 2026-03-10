@@ -242,8 +242,19 @@ class ProviderBackendName(NonEmptyStr):
     """Name of a provider backend."""
 
 
+class InvalidAgentName(ValueError):
+    pass
+
+
+# FIXME: actually, there are more restrictions here, like: only alphanumeric and dashes, must not start or end with a dash, etc. We must enforce those.
+#  the same restrictions should apply to ProviderInstanceName, ProviderBackendName, HostName, AgentName, and AgentTypeName
 class AgentName(NonEmptyStr):
     """Human-readable name for an agent."""
+
+    def __new__(cls, value: str) -> Self:
+        if value.startswith("-") or value.endswith("-"):
+            raise InvalidAgentName(f"{cls.__name__} cannot start or end with a dash: '{value}'")
+        return super().__new__(cls, value.strip())
 
 
 class HostName(NonEmptyStr):
@@ -305,6 +316,10 @@ class SnapshotName(str):
             core_schema.str_schema(),
             serialization=core_schema.to_string_ser_schema(),
         )
+
+
+class CertifiedDataError(Exception):
+    """Raised when certified_data contains an unexpected type for a field."""
 
 
 class SSHInfo(FrozenModel):
@@ -384,6 +399,17 @@ class DiscoveredAgent(FrozenModel):
         """Return the list of permissions assigned to this agent."""
         permissions_value = self.certified_data.get("permissions", [])
         return tuple(Permission(p) for p in permissions_value)
+
+    @property
+    def created_branch_name(self) -> str | None:
+        """Return the git branch name that was created for this agent, or None if not set."""
+        match self.certified_data.get("created_branch_name"):
+            case str(value):
+                return value
+            case None:
+                return None
+            case unexpected:
+                raise CertifiedDataError(f"Expected str or None for created_branch_name, got {type(unexpected)}")
 
     @property
     def labels(self) -> dict[str, str]:

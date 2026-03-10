@@ -10,7 +10,7 @@ from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.fetcher import _build_pr_branch_index
 from imbue.mng_kanpan.fetcher import _find_git_cwd
 from imbue.mng_kanpan.fetcher import _pr_priority
-from imbue.mng_kanpan.fetcher import _resolve_agent_branch
+from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.github import FetchPrsResult
 from imbue.mng_kanpan.testing import make_agent_details
@@ -75,32 +75,6 @@ def test_build_pr_branch_index_merged_wins_over_closed() -> None:
     assert result["branch-a"].number == 2
 
 
-# === _resolve_agent_branch ===
-
-
-def test_resolve_agent_branch_local_with_git(tmp_path: Path) -> None:
-    agent = make_agent_details(name="my-agent", work_dir=tmp_path, provider_name="local")
-    cg = MagicMock()
-    with patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value="mng/my-agent"):
-        branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
-
-
-def test_resolve_agent_branch_local_nonexistent_dir() -> None:
-    agent = make_agent_details(name="my-agent", work_dir=Path("/nonexistent/path"), provider_name="local")
-    cg = MagicMock()
-    branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
-
-
-def test_resolve_agent_branch_local_git_fails(tmp_path: Path) -> None:
-    agent = make_agent_details(name="my-agent", work_dir=tmp_path, provider_name="local")
-    cg = MagicMock()
-    with patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value=None):
-        branch = _resolve_agent_branch(agent, cg)
-    assert branch == "mng/my-agent"
-
-
 # === fetch_board_snapshot ===
 
 
@@ -127,7 +101,9 @@ def test_find_git_cwd_empty_agents() -> None:
 
 
 def test_fetch_board_snapshot_integrates_agents_and_prs() -> None:
-    agent1 = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
+    agent1 = make_agent_details(
+        name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal", initial_branch="mng/agent-1"
+    )
     agent2 = make_agent_details(name="agent-2", state=AgentLifecycleState.DONE, provider_name="modal")
 
     pr1 = make_pr_info(number=42, head_branch="mng/agent-1", state=PrState.OPEN)
@@ -182,10 +158,32 @@ def test_fetch_board_snapshot_with_list_errors() -> None:
     assert "ConnectionError" in snapshot.errors[0]
 
 
+def test_fetch_agent_snapshot_entries_have_no_pr() -> None:
+    """fetch_agent_snapshot should return entries with pr=None and create_pr_url=None."""
+    agent1 = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
+
+    mock_list_result = MagicMock()
+    mock_list_result.agents = [agent1]
+    mock_list_result.errors = []
+
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result):
+        snapshot = fetch_agent_snapshot(mng_ctx)
+
+    assert len(snapshot.entries) == 1
+    assert snapshot.entries[0].name == AgentName("agent-1")
+    assert snapshot.entries[0].pr is None
+    assert snapshot.entries[0].create_pr_url is None
+    assert snapshot.prs_loaded is False
+    assert snapshot.errors == ()
+    assert snapshot.fetch_time_seconds > 0
+
+
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
     init_git_repo_with_config(repo_dir)
-    # Add a GitHub remote so _get_github_repo_path succeeds
     subprocess.run(
         ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
         cwd=repo_dir,
@@ -193,7 +191,7 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
         capture_output=True,
     )
 
-    agent = make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local")
+    agent = make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local", initial_branch="mng/agent-1")
 
     pr_result = FetchPrsResult(prs=(), error="gh pr list failed: auth required")
 
@@ -207,7 +205,7 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
         patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
-        patch("imbue.mng_kanpan.fetcher.get_current_git_branch", return_value="mng/agent-1"),
+        patch("imbue.mng_kanpan.fetcher._get_github_repo_path", return_value="org/repo"),
     ):
         snapshot = fetch_board_snapshot(mng_ctx)
 

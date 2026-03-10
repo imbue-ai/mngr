@@ -14,6 +14,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.claude_agent import _build_install_command_hint
@@ -40,6 +41,7 @@ from imbue.mng.interfaces.host import AgentGitOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
@@ -548,21 +550,30 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "mv" in session_id_hook
 
 
-def test_build_readiness_hooks_config_has_user_prompt_submit_hook() -> None:
-    """build_readiness_hooks_config should include UserPromptSubmit hook that creates active file."""
+@pytest.mark.parametrize(
+    "hook_name, expected_substrings",
+    [
+        ("UserPromptSubmit", ["touch", "active", "permissions_waiting"]),
+        ("PermissionRequest", ["touch", "permissions_waiting"]),
+        ("PostToolUse", ["rm", "permissions_waiting"]),
+        ("PostToolUseFailure", ["rm", "permissions_waiting"]),
+    ],
+)
+def test_build_readiness_hooks_config_has_hook(hook_name: str, expected_substrings: list[str]) -> None:
+    """build_readiness_hooks_config should include the expected hook with correct command."""
     config = build_readiness_hooks_config()
 
-    assert "UserPromptSubmit" in config["hooks"]
-    assert len(config["hooks"]["UserPromptSubmit"]) == 1
-    hook = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert hook_name in config["hooks"]
+    assert len(config["hooks"][hook_name]) == 1
+    hook = config["hooks"][hook_name][0]["hooks"][0]
     assert hook["type"] == "command"
-    assert "touch" in hook["command"]
     assert "MNG_AGENT_STATE_DIR" in hook["command"]
-    assert "active" in hook["command"]
+    for substring in expected_substrings:
+        assert substring in hook["command"], f"Expected '{substring}' in {hook_name} hook command"
 
 
 def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
-    """build_readiness_hooks_config should include Notification idle_prompt hook that removes active file."""
+    """build_readiness_hooks_config should include Notification idle_prompt hook that removes active and permissions_waiting files."""
     config = build_readiness_hooks_config()
 
     assert "Notification" in config["hooks"]
@@ -574,6 +585,32 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "rm" in hook["command"]
     assert "MNG_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
+    assert "permissions_waiting" in hook["command"]
+
+
+def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """ClaudeAgent.get_lifecycle_state downgrades RUNNING to WAITING when permissions_waiting exists."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
+
+    with patch.object(BaseAgent, "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
+        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+
+        (agent._get_agent_dir() / "permissions_waiting").touch()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+
+    # Non-RUNNING states should pass through unchanged
+    (agent._get_agent_dir() / "permissions_waiting").touch()
+    for state in (
+        AgentLifecycleState.STOPPED,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.DONE,
+    ):
+        with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
+            assert agent.get_lifecycle_state() == state
 
 
 def test_get_expected_process_name_returns_claude(

@@ -49,7 +49,7 @@ def deployed_test_coder() -> Generator[dict[str, object], None, None]:
     assert agent is not None, f"Agent {agent_name} not found in mng list"
 
     agent_id = str(agent["id"])
-    settings_path = Path(str(agent["work_dir"])) / ".changelings" / "settings.toml"
+    settings_path = Path(str(agent["work_dir"])) / "changelings.toml"
     wait_for(
         condition=settings_path.exists,
         timeout=60.0,

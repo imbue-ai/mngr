@@ -494,6 +494,7 @@ def test_create_mng_agent_local_uses_in_place(tmp_path: Path) -> None:
         changeling_dir=tmp_path,
         agent_name=AgentName("my-agent"),
         agent_id=AgentId(),
+        agent_type="elena-code",
         provider=DeploymentProvider.LOCAL,
         concurrency_group=cg,
     )
@@ -513,6 +514,7 @@ def test_create_mng_agent_modal_uses_in_modal_and_source_path(tmp_path: Path) ->
         changeling_dir=tmp_path,
         agent_name=AgentName("my-agent"),
         agent_id=AgentId(),
+        agent_type="elena-code",
         provider=DeploymentProvider.MODAL,
         concurrency_group=cg,
     )
@@ -536,6 +538,7 @@ def test_create_mng_agent_docker_uses_in_docker_and_source_path(tmp_path: Path) 
         changeling_dir=tmp_path,
         agent_name=AgentName("my-agent"),
         agent_id=AgentId(),
+        agent_type="elena-code",
         provider=DeploymentProvider.DOCKER,
         concurrency_group=cg,
     )
@@ -559,6 +562,7 @@ def test_create_mng_agent_always_includes_changeling_label(tmp_path: Path) -> No
             changeling_dir=tmp_path,
             agent_name=AgentName("my-agent"),
             agent_id=AgentId(),
+            agent_type="elena-code",
             provider=provider,
             concurrency_group=cg,
         )
@@ -569,23 +573,29 @@ def test_create_mng_agent_always_includes_changeling_label(tmp_path: Path) -> No
         assert cmd[label_index + 1] == "changeling=true"
 
 
-def test_create_mng_agent_includes_template_and_no_connect(tmp_path: Path) -> None:
-    """Verify that the mng create command always includes -t entrypoint and --no-connect."""
+def test_create_mng_agent_includes_agent_type_and_no_connect(tmp_path: Path) -> None:
+    """Verify that the mng create command includes --agent-type and --no-connect."""
     cg = make_fake_concurrency_group()
 
     _create_mng_agent(
         changeling_dir=tmp_path,
         agent_name=AgentName("my-agent"),
         agent_id=AgentId(),
+        agent_type="elena-code",
         provider=DeploymentProvider.LOCAL,
         concurrency_group=cg,
     )
 
     cmd = cg.commands_run[0]
-    assert "-t" in cmd
-    t_index = cmd.index("-t")
-    assert cmd[t_index + 1] == "entrypoint"
+    assert "--agent-type" in cmd
+    at_index = cmd.index("--agent-type")
+    assert cmd[at_index + 1] == "elena-code"
     assert "--no-connect" in cmd
+    assert "-t" not in cmd
+    # Verify ROLE env var is passed
+    assert "--env" in cmd
+    env_index = cmd.index("--env")
+    assert cmd[env_index + 1] == "ROLE=thinking"
 
 
 def test_create_mng_agent_passes_agent_id(tmp_path: Path) -> None:
@@ -597,6 +607,7 @@ def test_create_mng_agent_passes_agent_id(tmp_path: Path) -> None:
         changeling_dir=tmp_path,
         agent_name=AgentName("my-agent"),
         agent_id=agent_id,
+        agent_type="elena-code",
         provider=DeploymentProvider.LOCAL,
         concurrency_group=cg,
     )
@@ -624,6 +635,7 @@ def test_create_mng_agent_raises_on_failure(tmp_path: Path) -> None:
             changeling_dir=tmp_path,
             agent_name=AgentName("my-agent"),
             agent_id=AgentId(),
+            agent_type="elena-code",
             provider=DeploymentProvider.LOCAL,
             concurrency_group=cg,
         )

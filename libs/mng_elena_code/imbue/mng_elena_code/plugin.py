@@ -10,15 +10,7 @@ from imbue.mng.primitives import CommandString
 from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
 from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
 
-ELENA_SYSTEM_PROMPT = (
-    "You are Elena, a friendly and conversational AI assistant. "
-    "Your purpose is to have engaging conversations, answer questions, and help users think through problems. "
-    "You should be warm, thoughtful, and direct in your responses. "
-    "IMPORTANT: You must NEVER write code, create files, or make any changes to the filesystem. "
-    "You are purely conversational. If a user asks you to write code, politely explain that you are a conversational "
-    "assistant and suggest they use a different tool for coding tasks. "
-    "Keep your responses concise and focused on the conversation."
-)
+ELENA_SYSTEM_PROMPT = "You are Elena, an assistant powered by Claude Code that helps users write software."
 
 
 _APPEND_SYSTEM_PROMPT_FLAG = "--append-system-prompt"

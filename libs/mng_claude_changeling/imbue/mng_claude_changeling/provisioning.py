@@ -9,9 +9,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
-from uuid import uuid4
 
-import pluggy
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
@@ -21,20 +19,16 @@ from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng_claude_changeling import resources as changeling_resources
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 
-# Scripts to provision to $MNG_HOST_DIR/commands/
-_SCRIPT_FILES: Final[tuple[str, ...]] = (
+# Supporting service shell scripts to provision to $MNG_AGENT_STATE_DIR/commands/.
+# Python scripts (event_watcher, conversation_watcher, transcript_watcher,
+# web_server, conversation_db) are now registered as mng CLI commands and
+# do not need to be provisioned.
+_SERVICE_SCRIPT_FILES: Final[tuple[str, ...]] = (
     "chat.sh",
     "chat_ttyd_handler.sh",
-    "web_server.py",
-    "conversation_watcher.py",
-    "event_watcher.py",
-    "transcript_watcher.py",
 )
 
-# Python modules provisioned alongside scripts (not executable, mode 0644)
-_SCRIPT_MODULES: Final[tuple[str, ...]] = ("watcher_common.py",)
-
-# Python tool files to provision to $MNG_HOST_DIR/commands/llm_tools/
+# Python tool files to provision to $MNG_AGENT_STATE_DIR/commands/llm_tools/
 _LLM_TOOL_FILES: Final[tuple[str, ...]] = (
     "context_tool.py",
     "extra_context_tool.py",
@@ -244,8 +238,8 @@ def install_llm_toolchain(host: OnlineHostInterface, settings: ProvisioningSetti
 
 
 def _install_llm_plugins(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
-    """Install llm-anthropic and llm-live-chat plugins."""
-    for plugin_name in ("llm-anthropic", "llm-live-chat"):
+    """Install the required llm plugins for the models and features we use."""
+    for plugin_name in ("llm-anthropic", "llm-live-chat", "llm-matched-responses"):
         with log_span("Installing llm plugin: {}", plugin_name):
             result = _execute_with_timing(
                 host,
@@ -258,49 +252,6 @@ def _install_llm_plugins(host: OnlineHostInterface, settings: ProvisioningSettin
                 raise RuntimeError(f"Failed to install {plugin_name}: {result.stderr}")
 
 
-def _is_recursive_plugin_registered(pm: pluggy.PluginManager) -> bool:
-    """Check if the mng_recursive plugin is registered (and thus will install mng on remote hosts)."""
-    return any(name == "recursive_mng" for name, _ in pm.list_name_plugin())
-
-
-def warn_if_mng_unavailable(
-    host: OnlineHostInterface,
-    pm: pluggy.PluginManager,
-    settings: ProvisioningSettings,
-) -> None:
-    """Warn if mng will not be available on the agent host.
-
-    Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to
-    communicate with the primary agent. If mng is not available on the host,
-    these scripts will fail silently.
-
-    Skips the warning if:
-    - The host is local (mng is obviously available since it's running locally)
-    - The mng_recursive plugin is registered (it will install mng on remote hosts)
-    """
-    if host.is_local:
-        return
-
-    if _is_recursive_plugin_registered(pm):
-        logger.debug("Skipping mng availability check: recursive plugin will install mng")
-        return
-
-    check_result = _execute_with_timing(
-        host,
-        "command -v mng",
-        hard_timeout=settings.command_check_hard_timeout_seconds,
-        warn_threshold=settings.command_check_warn_threshold_seconds,
-        label="mng check",
-    )
-    if not check_result.success:
-        logger.warning(
-            "mng is not available on the remote host and the mng_recursive plugin is not enabled. "
-            "Changeling scripts (event_watcher.py, etc.) use 'uv run mng message' to communicate "
-            "with the primary agent and will fail without mng installed. "
-            "Enable the mng_recursive plugin or install mng on the remote host manually."
-        )
-
-
 def create_changeling_symlinks(
     host: OnlineHostInterface,
     work_dir: Path,
@@ -309,22 +260,14 @@ def create_changeling_symlinks(
 ) -> None:
     """Create symlinks so Claude Code discovers changeling files at standard locations.
 
-    The active role's .claude/ directory becomes the top-level .claude/ via a
-    directory symlink, so Claude Code naturally finds settings.json, skills/, etc.
+    Claude Code runs from within the role directory (via ``cd $ROLE`` in
+    assemble_command), so ``.claude/`` is found naturally. We only need:
 
-    Creates:
-    - <work_dir>/.claude -> <work_dir>/<active_role>/.claude (directory symlink)
-    - <work_dir>/CLAUDE.md -> <work_dir>/GLOBAL.md
-    - <work_dir>/CLAUDE.local.md -> <work_dir>/<active_role>/PROMPT.md
+    - ``<work_dir>/CLAUDE.md`` -> ``<work_dir>/GLOBAL.md`` (found by Claude Code
+      walking up the directory tree from the role directory)
+    - ``<work_dir>/<active_role>/CLAUDE.local.md`` -> ``<work_dir>/<active_role>/PROMPT.md``
+      (role-specific prompt, discovered in the role directory)
     """
-    # .claude -> <active_role>/.claude (directory symlink)
-    _create_dir_symlink_if_target_exists(
-        host,
-        link_path=work_dir / ".claude",
-        target_path=work_dir / active_role / ".claude",
-        settings=settings,
-    )
-
     # CLAUDE.md -> GLOBAL.md (so Claude Code loads global instructions)
     _create_symlink_if_target_exists(
         host,
@@ -333,10 +276,10 @@ def create_changeling_symlinks(
         settings=settings,
     )
 
-    # CLAUDE.local.md -> <active_role>/PROMPT.md (role-specific prompt)
+    # <role>/CLAUDE.local.md -> <role>/PROMPT.md (role-specific prompt)
     _create_symlink_if_target_exists(
         host,
-        link_path=work_dir / "CLAUDE.local.md",
+        link_path=work_dir / active_role / "CLAUDE.local.md",
         target_path=work_dir / active_role / "PROMPT.md",
         settings=settings,
     )
@@ -382,67 +325,19 @@ def _create_symlink_if_target_exists(
             raise RuntimeError(f"Failed to create symlink {link_path} -> {target_path}: {result.stderr}")
 
 
-def _create_dir_symlink_if_target_exists(
+def provision_supporting_services(
     host: OnlineHostInterface,
-    link_path: Path,
-    target_path: Path,
+    agent_state_dir: Path,
     settings: ProvisioningSettings,
 ) -> None:
-    """Create a directory symlink at link_path pointing to target_path, if target exists.
-
-    Uses ``ln -sfn`` so that an existing symlink to a directory is replaced
-    rather than creating a symlink inside the target directory.
-    """
-    check = _execute_with_timing(
-        host,
-        f"test -d {shlex.quote(str(target_path))}",
-        hard_timeout=settings.fs_hard_timeout_seconds,
-        warn_threshold=settings.fs_warn_threshold_seconds,
-        label="dir check",
-    )
-    if not check.success:
-        return
-
-    _execute_with_timing(
-        host,
-        f"mkdir -p {shlex.quote(str(link_path.parent))}",
-        hard_timeout=settings.fs_hard_timeout_seconds,
-        warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir",
-    )
-
-    # Remove any existing real directory at link_path. ln -sfn on a real
-    # directory creates the symlink INSIDE rather than replacing it. The
-    # guard "[ -d X ] && [ ! -L X ]" only matches real directories, not
-    # existing symlinks (which ln -sfn handles correctly).
-    quoted_link = shlex.quote(str(link_path))
-    _execute_with_timing(
-        host,
-        f"[ -d {quoted_link} ] && [ ! -L {quoted_link} ] && rm -rf {quoted_link} || true",
-        hard_timeout=settings.fs_hard_timeout_seconds,
-        warn_threshold=settings.fs_warn_threshold_seconds,
-        label="rm existing dir",
-    )
-
-    cmd = f"ln -sfn {shlex.quote(str(target_path))} {quoted_link}"
-    with log_span("Creating directory symlink: {} -> {}", link_path, target_path):
-        result = _execute_with_timing(
-            host,
-            cmd,
-            hard_timeout=settings.fs_hard_timeout_seconds,
-            warn_threshold=settings.fs_warn_threshold_seconds,
-            label="dir symlink",
-        )
-        if not result.success:
-            raise RuntimeError(f"Failed to create directory symlink {link_path} -> {target_path}: {result.stderr}")
-
-
-def provision_changeling_scripts(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
-    """Write changeling scripts to $MNG_HOST_DIR/commands/.
+    """Write supporting service shell scripts to $MNG_AGENT_STATE_DIR/commands/.
 
     Scripts are loaded from the resources package and written with execute permission.
+    Python supporting services (event_watcher, conversation_watcher, transcript_watcher,
+    web_server, conversation_db) are registered as mng CLI commands and do not need
+    to be provisioned.
     """
-    commands_dir = host.host_dir / "commands"
+    commands_dir = agent_state_dir / "commands"
     _execute_with_timing(
         host,
         f"mkdir -p {shlex.quote(str(commands_dir))}",
@@ -452,32 +347,30 @@ def provision_changeling_scripts(host: OnlineHostInterface, settings: Provisioni
     )
 
     # Provision the shared logging library (from mng core resources) first,
-    # since the changeling scripts source it.
+    # since the supporting service scripts source it.
     mng_log_content = load_resource_script("mng_log.sh")
     mng_log_path = commands_dir / "mng_log.sh"
     with log_span("Writing mng_log.sh to host"):
         host.write_file(mng_log_path, mng_log_content.encode(), mode="0755")
 
-    for script_name in _SCRIPT_FILES:
+    for script_name in _SERVICE_SCRIPT_FILES:
         script_content = load_changeling_resource(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
 
-    for module_name in _SCRIPT_MODULES:
-        module_content = load_changeling_resource(module_name)
-        module_path = commands_dir / module_name
-        with log_span("Writing {} to host", module_name):
-            host.write_file(module_path, module_content.encode(), mode="0644")
 
-
-def provision_llm_tools(host: OnlineHostInterface, settings: ProvisioningSettings) -> None:
-    """Write LLM tool Python files to $MNG_HOST_DIR/commands/llm_tools/.
+def provision_llm_tools(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    settings: ProvisioningSettings,
+) -> None:
+    """Write LLM tool Python files to $MNG_AGENT_STATE_DIR/commands/llm_tools/.
 
     These files are passed to `llm live-chat` via `--functions` to give
     conversation agents access to changeling context.
     """
-    tools_dir = host.host_dir / "commands" / "llm_tools"
+    tools_dir = agent_state_dir / "commands" / "llm_tools"
     _execute_with_timing(
         host,
         f"mkdir -p {shlex.quote(str(tools_dir))}",
@@ -501,7 +394,6 @@ def create_event_log_directories(
     """Create the event and log directory structure.
 
     Creates directories for event sources (events/<source>/):
-    - events/conversations/      conversation lifecycle events
     - events/messages/           conversation messages
     - events/scheduled/          scheduled trigger events
     - events/mng_agents/         agent state transitions
@@ -513,9 +405,12 @@ def create_event_log_directories(
 
     Creates directories for log sources (logs/<source>/):
     - logs/claude_transcript/    inner monologue (written by Claude background tasks, raw format)
+
+    Note: conversation metadata (tags, created_at) is stored in the
+    changeling_conversations table in the llm sqlite database, not in
+    a separate event directory.
     """
     for source in (
-        "conversations",
         "messages",
         "scheduled",
         "mng_agents",
@@ -570,43 +465,102 @@ def configure_llm_user_path(
     logger.info("Created LLM data directory: {}", llm_data_dir)
 
 
-def _record_conversation_event(
+def _get_llm_db_path(agent_state_dir: Path) -> Path:
+    """Return the path to the llm database for the given agent."""
+    return agent_state_dir / "llm_data" / "logs.db"
+
+
+# SQL schema for the changeling_conversations table that stores conversation
+# metadata (tags, created_at) alongside the llm tool's own tables.
+CHANGELING_CONVERSATIONS_TABLE_SQL: Final[str] = (
+    "CREATE TABLE IF NOT EXISTS changeling_conversations ("
+    "conversation_id TEXT PRIMARY KEY, "
+    "tags TEXT NOT NULL DEFAULT '{}', "
+    "created_at TEXT NOT NULL"
+    ")"
+)
+
+
+def create_changeling_conversations_table(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    settings: ProvisioningSettings,
+) -> None:
+    """Create the changeling_conversations table in the llm database.
+
+    Uses CREATE TABLE IF NOT EXISTS so it is safe to call multiple times.
+    The table stores conversation metadata (tags, created_at) that the llm
+    tool's built-in tables do not track.
+    """
+    db_path = _get_llm_db_path(agent_state_dir)
+    cmd = f"sqlite3 {shlex.quote(str(db_path))} {shlex.quote(CHANGELING_CONVERSATIONS_TABLE_SQL)}"
+    with log_span("Creating changeling_conversations table in {}", db_path):
+        result = _execute_with_timing(
+            host,
+            cmd,
+            hard_timeout=settings.fs_hard_timeout_seconds,
+            warn_threshold=settings.fs_warn_threshold_seconds,
+            label="create changeling_conversations table",
+        )
+        if not result.success:
+            raise RuntimeError(
+                f"Failed to create changeling_conversations table: {result.stderr}. "
+                "Conversation features (chat, system notifications) will not work without this table."
+            )
+
+
+def _insert_conversation_record(
     host: OnlineHostInterface,
     agent_state_dir: Path,
     settings: ProvisioningSettings,
     *,
     conversation_id: str,
-    model: str,
     tags: dict[str, str] | None = None,
 ) -> None:
-    """Append a conversation_created event to events/conversations/events.jsonl."""
-    now = datetime.now(timezone.utc)
-    event: dict[str, object] = {
-        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z",
-        "type": "conversation_created",
-        "event_id": f"evt-{uuid4().hex}",
-        "source": "conversations",
-        "conversation_id": conversation_id,
-        "model": model,
-    }
-    if tags:
-        event["tags"] = tags
+    """Insert a conversation record into the changeling_conversations table in the llm database.
 
-    conversations_dir = agent_state_dir / "events" / "conversations"
-    _execute_with_timing(
-        host,
-        f"mkdir -p {shlex.quote(str(conversations_dir))}",
-        hard_timeout=settings.fs_hard_timeout_seconds,
-        warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir conversations",
+    The model is not stored here -- it lives in the llm tool's native
+    ``conversations`` table and is set when the conversation is created
+    via ``llm inject -m <model>``.
+    """
+    now = datetime.now(timezone.utc)
+    created_at = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
+    tags_json = json.dumps(tags or {}, separators=(",", ":"))
+
+    db_path = _get_llm_db_path(agent_state_dir)
+    sql = (
+        f"INSERT OR REPLACE INTO changeling_conversations "
+        f"(conversation_id, tags, created_at) "
+        f"VALUES ("
+        f"{_sql_quote(conversation_id)}, "
+        f"{_sql_quote(tags_json)}, "
+        f"{_sql_quote(created_at)}"
+        f")"
     )
-    events_file = conversations_dir / "events.jsonl"
-    event_line = json.dumps(event, separators=(",", ":"))
-    with log_span("Recording conversation event for {}", conversation_id):
-        host.execute_command(
-            f"echo {shlex.quote(event_line)} >> {shlex.quote(str(events_file))}",
-            timeout_seconds=settings.fs_hard_timeout_seconds,
+    cmd = f"sqlite3 {shlex.quote(str(db_path))} {shlex.quote(sql)}"
+    with log_span("Recording conversation in DB for {}", conversation_id):
+        result = _execute_with_timing(
+            host,
+            cmd,
+            hard_timeout=settings.fs_hard_timeout_seconds,
+            warn_threshold=settings.fs_warn_threshold_seconds,
+            label="insert conversation record",
         )
+        if not result.success:
+            logger.warning("Failed to insert conversation record for {}: {}", conversation_id, result.stderr)
+
+
+def _sql_quote(value: str) -> str:
+    """Quote a string value for use in a SQL statement.
+
+    Escapes single quotes by doubling them, per SQL standard.
+
+    We use manual quoting here instead of parameterized queries because the
+    SQL is passed to the sqlite3 CLI via host.execute_command() over SSH,
+    where parameterized queries are not available.
+    """
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def _inject_conversation(
@@ -618,17 +572,16 @@ def _inject_conversation(
     response: str,
     label: str,
     llm_user_path: Path | None = None,
+    env_vars: dict[str, str] | None = None,
 ) -> str | None:
     """Run ``llm inject`` to create a new conversation. Returns the conversation ID on success.
 
     Omits ``--cid`` so that ``llm inject`` creates a new conversation and
     prints the assigned ID to stdout (e.g. "Injected message into conversation <id>").
-
-    When ``llm_user_path`` is provided, the command is prefixed with
-    ``LLM_USER_PATH=<path>`` so the conversation is created in the
-    per-agent database rather than the system default.
     """
     env_prefix = f"LLM_USER_PATH={shlex.quote(str(llm_user_path))} " if llm_user_path else ""
+    if env_vars:
+        env_prefix += " ".join(f"{key}={shlex.quote(value)}" for key, value in env_vars.items()) + " "
     inject_cmd = (
         f"{env_prefix}llm inject -m {shlex.quote(model)} --prompt {shlex.quote(prompt)} {shlex.quote(response)}"
     )
@@ -660,12 +613,12 @@ def create_system_notifications_conversation(
 ) -> None:
     """Create the system_notifications conversation for delivery failure alerts.
 
-    Uses ``llm inject`` to create a new conversation, then records a
-    ``conversation_created`` event in ``events/conversations/events.jsonl``.
-    Because this is the first conversation created, ``_send_chat_notification``
-    can find it by reading the first entry in the conversations event log.
+    Uses ``llm inject`` to create a new conversation, then inserts a record
+    into the ``changeling_conversations`` table in the llm database with
+    ``tags={"internal": "system_notifications"}``. The event watcher finds
+    this conversation by querying for the ``internal`` tag.
     """
-    model = "echo"
+    model = "matched-responses"
 
     llm_data_dir = agent_state_dir / "llm_data"
     conversation_id = _inject_conversation(
@@ -676,17 +629,17 @@ def create_system_notifications_conversation(
         response="Confirmed.",
         label="system_notifications",
         llm_user_path=llm_data_dir,
+        env_vars=dict(LLM_MATCHED_RESPONSE=""),
     )
     if conversation_id is None:
         return
 
-    _record_conversation_event(
+    _insert_conversation_record(
         host,
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        model=model,
-        tags={"internal": "system_notifications"},
+        tags={"internal": "system_notifications", "name": "System Notifications"},
     )
     logger.info("Created system_notifications conversation: conversation_id={}", conversation_id)
 
@@ -700,8 +653,8 @@ def create_daily_conversation(
     """Create a daily conversation tagged with today's date.
 
     Uses ``llm inject`` to seed the conversation with an empty user prompt
-    and a greeting from the assistant, then records a ``conversation_created``
-    event with ``tags={"daily": "<today>"}`` in the conversations event log.
+    and a greeting from the assistant, then inserts a record into the
+    ``changeling_conversations`` table with ``tags={"daily": "<today>"}``.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -718,13 +671,12 @@ def create_daily_conversation(
     if conversation_id is None:
         return
 
-    _record_conversation_event(
+    _insert_conversation_record(
         host,
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        model=chat_model,
-        tags={"daily": today},
+        tags={"daily": today, "name": f"Daily Thread ({today})"},
     )
     logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)
 
@@ -763,7 +715,7 @@ def setup_memory_directory(
     host: OnlineHostInterface,
     work_dir: Path,
     active_role: str,
-    work_dir_abs: str,
+    role_dir_abs: str,
     settings: ProvisioningSettings,
 ) -> None:
     """Set up the per-role memory directory and initial sync into Claude project memory.
@@ -773,13 +725,20 @@ def setup_memory_directory(
     - ~/.claude/projects/<project_name>/memory/ (real directory, not symlink)
     - Initial rsync of contents from role memory/ to claude project memory/
 
+    The project_name is derived from role_dir_abs (the absolute path to the
+    role directory, e.g. ``/home/user/.changelings/agent/thinking``), because
+    Claude Code runs from within the role directory.
+
     Memory sync hooks (added separately via build_memory_sync_hooks_config) keep
     the two directories in sync during agent operation: PreToolUse syncs from the
     version-controlled role memory into Claude's project memory, and PostToolUse
     syncs back so that any memory Claude wrote is captured in version control.
     """
     memory_dir = work_dir / active_role / "memory"
-    project_dir_name = compute_claude_project_dir_name(work_dir_abs)
+    # Use .parent because Claude Code's project dir is named after the git repo
+    # root (the changeling dir), not the role subdirectory within it. This must
+    # match the path used by build_memory_sync_hooks_config.
+    project_dir_name = compute_claude_project_dir_name(str(Path(role_dir_abs).parent))
 
     # Create both memory directories.
     # Remove any existing symlink at the project memory path (from old provisioning)
@@ -810,18 +769,24 @@ def setup_memory_directory(
             raise RuntimeError(f"Failed to sync memory directory: {result.stderr}")
 
 
-def build_memory_sync_hooks_config(work_dir_abs: str, active_role: str) -> dict[str, Any]:
+def build_memory_sync_hooks_config(role_dir_abs: str) -> dict[str, Any]:
     """Build Claude hooks config for syncing per-role memory with Claude project memory.
+
+    Takes role_dir_abs, the absolute path to the role directory (e.g.
+    ``/home/user/.changelings/agent/thinking``), because Claude Code runs
+    from within the role directory and its project dir name is derived from
+    that path.
 
     Returns a hooks config dict with PreToolUse and PostToolUse entries that
     rsync the memory directory in the appropriate direction:
-    - PreToolUse: <role>/memory/ -> ~/.claude/projects/<project>/memory/
+    - PreToolUse: <role_dir>/memory/ -> ~/.claude/projects/<project>/memory/
       (ensures Claude sees the latest version-controlled memory)
-    - PostToolUse: ~/.claude/projects/<project>/memory/ -> <role>/memory/
+    - PostToolUse: ~/.claude/projects/<project>/memory/ -> <role_dir>/memory/
       (captures any memory Claude wrote back into version control)
     """
-    project_dir_name = compute_claude_project_dir_name(work_dir_abs)
-    quoted_work_memory = shlex.quote(f"{work_dir_abs}/{active_role}/memory")
+    # note that the ".parent" is necessary here--the git repo is what is tracked on the claude side
+    project_dir_name = compute_claude_project_dir_name(str(Path(role_dir_abs).parent))
+    quoted_work_memory = shlex.quote(f"{role_dir_abs}/memory")
     quoted_project_dir_name = shlex.quote(project_dir_name)
     project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
 
@@ -834,6 +799,7 @@ def build_memory_sync_hooks_config(work_dir_abs: str, active_role: str) -> dict[
         "hooks": {
             "PreToolUse": [
                 {
+                    "matcher": "Read",
                     "hooks": [
                         {
                             "type": "command",
@@ -844,6 +810,7 @@ def build_memory_sync_hooks_config(work_dir_abs: str, active_role: str) -> dict[
             ],
             "PostToolUse": [
                 {
+                    "matcher": "Write|Edit",
                     "hooks": [
                         {
                             "type": "command",

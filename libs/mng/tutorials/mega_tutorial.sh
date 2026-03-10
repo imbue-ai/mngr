@@ -11,21 +11,15 @@ set -euo pipefail
 
 ## BASIC CREATION
 
-# running mng is strictly better than running claude! It's less letters to type :-D
+# running mng create is strictly better than running claude! It's less letters to type :-D
 # running this command launches claude (Claude Code) immediately *in a new worktree*
-mng
-# that happens because the defaults are the following: command=create, agent=claude, provider=local, project=current dir
+mng create
+# the defaults are the following: agent=claude, provider=local, project=current dir
 
 # if you want the default behavior of claude (starting in-place), you can specify that:
-mng --in-place
+mng create --in-place
 # mng defaults to creating a new worktree for each agent because the whole point of mng is to let you run multiple agents in parallel.
 # without creating a new worktree for each, they will make conflicting changes with one another.
-
-# running this:
-mng
-
-# is really just the same thing as this:
-mng create
 
 # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
 mng create my-task
@@ -93,22 +87,23 @@ mng create my-task --source-path /tmp/my_random_folder --command python -- scrip
 mng create my-task
 git branch | grep mng/my-task
 
-# --new-branch-prefix controls the prefix for auto-generated branch names (default: mng/)
-mng create my-task --new-branch-prefix "feature/"
+# --branch controls branch creation. the default is :mng/* which creates a new branch named mng/{agent_name}
+# you can change the pattern (the * is replaced by the agent name):
+mng create my-task --branch ":feature/*"
 git branch | grep feature/my-task
 
 # you can also specify a different base branch (instead of the current branch):
-mng create my-task --base-branch main
+mng create my-task --branch "main:mng/*"
 
 # or set the new branch name explicitly:
-mng create my-task --new-branch feature/my-task
+mng create my-task --branch ":feature/my-task"
 
 # you can create a copy instead of a worktree:
 mng create my-task --copy
 # that is used by default if you're not in a git repo
 
-# you can disable new branch creation entirely with --no-new-branch (requires --in-place or --copy due to how worktrees work, and --in-place implies --no-new-branch):
-mng create my-task --copy --no-new-branch
+# you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
+mng create my-task --copy --branch main
 
 # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
 mng create my-task --clone

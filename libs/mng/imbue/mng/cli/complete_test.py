@@ -8,6 +8,8 @@ from imbue.mng.cli.complete import _filter_aliases
 from imbue.mng.cli.complete import _get_completions
 from imbue.mng.cli.complete import _read_agent_names
 from imbue.mng.cli.complete import _read_cache
+from imbue.mng.cli.complete import _read_git_branches
+from imbue.mng.utils.testing import run_git_command
 from imbue.mng.utils.testing import write_discovery_snapshot_to_path
 
 
@@ -31,6 +33,7 @@ def _make_cache_data(
     flag_options_by_command: dict[str, list[str]] | None = None,
     option_choices: dict[str, list[str]] | None = None,
     agent_name_arguments: list[str] | None = None,
+    git_branch_options: list[str] | None = None,
 ) -> dict:
     """Build a command completions cache dict with sensible defaults."""
     return {
@@ -41,6 +44,7 @@ def _make_cache_data(
         "flag_options_by_command": flag_options_by_command or {},
         "option_choices": option_choices or {},
         "agent_name_arguments": agent_name_arguments or [],
+        "git_branch_options": git_branch_options or [],
     }
 
 
@@ -608,3 +612,88 @@ def test_get_completions_subcommand_flag_allows_positional(
     result = _get_completions()
 
     assert result == ["my-agent", "other-agent"]
+
+
+# =============================================================================
+# Git branch completion tests
+# =============================================================================
+
+
+def test_read_git_branches_returns_branches(temp_git_repo_cwd: Path) -> None:
+    """_read_git_branches should return branch names from a real git repo."""
+    run_git_command(temp_git_repo_cwd, "branch", "develop")
+    run_git_command(temp_git_repo_cwd, "branch", "feature/foo")
+
+    result = _read_git_branches()
+
+    assert "develop" in result
+    assert "feature/foo" in result
+
+
+def test_read_git_branches_returns_empty_outside_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_read_git_branches should return an empty list when not in a git repo."""
+    monkeypatch.chdir(tmp_path)
+
+    result = _read_git_branches()
+
+    assert result == []
+
+
+def test_get_completions_git_branch_option(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+    temp_git_repo_cwd: Path,
+) -> None:
+    """Completing values for a git branch option should offer branch names."""
+    run_git_command(temp_git_repo_cwd, "branch", "develop")
+    data = _make_cache_data(
+        commands=["create"],
+        options_by_command={"create": ["--base-branch", "--name"]},
+        git_branch_options=["create.--base-branch"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng create --base-branch ", "3")
+
+    result = _get_completions()
+
+    assert "develop" in result
+
+
+def test_get_completions_git_branch_option_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+    temp_git_repo_cwd: Path,
+) -> None:
+    """Completing values for a git branch option should filter by prefix."""
+    run_git_command(temp_git_repo_cwd, "branch", "develop")
+    run_git_command(temp_git_repo_cwd, "branch", "feature/foo")
+    data = _make_cache_data(
+        commands=["create"],
+        options_by_command={"create": ["--base-branch", "--name"]},
+        git_branch_options=["create.--base-branch"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng create --base-branch dev", "3")
+
+    result = _get_completions()
+
+    assert result == ["develop"]
+
+
+def test_get_completions_git_branch_option_not_triggered_for_other_options(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+    temp_git_repo_cwd: Path,
+) -> None:
+    """Options not in git_branch_options should not trigger git branch completion."""
+    data = _make_cache_data(
+        commands=["create"],
+        options_by_command={"create": ["--base-branch", "--name"]},
+        git_branch_options=["create.--base-branch"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng create --name ", "3")
+
+    result = _get_completions()
+
+    assert result == []

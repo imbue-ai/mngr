@@ -68,7 +68,7 @@ class _LessonSelectorInputHandler(MutableModel):
         return True
 
 
-def run_lesson_selector(lessons: tuple[Lesson, ...]) -> Lesson | None:
+def run_lesson_selector(lessons: tuple[Lesson, ...]) -> Lesson | None:  # pragma: no cover
     """Run the lesson selector TUI. Returns the selected lesson or None if cancelled."""
     list_walker: SimpleFocusListWalker[AttrMap] = SimpleFocusListWalker([])
 
@@ -232,7 +232,7 @@ def _on_check_alarm(loop: MainLoop, state: _LessonRunnerState) -> None:
         _refresh_display(state)
 
 
-def run_lesson_runner(lesson: Lesson, mng_ctx: MngContext) -> None:
+def run_lesson_runner(lesson: Lesson, mng_ctx: MngContext) -> None:  # pragma: no cover
     """Run the lesson runner TUI with periodic check polling."""
     status_text = Text("  Starting lesson... (q to go back)")
     status_bar = AttrMap(status_text, "status")

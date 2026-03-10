@@ -400,9 +400,6 @@ Code patterns that are very likely to cause runtime errors during execution.
 **Catch clauses that are too broad and could hide runtime errors:**
 - Almost all try/except blocks (for specific types of errors) should only span a single line, and should generally catch a single class of errors.
 
-**Look for platform-specific incompatibilities:**
-- Code that will fail when run on OSX or linux (it's ok to fail on Windows)
-
 Only flag issues where there is clear evidence the code will fail or cause serious problems. Avoid speculating about potential issues in well-established language patterns or standard library usage.
 
 ---

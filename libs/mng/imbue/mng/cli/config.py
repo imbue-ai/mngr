@@ -637,7 +637,7 @@ def _get_config_template() -> str:
 
 # Command defaults
 # [commands.create]
-# new_branch_prefix = "agent/"
+# branch = "main:agent/*"
 # connect = false
 
 # Logging configuration

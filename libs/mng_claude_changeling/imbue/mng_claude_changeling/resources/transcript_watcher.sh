@@ -21,15 +21,13 @@
 #
 # Environment:
 #   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-#   MNG_HOST_DIR         - host data directory (contains events/ for log output)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
-HOST_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/claude_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/common_transcript/events.jsonl"
-LOG_FILE="$HOST_DIR/events/logs/transcript_watcher/events.jsonl"
+LOG_FILE="$AGENT_DATA_DIR/events/logs/transcript_watcher/events.jsonl"
 
 # Read poll interval from settings.toml, fall back to default
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -338,8 +336,6 @@ CONVERT_SCRIPT
     local converted="${result:-0}"
     if [ "$converted" -gt 0 ] 2>/dev/null; then
         log "Converted $converted new event(s) -> events/common_transcript/events.jsonl"
-    else
-        log_debug "No new events to convert"
     fi
 }
 

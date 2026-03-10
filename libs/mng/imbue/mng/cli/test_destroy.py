@@ -39,8 +39,6 @@ def test_destroy_single_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -48,7 +46,11 @@ def test_destroy_single_agent(
         )
 
         assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
-        assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         destroy_result = cli_runner.invoke(
             destroy,
@@ -88,8 +90,6 @@ def test_destroy_single_agent_via_session(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -97,7 +97,11 @@ def test_destroy_single_agent_via_session(
         )
 
         assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
-        assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         destroy_result = cli_runner.invoke(
             destroy,
@@ -141,8 +145,6 @@ def test_destroy_with_confirmation(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -150,7 +152,11 @@ def test_destroy_with_confirmation(
         )
 
         assert create_result.exit_code == 0
-        assert tmux_session_exists(session_name)
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         # Stop the tmux session so the agent is not running (lifecycle state: STOPPED)
         subprocess.run(["tmux", "kill-session", "-t", session_name], check=True)
@@ -194,8 +200,6 @@ def test_destroy_blocks_running_agent_without_force(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -203,7 +207,11 @@ def test_destroy_blocks_running_agent_without_force(
         )
 
         assert create_result.exit_code == 0
-        assert tmux_session_exists(session_name)
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         # Attempt to destroy without --force (answer "y" to confirmation)
         destroy_result = cli_runner.invoke(
@@ -267,15 +275,17 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
-        assert tmux_session_exists(session_name)
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         # Try to destroy the real agent plus two non-existent ones
         destroy_result = cli_runner.invoke(
@@ -319,8 +329,6 @@ def test_destroy_dry_run(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -328,7 +336,11 @@ def test_destroy_dry_run(
         )
 
         assert create_result.exit_code == 0
-        assert tmux_session_exists(session_name)
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         destroy_result = cli_runner.invoke(
             destroy,
@@ -375,8 +387,6 @@ def test_destroy_multiple_agents(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
@@ -548,7 +558,6 @@ def test_destroy_remove_created_branch_deletes_branch(
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
-                "--await-ready",
                 "--worktree",
                 "--no-ensure-clean",
             ],
@@ -597,7 +606,6 @@ def test_destroy_without_remove_created_branch_leaves_branch(
                 "--source",
                 str(temp_git_repo),
                 "--no-connect",
-                "--await-ready",
                 "--worktree",
                 "--no-ensure-clean",
             ],
@@ -644,8 +652,6 @@ def test_destroy_remove_created_branch_graceful_when_no_branch(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,

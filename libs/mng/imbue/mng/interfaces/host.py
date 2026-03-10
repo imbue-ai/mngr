@@ -324,6 +324,11 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
+    def get_host_env_path(self) -> Path:
+        """Get the path to the host env file."""
+        ...
+
+    @abstractmethod
     def get_env_vars(self) -> dict[str, str]:
         """Return all environment variables configured for this host."""
         ...
@@ -341,6 +346,11 @@ class OnlineHostInterface(HostInterface, ABC):
     @abstractmethod
     def set_env_var(self, key: str, value: str) -> None:
         """Set a single environment variable to the given value."""
+        ...
+
+    @abstractmethod
+    def build_source_env_prefix(self, agent: AgentInterface) -> str:
+        """Build a shell prefix that sources host and agent env files if they exist."""
         ...
 
     # =========================================================================
@@ -488,17 +498,9 @@ class AgentGitOptions(FrozenModel):
         default=None,
         description="Starting branch for the agent (default: current branch)",
     )
-    is_new_branch: bool = Field(
-        default=False,
-        description="Whether to create a new branch",
-    )
     new_branch_name: str | None = Field(
         default=None,
-        description="Name for the new branch (implies is_new_branch)",
-    )
-    new_branch_prefix: str = Field(
-        default="mng/",
-        description="Prefix for auto-generated branch names",
+        description="Fully resolved name for the new branch, or None to use base_branch directly",
     )
     depth: int | None = Field(
         default=None,
@@ -728,10 +730,6 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Target path for the agent work_dir",
     )
-    is_copy_immediate: bool = Field(
-        default=False,
-        description="Whether to copy the source data immediately (before building the host) or after",
-    )
     initial_message: str | None = Field(
         default=None,
         description="Initial message to pipe to the agent on startup",
@@ -785,10 +783,6 @@ class NewHostBuildOptions(FrozenModel):
     snapshot: SnapshotName | None = Field(
         default=None,
         description="Use existing snapshot instead of building",
-    )
-    context_path: Path | None = Field(
-        default=None,
-        description="Build context directory [default: local .git root]",
     )
     build_args: tuple[str, ...] = Field(
         default=(),

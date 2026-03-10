@@ -10,7 +10,7 @@ The tool tracks which events have already been returned, so each call only
 returns new events since the last invocation. This makes conversations more
 efficient by avoiding redundant context.
 
-Settings are read from $MNG_AGENT_WORK_DIR/.changelings/settings.toml.
+Settings are read from $MNG_AGENT_WORK_DIR/changelings.toml.
 Missing file or keys fall back to built-in defaults.
 
 NOTE: _format_events() is duplicated in extra_context_tool.py because these
@@ -27,7 +27,7 @@ _TAIL_CHUNK_SIZE = 8192
 
 
 def _load_settings() -> dict:
-    """Load settings from .changelings/settings.toml in the agent's work dir.
+    """Load settings from changelings.toml in the agent's work dir.
 
     NOTE: This function is intentionally duplicated (as _load_extra_settings)
     in extra_context_tool.py. These files are deployed as standalone scripts
@@ -41,7 +41,7 @@ def _load_settings() -> dict:
     work_dir = os.environ.get("MNG_AGENT_WORK_DIR", "")
     if not work_dir:
         return {}
-    settings_path = pathlib.Path(work_dir) / ".changelings" / "settings.toml"
+    settings_path = pathlib.Path(work_dir) / "changelings.toml"
     if not settings_path.exists():
         return {}
     try:

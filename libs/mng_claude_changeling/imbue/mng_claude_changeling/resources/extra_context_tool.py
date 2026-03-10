@@ -5,8 +5,10 @@ deeper context information beyond what gather_context() returns.
 
 All event data follows the standard envelope format with timestamp, type,
 event_id, and source fields. Events are read from events/<source>/events.jsonl.
+Conversation metadata is read from the changeling_conversations table in the
+llm sqlite database at $LLM_USER_PATH/logs.db.
 
-Settings are read from $MNG_AGENT_WORK_DIR/.changelings/settings.toml.
+Settings are read from $MNG_AGENT_WORK_DIR/changelings.toml.
 Missing file or keys fall back to built-in defaults.
 
 NOTE: _format_extra_events() is duplicated in context_tool.py because these
@@ -17,13 +19,14 @@ where they cannot import from each other or from the mng_claude_changeling packa
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import time
 
 
 def _load_extra_settings() -> dict:
-    """Load settings from .changelings/settings.toml in the agent's work dir.
+    """Load settings from changelings.toml in the agent's work dir.
 
     NOTE: This is the same logic as _load_settings in context_tool.py,
     renamed to avoid duplicate tool registration by llm --functions.
@@ -36,7 +39,7 @@ def _load_extra_settings() -> dict:
     work_dir = os.environ.get("MNG_AGENT_WORK_DIR", "")
     if not work_dir:
         return {}
-    settings_path = pathlib.Path(work_dir) / ".changelings" / "settings.toml"
+    settings_path = pathlib.Path(work_dir) / "changelings.toml"
     if not settings_path.exists():
         return {}
     try:
@@ -50,6 +53,29 @@ def _load_extra_settings() -> dict:
 _SETTINGS = _load_extra_settings()
 _EXTRA = _SETTINGS.get("chat", {}).get("extra_context", {})
 
+
+def _get_mng_command() -> list[str]:
+    """Return the command for invoking the per-agent mng binary.
+
+    Looks for the mng binary in ``$UV_TOOL_BIN_DIR/mng``. Raises RuntimeError
+    if the binary cannot be found.
+
+    NOTE: This is a standalone copy of watcher_common.get_mng_command()
+    because this file is deployed to commands/llm_tools/ and cannot import
+    from the commands/ directory.
+    """
+    bin_dir = os.environ.get("UV_TOOL_BIN_DIR", "")
+    if not bin_dir:
+        raise RuntimeError("UV_TOOL_BIN_DIR is not set. The per-agent mng binary cannot be located without it.")
+    mng_bin = os.path.join(bin_dir, "mng")
+    if not os.path.isfile(mng_bin):
+        raise RuntimeError(
+            f"Per-agent mng binary not found at {mng_bin}. "
+            "Ensure the mng_recursive plugin is enabled and provisioning completed successfully."
+        )
+    return [mng_bin]
+
+
 _MNG_LIST_HARD_TIMEOUT = _EXTRA.get("mng_list_hard_timeout_seconds", 120)
 _MNG_LIST_WARN_THRESHOLD = _EXTRA.get("mng_list_warn_threshold_seconds", 15)
 _MAX_CONTENT_LENGTH = _EXTRA.get("max_content_length", 300)
@@ -62,7 +88,7 @@ def gather_extra_context() -> str:
     Returns a formatted string with:
     - Current mng agent list (active agents and their states)
     - Extended inner monologue history (from events/transcript/events.jsonl)
-    - Full conversation list (from events/conversations/events.jsonl)
+    - Full conversation list (from changeling_conversations table in the llm DB)
 
     Use this when you need deeper context than gather_context() provides.
     """
@@ -72,7 +98,7 @@ def gather_extra_context() -> str:
     try:
         start = time.monotonic()
         result = subprocess.run(
-            ["uv", "run", "mng", "list", "--json"],
+            [*_get_mng_command(), "list", "--json"],
             capture_output=True,
             text=True,
             timeout=_MNG_LIST_HARD_TIMEOUT,
@@ -89,7 +115,7 @@ def gather_extra_context() -> str:
             sections.append("## Current Agents\n(No agents or unable to retrieve)")
     except subprocess.TimeoutExpired:
         sections.append(f"## Current Agents\n(Timed out after {_MNG_LIST_HARD_TIMEOUT}s -- mng list may be hanging)")
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, RuntimeError):
         sections.append("## Current Agents\n(Unable to retrieve agent list)")
 
     agent_data_dir_str = os.environ.get("MNG_AGENT_STATE_DIR", "")
@@ -110,32 +136,34 @@ def gather_extra_context() -> str:
             except OSError as e:
                 print(f"WARNING: failed to read transcript file {transcript}: {e}", file=sys.stderr)
 
-        # Full conversation list (from events/conversations/events.jsonl)
-        conversations_file = agent_data_dir / "events" / "conversations" / "events.jsonl"
-        if conversations_file.exists():
-            try:
-                lines = conversations_file.read_text().strip().split("\n")
-                conversations: dict[str, dict[str, str]] = {}
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
+        # Full conversation list (from changeling_conversations table in llm DB)
+        llm_user_path = os.environ.get("LLM_USER_PATH", "")
+        if not llm_user_path:
+            sys.stderr.write("WARNING: LLM_USER_PATH not set, skipping conversation list\n")
+        else:
+            db_path = pathlib.Path(llm_user_path) / "logs.db"
+            if db_path.is_file():
+                try:
+                    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                     try:
-                        event = json.loads(line)
-                        conversation_id = event["conversation_id"]
-                        conversations[conversation_id] = event
-                    except (json.JSONDecodeError, KeyError) as e:
-                        print(f"WARNING: malformed conversation event: {e}", file=sys.stderr)
-                        continue
-                if conversations:
-                    conv_lines = []
-                    for conversation_id, event in conversations.items():
-                        conv_lines.append(
-                            f"  {conversation_id}: model={event.get('model', '?')}, created={event.get('timestamp', '?')}"
-                        )
-                    sections.append("## All Conversations\n" + "\n".join(conv_lines))
-            except OSError as e:
-                print(f"WARNING: failed to read conversations file {conversations_file}: {e}", file=sys.stderr)
+                        rows = conn.execute(
+                            "SELECT cc.conversation_id, c.model, cc.created_at "
+                            "FROM changeling_conversations cc "
+                            "LEFT JOIN conversations c ON cc.conversation_id = c.id"
+                        ).fetchall()
+                        if rows:
+                            conv_lines = []
+                            for conversation_id, model, created_at in rows:
+                                conv_lines.append(
+                                    f"  {conversation_id}: model={model or '?'}, created={created_at or '?'}"
+                                )
+                            sections.append("## All Conversations\n" + "\n".join(conv_lines))
+                    except sqlite3.Error as e:
+                        print(f"WARNING: failed to query changeling_conversations: {e}", file=sys.stderr)
+                    finally:
+                        conn.close()
+                except (sqlite3.Error, OSError) as e:
+                    print(f"WARNING: failed to open llm database: {e}", file=sys.stderr)
 
     return "\n\n".join(sections) if sections else "No extra context available."
 

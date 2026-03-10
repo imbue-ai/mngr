@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 from collections.abc import Callable
 from collections.abc import Hashable
 from concurrent.futures import Future
@@ -37,10 +38,11 @@ from imbue.mng_kanpan.data_types import CheckStatus
 from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
 
-REFRESH_INTERVAL_SECONDS: int = 600  # 10 minutes
+DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
 
 SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 SPINNER_INTERVAL_SECONDS: float = 0.15
@@ -117,16 +119,28 @@ _BUILTIN_COMMAND_KEY_REFRESH = "r"
 _BUILTIN_COMMAND_KEY_PUSH = "p"
 _BUILTIN_COMMAND_KEY_DELETE = "d"
 _BUILTIN_COMMAND_KEY_MUTE = "m"
+_BUILTIN_COMMAND_KEY_UNMARK = "u"
+_BUILTIN_COMMAND_KEY_EXECUTE = "x"
 
 _BUILTIN_COMMANDS: dict[str, CustomCommand] = {
     _BUILTIN_COMMAND_KEY_REFRESH: CustomCommand(name="refresh"),
-    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="push"),
-    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="delete"),
+    _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
+    _BUILTIN_COMMAND_KEY_DELETE: CustomCommand(name="mark delete", markable="light red"),
     _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="mute"),
+    _BUILTIN_COMMAND_KEY_UNMARK: CustomCommand(name="unmark"),
+    _BUILTIN_COMMAND_KEY_EXECUTE: CustomCommand(name="execute"),
 }
 
+_DEFAULT_MARK_COLOR = "light cyan"
+
 # All attributes that can appear in agent lines and need focus variants
-_AGENT_LINE_ATTRS = ("state_running", "state_attention", "check_failing", "check_pending", "muted")
+_AGENT_LINE_ATTRS = (
+    "state_running",
+    "state_attention",
+    "check_failing",
+    "check_pending",
+    "muted",
+)
 
 # Column layout configuration
 _COL_DIVIDER_CHARS = 2
@@ -161,13 +175,12 @@ class _KanpanState(MutableModel):
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
     refresh_future: Future[BoardSnapshot] | None = None
-    delete_future: Future[subprocess.CompletedProcess[str]] | None = None
-    deleting_agent_name: AgentName | None = None
-    # Set when awaiting delete confirmation (press d again to confirm, anything else to cancel)
-    pending_delete_name: AgentName | None = None
-    push_future: Future[subprocess.CompletedProcess[str]] | None = None
-    pushing_agent_name: AgentName | None = None
     executor: ThreadPoolExecutor | None = None
+    # Dired-style marks: agents flagged for batch operations, keyed by command key
+    marks: dict[AgentName, str] = {}
+    # Active batch execution state
+    executing: bool = False
+    execute_status: str = ""
     # Maps list walker index -> AgentBoardEntry for selectable agent entries
     index_to_entry: dict[int, AgentBoardEntry] = {}
     list_walker: Any = None  # SimpleFocusListWalker, set during display build
@@ -177,6 +190,19 @@ class _KanpanState(MutableModel):
     steady_footer_text: str = "  Loading..."
     # All commands (builtins merged with user config), keyed by trigger key
     commands: dict[str, CustomCommand] = {}
+    # Monotonic timestamp of the last completed refresh (for cooldown logic)
+    last_refresh_time: float = 0.0
+    # Whether the current in-flight refresh is local-only (no GitHub API)
+    refresh_is_local_only: bool = False
+    # Handle for the pending deferred refresh alarm (None if no alarm is pending)
+    deferred_refresh_alarm: Any = None
+    # Monotonic time the deferred refresh is scheduled to fire
+    deferred_refresh_fire_at: float = 0.0
+    # Cooldown durations (loaded from plugin config)
+    refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
+    retry_cooldown_seconds: float = 60.0
+    # Palette attr names for mark indicators (e.g. "mark_d", "mark_p")
+    mark_attr_names: tuple[str, ...] = ()
 
 
 class _KanpanInputHandler(MutableModel):
@@ -188,19 +214,14 @@ class _KanpanInputHandler(MutableModel):
         """Handle keyboard input. Returns True if handled, None to pass through."""
         if isinstance(key, tuple):
             return None
-        # Handle pending delete confirmation
-        if self.state.pending_delete_name is not None:
-            if key in ("y", "Y"):
-                _confirm_delete(self.state)
-            else:
-                _cancel_delete(self.state)
-            return True
-        if key in ("q", "Q", "ctrl c"):
+        if key in ("q", "ctrl c"):
             raise ExitMainLoop()
-        # Look up command by key (case-insensitive)
-        cmd = self.state.commands.get(key.lower())
+        if key == "U":
+            _unmark_all(self.state)
+            return True
+        cmd = self.state.commands.get(key)
         if cmd is not None:
-            _dispatch_command(self.state, key.lower(), cmd)
+            _dispatch_command(self.state, key, cmd)
             return True
         if key == "up":
             if _is_focus_on_first_selectable(self.state):
@@ -243,7 +264,7 @@ def _get_focused_entry(state: _KanpanState) -> AgentBoardEntry | None:
     return state.index_to_entry.get(focus_index)
 
 
-def _run_destroy(agent_name: str) -> subprocess.CompletedProcess[str]:
+def _run_destroy(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Run mng destroy in a subprocess. Called from a background thread."""
     return subprocess.run(
         ["mng", "destroy", agent_name, "--force"],
@@ -253,101 +274,7 @@ def _run_destroy(agent_name: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _is_safe_to_delete(entry: AgentBoardEntry) -> bool:
-    """Check if an agent can be deleted without confirmation.
-
-    Agents with a merged PR are safe to delete. All others require confirmation.
-    """
-    return entry.pr is not None and entry.pr.state == PrState.MERGED
-
-
-def _delete_focused_agent(state: _KanpanState) -> None:
-    """Delete the focused agent, with confirmation if PR is not merged."""
-    if state.delete_future is not None:
-        return  # Already deleting
-    entry = _get_focused_entry(state)
-    if entry is None:
-        return
-
-    if _is_safe_to_delete(entry):
-        _execute_delete(state, entry.name)
-    else:
-        state.pending_delete_name = entry.name
-        state.footer_left_text.set_text(
-            f"  Delete {entry.name}? PR not merged. Press y to confirm, any other key to cancel"
-        )
-        state.footer_left_attr.set_attr_map({None: "notification"})
-
-
-def _confirm_delete(state: _KanpanState) -> None:
-    """Confirm a pending delete."""
-    agent_name = state.pending_delete_name
-    state.pending_delete_name = None
-    state.footer_left_attr.set_attr_map({None: "footer"})
-    if agent_name is not None:
-        _execute_delete(state, agent_name)
-
-
-def _cancel_delete(state: _KanpanState) -> None:
-    """Cancel a pending delete."""
-    state.pending_delete_name = None
-    _restore_footer(state)
-
-
-def _execute_delete(state: _KanpanState, agent_name: AgentName) -> None:
-    """Execute the actual deletion of an agent."""
-    if state.executor is None:
-        state.executor = ThreadPoolExecutor(max_workers=1)
-
-    state.deleting_agent_name = agent_name
-    state.footer_left_text.set_text(f"  Deleting {agent_name}...")
-    state.delete_future = state.executor.submit(_run_destroy, str(agent_name))
-
-    if state.loop is not None:
-        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_delete_poll, state)
-
-
-def _on_delete_poll(loop: MainLoop, state: _KanpanState) -> None:
-    """Poll for delete completion."""
-    if state.delete_future is None:
-        return
-
-    if state.delete_future.done():
-        _finish_delete(loop, state)
-        return
-
-    # Show spinner while deleting
-    frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    state.footer_left_text.set_text(f"  Deleting {state.deleting_agent_name} {frame_char}")
-    state.spinner_index += 1
-    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_delete_poll, state)
-
-
-def _finish_delete(loop: MainLoop, state: _KanpanState) -> None:
-    """Complete a background deletion."""
-    if state.delete_future is None:
-        return
-
-    agent_name = state.deleting_agent_name
-    try:
-        result = state.delete_future.result()
-        if result.returncode == 0:
-            _show_transient_message(state, f"  Deleted {agent_name}")
-        else:
-            stderr = result.stderr.strip()
-            _show_transient_message(state, f"  Failed to delete {agent_name}: {stderr}")
-    except Exception as e:
-        _show_transient_message(state, f"  Failed to delete {agent_name}: {e}")
-    finally:
-        state.delete_future = None
-        state.deleting_agent_name = None
-
-    # Trigger a refresh to update the board
-    if state.refresh_future is None:
-        _start_refresh(loop, state)
-
-
-def _run_git_push(work_dir: str) -> subprocess.CompletedProcess[str]:
+def _run_git_push(work_dir: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Run git push in an agent's work_dir. Called from a background thread."""
     return subprocess.run(
         ["git", "push", "-u", "origin", "HEAD"],
@@ -358,64 +285,243 @@ def _run_git_push(work_dir: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _push_focused_agent(state: _KanpanState) -> None:
-    """Start async push of the currently focused agent's branch."""
-    if state.push_future is not None:
-        return  # Already pushing
-    entry = _get_focused_entry(state)
+def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None) -> None:
+    """Update the mark indicator on a single row without rebuilding the display."""
+    if state.list_walker is None:
+        return
+    entry = state.index_to_entry.get(walker_idx)
     if entry is None:
         return
-    if entry.work_dir is None:
+    section = _classify_entry(entry)
+    name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
+    if section == BoardSection.MUTED:
+        name_markup = _flatten_markup_to_muted(name_markup)
+    attr_map_widget = state.list_walker[walker_idx]
+    row: _SelectableRow = attr_map_widget.original_widget
+    name_text: Text = row.contents[0][0]
+    name_text.set_text(name_markup)
+
+
+def _toggle_mark(state: _KanpanState, key: str) -> None:
+    """Toggle a dired-style mark on the focused agent."""
+    if state.list_walker is None:
+        return
+    _, focus_idx = state.list_walker.get_focus()
+    if focus_idx is None:
+        return
+    entry = state.index_to_entry.get(focus_idx)
+    if entry is None:
+        return
+
+    if key == _BUILTIN_COMMAND_KEY_PUSH and entry.work_dir is None:
         _show_transient_message(state, f"  Cannot push: {entry.name} has no local work_dir")
         return
+
+    existing = state.marks.get(entry.name)
+    if existing == key:
+        del state.marks[entry.name]
+        new_mark = None
+    else:
+        state.marks[entry.name] = key
+        new_mark = key
+
+    _update_row_mark(state, focus_idx, new_mark)
+    _update_mark_count_footer(state)
+
+
+def _unmark_focused(state: _KanpanState) -> None:
+    """Remove any mark from the focused agent."""
+    if state.list_walker is None:
+        return
+    _, focus_idx = state.list_walker.get_focus()
+    if focus_idx is None:
+        return
+    entry = state.index_to_entry.get(focus_idx)
+    if entry is None:
+        return
+    if entry.name in state.marks:
+        del state.marks[entry.name]
+        _update_row_mark(state, focus_idx, None)
+        _update_mark_count_footer(state)
+
+
+def _unmark_all(state: _KanpanState) -> None:
+    """Remove all marks."""
+    if not state.marks:
+        return
+    # Update each marked row's display before clearing
+    marked_names = set(state.marks.keys())
+    state.marks.clear()
+    for idx, entry in state.index_to_entry.items():
+        if entry.name in marked_names:
+            _update_row_mark(state, idx, None)
+    _update_mark_count_footer(state)
+
+
+def _update_mark_count_footer(state: _KanpanState) -> None:
+    """Update the footer to show the count of marked agents."""
+    if not state.marks:
+        _restore_footer(state)
+        return
+    counts: dict[str, int] = {}
+    for mark_key in state.marks.values():
+        counts[mark_key] = counts.get(mark_key, 0) + 1
+    parts = []
+    for mark_key, count in sorted(counts.items()):
+        cmd = state.commands.get(mark_key)
+        label = cmd.name if cmd else mark_key
+        parts.append(f"{count} {label}")
+    state.footer_left_text.set_text(f"  Marked: {', '.join(parts)}  (x to execute, U to unmark all)")
+    state.footer_left_attr.set_attr_map({None: "footer"})
+
+
+def _execute_marks(state: _KanpanState) -> None:
+    """Execute all pending marks immediately."""
+    if not state.marks or state.executing:
+        return
+    _start_batch_execution(state)
+
+
+class _BatchWorkItem(NamedTuple):
+    name: AgentName
+    key: str
+    cmd: CustomCommand
+    entry: AgentBoardEntry | None
+
+
+def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.CompletedProcess[str]:
+    """Run a shell command with MNG_AGENT_NAME set. Called from a background thread."""
+    env = {**os.environ, "MNG_AGENT_NAME": agent_name}
+    return subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+
+
+def _start_batch_execution(state: _KanpanState) -> None:
+    """Begin executing all marked operations sequentially."""
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
-    state.pushing_agent_name = entry.name
-    state.footer_left_text.set_text(f"  Pushing {entry.name}...")
-    state.push_future = state.executor.submit(_run_git_push, str(entry.work_dir))
+    state.executing = True
+    state.spinner_index = 0
 
-    if state.loop is not None:
-        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_push_poll, state)
+    entries_by_name: dict[AgentName, AgentBoardEntry] = {}
+    if state.snapshot is not None:
+        entries_by_name = {e.name: e for e in state.snapshot.entries}
+
+    work: list[_BatchWorkItem] = []
+    for name, mark_key in state.marks.items():
+        cmd = state.commands.get(mark_key)
+        if cmd is not None:
+            work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
+
+    _execute_next_in_batch(state, work, [], 0)
 
 
-def _on_push_poll(loop: MainLoop, state: _KanpanState) -> None:
-    """Poll for push completion."""
-    if state.push_future is None:
+def _submit_batch_item(
+    executor: ThreadPoolExecutor, item: _BatchWorkItem
+) -> Future[subprocess.CompletedProcess[str]] | None:
+    """Submit a single batch work item to the executor. Returns None if the item can't be executed."""
+    if item.key == _BUILTIN_COMMAND_KEY_DELETE:
+        return executor.submit(_run_destroy, str(item.name))
+    if item.key == _BUILTIN_COMMAND_KEY_PUSH:
+        if item.entry is None or item.entry.work_dir is None:
+            return None
+        return executor.submit(_run_git_push, str(item.entry.work_dir))
+    if item.cmd.command:
+        return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
+    return None
+
+
+def _execute_next_in_batch(
+    state: _KanpanState,
+    work: list[_BatchWorkItem],
+    results: list[str],
+    index: int,
+) -> None:
+    """Execute the next item in the batch work queue."""
+    if index >= len(work):
+        _finish_batch_execution(state, results)
         return
 
-    if state.push_future.done():
-        _finish_push(loop, state)
+    item = work[index]
+    state.execute_status = f"  [{index + 1}/{len(work)}] "
+
+    assert state.executor is not None
+    future = _submit_batch_item(state.executor, item)
+    if future is None:
+        results.append(f"{item.cmd.name} {item.name}: skipped (not executable)")
+        _execute_next_in_batch(state, work, results, index + 1)
+        return
+
+    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name}...")
+
+    if state.loop is not None:
+        state.loop.set_alarm_in(
+            SPINNER_INTERVAL_SECONDS,
+            _on_batch_item_poll,
+            (state, future, work, results, index, item),
+        )
+
+
+def _on_batch_item_poll(
+    loop: MainLoop,
+    data: tuple[
+        _KanpanState,
+        Future[subprocess.CompletedProcess[str]],
+        list[_BatchWorkItem],
+        list[str],
+        int,
+        _BatchWorkItem,
+    ],
+) -> None:
+    """Poll for completion of a single batch item."""
+    state, future, work, results, index, item = data
+
+    if future.done():
+        try:
+            result = future.result()
+            if result.returncode == 0:
+                results.append(f"{item.cmd.name} {item.name}: ok")
+                state.marks.pop(item.name, None)
+            else:
+                stderr = result.stderr.strip()
+                results.append(f"{item.cmd.name} {item.name}: failed ({stderr})")
+        except Exception as e:
+            results.append(f"{item.cmd.name} {item.name}: failed ({e})")
+
+        _execute_next_in_batch(state, work, results, index + 1)
         return
 
     frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    state.footer_left_text.set_text(f"  Pushing {state.pushing_agent_name} {frame_char}")
+    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name} {frame_char}")
     state.spinner_index += 1
-    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_push_poll, state)
+    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
 
 
-def _finish_push(loop: MainLoop, state: _KanpanState) -> None:
-    """Complete a background push."""
-    if state.push_future is None:
-        return
+def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
+    """Complete batch execution and show summary."""
+    state.executing = False
+    state.execute_status = ""
 
-    agent_name = state.pushing_agent_name
-    try:
-        result = state.push_future.result()
-        if result.returncode == 0:
-            _show_transient_message(state, f"  Pushed {agent_name}")
-        else:
-            stderr = result.stderr.strip()
-            _show_transient_message(state, f"  Failed to push {agent_name}: {stderr}")
-    except Exception as e:
-        _show_transient_message(state, f"  Failed to push {agent_name}: {e}")
-    finally:
-        state.push_future = None
-        state.pushing_agent_name = None
+    ok_count = sum(1 for r in results if r.endswith(": ok"))
+    fail_count = len(results) - ok_count
 
-    # Trigger a refresh to update the board
-    if state.refresh_future is None:
-        _start_refresh(loop, state)
+    if fail_count == 0:
+        _show_transient_message(state, f"  Executed {ok_count} operation(s) successfully")
+    else:
+        _show_transient_message(state, f"  Executed: {ok_count} ok, {fail_count} failed")
+
+    _refresh_display(state)
+
+    # Local-only refresh to immediately show updated state (no cooldown needed)
+    if state.loop is not None:
+        _start_local_refresh(state.loop, state)
 
 
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
@@ -482,21 +588,24 @@ def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool]
 
 
 def _dispatch_command(state: _KanpanState, key: str, cmd: CustomCommand) -> None:
-    """Dispatch a command by key. Routes to builtins or runs shell commands."""
+    """Dispatch a command by key. Routes to builtins, markable commands, or immediate shell commands."""
     if key == _BUILTIN_COMMAND_KEY_REFRESH and not cmd.command:
-        if state.refresh_future is None and state.loop is not None:
+        if state.loop is not None and state.refresh_future is None:
             _start_refresh(state.loop, state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_PUSH and not cmd.command:
-        _push_focused_agent(state)
-        return
-    if key == _BUILTIN_COMMAND_KEY_DELETE and not cmd.command:
-        _delete_focused_agent(state)
         return
     if key == _BUILTIN_COMMAND_KEY_MUTE and not cmd.command:
         _mute_focused_agent(state)
         return
-    # User-defined shell command
+    if key == _BUILTIN_COMMAND_KEY_UNMARK and not cmd.command:
+        _unmark_focused(state)
+        return
+    if key == _BUILTIN_COMMAND_KEY_EXECUTE and not cmd.command:
+        _execute_marks(state)
+        return
+    if cmd.markable:
+        _toggle_mark(state, key)
+        return
+    # Immediate shell command
     if cmd.command:
         _run_shell_command(state, cmd)
 
@@ -543,8 +652,8 @@ def _on_custom_command_poll(
                 _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {stderr}")
         except Exception as e:
             _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {e}")
-        if cmd.refresh_afterwards and state.refresh_future is None:
-            _start_refresh(loop, state)
+        if cmd.refresh_afterwards:
+            _start_local_refresh(loop, state)
     else:
         frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
         state.footer_left_text.set_text(f"  Running {cmd.name} on {agent_name} {frame_char}")
@@ -571,12 +680,69 @@ def _on_restore_footer(loop: MainLoop, state: _KanpanState) -> None:
     _restore_footer(state)
 
 
-def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a background refresh and begin the spinner animation."""
+def _request_refresh(loop: MainLoop, state: _KanpanState, cooldown_seconds: float) -> None:
+    """Request a refresh, subject to a cooldown period.
+
+    If enough time has passed since the last refresh, starts immediately.
+    Otherwise, schedules a deferred refresh for when the cooldown expires.
+    If a deferred refresh is already pending but the new request would fire
+    sooner (e.g. manual refresh with a shorter cooldown), the old alarm is
+    replaced.
+    """
+    if state.refresh_future is not None:
+        return
+    elapsed = time.monotonic() - state.last_refresh_time
+    remaining = cooldown_seconds - elapsed
+    if remaining <= 0:
+        _cancel_deferred_refresh(loop, state)
+        _start_refresh(loop, state)
+        return
+    fire_at = time.monotonic() + remaining
+    if state.deferred_refresh_alarm is not None:
+        if state.deferred_refresh_fire_at <= fire_at:
+            return
+        _cancel_deferred_refresh(loop, state)
+    state.deferred_refresh_fire_at = fire_at
+    state.deferred_refresh_alarm = loop.set_alarm_in(remaining, _on_deferred_refresh, state)
+
+
+def _cancel_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Cancel any pending deferred refresh alarm."""
+    if state.deferred_refresh_alarm is not None:
+        loop.remove_alarm(state.deferred_refresh_alarm)
+        state.deferred_refresh_alarm = None
+
+
+def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback for a deferred (cooldown-delayed) refresh."""
+    state.deferred_refresh_alarm = None
+    if state.refresh_future is None:
+        _start_refresh(loop, state)
+
+
+def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a local-only background refresh (no GitHub API calls).
+
+    Bypasses cooldown entirely since local state is cheap to fetch.
+    """
+    if state.refresh_future is not None:
+        return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
     state.footer_left_attr.set_attr_map({None: "footer"})
     state.spinner_index = 0
+    state.refresh_is_local_only = True
+    state.refresh_future = state.executor.submit(fetch_agent_snapshot, state.mng_ctx)
+    _schedule_spinner_tick(loop, state)
+
+
+def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start a full background refresh and begin the spinner animation."""
+    if state.executor is None:
+        state.executor = ThreadPoolExecutor(max_workers=1)
+    state.footer_left_attr.set_attr_map({None: "footer"})
+    state.spinner_index = 0
+    state.refresh_is_local_only = False
     state.refresh_future = state.executor.submit(fetch_board_snapshot, state.mng_ctx)
     _schedule_spinner_tick(loop, state)
 
@@ -607,12 +773,18 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     if state.refresh_future is None:
         return
 
+    was_local_only = state.refresh_is_local_only
+    failed = False
     try:
         new_snapshot = state.refresh_future.result()
-        if not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded:
+        should_carry_forward = was_local_only or (
+            not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded
+        )
+        if should_carry_forward and state.snapshot is not None:
             new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
         state.snapshot = new_snapshot
     except Exception as e:
+        failed = True
         logger.debug("Refresh failed: {}", e)
         if state.snapshot is not None:
             state.snapshot = BoardSnapshot(
@@ -623,18 +795,28 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
             )
     finally:
         state.refresh_future = None
+        state.refresh_is_local_only = False
+        # Only update last_refresh_time for full refreshes (so the full-refresh
+        # cooldown isn't affected by cheap local-only refreshes)
+        if not was_local_only:
+            state.last_refresh_time = time.monotonic()
 
     _refresh_display(state)
 
     now = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
     if state.snapshot is not None:
         elapsed = f"{state.snapshot.fetch_time_seconds:.1f}s"
-        state.steady_footer_text = f"  Last refresh: {now} (took {elapsed})  r: refresh"
+        state.steady_footer_text = f"  Last refresh: {now} (took {elapsed})"
     else:
-        state.steady_footer_text = f"  Last refresh: {now}  r: refresh"
+        state.steady_footer_text = f"  Last refresh: {now}"
     state.footer_left_text.set_text(state.steady_footer_text)
 
-    _schedule_next_refresh(loop, state)
+    if failed:
+        _request_refresh(loop, state, state.retry_cooldown_seconds)
+    elif was_local_only:
+        pass
+    else:
+        _schedule_next_refresh(loop, state)
 
 
 @pure
@@ -746,6 +928,28 @@ def _get_push_cell_text(entry: AgentBoardEntry) -> str:
     return f"[{entry.commits_ahead} unpushed]"
 
 
+def _flatten_markup_to_muted(
+    markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+) -> tuple[Hashable, str]:
+    """Flatten rich urwid text markup to a plain string wrapped in the 'muted' attribute."""
+    if isinstance(markup, list):
+        plain = "".join(seg if isinstance(seg, str) else seg[1] for seg in markup)
+    elif isinstance(markup, tuple):
+        plain = markup[1]
+    else:
+        plain = markup
+    return ("muted", plain)
+
+
+def _get_name_cell_markup(
+    entry: AgentBoardEntry, mark_key: str | None = None
+) -> str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]:
+    """Build urwid text markup for the name column cell, with optional mark indicator."""
+    if mark_key is not None:
+        return [(f"mark_{mark_key}", mark_key), f" {entry.name}"]
+    return f"  {entry.name}"
+
+
 def _get_pr_cell_text(entry: AgentBoardEntry) -> str:
     """Get plain text for the PR column cell."""
     if entry.pr is not None:
@@ -789,7 +993,7 @@ def _compute_board_column_widths(entries: tuple[AgentBoardEntry, ...]) -> dict[s
     """
     # For each fixed-width column, take the wider of the header and the widest cell value
     return {
-        defn.name: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries))
+        defn.name: max(len(defn.header), *(len(defn.text_fn(e)) for e in entries)) if entries else len(defn.header)
         for defn in _BOARD_COLUMN_DEFS
         if not defn.flexible
     }
@@ -806,16 +1010,27 @@ def _build_column_header(widths: dict[str, int]) -> Columns:
     return Columns(cols, dividechars=_COL_DIVIDER_CHARS)
 
 
-def _build_agent_row(entry: AgentBoardEntry, section: BoardSection, widths: dict[str, int]) -> _SelectableRow:
+def _build_agent_row(
+    entry: AgentBoardEntry,
+    section: BoardSection,
+    widths: dict[str, int],
+    mark: str | None = None,
+) -> _SelectableRow:
     """Build a columnar urwid widget for a single agent row.
 
-    Muted agents are rendered entirely in gray.
+    Muted agents are rendered entirely in gray. Mark indicators (d/p) replace
+    the leading spaces in the name column.
     """
-    raw_markup = {defn.name: defn.markup_fn(entry) for defn in _BOARD_COLUMN_DEFS}
+    raw_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
+        defn.name: defn.markup_fn(entry) for defn in _BOARD_COLUMN_DEFS
+    }
+    raw_markup["name"] = _get_name_cell_markup(entry, mark)
 
     # Muted agents: flatten all markup to gray
     if section == BoardSection.MUTED:
-        cell_markup = {k: ("muted", v[1] if isinstance(v, tuple) else v) for k, v in raw_markup.items()}
+        cell_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
+            k: _flatten_markup_to_muted(v) for k, v in raw_markup.items()
+        }
     else:
         cell_markup = raw_markup
 
@@ -845,6 +1060,8 @@ def _format_section_heading(section: BoardSection, count: int) -> list[str | tup
 @pure
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
+    marks: dict[AgentName, str] | None = None,
+    mark_attr_names: tuple[str, ...] = (),
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by PR state.
 
@@ -892,10 +1109,11 @@ def _build_board_widgets(
         has_content = True
 
         for entry in entries:
-            item = _build_agent_row(entry, section, col_widths)
+            mark = marks.get(entry.name) if marks else None
+            item = _build_agent_row(entry, section, col_widths, mark)
             idx = len(walker)
             focus_map: dict[str | None, str] = {None: "reversed"}
-            for attr in _AGENT_LINE_ATTRS:
+            for attr in _AGENT_LINE_ATTRS + mark_attr_names:
                 focus_map[attr] = f"{attr}_focus"
             walker.append(AttrMap(item, None, focus_map=focus_map))
             index_to_entry[idx] = entry
@@ -923,7 +1141,7 @@ def _refresh_display(state: _KanpanState) -> None:
     if focused_entry is not None:
         state.focused_agent_name = focused_entry.name
 
-    walker, state.index_to_entry = _build_board_widgets(state.snapshot)
+    walker, state.index_to_entry = _build_board_widgets(state.snapshot, state.marks or None, state.mark_attr_names)
     state.list_walker = walker
     state.frame.body = ListBox(walker)
 
@@ -937,7 +1155,7 @@ def _refresh_display(state: _KanpanState) -> None:
 
 def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Schedule the next auto-refresh alarm."""
-    loop.set_alarm_in(REFRESH_INTERVAL_SECONDS, _on_auto_refresh_alarm, state)
+    loop.set_alarm_in(state.refresh_interval_seconds, _on_auto_refresh_alarm, state)
 
 
 def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
@@ -972,14 +1190,39 @@ def _build_command_map(mng_ctx: MngContext) -> dict[str, CustomCommand]:
     return {key: cmd for key, cmd in commands.items() if cmd.enabled}
 
 
-def run_kanpan(mng_ctx: MngContext) -> None:
+@pure
+def _build_mark_palette(
+    commands: dict[str, CustomCommand],
+) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
+    """Build palette entries and attr names for markable commands.
+
+    Returns (palette_entries, mark_attr_names).
+    """
+    entries: list[tuple[str, str, str]] = []
+    attr_names: list[str] = []
+    for key, cmd in commands.items():
+        if not cmd.markable:
+            continue
+        color = cmd.markable if isinstance(cmd.markable, str) else _DEFAULT_MARK_COLOR
+        attr = f"mark_{key}"
+        entries.append((attr, color, ""))
+        entries.append((f"{attr}_focus", f"{color},standout", ""))
+        attr_names.append(attr)
+    return entries, tuple(attr_names)
+
+
+def run_kanpan(mng_ctx: MngContext) -> None:  # pragma: no cover
     """Run the kanpan TUI board."""
     commands = _build_command_map(mng_ctx)
+    plugin_config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
 
-    # Build footer keybindings (q: quit is always present, not in the command map)
-    keybinding_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items()]
-    keybinding_parts.append("q: quit")
-    keybindings = "  ".join(keybinding_parts) + "  "
+    # Build footer keybindings, visually separating mark-related from action commands
+    mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
+    mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
+    mark_parts.append("U: unmark all")
+    action_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if not cmd.markable and key not in mark_keys]
+    action_parts.append("q: quit")
+    keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
@@ -998,6 +1241,8 @@ def run_kanpan(mng_ctx: MngContext) -> None:
     initial_body = Filler(Pile([Text("Loading...")]), valign="top")
     frame = Frame(body=initial_body, header=header, footer=footer)
 
+    mark_palette_entries, mark_attr_names = _build_mark_palette(commands)
+
     state = _KanpanState(
         mng_ctx=mng_ctx,
         frame=frame,
@@ -1005,6 +1250,9 @@ def run_kanpan(mng_ctx: MngContext) -> None:
         footer_left_attr=footer_left_attr,
         footer_right=footer_right,
         commands=commands,
+        refresh_interval_seconds=plugin_config.refresh_interval_seconds,
+        retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
+        mark_attr_names=mark_attr_names,
     )
 
     input_handler = _KanpanInputHandler(state=state)
@@ -1012,7 +1260,7 @@ def run_kanpan(mng_ctx: MngContext) -> None:
     screen = Screen()
     screen.tty_signal_keys(intr="undefined")
 
-    loop = MainLoop(frame, palette=PALETTE, unhandled_input=input_handler, screen=screen)
+    loop = MainLoop(frame, palette=PALETTE + mark_palette_entries, unhandled_input=input_handler, screen=screen)
     state.loop = loop
 
     # Initial data load with spinner

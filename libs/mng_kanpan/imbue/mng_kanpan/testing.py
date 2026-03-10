@@ -29,6 +29,7 @@ def make_agent_details(
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
     work_dir: Path = Path("/tmp/test-work-dir"),
     provider_name: str = "local",
+    initial_branch: str | None = None,
 ) -> AgentDetails:
     """Create a minimal AgentDetails for testing."""
     return AgentDetails(
@@ -37,6 +38,7 @@ def make_agent_details(
         type="claude",
         command=CommandString("claude"),
         work_dir=work_dir,
+        initial_branch=initial_branch,
         create_time=datetime.now(tz=timezone.utc),
         start_on_boot=False,
         state=state,

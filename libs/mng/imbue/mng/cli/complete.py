@@ -11,6 +11,7 @@ Invoked as: python -m imbue.mng.cli.complete {zsh|bash}
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,6 +55,22 @@ def _read_agent_names() -> list[str]:
         return []
 
 
+def _read_git_branches() -> list[str]:
+    """Read local and remote git branch names via ``git for-each-ref``."""
+    try:
+        result = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/remotes/"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        return [line for line in result.stdout.splitlines() if line]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
 def _is_flag_option(word: str, flag_options: list[str]) -> bool:
     """Check if word is a known flag option.
 
@@ -94,6 +111,7 @@ def _get_completions() -> list[str]:
     flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
     option_choices: dict[str, list[str]] = cache.get("option_choices", {})
     agent_name_arguments: list[str] = cache.get("agent_name_arguments", [])
+    git_branch_options: list[str] = cache.get("git_branch_options", [])
 
     # Resolve the command and subcommand from the words already typed
     resolved_command: str | None = None
@@ -148,6 +166,9 @@ def _get_completions() -> list[str]:
         elif incomplete.startswith("--"):
             # Previous word is value-taking, but user started typing an option
             candidates = options_by_command.get(option_key, [])
+        elif choice_key in git_branch_options:
+            # Option whose value should complete against git branch names
+            candidates = _read_git_branches()
         else:
             # Previous word is value-taking, current word is its value -- no completions
             candidates = []

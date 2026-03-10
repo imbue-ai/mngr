@@ -13,6 +13,7 @@ from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.utils.testing import tmux_session_cleanup
+from imbue.mng.utils.testing import wait_for_agent_session
 
 
 def test_list_command_no_agents(
@@ -70,14 +71,13 @@ def test_list_command_with_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List agents
         result = cli_runner.invoke(
@@ -114,14 +114,13 @@ def test_list_command_json_format_with_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List agents in JSON format
         result = cli_runner.invoke(
@@ -159,14 +158,13 @@ def test_list_command_jsonl_format_with_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List agents in JSONL format
         result = cli_runner.invoke(
@@ -204,14 +202,13 @@ def test_list_command_with_include_filter(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with matching filter
         result = cli_runner.invoke(
@@ -248,14 +245,13 @@ def test_list_command_with_exclude_filter(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with exclusion filter
         result = cli_runner.invoke(
@@ -296,14 +292,13 @@ def test_list_command_with_host_provider_filter(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with host.provider filter - should find the agent
         result = cli_runner.invoke(
@@ -354,14 +349,13 @@ def test_list_command_with_host_name_filter(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with host.name filter - local host is named "@local"
         result = cli_runner.invoke(
@@ -428,14 +422,13 @@ def test_list_command_with_basic_fields(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with specific fields
         result = cli_runner.invoke(
@@ -477,14 +470,13 @@ def test_list_command_with_nested_fields(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with nested fields
         result = cli_runner.invoke(
@@ -526,14 +518,13 @@ def test_list_command_with_host_and_provider_fields(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with host.name and host.provider_name fields
         result = cli_runner.invoke(
@@ -577,14 +568,13 @@ def test_list_command_with_invalid_fields(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with invalid field
         result = cli_runner.invoke(
@@ -624,14 +614,13 @@ def test_list_command_with_running_filter_alias(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # Create the "active" file so the agent is considered RUNNING.
         # Without this file, the agent would be in WAITING state.
@@ -702,14 +691,13 @@ def test_list_command_with_local_filter_alias(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with --local should show the agent
         result = cli_runner.invoke(
@@ -746,14 +734,13 @@ def test_list_command_with_remote_filter_alias(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with --remote should NOT show the local agent
         result = cli_runner.invoke(
@@ -797,14 +784,13 @@ def test_list_command_with_limit(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_1.exit_code == 0
+            wait_for_agent_session(session_name_1)
 
             # Create second agent
             create_result_2 = cli_runner.invoke(
@@ -817,14 +803,13 @@ def test_list_command_with_limit(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_2.exit_code == 0
+            wait_for_agent_session(session_name_2)
 
             # List with --limit 1 should show only one agent
             result = cli_runner.invoke(
@@ -864,14 +849,13 @@ def test_list_command_with_limit_json_format(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with --limit 1 --format json
         result = cli_runner.invoke(
@@ -911,14 +895,13 @@ def test_list_command_with_sort_by_name(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_z.exit_code == 0
+            wait_for_agent_session(session_name_z)
 
             create_result_a = cli_runner.invoke(
                 create,
@@ -930,14 +913,13 @@ def test_list_command_with_sort_by_name(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_a.exit_code == 0
+            wait_for_agent_session(session_name_a)
 
             # List sorted by name ascending
             result = cli_runner.invoke(
@@ -982,14 +964,13 @@ def test_list_command_with_sort_descending(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_a.exit_code == 0
+            wait_for_agent_session(session_name_a)
 
             create_result_z = cli_runner.invoke(
                 create,
@@ -1001,14 +982,13 @@ def test_list_command_with_sort_descending(
                     "--source",
                     str(temp_work_dir),
                     "--no-connect",
-                    "--await-ready",
-                    "--no-copy-work-dir",
                     "--no-ensure-clean",
                 ],
                 obj=plugin_manager,
                 catch_exceptions=False,
             )
             assert create_result_z.exit_code == 0
+            wait_for_agent_session(session_name_z)
 
             # List sorted by name descending
             result = cli_runner.invoke(
@@ -1050,14 +1030,13 @@ def test_list_command_with_provider_filter(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with --provider local - should find the agent
         result = cli_runner.invoke(
@@ -1123,14 +1102,13 @@ def test_list_command_format_template_with_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0
+        wait_for_agent_session(session_name)
 
         # List with --format template string
         result = cli_runner.invoke(

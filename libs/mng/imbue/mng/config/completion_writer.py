@@ -60,6 +60,15 @@ _AGENT_NAME_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Options (keyed as "command.--option") whose values should complete against
+# git branch names. The lightweight completer reads this field to decide when
+# to offer git branch completions.
+_GIT_BRANCH_OPTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "create.--base-branch",
+    }
+)
+
 
 # =============================================================================
 # Cache writers
@@ -174,6 +183,13 @@ def write_cli_completions_cache(cli_group: click.Group) -> None:
             if group_name in canonical_names:
                 agent_name_args = agent_name_args | {sub_key}
 
+        # Include git branch options for commands that are actually registered
+        git_branch_opts: set[str] = set()
+        for opt_key in _GIT_BRANCH_OPTIONS:
+            cmd_name = opt_key.split(".")[0]
+            if cmd_name in canonical_names:
+                git_branch_opts.add(opt_key)
+
         cache_data: dict[str, object] = {
             "commands": all_command_names,
             "aliases": alias_to_canonical,
@@ -182,6 +198,7 @@ def write_cli_completions_cache(cli_group: click.Group) -> None:
             "flag_options_by_command": flag_options_by_command,
             "option_choices": option_choices,
             "agent_name_arguments": sorted(agent_name_args),
+            "git_branch_options": sorted(git_branch_opts),
         }
 
         cache_path = get_completion_cache_dir() / COMMAND_COMPLETIONS_CACHE_FILENAME

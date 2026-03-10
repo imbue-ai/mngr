@@ -78,8 +78,8 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I destroy all my agents?\n"
     "response: mng destroy --all --force\n\n"
     #
-    "user: How do I create an agent with environment secrets and GitHub SSH access?\n"
-    "response: mng create --env-file .env.secrets --known-host github.com\n\n"
+    "user: How do I create an agent with environment secrets?\n"
+    "response: mng create --env-file .env.secrets\n\n"
     #
     "user: How do I create an agent from a saved template?\n"
     "response: mng create --template gpu-heavy\n\n"

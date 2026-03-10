@@ -2629,6 +2629,7 @@ log "=== Shutdown script completed ==="
             type=agent_type,
             command=command,
             work_dir=Path(agent_data.get("work_dir", "/")),
+            initial_branch=agent_data.get("created_branch_name"),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=state,

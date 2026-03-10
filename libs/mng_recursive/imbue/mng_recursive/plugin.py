@@ -12,5 +12,5 @@ register_plugin_config("recursive", RecursivePluginConfig)
 
 @hookimpl
 def on_host_created(host: OnlineHostInterface, mng_ctx: MngContext) -> None:
-    """Inject mng config, settings, and dependencies into remote hosts when they are created."""
+    """Provision host-level mng prerequisites (deploy files, uv availability)."""
     provision_mng_on_host(host=host, mng_ctx=mng_ctx)

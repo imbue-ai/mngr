@@ -5,11 +5,13 @@ Syncs messages from the llm database to the standard event log at
 events/messages/events.jsonl. Uses watchdog for fast filesystem event
 detection, with periodic mtime-based polling as a safety net.
 
-Usage: python3 conversation_watcher.py
+Tracked conversations are read from the changeling_conversations table
+in the llm database (created during provisioning).
+
+Usage: mng changeling-conversation-watcher
 
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-  MNG_HOST_DIR         - host data directory (contains events/ for event and log output)
 """
 
 from __future__ import annotations
@@ -17,24 +19,15 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import sys
 from pathlib import Path
 
 from loguru import logger
 
-try:
-    from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
-    from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
-    from imbue.mng_claude_changeling.resources.watcher_common import require_env
-    from imbue.mng_claude_changeling.resources.watcher_common import run_watcher_loop
-    from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).parent))
-    from watcher_common import load_watchers_section  # type: ignore[no-redef]
-    from watcher_common import read_event_ids_from_jsonl  # type: ignore[no-redef]
-    from watcher_common import require_env  # type: ignore[no-redef]
-    from watcher_common import run_watcher_loop  # type: ignore[no-redef]
-    from watcher_common import setup_watcher_logging  # type: ignore[no-redef]
+from imbue.mng_claude_changeling.resources.watcher_common import load_watchers_section
+from imbue.mng_claude_changeling.resources.watcher_common import read_event_ids_from_jsonl
+from imbue.mng_claude_changeling.resources.watcher_common import require_env
+from imbue.mng_claude_changeling.resources.watcher_common import run_watcher_loop
+from imbue.mng_claude_changeling.resources.watcher_common import setup_watcher_logging
 
 
 def _load_poll_interval(agent_work_dir: Path) -> int:
@@ -44,37 +37,38 @@ def _load_poll_interval(agent_work_dir: Path) -> int:
 
 
 def _get_llm_db_path() -> Path:
-    """Locate the llm database file."""
+    """Locate the llm database file.
+
+    Requires LLM_USER_PATH to be set (always configured during provisioning).
+    """
     llm_user_path = os.environ.get("LLM_USER_PATH", "")
     if not llm_user_path:
-        llm_user_path = str(Path.home() / ".config" / "io.datasette.llm")
+        raise RuntimeError("LLM_USER_PATH must be set")
     return Path(llm_user_path) / "logs.db"
 
 
-def _get_tracked_conversation_ids(conversations_file: Path) -> set[str]:
-    """Read tracked conversation IDs from events/conversations/events.jsonl."""
-    tracked_conversation_ids: set[str] = set()
-    if not conversations_file.is_file():
-        return tracked_conversation_ids
+def _get_tracked_conversation_ids(db_path: Path) -> set[str]:
+    """Read tracked conversation IDs from the changeling_conversations table in the llm database."""
+    if not db_path.is_file():
+        return set()
     try:
-        with conversations_file.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    tracked_conversation_ids.add(json.loads(line)["conversation_id"])
-                except (json.JSONDecodeError, KeyError) as exc:
-                    logger.warning("Malformed conversation event line: {}", exc)
-                    continue
-    except OSError as exc:
-        logger.warning("Failed to read conversations file: {}", exc)
-    return tracked_conversation_ids
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("Cannot open database for tracked conversations: {}", exc)
+        return set()
+
+    try:
+        rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
+        return {row[0] for row in rows}
+    except sqlite3.Error as exc:
+        logger.debug("changeling_conversations table not available: {}", exc)
+        return set()
+    finally:
+        conn.close()
 
 
 def _sync_messages(
     db_path: Path,
-    conversations_file: Path,
     messages_file: Path,
 ) -> int:
     """Sync missing messages from the llm DB to events/messages/events.jsonl.
@@ -91,7 +85,7 @@ def _sync_messages(
         logger.debug("LLM database not found at {}", db_path)
         return 0
 
-    tracked_conversation_ids = _get_tracked_conversation_ids(conversations_file)
+    tracked_conversation_ids = _get_tracked_conversation_ids(db_path)
     if not tracked_conversation_ids:
         return 0
 
@@ -130,6 +124,20 @@ def _sync_messages(
         is_found_existing = False
 
         for row_id, ts, conversation_id, prompt, response in rows:
+            # llm live-chat inserts a preliminary row (prompt set, response
+            # is empty string "") for crash safety before streaming. It is
+            # deleted once the real response is logged. Skip these to avoid
+            # syncing duplicate user messages.
+            if prompt and response == "":
+                continue
+
+            # this happens when llm inject creates a message
+            # because this is created by the thinking agent itself, there's no need for these messages to be emitted.
+            if prompt == "...":
+                continue
+
+            # Sync user messages, but skip empty prompts (e.g. from llm inject
+            # where the agent injected its own message with prompt="" or "...")
             if prompt:
                 eid = f"{row_id}-user"
                 if eid in file_event_ids:
@@ -154,7 +162,11 @@ def _sync_messages(
                         )
                     )
 
-            if response:
+            # Skip assistant responses that are only whitespace. These are
+            # intermediate tool-call responses from llm live-chat's
+            # conversation.chain() -- the actual content comes in the
+            # final response of the chain.
+            if response and response.strip():
                 eid = f"{row_id}-assistant"
                 if eid in file_event_ids:
                     is_found_existing = True
@@ -201,13 +213,11 @@ def _sync_messages(
 def main() -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
-    host_dir = Path(require_env("MNG_HOST_DIR"))
 
-    conversations_file = agent_state_dir / "events" / "conversations" / "events.jsonl"
     messages_file = agent_state_dir / "events" / "messages" / "events.jsonl"
     messages_file.parent.mkdir(parents=True, exist_ok=True)
 
-    setup_watcher_logging("conversation_watcher", host_dir / "events" / "logs")
+    setup_watcher_logging("conversation_watcher", agent_state_dir / "events" / "logs")
 
     poll_interval = _load_poll_interval(agent_work_dir)
     db_path = _get_llm_db_path()
@@ -215,14 +225,13 @@ def main() -> None:
     logger.info("Conversation watcher started")
     logger.info("  Agent data dir: {}", agent_state_dir)
     logger.info("  LLM database: {}", db_path)
-    logger.info("  Conversations events: {}", conversations_file)
     logger.info("  Messages events: {}", messages_file)
     logger.info("  Poll interval: {}s", poll_interval)
 
-    watch_paths = [db_path, conversations_file]
+    watch_paths = [db_path]
 
     def on_tick() -> None:
-        synced_count = _sync_messages(db_path, conversations_file, messages_file)
+        synced_count = _sync_messages(db_path, messages_file)
         if synced_count > 0:
             logger.info("Synced {} new message event(s) -> events/messages/events.jsonl", synced_count)
         else:

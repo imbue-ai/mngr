@@ -12,7 +12,7 @@ class DefaultCommandGroup(click.Group):
     the arguments are forwarded to the default command.
 
     Subclasses can set `_default_command` to change the compile-time default
-    (defaults to `"create"`).
+    (defaults to `""`, i.e. no defaulting -- bare invocation shows help).
 
     Subclasses can also set `_config_key` to enable runtime configuration of
     the default via `[commands.<config_key>].default_subcommand` in config
@@ -22,7 +22,7 @@ class DefaultCommandGroup(click.Group):
     help / "No such command" instead).
     """
 
-    _default_command: str = "create"
+    _default_command: str = ""
     _config_key: str | None = None
 
     def make_context(
@@ -33,7 +33,9 @@ class DefaultCommandGroup(click.Group):
         **extra: Any,
     ) -> click.Context:
         if self._config_key is not None:
-            self._default_command = read_default_command(self._config_key)
+            configured = read_default_command(self._config_key)
+            if configured is not None:
+                self._default_command = configured
         return super().make_context(info_name, args, parent=parent, **extra)
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:

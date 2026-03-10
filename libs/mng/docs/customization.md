@@ -14,34 +14,34 @@
 
 ### Default Subcommands
 
-You can configure which subcommand runs when a command group is invoked with no recognized subcommand. By default, both `mng` and `mng snapshot` default to `create` when no subcommand is given (e.g., `mng my-task` is equivalent to `mng create my-task`).
+You can configure which subcommand runs when a command group is invoked with no recognized subcommand. By default, both `mng` and `mng snapshot` with no subcommand show help.
 
-**Example:**
+To restore the old behavior where `mng my-task` is equivalent to `mng create my-task`, set the default subcommand explicitly:
 
 ```toml
 # .mng/settings.toml
 
-# Running bare `mng` defaults to `mng list` instead of `mng create`
+# Running bare `mng` defaults to `mng create` (opt-in)
+[commands.mng]
+default_subcommand = "create"
+
+# Running bare `mng` defaults to `mng list` instead
 [commands.mng]
 default_subcommand = "list"
-
-# Running bare `mng snapshot` defaults to `mng snapshot create` (unchanged)
-[commands.snapshot]
-default_subcommand = "create"
 ```
 
-**Disabling the default:**
+**Disabling a configured default:**
 
-Set `default_subcommand` to an empty string to disable defaulting entirely. When disabled, running the group with no subcommand shows help, and unrecognized arguments produce an error instead of being forwarded.
+Set `default_subcommand` to an empty string to disable defaulting entirely. When disabled (or absent), running the group with no subcommand shows help, and unrecognized arguments produce an error instead of being forwarded.
 
 ```toml
 [commands.mng]
-default_subcommand = ""   # `mng` with no args shows help
+default_subcommand = ""   # explicitly disable (same as the built-in default)
 ```
 
 **Notes:**
 
-- If `default_subcommand` is absent from config, the groups default to `"create"`.
+- If `default_subcommand` is absent from config, both `mng` and `mng snapshot` show help (no defaulting).
 - The `default_subcommand` key can coexist with parameter defaults in the same `[commands.<name>]` section.
 - Config file precedence applies as usual: local config overrides project config, which overrides user config.
 

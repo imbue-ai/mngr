@@ -30,9 +30,11 @@ from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.main import cli
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
+from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import cleanup_tmux_session
 from imbue.mng.utils.testing import make_test_agent_details
 from imbue.mng.utils.testing import tmux_session_exists
+from imbue.mng.utils.testing import wait_for_agent_session
 
 # =============================================================================
 # CLI-level integration tests for connect command
@@ -109,8 +111,6 @@ def test_connect_via_cli_group(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
@@ -156,15 +156,17 @@ def test_connect_start_restarts_stopped_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0, f"Create failed with: {create_result.output}"
-        assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to exist"
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
 
         # Kill the tmux session to simulate a stopped agent
         cleanup_tmux_session(session_name)
@@ -210,14 +212,13 @@ def test_connect_no_start_raises_error_for_stopped_agent(
                 "--source",
                 str(temp_work_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
             ],
             obj=plugin_manager,
             catch_exceptions=False,
         )
         assert create_result.exit_code == 0, f"Create failed with: {create_result.output}"
+        wait_for_agent_session(session_name)
 
         # Kill the tmux session to simulate a stopped agent
         cleanup_tmux_session(session_name)

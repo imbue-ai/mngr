@@ -1836,7 +1836,7 @@ def test_create_work_dir_generates_new_branch(
     host_with_temp_dir: tuple[Host, Path],
     setup_git_config: None,
 ) -> None:
-    """Test that git transfer creates a new branch when is_new_branch is True."""
+    """Test that git transfer creates a new branch when new_branch_name is set."""
     host, temp_dir = host_with_temp_dir
 
     source_path = temp_dir / "source_new_branch"
@@ -1852,7 +1852,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/new-branch-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1860,7 +1860,7 @@ def test_create_work_dir_generates_new_branch(
     assert work_dir == target_path
     assert (work_dir / "file.txt").read_text() == "content"
 
-    # Check the branch name starts with test/
+    # Check the branch name
     result = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=work_dir,
@@ -1868,7 +1868,7 @@ def test_create_work_dir_generates_new_branch(
         text=True,
     )
     assert result.returncode == 0
-    assert result.stdout.strip().startswith("test/")
+    assert result.stdout.strip() == "test/new-branch-test"
 
 
 @pytest.mark.rsync
@@ -1900,7 +1900,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/origin-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1940,7 +1940,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/no-origin-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path

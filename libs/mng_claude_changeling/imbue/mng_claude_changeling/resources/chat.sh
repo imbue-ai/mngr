@@ -1,11 +1,9 @@
 #!/bin/bash
 # Chat wrapper for changeling conversations.
 #
-# Manages conversation threads backed by the `llm` CLI tool. Events are
-# written to the standard log structure: events/<source>/events.jsonl
-#
-# Event sources used:
-#   events/conversations/events.jsonl  - conversation lifecycle (created, model changed)
+# Manages conversation threads backed by the `llm` CLI tool. Conversation
+# metadata (tags, model, created_at) is stored in the changeling_conversations
+# table in the llm sqlite database at $LLM_USER_PATH/logs.db.
 #
 # Usage:
 #   chat --new [message]              Create a new conversation (user-initiated)
@@ -17,33 +15,38 @@
 #
 # Environment:
 #   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
-#   MNG_HOST_DIR         - host data directory (contains commands/)
+#   MNG_AGENT_STATE_DIR  - agent state directory (contains events/, commands/)
 #   MNG_AGENT_WORK_DIR   - agent work directory (contains talking/PROMPT.md)
+#   LLM_USER_PATH        - llm data directory (contains logs.db)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}"
-CONVERSATIONS_EVENTS="$AGENT_DATA_DIR/events/conversations/events.jsonl"
-LLM_TOOLS_DIR="${MNG_HOST_DIR:?MNG_HOST_DIR must be set}/commands/llm_tools"
+LLM_TOOLS_DIR="${MNG_AGENT_STATE_DIR}/commands/llm_tools"
 TALKING_PROMPT="${MNG_AGENT_WORK_DIR:-}/talking/PROMPT.md"
+
+# Path to the llm database (LLM_USER_PATH is always set during provisioning)
+if [ -z "${LLM_USER_PATH:-}" ]; then
+    echo "ERROR: LLM_USER_PATH must be set" >&2
+    exit 1
+fi
+_LLM_DB="${LLM_USER_PATH}/logs.db"
 
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="chat"
 _MNG_LOG_SOURCE="logs/chat"
-_MNG_LOG_FILE="${MNG_HOST_DIR}/events/logs/chat/events.jsonl"
+_MNG_LOG_FILE="${MNG_AGENT_STATE_DIR}/events/logs/chat/events.jsonl"
 # shellcheck source=../../../../mng/imbue/mng/resources/mng_log.sh
-source "$MNG_HOST_DIR/commands/mng_log.sh"
+source "$MNG_AGENT_STATE_DIR/commands/mng_log.sh"
 
 LOG_FILE="$_MNG_LOG_FILE"
+
+# set this so that we dont get back funny-looking echo output
+export LLM_MATCHED_RESPONSE="Thinking..."
 
 # Nanosecond-precision UTC timestamp in ISO 8601 format.
 iso_timestamp_ns() {
     date -u +"%Y-%m-%dT%H:%M:%S.%NZ"
-}
-
-# Generate a unique event ID (random UUID4 hex with evt- prefix)
-generate_event_id() {
-    echo "evt-$(head -c 16 /dev/urandom | xxd -p)"
 }
 
 # Log a message to the log file (not to stdout, since chat is interactive)
@@ -57,7 +60,7 @@ get_default_model() {
     local _model
     _model=$(python3 -c "
 import tomllib, pathlib, sys
-p = pathlib.Path('${MNG_AGENT_WORK_DIR:-}/.changelings/settings.toml')
+p = pathlib.Path('${MNG_AGENT_WORK_DIR:-}/changelings.toml')
 if p.exists():
     try:
         s = tomllib.loads(p.read_text())
@@ -80,27 +83,18 @@ generate_conversation_id() {
     echo "conv-$(date +%s)-$(head -c 4 /dev/urandom | xxd -p)"
 }
 
-# Append a conversation_created event to events/conversations/events.jsonl
-# Uses the standard envelope: timestamp, type, event_id, source + conversation fields
-# Optional 4th argument is a JSON object of tags (e.g. '{"daily":"2026-03-04"}')
-append_conversation_event() {
+# Insert a conversation record into the changeling_conversations table.
+# The model is not stored here -- it lives in the llm conversations table.
+# Args: conversation_id, [tags_json]
+# tags_json defaults to '{}' if not provided.
+insert_conversation_record() {
     local conversation_id="$1"
-    local model="$2"
-    local event_type="${3:-conversation_created}"
-    local tags="${4:-}"
-    local timestamp
-    timestamp=$(iso_timestamp_ns)
-    local event_id
-    event_id=$(generate_event_id)
-    mkdir -p "$(dirname "$CONVERSATIONS_EVENTS")"
-    if [ -n "$tags" ]; then
-        printf '{"timestamp":"%s","type":"%s","event_id":"%s","source":"conversations","conversation_id":"%s","model":"%s","tags":%s}\n' \
-            "$timestamp" "$event_type" "$event_id" "$conversation_id" "$model" "$tags" >> "$CONVERSATIONS_EVENTS"
-    else
-        printf '{"timestamp":"%s","type":"%s","event_id":"%s","source":"conversations","conversation_id":"%s","model":"%s"}\n' \
-            "$timestamp" "$event_type" "$event_id" "$conversation_id" "$model" >> "$CONVERSATIONS_EVENTS"
-    fi
-    log "Appended event: type=$event_type conversation_id=$conversation_id model=$model event_id=$event_id tags=$tags"
+    local tags="${2:-\{\}}"
+    local created_at
+    created_at=$(iso_timestamp_ns)
+
+    mng changelingdb insert "$_LLM_DB" "$conversation_id" "$tags" "$created_at"
+    log "Inserted conversation record: conversation_id=$conversation_id tags=$tags"
 }
 
 build_tool_args() {
@@ -166,7 +160,7 @@ new_conversation() {
     fi
 
     if [ "$as_agent" = true ]; then
-        append_conversation_event "$conversation_id" "$model" "conversation_created"
+        insert_conversation_record "$conversation_id" '{"name":"(new chat)"}'
         if [ -n "$message" ]; then
             log "Injecting agent message into conversation $conversation_id"
             llm inject --cid "$conversation_id" -m "$model" "$message"
@@ -179,27 +173,23 @@ new_conversation() {
         log "Starting live-chat session: model=$model tool_args='$tool_args'"
 
         # llm live-chat creates a conversation in the llm database. We need
-        # to register the correct conversation ID in our events file. Record
-        # the current max rowid so the background process can find the NEW
-        # conversation (rather than picking up a stale one from a prior session).
-        local _llm_db _max_rowid
-        _llm_db=$(llm logs path 2>/dev/null || echo "")
+        # to register it in changeling_conversations. Record the current max
+        # rowid so the background process can find the NEW conversation.
+        local _max_rowid
         _max_rowid=0
-        if [ -n "$_llm_db" ] && [ -f "$_llm_db" ]; then
-            _max_rowid=$(sqlite3 "$_llm_db" "SELECT COALESCE(MAX(rowid), 0) FROM conversations" 2>/dev/null || echo "0")
+        if [ -f "$_LLM_DB" ]; then
+            _max_rowid=$(mng changelingdb max-rowid "$_LLM_DB")
         fi
 
         (
             # Poll for a conversation created after we started (rowid > saved).
             for _i in $(seq 1 60); do
                 sleep 1
-                if [ -n "$_llm_db" ] && [ -f "$_llm_db" ]; then
-                    _new_conversation_id=$(sqlite3 "$_llm_db" \
-                        "SELECT id FROM conversations WHERE rowid > $_max_rowid ORDER BY rowid ASC LIMIT 1" \
-                        2>/dev/null || true)
+                if [ -f "$_LLM_DB" ]; then
+                    _new_conversation_id=$(mng changelingdb poll-new "$_LLM_DB" "$_max_rowid")
                     if [ -n "$_new_conversation_id" ]; then
-                        append_conversation_event "$_new_conversation_id" "$model" "conversation_created"
-                        log "Recorded conversation event for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
+                        insert_conversation_record "$_new_conversation_id" '{"name":"(new chat)"}'
+                        log "Recorded conversation for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
                         break
                     fi
                 fi
@@ -221,12 +211,12 @@ resume_conversation() {
 
     log "Resuming conversation: conversation_id=$conversation_id"
 
-    # Get the model from the latest event for this conversation
+    # Get the model from the changeling_conversations table
     local model
-    model=$(grep -F "\"conversation_id\":\"$conversation_id\"" "$CONVERSATIONS_EVENTS" 2>/dev/null \
-        | tail -1 \
-        | jq -r '.model' 2>/dev/null \
-        || get_default_model)
+    model=$(mng changelingdb lookup-model "$_LLM_DB" "$conversation_id")
+    if [ -z "$model" ]; then
+        model=$(get_default_model)
+    fi
 
     log "Resolved model for conversation $conversation_id: $model"
 
@@ -244,36 +234,54 @@ resume_conversation() {
 }
 
 list_conversations() {
-    if [ ! -f "$CONVERSATIONS_EVENTS" ]; then
+    if [ ! -f "$_LLM_DB" ]; then
         echo "No conversations yet."
         return 0
     fi
 
-    log "Listing conversations from $CONVERSATIONS_EVENTS"
+    # Check if the changeling_conversations table exists and has rows
+    local _row_count
+    _row_count=$(mng changelingdb count "$_LLM_DB")
+    if [ "$_row_count" = "0" ]; then
+        echo "No conversations yet."
+        return 0
+    fi
+
+    log "Listing conversations from $_LLM_DB"
 
     echo "Conversations:"
     echo "=============="
     python3 -c "
-import json, os, sys
+import json, sys, sqlite3
 from pathlib import Path
 
-events_file = '$CONVERSATIONS_EVENTS'
-messages_file = '${AGENT_DATA_DIR}/events/messages/events.jsonl'
+db_path = sys.argv[1]
+messages_file = sys.argv[2]
+
 conversations = {}
-line_num = 0
-for line in open(events_file):
-    line_num += 1
-    line = line.strip()
-    if not line:
-        continue
+try:
+    conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
     try:
-        event = json.loads(line)
-        conversation_id = event['conversation_id']
-        conversations[conversation_id] = event
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f'  WARNING: malformed line {line_num} in {events_file}: {e}', file=sys.stderr)
-        print(f'    line content: {line[:200]}', file=sys.stderr)
-        continue
+        rows = conn.execute(
+            'SELECT cc.conversation_id, c.model, cc.tags, cc.created_at '
+            'FROM changeling_conversations cc '
+            'LEFT JOIN conversations c ON cc.conversation_id = c.id'
+        ).fetchall()
+    finally:
+        conn.close()
+    for conversation_id, model, tags_json, created_at in rows:
+        try:
+            tags = json.loads(tags_json) if tags_json else {}
+        except json.JSONDecodeError:
+            tags = {}
+        conversations[conversation_id] = {
+            'conversation_id': conversation_id,
+            'model': model or '?',
+            'timestamp': created_at or '?',
+            'tags': tags,
+        }
+except (sqlite3.Error, OSError) as e:
+    print(f'WARNING: failed to read conversations from database: {e}', file=sys.stderr)
 
 # Find latest message timestamp per conversation from messages events
 updated_at = {}
@@ -293,19 +301,16 @@ if Path(messages_file).exists():
             print(f'WARNING: malformed message event line: {e}', file=sys.stderr)
             continue
 
-# Filter out internal conversations (tagged with 'internal')
-visible_conversations = {conversation_id: e for conversation_id, e in conversations.items() if 'internal' not in e.get('tags', {})}
-
-for conversation_id, event in visible_conversations.items():
+for conversation_id, event in conversations.items():
     event['updated_at'] = updated_at.get(conversation_id, event.get('timestamp', '?'))
 
-sorted_conversations = sorted(visible_conversations.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
+sorted_conversations = sorted(conversations.values(), key=lambda r: r.get('updated_at', ''), reverse=True)
 
 for event in sorted_conversations:
     tags = event.get('tags', {})
     tags_str = '  tags=' + json.dumps(tags) if tags else ''
     print(f\"  {event.get('conversation_id','?')}  model={event.get('model', '?')}  created_at={event.get('timestamp', '?')}  updated_at={event.get('updated_at', '?')}{tags_str}\")
-"
+" "$_LLM_DB" "${AGENT_DATA_DIR}/events/messages/events.jsonl"
 
     log "Listed conversations"
 }

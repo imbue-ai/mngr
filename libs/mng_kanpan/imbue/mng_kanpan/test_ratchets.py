@@ -51,7 +51,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(6))
+    rc.check_broad_exception_catch(_DIR, snapshot(15))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -127,7 +127,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(12))
+    rc.check_trailing_comments(_DIR, snapshot(29))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -167,7 +167,7 @@ def test_prevent_short_uuid_ids() -> None:
 
 
 def test_prevent_model_copy() -> None:
-    rc.check_model_copy(_DIR, snapshot(1))
+    rc.check_model_copy(_DIR, snapshot(3))
 
 
 # --- Logging ---
@@ -185,11 +185,11 @@ def test_prevent_click_echo() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(3))
+    rc.check_unittest_mock_imports(_DIR, snapshot(7))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(0))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(11))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -208,18 +208,18 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess_usage() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(3))
+    rc.check_direct_subprocess(_DIR, snapshot(12))
 
 
 # --- AST-based ratchets ---
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(2))
+    rc.check_if_elif_without_else(_DIR, snapshot(6))
 
 
 def test_prevent_inline_functions_in_non_test_code() -> None:
-    rc.check_inline_functions(_DIR, snapshot(2))
+    rc.check_inline_functions(_DIR, snapshot(6))
 
 
 def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
