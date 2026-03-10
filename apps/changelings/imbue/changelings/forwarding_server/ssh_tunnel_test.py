@@ -249,7 +249,7 @@ def test_relay_data_forwards_between_socket_pair() -> None:
 
 def test_tunnel_accept_loop_forwards_connections(short_tmp_path: Path) -> None:
     """The accept loop creates Unix sockets and forwards data through a mock transport."""
-    sock_path = short_tmp_path / "t.sock"
+    sock_path = short_tmp_path / "test.sock"
     shutdown_event = threading.Event()
 
     channel_remote, channel_local = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -285,7 +285,7 @@ def test_tunnel_accept_loop_forwards_connections(short_tmp_path: Path) -> None:
 
 def test_tunnel_accept_loop_handles_channel_open_failure(short_tmp_path: Path) -> None:
     """When open_channel fails, the accepted client socket is closed gracefully."""
-    sock_path = short_tmp_path / "t.sock"
+    sock_path = short_tmp_path / "fail.sock"
     shutdown_event = threading.Event()
 
     fake_transport = FakeParamikoTransport.create()
@@ -314,7 +314,7 @@ def test_tunnel_accept_loop_handles_channel_open_failure(short_tmp_path: Path) -
 
 def test_tunnel_accept_loop_shutdown_event_stops_loop(short_tmp_path: Path) -> None:
     """Setting the shutdown event causes the accept loop to exit."""
-    sock_path = short_tmp_path / "t.sock"
+    sock_path = short_tmp_path / "shutdown.sock"
     shutdown_event = threading.Event()
 
     fake_transport = FakeParamikoTransport.create()
