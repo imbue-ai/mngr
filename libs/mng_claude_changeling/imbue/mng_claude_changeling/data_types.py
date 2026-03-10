@@ -34,7 +34,7 @@ class MessageRole(NonEmptyStr):
 
 SOURCE_MESSAGES: Final[EventSource] = EventSource("messages")
 SOURCE_SCHEDULED: Final[EventSource] = EventSource("scheduled")
-SOURCE_MNG_AGENTS: Final[EventSource] = EventSource("mng_agents")
+SOURCE_MNG_AGENTS: Final[EventSource] = EventSource("mng/agents")
 SOURCE_STOP: Final[EventSource] = EventSource("stop")
 SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_DELIVERY_FAILURES: Final[EventSource] = EventSource("delivery_failures")
@@ -56,7 +56,7 @@ class MessageEvent(EventEnvelope):
 
 class ChangelingEvent(EventEnvelope):
     """A generic event with a data payload, used for sources like scheduled,
-    mng_agents, stop, and monitor.
+    mng/agents, stop, and monitor.
 
     The data field carries event-type-specific payload.
     """

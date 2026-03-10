@@ -14,7 +14,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.local_process import run_background
-from imbue.concurrency_group.test_utils import wait_interval
+from imbue.concurrency_group.test_utils import poll_until
 
 
 def test_run_background_simple_command() -> None:
@@ -106,9 +106,6 @@ def test_run_background_poll_and_is_finished() -> None:
     # Fast command
     process = run_background(["echo", "quick"])
 
-    # Initially might still be running
-    wait_interval(0.01)
-
     # Wait for completion
     process.wait(timeout=5.0)
 
@@ -140,9 +137,8 @@ def test_run_background_terminate() -> None:
     """Test terminating a background process."""
     process = run_background(["sleep", "10"])
 
-    # Process should be running
-    wait_interval(0.1)
-    assert not process.is_finished()
+    # Wait until the process is running
+    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
 
     # Terminate it
     process.terminate(force_kill_seconds=2.0)
@@ -224,15 +220,14 @@ def test_run_background_shutdown_event() -> None:
 
     process = run_background(["sleep", "10"], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
 
-    # Let it run briefly
-    wait_interval(0.05)
-    assert not process.is_finished()
+    # Wait until the process is running
+    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
 
     # Trigger shutdown
     shutdown_event.set()
 
-    # Wait for shutdown to complete
-    wait_interval(0.3)
+    # Wait for the process to actually complete
+    process.wait(timeout=5.0)
 
     # Process should be terminated
     assert process.is_finished()
@@ -252,15 +247,14 @@ def test_run_background_compound_shutdown_event() -> None:
         shutdown_timeout_sec=0.2,
     )
 
-    # Let it run briefly
-    wait_interval(0.05)
-    assert not process.is_finished()
+    # Wait until the process is running
+    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
 
     # Trigger one of the compound events
     event2.set()
 
-    # Wait for shutdown
-    wait_interval(0.3)
+    # Wait for the process to actually complete
+    process.wait(timeout=5.0)
 
     # Process should be terminated
     assert process.is_finished()
@@ -441,26 +435,23 @@ def test_run_background_thread_safety() -> None:
 
     def poll_thread() -> None:
         try:
-            for _ in range(5):
+            while not process.is_finished():
                 results["poll"].append(process.poll())
-                wait_interval(0.02)
         except Exception as e:
             errors.append(e)
 
     def check_thread() -> None:
         try:
-            for _ in range(5):
+            while not process.is_finished():
                 results["is_finished"].append(process.is_finished())
-                wait_interval(0.02)
         except Exception as e:
             errors.append(e)
 
     def read_thread() -> None:
         try:
-            for _ in range(3):
+            while not process.is_finished():
                 results["stdout"].append(process.read_stdout())
                 results["stderr"].append(process.read_stderr())
-                wait_interval(0.03)
         except Exception as e:
             errors.append(e)
 

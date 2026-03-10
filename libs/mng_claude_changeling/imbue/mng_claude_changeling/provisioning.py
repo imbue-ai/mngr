@@ -396,7 +396,7 @@ def create_event_log_directories(
     Creates directories for event sources (events/<source>/):
     - events/messages/           conversation messages
     - events/scheduled/          scheduled trigger events
-    - events/mng_agents/         agent state transitions
+    - events/mng/agents/         agent state transitions
     - events/stop/               agent stop events
     - events/monitor/            (future) monitor agent events
     - events/delivery_failures/  event delivery failure notifications
@@ -413,7 +413,7 @@ def create_event_log_directories(
     for source in (
         "messages",
         "scheduled",
-        "mng_agents",
+        "mng/agents",
         "stop",
         "monitor",
         "delivery_failures",
