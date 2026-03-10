@@ -1,0 +1,8 @@
+{
+    "enabled": true,
+    "extra_args": "",
+    "_examples": {
+        "extra_args_severity": "Only fix MAJOR and CRITICAL issues.",
+        "extra_args_tests": "Pay extra attention to whether the tests are rigorous and non-tautological."
+    }
+}

@@ -36,7 +36,7 @@ tip_hash=$(git rev-parse HEAD)
 Create a temporary worktree with a unique name so the analysis agent can read the pre-change codebase:
 
 ```bash
-worktree_path=".worktree/arch-verify-$(head -c 8 /dev/urandom | xxd -p)"
+worktree_path="/tmp/arch-verify-$(head -c 8 /dev/urandom | xxd -p)"
 git worktree add --detach $worktree_path $base_hash
 ```
 

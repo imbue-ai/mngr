@@ -1,0 +1,6 @@
+{
+    "include_tracked_sessions": true,
+    "include_current_session": true,
+    "include_all_agent_sessions": true,
+    "include_subagents": true
+}

@@ -1,17 +1,17 @@
 #!/bin/bash
 # Stop hook that requires /autofix to be run before the agent can stop.
-# Reads configuration from .autofix/config/stop-hook.toml.
+# Reads configuration from .autofix/config/stop-hook.json.
 set -euo pipefail
 
-CONFIG_FILE=".autofix/config/stop-hook.toml"
+CONFIG_FILE=".autofix/config/stop-hook.json"
 
-# Read config values (simple key = value parsing, no TOML library needed)
+# Read config values from JSON using jq
 _read_config() {
     local key="$1"
     local default="$2"
     if [ -f "$CONFIG_FILE" ]; then
         local val
-        val=$(grep "^${key} " "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^[^=]*= *//' | sed 's/^"//;s/"$//')
+        val=$(jq -r --arg k "$key" '.[$k] // empty' "$CONFIG_FILE" 2>/dev/null)
         if [ -n "$val" ]; then
             echo "$val"
             return

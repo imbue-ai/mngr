@@ -4,7 +4,7 @@
 # where source is one of: mng_tracked, current, mng_agent_dir,
 # or a subagent variant like mng_tracked:subagent, current:subagent, etc.
 #
-# Discovery is controlled by .reviews/config/verify-conversation.toml.
+# Discovery is controlled by .reviews/config/verify-conversation.json.
 # If the config file is missing, all toggles default to true.
 #
 # Session IDs are read from $MNG_AGENT_STATE_DIR/claude_session_id_history.
@@ -14,17 +14,17 @@
 
 set -euo pipefail
 
-CONFIG_FILE=".reviews/config/verify-conversation.toml"
+CONFIG_FILE=".reviews/config/verify-conversation.json"
 
 # ---------------------------------------------------------------------------
-# Config reader (simple grep/sed, same approach as stop_hook_autofix.sh)
+# Config reader (uses jq for JSON parsing)
 # ---------------------------------------------------------------------------
 _read_config() {
     local key="$1"
     local default="$2"
     if [ -f "$CONFIG_FILE" ]; then
         local val
-        val=$(grep "^${key} " "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/^[^=]*= *//' | sed 's/^"//;s/"$//')
+        val=$(jq -r --arg k "$key" '.[$k] // empty' "$CONFIG_FILE" 2>/dev/null)
         if [ -n "$val" ]; then
             echo "$val"
             return
