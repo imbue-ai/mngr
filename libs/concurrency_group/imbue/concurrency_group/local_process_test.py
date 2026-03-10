@@ -434,26 +434,23 @@ def test_run_background_thread_safety() -> None:
 
     def poll_thread() -> None:
         try:
-            for _ in range(5):
+            while not process.is_finished():
                 results["poll"].append(process.poll())
-                Event().wait(timeout=0.02)
         except Exception as e:
             errors.append(e)
 
     def check_thread() -> None:
         try:
-            for _ in range(5):
+            while not process.is_finished():
                 results["is_finished"].append(process.is_finished())
-                Event().wait(timeout=0.02)
         except Exception as e:
             errors.append(e)
 
     def read_thread() -> None:
         try:
-            for _ in range(3):
+            while not process.is_finished():
                 results["stdout"].append(process.read_stdout())
                 results["stderr"].append(process.read_stderr())
-                Event().wait(timeout=0.03)
         except Exception as e:
             errors.append(e)
 

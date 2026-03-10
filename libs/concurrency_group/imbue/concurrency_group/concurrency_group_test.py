@@ -36,9 +36,9 @@ INSTANT_SUCCESS_COMMAND: Final[tuple[str, ...]] = ("true",)
 LONG_RUNNING_COMMAND: Final[tuple[str, ...]] = ("sleep", "30")
 
 
-def _sleep_and_return_1() -> int:
-    """Thread target that takes a while to run, then returns 1."""
-    Event().wait(timeout=0.3)
+def _block_and_return_1(release: Event) -> int:
+    """Thread target that blocks until released, then returns 1."""
+    release.wait(timeout=5.0)
     return 1
 
 
@@ -103,10 +103,12 @@ def test_concurrency_group_supports_running_running_local_process_in_background(
 
 
 def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:
+    # Never set -- thread stays blocked, guaranteeing the CG times out.
+    blocked = Event()
     thread: ObservableThread | None = None
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
-            thread = cg.start_new_thread(target=lambda: Event().wait(timeout=100.0))
+            thread = cg.start_new_thread(target=blocked.wait)
     assert exception_info.value.only_exception_is_instance_of(StrandTimedOutError)
     assert thread is not None
     assert thread.is_alive()
@@ -246,20 +248,23 @@ def _create_nested_concurrency_group(
     concurrency_group: ConcurrencyGroup,
     closure: dict,
     thread_started_event: Event,
+    release_event: Event,
 ) -> None:
     with concurrency_group.make_concurrency_group(name="inner") as cg:
-        cg.start_new_thread(target=lambda: closure.update({"i": _sleep_and_return_1()}))
+        cg.start_new_thread(target=lambda: closure.update({"i": _block_and_return_1(release_event)}))
         thread_started_event.set()
 
 
 def test_nesting_across_threads_works_and_properly_waits() -> None:
     closure = {"i": 0}
     thread_started_event = Event()
+    release_event = Event()
     with ConcurrencyGroup(name="outer") as cg_outer:
         cg_outer.start_new_thread(
-            target=_create_nested_concurrency_group, args=(cg_outer, closure, thread_started_event)
+            target=_create_nested_concurrency_group, args=(cg_outer, closure, thread_started_event, release_event)
         )
-        thread_started_event.wait(timeout=SMALL_SLEEP)
+        thread_started_event.wait(timeout=5.0)
+        release_event.set()
     assert closure["i"] == 1
 
 
@@ -267,10 +272,11 @@ def _create_nested_concurrency_group_that_expects_parent_failure(
     concurrency_group: ConcurrencyGroup,
     closure: dict,
     thread_started_event: Event,
+    release_event: Event,
 ) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
-            cg.start_new_thread(target=lambda: closure.update({"i": _sleep_and_return_1()}))
+            cg.start_new_thread(target=lambda: closure.update({"i": _block_and_return_1(release_event)}))
             thread_started_event.set()
     assert exception_info.value.only_exception_is_instance_of(AncestorConcurrentFailure)
 
@@ -278,13 +284,15 @@ def _create_nested_concurrency_group_that_expects_parent_failure(
 def test_nesting_across_threads_raises_timeout_when_child_group_does_not_finish_in_time() -> None:
     closure = {"i": 0}
     thread_started_event = Event()
+    # Never set -- thread stays blocked, guaranteeing the CG times out.
+    release_event = Event()
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=TINY_SLEEP) as cg_outer:
             cg_outer.start_new_thread(
                 target=_create_nested_concurrency_group_that_expects_parent_failure,
-                args=(cg_outer, closure, thread_started_event),
+                args=(cg_outer, closure, thread_started_event, release_event),
             )
-            thread_started_event.wait(timeout=SMALL_SLEEP)
+            thread_started_event.wait(timeout=5.0)
     assert any(
         isinstance(exception, ChildConcurrencyGroupDidNotExitError) for exception in exception_info.value.exceptions
     )
@@ -313,15 +321,17 @@ def test_error_from_nested_group_in_another_thread_gets_properly_propagated() ->
 
 
 def _create_two_nested_concurrency_groups_that_expect_parent_failure(
-    concurrency_group: ConcurrencyGroup, closure: dict, setup_done_event: Event
+    concurrency_group: ConcurrencyGroup, closure: dict, setup_done_event: Event, release_event: Event
 ) -> None:
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="middle") as cg_middle:
             try:
                 with cg_middle.make_concurrency_group(name="inner") as cg_inner:
-                    # Thread must outlast the outer CG's TINY_SLEEP exit timeout (to trigger
-                    # the timeout error) but eventually finish (to update the closure).
-                    thread = cg_inner.start_new_thread(target=lambda: closure.update({"i": _sleep_and_return_1()}))
+                    # Thread blocks until released. The outer CG's TINY_SLEEP exit timeout will
+                    # expire while this thread is blocked, triggering the timeout error.
+                    thread = cg_inner.start_new_thread(
+                        target=lambda: closure.update({"i": _block_and_return_1(release_event)})
+                    )
                     setup_done_event.set()
                     thread.join()
             except ConcurrencyExceptionGroup as exception_info:
@@ -340,14 +350,17 @@ def _create_two_nested_concurrency_groups_that_expect_parent_failure(
 def test_parent_failures_propagate_recursively() -> None:
     closure: dict[str, Any] = {"i": 0}
     setup_done_event = Event()
+    release_event = Event()
     outer_thread: ObservableThread | None = None
     with pytest.raises(ConcurrencyExceptionGroup):
         with ConcurrencyGroup(name="outer", exit_timeout_seconds=TINY_SLEEP) as cg_outer:
             outer_thread = cg_outer.start_new_thread(
                 target=_create_two_nested_concurrency_groups_that_expect_parent_failure,
-                args=(cg_outer, closure, setup_done_event),
+                args=(cg_outer, closure, setup_done_event, release_event),
             )
             setup_done_event.wait(timeout=5.0)
+    # Release the blocked thread so it can finish and update the closure.
+    release_event.set()
     assert outer_thread is not None
     outer_thread.join()
     assert closure["i"] == 2
@@ -419,7 +432,7 @@ def _create_nested_concurrency_group_and_run_process_while_shutting_down(
     with pytest.raises(ConcurrencyExceptionGroup) as exception_info:
         with concurrency_group.make_concurrency_group(name="inner") as cg:
             process_started_event.set()
-            Event().wait(timeout=SMALL_SLEEP)
+            poll_until(lambda: concurrency_group.is_shutting_down(), timeout=5.0)
             closure["i"] += 1
             process = cg.run_process_in_background(LONG_RUNNING_COMMAND, is_checked_by_group=True)
             process.wait()
