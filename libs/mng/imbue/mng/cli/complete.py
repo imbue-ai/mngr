@@ -118,10 +118,6 @@ def _get_completions() -> list[str]:
     subcommand_by_command: dict[str, list[str]] = cache.get("subcommand_by_command", {})
     options_by_command: dict[str, list[str]] = cache.get("options_by_command", {})
     flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
-    option_choices: dict[str, list[str]] = cache.get("option_choices", {})
-    git_branch_options: list[str] = cache.get("git_branch_options", [])
-    host_name_options: list[str] = cache.get("host_name_options", [])
-    plugin_name_options: list[str] = cache.get("plugin_name_options", [])
 
     # Resolve the command and subcommand from the words already typed
     resolved_command: str | None = None
@@ -162,12 +158,8 @@ def _get_completions() -> list[str]:
         assert resolved_command is not None
         candidates = subcommand_by_command.get(resolved_command, [])
     elif prev_word is not None and prev_word.startswith("-"):
-        choice_key = f"{option_key}.{prev_word}"
         flag_options = flag_options_by_command.get(option_key, [])
-        if choice_key in option_choices:
-            # Option with predefined choices (e.g. --on-error abort|continue)
-            candidates = option_choices[choice_key]
-        elif _is_flag_option(prev_word, flag_options):
+        if _is_flag_option(prev_word, flag_options):
             # Previous word is a flag -- next position is positional
             if incomplete.startswith("--"):
                 candidates = options_by_command.get(option_key, [])
@@ -176,18 +168,9 @@ def _get_completions() -> list[str]:
         elif incomplete.startswith("--"):
             # Previous word is value-taking, but user started typing an option
             candidates = options_by_command.get(option_key, [])
-        elif choice_key in git_branch_options:
-            # Option whose value should complete against git branch names
-            candidates = _read_git_branches()
-        elif choice_key in host_name_options:
-            # Option whose value should complete against host names
-            candidates = _read_host_names()
-        elif choice_key in plugin_name_options:
-            # Option whose value should complete against plugin names
-            candidates = cache.get("plugin_names", [])
         else:
-            # Previous word is value-taking, current word is its value -- no completions
-            candidates = []
+            choice_key = f"{option_key}.{prev_word}"
+            candidates = _get_option_value_candidates(choice_key, cache)
     elif incomplete.startswith("--"):
         candidates = options_by_command.get(option_key, [])
     else:
@@ -208,6 +191,31 @@ def _filter_aliases(
     matching = [c for c in commands if c.startswith(incomplete)]
     matching_set = set(matching)
     return [c for c in matching if c not in aliases or aliases[c] not in matching_set]
+
+
+def _get_option_value_candidates(choice_key: str, cache: dict[str, Any]) -> list[str]:
+    """Return completion candidates for a value-taking option.
+
+    choice_key is the dotted key like "create.--host" or "list.--on-error".
+    Checks predefined choices, git branches, host names, and plugin names.
+    """
+    option_choices: dict[str, list[str]] = cache.get("option_choices", {})
+    if choice_key in option_choices:
+        return option_choices[choice_key]
+
+    git_branch_options: list[str] = cache.get("git_branch_options", [])
+    if choice_key in git_branch_options:
+        return _read_git_branches()
+
+    host_name_options: list[str] = cache.get("host_name_options", [])
+    if choice_key in host_name_options:
+        return _read_host_names()
+
+    plugin_name_options: list[str] = cache.get("plugin_name_options", [])
+    if choice_key in plugin_name_options:
+        return cache.get("plugin_names", [])
+
+    return []
 
 
 def _get_positional_candidates(command_key: str, cache: dict[str, Any]) -> list[str]:
