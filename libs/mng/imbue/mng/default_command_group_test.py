@@ -15,15 +15,21 @@ from imbue.mng.main import cli
 # DefaultCommandGroup tests
 # =============================================================================
 #
-# These tests exercise the default-to-create and unrecognized-command-forwarding
-# behavior using a minimal group with "create" and "list" subcommands.
+# These tests exercise DefaultCommandGroup behavior: default command routing,
+# unrecognized-command forwarding, and configurable defaults.
 # Commands record their invocation info in a shared dict so tests can verify routing.
 
 
-def _make_test_group(invocation_record: dict[str, str | None]) -> click.Group:
+def _make_test_group(
+    invocation_record: dict[str, str | None],
+    default_command: str = "",
+) -> click.Group:
     """Build a minimal DefaultCommandGroup with 'create' and 'list' subcommands."""
 
-    @click.group(cls=DefaultCommandGroup)
+    class _TestGroup(DefaultCommandGroup):
+        _default_command = default_command
+
+    @click.group(cls=_TestGroup)
     def group() -> None:
         pass
 
@@ -40,20 +46,40 @@ def _make_test_group(invocation_record: dict[str, str | None]) -> click.Group:
     return group
 
 
-def test_bare_invocation_defaults_to_create() -> None:
-    """Running the group with no args should forward to 'create'."""
+def test_bare_invocation_shows_help_by_default() -> None:
+    """Running the group with no args and no default command should show help."""
     record: dict[str, str | None] = {}
     group = _make_test_group(record)
+    runner = CliRunner()
+    result = runner.invoke(group, [])
+    assert "Commands:" in result.output or "Usage:" in result.output
+    assert "command" not in record
+
+
+def test_bare_invocation_defaults_to_create_when_configured() -> None:
+    """Running the group with no args should forward to the configured default."""
+    record: dict[str, str | None] = {}
+    group = _make_test_group(record, default_command="create")
     runner = CliRunner()
     result = runner.invoke(group, [])
     assert result.exit_code == 0
     assert record["command"] == "create"
 
 
-def test_unrecognized_command_forwards_to_create() -> None:
-    """Running the group with an unrecognized command should forward to 'create'."""
+def test_unrecognized_command_errors_by_default() -> None:
+    """Running the group with an unrecognized command and no default should error."""
     record: dict[str, str | None] = {}
     group = _make_test_group(record)
+    runner = CliRunner()
+    result = runner.invoke(group, ["my-task"])
+    assert result.exit_code != 0
+    assert "No such command" in result.output
+
+
+def test_unrecognized_command_forwards_when_configured() -> None:
+    """Running the group with an unrecognized command should forward to the configured default."""
+    record: dict[str, str | None] = {}
+    group = _make_test_group(record, default_command="create")
     runner = CliRunner()
     result = runner.invoke(group, ["my-task"])
     assert result.exit_code == 0
@@ -83,50 +109,48 @@ def test_explicit_create_still_works() -> None:
 
 
 # =============================================================================
-# Integration tests: real mng CLI defaults to create
+# Integration tests: real mng CLI (no default command)
 # =============================================================================
 
 
-def test_mng_bare_invocation_defaults_to_create(
+def test_mng_bare_invocation_shows_help(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_git_repo_cwd: Path,
 ) -> None:
-    """Running `mng` with no args should forward to `mng create`."""
+    """Running `mng` with no args should show help (no default command)."""
     result = cli_runner.invoke(cli, [], obj=plugin_manager)
-    # create with no args should attempt to create an agent (not show group help)
-    assert "Missing command" not in result.output
-    assert "Commands:" not in result.output
+    assert "Commands:" in result.output or "Usage:" in result.output
 
 
-def test_mng_unrecognized_command_forwards_to_create(
+def test_mng_unrecognized_command_errors(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_git_repo_cwd: Path,
 ) -> None:
-    """Running `mng my-task` should forward to `mng create my-task`."""
+    """Running `mng my-task` with no default command should error."""
     result = cli_runner.invoke(cli, ["my-task"], obj=plugin_manager)
-    assert "No such command" not in result.output
+    assert result.exit_code != 0
+    assert "No such command" in result.output
 
 
-def test_mng_snapshot_bare_defaults_to_create(
+def test_mng_snapshot_bare_shows_help(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Running `mng snapshot` with no args should forward to `snapshot create`."""
+    """Running `mng snapshot` with no args should show help (no default command)."""
     result = cli_runner.invoke(snapshot, [], obj=plugin_manager)
-    assert "Missing command" not in result.output
-    assert "Commands:" not in result.output
-    assert "Must specify at least one agent" in result.output
+    assert "Commands:" in result.output or "Usage:" in result.output
 
 
-def test_mng_snapshot_unrecognized_forwards_to_create(
+def test_mng_snapshot_unrecognized_errors(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Running `mng snapshot nonexistent` should forward to `snapshot create nonexistent`."""
+    """Running `mng snapshot nonexistent` with no default command should error."""
     result = cli_runner.invoke(snapshot, ["nonexistent"], obj=plugin_manager)
-    assert "No such command" not in result.output
+    assert result.exit_code != 0
+    assert "No such command" in result.output
 
 
 # =============================================================================
@@ -218,8 +242,9 @@ def test_config_key_disabled_unrecognized_errors(
 def test_no_config_key_uses_default_command_attribute() -> None:
     """A group without _config_key should use the _default_command attribute."""
     record: dict[str, str | None] = {}
-    # _make_test_group creates a plain DefaultCommandGroup (no _config_key)
-    group = _make_test_group(record)
+    # _make_test_group with explicit default_command creates a DefaultCommandGroup
+    # that forwards to that command (no _config_key, so no config lookup)
+    group = _make_test_group(record, default_command="create")
     runner = CliRunner()
     result = runner.invoke(group, [])
     assert result.exit_code == 0

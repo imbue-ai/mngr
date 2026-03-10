@@ -1,20 +1,13 @@
 import threading
+from threading import Event
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.concurrency_group.test_utils import wait_interval
-
-SMALL_SLEEP = 0.05
 
 
 def _return_value(value: int) -> int:
-    return value
-
-
-def _sleep_and_return(value: int) -> int:
-    wait_interval(SMALL_SLEEP)
     return value
 
 
@@ -41,13 +34,18 @@ def test_executor_respects_max_workers() -> None:
     max_concurrent = 0
     current_concurrent = 0
     lock = threading.Lock()
+    # Barrier synchronizes pairs of workers so they overlap, guaranteeing we observe concurrency.
+    barrier = threading.Barrier(2, timeout=5.0)
 
     def _track_concurrency() -> None:
         nonlocal max_concurrent, current_concurrent
         with lock:
             current_concurrent += 1
             max_concurrent = max(max_concurrent, current_concurrent)
-        wait_interval(SMALL_SLEEP)
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
         with lock:
             current_concurrent -= 1
 
@@ -80,9 +78,16 @@ def test_executor_exception_does_not_prevent_other_submissions() -> None:
 
 
 def test_executor_waits_for_all_threads_on_exit() -> None:
+    release = Event()
+
+    def _wait_and_return(value: int) -> int:
+        release.wait(timeout=5.0)
+        return value
+
     with ConcurrencyGroup(name="outer") as cg:
         with ConcurrencyGroupExecutor(parent_cg=cg, name="test", max_workers=4) as executor:
-            futures = [executor.submit(_sleep_and_return, i) for i in range(5)]
+            futures = [executor.submit(_wait_and_return, i) for i in range(5)]
+            release.set()
 
     # After the executor context exits, all threads should be done
     assert all(f.done() for f in futures)

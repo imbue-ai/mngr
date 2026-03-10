@@ -3,14 +3,9 @@ import subprocess
 from collections.abc import Generator
 from pathlib import Path
 
-import docker
-import docker.errors
 import pytest
 
-from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
-from imbue.mng.providers.docker.volume import LABEL_PROVIDER
-from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
-from imbue.mng.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
+from imbue.mng.providers.docker.testing import remove_all_containers_by_prefix
 from imbue.mng.utils.testing import generate_test_environment_name
 from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import run_mng_subprocess
@@ -21,7 +16,9 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
     """Create a subprocess test environment for Docker tests.
 
     On teardown, destroys all agents created by this test via ``mng destroy``,
-    then removes the state container and its backing volume.
+    then force-removes ALL Docker containers whose name starts with the test
+    prefix.  This catches both host containers and state containers even when
+    ``mng destroy`` fails or the test is interrupted.
     """
     host_dir = tmp_path / "docker-test-hosts"
     host_dir.mkdir()
@@ -46,32 +43,11 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, json.JSONDecodeError, OSError):
         pass
 
-    # Remove the state container and its backing volume.
-    # The state container name follows the pattern {prefix}docker-state-{user_id}.
-    # Since we cannot easily determine user_id, we find the container by labels.
-    try:
-        client = docker.from_env()
-    except (docker.errors.DockerException, OSError):
-        return
-
-    try:
-        containers = client.containers.list(
-            all=True,
-            filters={
-                "label": [
-                    f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}",
-                    f"{LABEL_PROVIDER}=docker",
-                ],
-            },
-        )
-        for container in containers:
-            name = container.name or ""
-            if name.startswith(prefix):
-                remove_docker_container_and_volume(client, container)
-    except (docker.errors.DockerException, OSError):
-        pass
-    finally:
-        client.close()
+    # Force-remove ALL Docker containers whose name starts with the test
+    # prefix.  Even if ``mng destroy`` missed a container (e.g. the test
+    # was interrupted, or destroy failed silently), we still remove it here.
+    # Subprocess tests use the default provider name "docker".
+    remove_all_containers_by_prefix(prefix, provider_name="docker")
 
 
 @pytest.fixture

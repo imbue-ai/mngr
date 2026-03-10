@@ -1134,6 +1134,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `command` - The command used to start the agent
 - `url` - URL where the agent can be accessed (if reported)
 - `work_dir` - Working directory for this agent
+- `initial_branch` - Git branch name created for this agent
 - `create_time` - Creation timestamp
 - `start_time` - Timestamp for when the agent was last started
 - `runtime_seconds` - How long the agent has been running

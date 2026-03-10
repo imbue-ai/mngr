@@ -4,7 +4,7 @@ Tests the plugin end-to-end by creating real agents in temporary git repos,
 verifying provisioning creates the expected filesystem structures, and
 exercising the chat and watcher scripts.
 
-These tests use --agent-cmd to override the default Claude command with
+These tests use --command to override the default Claude command with
 a simple sleep process, since Claude Code is not available in CI. This
 still exercises all the provisioning, symlink creation, and tmux window
 injection logic that the plugin provides.
@@ -12,6 +12,7 @@ injection logic that the plugin provides.
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -29,25 +30,27 @@ from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
+from imbue.mng.utils.testing import wait_for_agent_session
 from imbue.mng_claude_changeling.conftest import ChatScriptEnv
 from imbue.mng_claude_changeling.conftest import LocalShellHost
 from imbue.mng_claude_changeling.conftest import StubCommandResult
 from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_changeling.conftest import assert_conversation_exists_in_db
 from imbue.mng_claude_changeling.conftest import create_test_llm_db
-from imbue.mng_claude_changeling.conftest import write_conversation_event
+from imbue.mng_claude_changeling.conftest import write_conversation_to_db
 from imbue.mng_claude_changeling.data_types import ProvisioningSettings
 from imbue.mng_claude_changeling.provisioning import _DEFAULT_SKILL_DIRS
 from imbue.mng_claude_changeling.provisioning import _DEFAULT_THINKING_DIR_FILES
 from imbue.mng_claude_changeling.provisioning import _DEFAULT_WORK_DIR_FILES
 from imbue.mng_claude_changeling.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_changeling.provisioning import _SCRIPT_FILES
+from imbue.mng_claude_changeling.provisioning import _SERVICE_SCRIPT_FILES
 from imbue.mng_claude_changeling.provisioning import compute_claude_project_dir_name
 from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
 from imbue.mng_claude_changeling.provisioning import create_event_log_directories
 from imbue.mng_claude_changeling.provisioning import load_changeling_resource
-from imbue.mng_claude_changeling.provisioning import provision_changeling_scripts
 from imbue.mng_claude_changeling.provisioning import provision_default_content
 from imbue.mng_claude_changeling.provisioning import provision_llm_tools
+from imbue.mng_claude_changeling.provisioning import provision_supporting_services
 from imbue.mng_claude_changeling.provisioning import setup_memory_directory
 from imbue.mng_claude_changeling.resources.conversation_watcher import _sync_messages
 
@@ -84,13 +87,11 @@ def _create_agent_in_session(
             [
                 "--name",
                 agent_name,
-                "--agent-cmd",
+                "--command",
                 "sleep 847291",
                 "--source",
                 str(source_dir),
                 "--no-connect",
-                "--await-ready",
-                "--no-copy-work-dir",
                 "--no-ensure-clean",
                 "--disable-plugin",
                 "modal",
@@ -100,6 +101,9 @@ def _create_agent_in_session(
             catch_exceptions=False,
         )
         assert result.exit_code == 0, f"CLI failed with: {result.output}"
+
+        # Wait for the tmux session to appear
+        wait_for_agent_session(session_name)
         yield session_name
 
 
@@ -114,9 +118,9 @@ def _find_agent_state_dir(host_dir: Path) -> Path | None:
     return None
 
 
-def _run_sync_script(conversations_file: Path, messages_file: Path, db_path: Path, tmp_path: Path) -> int:
+def _run_sync_script(messages_file: Path, db_path: Path) -> int:
     """Run the conversation watcher's sync logic and return the count of synced events."""
-    return _sync_messages(db_path, conversations_file, messages_file)
+    return _sync_messages(db_path, messages_file)
 
 
 # -- Provisioning filesystem structure tests --
@@ -134,10 +138,9 @@ def test_provisioning_creates_event_log_directories(
     create_event_log_directories(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     expected_sources = (
-        "conversations",
         "messages",
         "scheduled",
-        "mng_agents",
+        "mng/agents",
         "stop",
         "monitor",
     )
@@ -151,14 +154,16 @@ def test_provisioning_creates_event_log_directories(
 
 
 @pytest.mark.timeout(30)
-def test_provisioning_writes_changeling_scripts_to_host(
+def test_provisioning_writes_supporting_services_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
     """Verify that provisioning writes all scripts with correct permissions."""
-    provision_changeling_scripts(cast(Any, local_shell_host), _DEFAULT_PROVISIONING)
+    agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+    provision_supporting_services(cast(Any, local_shell_host), agent_state_dir, _DEFAULT_PROVISIONING)
 
-    commands_dir = local_shell_host.host_dir / "commands"
-    for script_name in _SCRIPT_FILES:
+    commands_dir = agent_state_dir / "commands"
+    for script_name in _SERVICE_SCRIPT_FILES:
         script_path = commands_dir / script_name
         assert script_path.exists(), f"Expected {script_name} to be written"
         assert script_path.stat().st_mode & 0o111, f"Expected {script_name} to be executable"
@@ -171,9 +176,11 @@ def test_provisioning_writes_llm_tools_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
     """Verify that provisioning writes LLM tool scripts."""
-    provision_llm_tools(cast(Any, local_shell_host), _DEFAULT_PROVISIONING)
+    agent_state_dir = local_shell_host.host_dir / "agents" / "test-agent"
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+    provision_llm_tools(cast(Any, local_shell_host), agent_state_dir, _DEFAULT_PROVISIONING)
 
-    tools_dir = local_shell_host.host_dir / "commands" / "llm_tools"
+    tools_dir = agent_state_dir / "commands" / "llm_tools"
     for tool_file in _LLM_TOOL_FILES:
         tool_path = tools_dir / tool_file
         assert tool_path.exists(), f"Expected {tool_file} to be written"
@@ -237,8 +244,13 @@ def test_provisioning_creates_symlinks(
     temp_git_repo: Path,
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that provisioning creates the expected symlinks."""
-    # Set up the new directory structure
+    """Verify that provisioning creates the expected symlinks.
+
+    With the cd-into-role approach, we only create:
+    - CLAUDE.md -> GLOBAL.md at the repo root
+    - <role>/CLAUDE.local.md -> <role>/PROMPT.md within the role directory
+    """
+    # Set up the directory structure
     (temp_git_repo / "GLOBAL.md").write_text("# Global instructions")
     thinking_dir = temp_git_repo / "thinking"
     thinking_dir.mkdir()
@@ -246,69 +258,22 @@ def test_provisioning_creates_symlinks(
     claude_dir = thinking_dir / ".claude"
     claude_dir.mkdir()
     (claude_dir / "settings.json").write_text("{}")
-    skills_dir = claude_dir / "skills"
-    skills_dir.mkdir()
-    (skills_dir / "test-skill").mkdir()
-    (skills_dir / "test-skill" / "SKILL.md").write_text("# Test skill")
 
     create_changeling_symlinks(cast(Any, local_shell_host), temp_git_repo, "thinking", _DEFAULT_PROVISIONING)
-
-    # .claude -> thinking/.claude (directory symlink)
-    claude_link = temp_git_repo / ".claude"
-    assert claude_link.is_symlink(), ".claude should be a symlink"
-    assert claude_link.resolve() == claude_dir.resolve()
 
     # CLAUDE.md -> GLOBAL.md
     claude_md = temp_git_repo / "CLAUDE.md"
     assert claude_md.is_symlink(), "CLAUDE.md should be a symlink"
     assert claude_md.resolve() == (temp_git_repo / "GLOBAL.md").resolve()
 
-    # CLAUDE.local.md -> thinking/PROMPT.md
-    local_md = temp_git_repo / "CLAUDE.local.md"
-    assert local_md.is_symlink(), "CLAUDE.local.md should be a symlink"
+    # thinking/CLAUDE.local.md -> thinking/PROMPT.md
+    local_md = thinking_dir / "CLAUDE.local.md"
+    assert local_md.is_symlink(), "thinking/CLAUDE.local.md should be a symlink"
     assert local_md.resolve() == (thinking_dir / "PROMPT.md").resolve()
 
-    # settings.json is accessible through the .claude symlink
-    settings_json = temp_git_repo / ".claude" / "settings.json"
-    assert settings_json.exists(), "settings.json should be accessible through .claude symlink"
-
-    # skills are accessible through the .claude symlink
-    skills_link = temp_git_repo / ".claude" / "skills"
-    assert skills_link.is_dir(), ".claude/skills should be accessible through .claude symlink"
-
-
-@pytest.mark.timeout(30)
-def test_symlink_replaces_existing_real_claude_dir(
-    temp_git_repo: Path,
-    local_shell_host: LocalShellHost,
-) -> None:
-    """Verify that create_changeling_symlinks replaces a real .claude/ directory.
-
-    This tests the critical interaction where super().provision() creates .claude/
-    as a real directory (via _configure_readiness_hooks), and create_changeling_symlinks
-    must replace it with a symlink to the active role's .claude/ directory.
-    """
-    # Set up the role's .claude directory
-    (temp_git_repo / "GLOBAL.md").write_text("# Global")
-    thinking_dir = temp_git_repo / "thinking"
-    thinking_dir.mkdir()
-    (thinking_dir / "PROMPT.md").write_text("# Thinking")
-    claude_dir = thinking_dir / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.json").write_text('{"test": true}')
-
-    # Simulate what super().provision() does: create .claude/ as a real directory
-    real_claude = temp_git_repo / ".claude"
-    real_claude.mkdir()
-    (real_claude / "settings.local.json").write_text("{}")
-
-    create_changeling_symlinks(cast(Any, local_shell_host), temp_git_repo, "thinking", _DEFAULT_PROVISIONING)
-
-    # .claude should now be a symlink, not a real directory
-    assert real_claude.is_symlink(), ".claude should be a symlink after create_changeling_symlinks"
-    assert real_claude.resolve() == claude_dir.resolve()
-    # settings.json should be accessible through the symlink
-    assert (real_claude / "settings.json").read_text() == '{"test": true}'
+    # No .claude symlink at the repo root (Claude Code runs from within the role dir)
+    claude_link = temp_git_repo / ".claude"
+    assert not claude_link.exists(), ".claude symlink should NOT be created at repo root"
 
 
 @pytest.mark.timeout(30)
@@ -319,15 +284,18 @@ def test_provisioning_syncs_memory_directory(
 ) -> None:
     """Verify that provisioning creates both memory dirs and syncs initial content."""
     abs_work_dir = str(temp_git_repo.resolve())
+    role_dir_abs = f"{abs_work_dir}/thinking"
     # Create a file in thinking/memory/ to verify initial sync
     memory_dir = temp_git_repo / "thinking" / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "test.md").write_text("hello")
 
-    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", abs_work_dir, _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", role_dir_abs, _DEFAULT_PROVISIONING)
 
     assert memory_dir.is_dir(), "memory dir should exist"
 
+    # Project dir name is derived from work dir (parent of role dir),
+    # matching build_memory_sync_hooks_config
     project_dir_name = compute_claude_project_dir_name(abs_work_dir)
     project_memory = Path.home() / ".claude" / "projects" / project_dir_name / "memory"
     assert project_memory.is_dir(), "Claude project memory should be a real directory"
@@ -387,17 +355,8 @@ def test_chat_script_no_args_lists_and_shows_hint(chat_env: ChatScriptEnv) -> No
 
 @pytest.mark.timeout(30)
 def test_chat_script_list_shows_existing_conversations(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh --list shows conversations from the events file."""
-    event = {
-        "timestamp": "2025-01-15T10:00:00.000000000Z",
-        "type": "conversation_created",
-        "event_id": "evt-test-001",
-        "source": "conversations",
-        "conversation_id": "conv-test-12345",
-        "model": "claude-sonnet-4-6",
-    }
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    events_file.write_text(json.dumps(event) + "\n")
+    """Verify that chat.sh --list shows conversations from the database."""
+    write_conversation_to_db(chat_env.llm_db_path, "conv-test-12345", model="claude-sonnet-4-6")
 
     result = chat_env.run("--list")
 
@@ -406,30 +365,7 @@ def test_chat_script_list_shows_existing_conversations(chat_env: ChatScriptEnv) 
     assert "claude-sonnet-4-6" in result.stdout
 
 
-@pytest.mark.timeout(30)
-def test_chat_script_list_handles_malformed_events(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh --list gracefully handles malformed JSONL lines."""
-    valid_event = json.dumps(
-        {
-            "timestamp": "2025-01-15T10:00:00.000000000Z",
-            "type": "conversation_created",
-            "event_id": "evt-test-002",
-            "source": "conversations",
-            "conversation_id": "conv-valid-789",
-            "model": "claude-sonnet-4-6",
-        }
-    )
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    events_file.write_text(f"this is not json\n{valid_event}\n")
-
-    result = chat_env.run("--list")
-
-    assert result.returncode == 0
-    assert "conv-valid-789" in result.stdout
-    assert "malformed" in result.stderr.lower() or "warning" in result.stderr.lower()
-
-
-# -- Watcher script syntax tests --
+# -- Supporting service script syntax tests --
 
 
 @pytest.mark.timeout(30)
@@ -482,7 +418,7 @@ def test_create_agent_with_additional_commands(
         cli_runner,
         plugin_manager,
         temp_git_repo,
-        extra_args=("--add-command", 'watcher="sleep 847292"'),
+        extra_args=("--extra-window", 'watcher="sleep 847292"'),
     ) as session_name:
         assert tmux_session_exists(session_name)
 
@@ -511,41 +447,29 @@ def test_create_agent_creates_state_directory(
         assert (agent_state_dir / "data.json").exists(), "data.json should exist in agent state dir"
 
 
-# -- JSONL event format tests --
+# -- Conversation DB record tests --
 # Note: settings loading tests (load_settings_from_host, provision_settings_file)
 # are covered by unit tests in settings_test.py using StubHost.
 
 
 @pytest.mark.timeout(30)
-def test_conversation_event_serializes_to_valid_jsonl(chat_env: ChatScriptEnv) -> None:
-    """Verify that conversation events written by chat.sh are valid JSONL."""
+def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
+    """Verify that conversation records written by chat.sh are stored in the database."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
     result = chat_env.run("--new", "--as-agent")
 
-    assert result.returncode == 0
+    assert result.returncode == 0, f"chat.sh failed: stdout={result.stdout!r} stderr={result.stderr!r}"
 
     conversation_id = result.stdout.strip()
     assert conversation_id.startswith("conv-"), f"Expected conversation ID, got: {conversation_id!r}"
 
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    assert events_file.exists(), "conversations/events.jsonl should exist"
-
-    lines = events_file.read_text().strip().split("\n")
-    assert len(lines) >= 1, "Should have at least one event"
-
-    event = json.loads(lines[-1])
-    assert event["type"] == "conversation_created"
-    assert event["source"] == "conversations"
-    assert event["conversation_id"] == conversation_id
-    assert event["model"] == "claude-sonnet-4-6"
-    assert "timestamp" in event
-    assert "event_id" in event
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
 
 @pytest.mark.timeout(30)
-def test_multiple_conversations_create_separate_events(chat_env: ChatScriptEnv) -> None:
-    """Verify that creating multiple conversations produces separate events."""
+def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptEnv) -> None:
+    """Verify that creating multiple conversations produces separate DB records."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
     conversation_ids = []
@@ -556,12 +480,8 @@ def test_multiple_conversations_create_separate_events(chat_env: ChatScriptEnv) 
 
     assert len(set(conversation_ids)) == 3, f"Expected 3 unique conversation IDs, got: {conversation_ids}"
 
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    lines = events_file.read_text().strip().split("\n")
-    assert len(lines) == 3
-
-    event_conversation_ids = [json.loads(line)["conversation_id"] for line in lines]
-    assert set(event_conversation_ids) == set(conversation_ids)
+    for cid in conversation_ids:
+        assert_conversation_exists_in_db(chat_env.llm_db_path, cid)
 
 
 @pytest.mark.timeout(30)
@@ -569,12 +489,21 @@ def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh reads the model from settings.toml."""
     chat_env.set_default_model("claude-haiku-4-5")
 
+    # Ensure log directory exists so we can check the log for the model
+    log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    event = json.loads(events_file.read_text().strip().split("\n")[-1])
-    assert event["model"] == "claude-haiku-4-5"
+    conversation_id = result.stdout.strip()
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+
+    # Verify the model from settings.toml was used (visible in log output)
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists()
+    log_content = log_file.read_text()
+    assert "claude-haiku-4-5" in log_content
 
 
 @pytest.mark.timeout(30)
@@ -582,8 +511,8 @@ def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh creates a log file with operation records."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
-    # The log dir is at $MNG_HOST_DIR/events/logs/
-    log_dir = Path(chat_env.env["MNG_HOST_DIR"]) / "events" / "logs"
+    # The log dir is at $MNG_AGENT_STATE_DIR/events/logs/
+    log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     chat_env.run("--new", "--as-agent")
@@ -604,31 +533,29 @@ def test_event_watcher_reads_settings_for_watched_sources(
     """Verify that the event watcher script reads settings from settings.toml."""
 
     work_dir = local_shell_host.host_dir / "work"
-    changelings_dir = work_dir / ".changelings"
-    changelings_dir.mkdir(parents=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write a settings.toml with custom watcher settings (both legacy and new fields)
+    # Write changelings.toml with custom watcher settings (both legacy and new fields)
     settings_content = (
         "[watchers]\n"
-        'watched_event_sources = ["messages", "stop"]\n'
         "event_poll_interval_seconds = 7\n"
         'event_cel_filter = "source == \\"messages\\""\n'
         "event_burst_size = 3\n"
         "max_event_messages_per_minute = 20\n"
         "high_rate_warning_threshold_per_minute = 15\n"
     )
-    (changelings_dir / "settings.toml").write_text(settings_content)
+    settings_path = work_dir / "changelings.toml"
+    settings_path.write_text(settings_content)
 
     # The event watcher reads settings via a Python snippet at startup.
     # Test that the Python settings-reading logic produces the expected output.
     settings_reader = f"""
 import tomllib, pathlib, json
-p = pathlib.Path('{changelings_dir}/settings.toml')
+p = pathlib.Path('{settings_path}')
 s = tomllib.loads(p.read_text()) if p.exists() else {{}}
 w = s.get('watchers', {{}})
 print(json.dumps({{
     'poll': w.get('event_poll_interval_seconds', 3),
-    'sources': w.get('watched_event_sources', ['messages', 'scheduled', 'mng_agents', 'stop']),
     'cel_filter': w.get('event_cel_filter', ''),
     'burst_size': w.get('event_burst_size', 5),
     'max_messages_per_minute': w.get('max_event_messages_per_minute', 10),
@@ -644,7 +571,6 @@ print(json.dumps({{
     assert result.returncode == 0
     parsed = json.loads(result.stdout.strip())
     assert parsed["poll"] == 7
-    assert parsed["sources"] == ["messages", "stop"]
     assert parsed["cel_filter"] == 'source == "messages"'
     assert parsed["burst_size"] == 3
     assert parsed["max_messages_per_minute"] == 20
@@ -661,7 +587,7 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
     temp_git_repo: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Verify that adding named windows via --add-command creates the expected tmux windows.
+    """Verify that adding named windows via --extra-window creates the expected tmux windows.
 
     This tests the window injection mechanism that the claude-changeling plugin uses,
     without requiring ttyd to be installed.
@@ -672,13 +598,13 @@ def test_agent_with_ttyd_window_creates_session_with_expected_windows(
         plugin_manager,
         temp_git_repo,
         extra_args=(
-            "--add-command",
+            "--extra-window",
             'agent_ttyd="sleep 847293"',
-            "--add-command",
+            "--extra-window",
             'conv_watcher="sleep 847294"',
-            "--add-command",
+            "--extra-window",
             'events="sleep 847295"',
-            "--add-command",
+            "--extra-window",
             'chat_ttyd="sleep 847296"',
         ),
     ) as session_name:
@@ -728,8 +654,6 @@ def test_conversation_watcher_sync_with_llm_database(
     Creates a minimal llm-compatible database and verifies that the sync
     script extracts messages correctly.
     """
-    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-sync-test")
-
     db_path = tmp_path / "logs.db"
     create_test_llm_db(
         db_path,
@@ -752,12 +676,11 @@ def test_conversation_watcher_sync_with_llm_database(
             ),
         ],
     )
+    write_conversation_to_db(db_path, "conv-sync-test")
 
     synced_count = _run_sync_script(
-        chat_env.conversations_dir / "events.jsonl",
         chat_env.messages_dir / "events.jsonl",
         db_path,
-        tmp_path,
     )
     assert synced_count == 4, f"Expected 4 synced events (2 user + 2 assistant), got {synced_count}"
 
@@ -783,8 +706,6 @@ def test_conversation_watcher_sync_is_idempotent(
     tmp_path: Path,
 ) -> None:
     """Verify that running the sync twice does not duplicate events."""
-    write_conversation_event(chat_env.conversations_dir / "events.jsonl", "conv-idem-test")
-
     db_path = tmp_path / "logs.db"
     create_test_llm_db(
         db_path,
@@ -799,14 +720,14 @@ def test_conversation_watcher_sync_is_idempotent(
             ),
         ],
     )
+    write_conversation_to_db(db_path, "conv-idem-test")
 
-    conversations_file = chat_env.conversations_dir / "events.jsonl"
     messages_file = chat_env.messages_dir / "events.jsonl"
 
-    first_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
+    first_count = _run_sync_script(messages_file, db_path)
     assert first_count == 2
 
-    second_count = _run_sync_script(conversations_file, messages_file, db_path, tmp_path)
+    second_count = _run_sync_script(messages_file, db_path)
     assert second_count == 0
 
     lines = messages_file.read_text().strip().split("\n")
@@ -821,96 +742,77 @@ def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScrip
     """Verify that chat.sh falls back to the hardcoded default model when settings.toml is absent."""
     # Do NOT call set_default_model -- no settings.toml exists
 
+    # Ensure log directory exists so we can check the log for the default model
+    log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     result = chat_env.run("--new", "--as-agent")
     assert result.returncode == 0
 
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    event = json.loads(events_file.read_text().strip().split("\n")[-1])
-    assert event["model"] == "claude-opus-4.6", f"Expected hardcoded default, got: {event['model']!r}"
+    conversation_id = result.stdout.strip()
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+
+    # Verify the hardcoded default model was used (visible in log output)
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists()
+    log_content = log_file.read_text()
+    assert "claude-opus-4.6" in log_content
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_grep_finds_correct_model_for_conversation(chat_env: ChatScriptEnv) -> None:
-    """Verify that the grep-based model lookup in resume_conversation finds the right model.
+def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv) -> None:
+    """Verify that the DB-based model lookup in resume_conversation finds the right model.
 
-    resume_conversation() uses `grep -F` to find the model for a conversation ID
-    in the events file. This test exercises that grep command directly to verify
-    it returns the correct model when multiple conversations exist.
-
-    Events are written using the same printf format that chat.sh's
-    append_conversation_event uses (no spaces after colons/commas), since
-    the grep pattern must match this exact format.
+    resume_conversation() queries the llm conversations table to find the
+    model for a conversation ID. This test inserts conversations directly
+    into the llm conversations table and verifies the lookup works.
     """
-    chat_env.set_default_model("claude-sonnet-4-6")
-
-    # Create two conversations using the actual chat.sh script
-    # so events are written in the exact format grep expects
-    result1 = chat_env.run("--new", "--as-agent")
-    assert result1.returncode == 0
-    cid1 = result1.stdout.strip()
-
-    # Manually append a second conversation event with a different model
-    # using the same printf format that chat.sh uses (no spaces)
-    events_file = chat_env.conversations_dir / "events.jsonl"
+    # Insert two conversations with different models into the llm conversations table
+    cid1 = "conv-111-aabb"
     cid2 = "conv-222-ccdd"
-    with events_file.open("a") as f:
-        f.write(
-            f'{{"timestamp":"2025-01-15T11:00:00.000Z","type":"conversation_created",'
-            f'"event_id":"evt-2","source":"conversations",'
-            f'"conversation_id":"{cid2}","model":"claude-haiku-4-5"}}\n'
-        )
+    write_conversation_to_db(chat_env.llm_db_path, cid1, model="claude-sonnet-4-6")
+    write_conversation_to_db(chat_env.llm_db_path, cid2, model="claude-haiku-4-5")
 
-    # Run the same grep -F | jq command that resume_conversation() uses
-    grep_result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'grep -F \'"conversation_id":"{cid2}"\' "{events_file}" | tail -1 | jq -r .model',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert grep_result.returncode == 0
-    assert grep_result.stdout.strip() == "claude-haiku-4-5"
+    # Use the conversation_db module directly (same logic as mng changelingdb)
+    import io
 
-    # Also verify that looking up the first CID finds the right model
-    grep_result2 = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f'grep -F \'"conversation_id":"{cid1}"\' "{events_file}" | tail -1 | jq -r .model',
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert grep_result2.returncode == 0
-    assert grep_result2.stdout.strip() == "claude-sonnet-4-6"
+    from imbue.mng_claude_changeling.resources.conversation_db import lookup_model
+
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        lookup_model(str(chat_env.llm_db_path), cid2)
+        assert sys.stdout.getvalue().strip() == "claude-haiku-4-5"
+    finally:
+        sys.stdout = old_stdout
+
+    sys.stdout = io.StringIO()
+    try:
+        lookup_model(str(chat_env.llm_db_path), cid1)
+        assert sys.stdout.getvalue().strip() == "claude-sonnet-4-6"
+    finally:
+        sys.stdout = old_stdout
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_new_as_agent_with_message_writes_event_without_llm(
+def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
     chat_env: ChatScriptEnv,
 ) -> None:
-    """Verify --new --as-agent with a message still writes the conversation event.
+    """Verify --new --as-agent with a message still writes the conversation record.
 
     The --as-agent path with a message calls `llm inject` which will fail if
-    llm is not installed. But the conversation_created event should still be
-    written to events.jsonl regardless, since append_conversation_event runs
+    llm is not installed. But the conversation record should still be
+    written to the DB regardless, since insert_conversation_record runs
     before the llm inject call.
     """
     chat_env.set_default_model("claude-sonnet-4-6")
 
     # This will fail at the `llm inject` call since llm is not installed,
-    # but the conversation event should already be appended because
-    # append_conversation_event runs before the llm inject call.
+    # but the conversation record should already be inserted because
+    # insert_conversation_record runs before the llm inject call.
     chat_env.run("--new", "--as-agent", "hello from test")
 
-    events_file = chat_env.conversations_dir / "events.jsonl"
-    assert events_file.exists(), "conversation event should be written even when llm inject fails"
-    content = events_file.read_text().strip()
-    assert content, "events.jsonl should not be empty"
-    event = json.loads(content.split("\n")[-1])
-    assert event["type"] == "conversation_created"
-    assert event["model"] == "claude-sonnet-4-6"
+    # At least one conversation should exist (the one just created)
+    with sqlite3.connect(str(chat_env.llm_db_path)) as conn:
+        rows = conn.execute("SELECT conversation_id FROM changeling_conversations").fetchall()
+    assert len(rows) >= 1, "conversation record should be written even when llm inject fails"

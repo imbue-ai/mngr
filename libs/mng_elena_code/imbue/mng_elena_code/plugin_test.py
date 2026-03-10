@@ -71,14 +71,14 @@ def test_elena_code_agent_inherits_from_claude_agent() -> None:
     assert issubclass(ElenaCodeAgent, ClaudeAgent)
 
 
-def test_elena_system_prompt_is_conversational() -> None:
-    """Verify that the system prompt instructs Elena to be conversational."""
-    assert "conversational" in ELENA_SYSTEM_PROMPT.lower()
+def test_elena_system_prompt_identifies_elena() -> None:
+    """Verify that the system prompt identifies the assistant as Elena."""
+    assert "Elena" in ELENA_SYSTEM_PROMPT
 
 
-def test_elena_system_prompt_forbids_code_writing() -> None:
-    """Verify that the system prompt instructs Elena not to write code."""
-    assert "NEVER write code" in ELENA_SYSTEM_PROMPT
+def test_elena_system_prompt_mentions_claude_code() -> None:
+    """Verify that the system prompt mentions Claude Code."""
+    assert "Claude Code" in ELENA_SYSTEM_PROMPT
 
 
 def test_elena_assemble_command_includes_system_prompt(tmp_path: Path) -> None:

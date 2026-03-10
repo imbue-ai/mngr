@@ -1,9 +1,10 @@
-"""Shared utilities for changeling watcher scripts.
+"""Shared utilities for changeling supporting service scripts.
 
-This module is provisioned alongside the watcher scripts (event_watcher.py,
-conversation_watcher.py, transcript_watcher.py) to $MNG_HOST_DIR/commands/
-and imported by them at runtime. It provides the common watchdog integration,
-logging, and polling infrastructure that all watchers share.
+This module is provisioned alongside the supporting service scripts
+(event_watcher.py, conversation_watcher.py, transcript_watcher.py) to
+$MNG_AGENT_STATE_DIR/commands/ and imported by them at runtime. It provides the
+common watchdog integration, logging, and polling infrastructure that all
+supporting services share.
 """
 
 from __future__ import annotations
@@ -17,12 +18,60 @@ from collections.abc import Callable
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from uuid import uuid4
 
 from loguru import logger
 from watchdog.events import FileSystemEvent
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+
+class MngNotInstalledError(RuntimeError):
+    """Raised when the per-agent mng binary cannot be found."""
+
+
+def get_mng_command() -> list[str]:
+    """Return the command for invoking the per-agent mng binary.
+
+    Looks for the mng binary in ``$UV_TOOL_BIN_DIR/mng``. This env var
+    is set by ``ClaudeChangelingAgent.modify_env_vars()`` during agent
+    creation and points to the per-agent bin directory where
+    ``uv tool install`` places the mng entrypoint.
+
+    Raises MngNotInstalledError if the binary cannot be found, which
+    indicates that mng was not properly provisioned for this agent.
+    """
+    bin_dir = os.environ.get("UV_TOOL_BIN_DIR", "")
+    if not bin_dir:
+        raise MngNotInstalledError(
+            "UV_TOOL_BIN_DIR is not set. The per-agent mng binary cannot be located without it."
+        )
+    mng_bin = os.path.join(bin_dir, "mng")
+    if not os.path.isfile(mng_bin):
+        raise MngNotInstalledError(
+            f"Per-agent mng binary not found at {mng_bin}. "
+            "Ensure the mng_recursive plugin is enabled and provisioning completed successfully."
+        )
+    return [mng_bin]
+
+
+DEFAULT_CEL_FILTER: Final[str] = (
+    # only include events that are:
+    # not from the common_transcript (to avoid seeing our own thoughts)
+    'source != "common_transcript"'
+    # and not from delivery_failures (which is about the delivery of messages to the core thinking loop, so it would never see these anyway)
+    ' && source != "delivery_failures"'
+    # and they're not about servers coming online (that's just startup noise from mng)
+    ' && source != "servers"'
+    # and either:
+    " && ("
+    # are normal events (eg, not logs):
+    '!source.startsWith("logs/") || '
+    # or they are logs, but they're ERROR or WARNING level (to catch important log messages without overwhelming the stream):
+    '(source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
+    ")"
+)
 
 
 def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
@@ -156,11 +205,11 @@ def read_event_ids_from_jsonl(file_path: Path) -> set[str]:
 
 
 def load_watchers_section(agent_work_dir: Path) -> dict[str, Any]:
-    """Load the [watchers] section from .changelings/settings.toml.
+    """Load the [watchers] section from changelings.toml.
 
     Returns an empty dict on any error (missing file, corrupt TOML, etc.).
     """
-    settings_path = agent_work_dir / ".changelings" / "settings.toml"
+    settings_path = agent_work_dir / "changelings.toml"
     try:
         if not settings_path.exists():
             return {}
@@ -349,9 +398,6 @@ def run_watcher_loop(
         while True:
             is_triggered_by_watchdog = wake_event.wait(timeout=poll_interval)
             wake_event.clear()
-
-            if is_triggered_by_watchdog:
-                logger.debug("Woken by watchdog filesystem event")
 
             if is_directory_mode:
                 is_mtime_changed = mtime_poll_directories(watch_targets, mtime_cache)

@@ -74,7 +74,6 @@ def _create_agent(
         "claude",
         "--no-connect",
         "--no-ensure-clean",
-        "--await-ready",
         "--pass-env",
         "HOME",
         "--pass-env",

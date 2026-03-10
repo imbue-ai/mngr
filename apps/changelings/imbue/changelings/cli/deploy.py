@@ -1,10 +1,11 @@
 import secrets
 import shutil
+import tomllib
 from pathlib import Path
-from typing import Final
 
 import click
 from loguru import logger
+from pydantic import ValidationError
 
 from imbue.changelings.config.data_types import ChangelingPaths
 from imbue.changelings.config.data_types import DEFAULT_FORWARDING_SERVER_PORT
@@ -17,17 +18,17 @@ from imbue.changelings.deployment.local import commit_files_in_repo
 from imbue.changelings.deployment.local import deploy_changeling
 from imbue.changelings.deployment.local import init_empty_git_repo
 from imbue.changelings.errors import ChangelingError
-from imbue.changelings.errors import MissingSettingsError
+from imbue.changelings.errors import MissingAgentTypeError
 from imbue.changelings.primitives import AgentName
 from imbue.changelings.primitives import GitBranch
 from imbue.changelings.primitives import GitUrl
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.primitives import AgentId
+from imbue.mng_claude_changeling.settings import SETTINGS_FILENAME
+from imbue.mng_claude_changeling.settings import load_settings_from_path
 
 # FIXME: stop making short ids
 _TEMP_DIR_ID_BYTES: int = 8
-
-_MNG_SETTINGS_REL_PATH: Final[str] = ".mng/settings.toml"
 
 
 def _prompt_agent_name(default_name: str) -> str:
@@ -82,6 +83,7 @@ def _run_deployment(
     changeling_dir: Path,
     agent_name: AgentName,
     agent_id: AgentId,
+    agent_type: str,
     provider: DeploymentProvider,
     paths: ChangelingPaths,
     pass_env: tuple[str, ...],
@@ -101,6 +103,7 @@ def _run_deployment(
                 changeling_dir=changeling_dir,
                 agent_name=agent_name,
                 agent_id=agent_id,
+                agent_type=agent_type,
                 provider=provider,
                 paths=paths,
                 forwarding_server_port=forwarding_port,
@@ -191,34 +194,16 @@ def _copy_add_paths(add_paths: tuple[tuple[Path, Path], ...], repo_dir: Path) ->
     return copied
 
 
-def _write_mng_settings_toml(repo_dir: Path, agent_type: str) -> None:
-    """Write .mng/settings.toml with a create template for the agent type.
-
-    Only writes the file if it does not already exist.
-    """
-    settings_path = repo_dir / _MNG_SETTINGS_REL_PATH
-    if settings_path.exists():
-        logger.debug("Settings file already exists at {}, skipping creation", settings_path)
-        return
-
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text('[create_templates.entrypoint]\nagent_type = "{}"\n'.format(agent_type))
-    logger.debug("Created {}", settings_path)
-
-
 def _prepare_repo(
     temp_dir: Path,
     git_url: str | None,
-    agent_type: str | None,
     branch: str | None,
     add_paths: tuple[tuple[Path, Path], ...],
 ) -> None:
     """Prepare the temporary repo directory by cloning or initializing.
 
     When git_url is provided, clones the repository. Otherwise, creates an
-    empty git repo. In both cases, copies any --add-path files and generates
-    .mng/settings.toml if --agent-type is provided and the file doesn't
-    already exist.
+    empty git repo. In both cases, copies any --add-path files.
     """
     if git_url is not None:
         url = GitUrl(git_url)
@@ -227,32 +212,50 @@ def _prepare_repo(
         logger.info("Cloning repository: {}", url)
         clone_git_repo(url, temp_dir, branch=git_branch)
     else:
-        assert agent_type is not None
-        logger.info("Creating changeling repo for agent type: {}", agent_type)
+        logger.info("Creating changeling repo")
         init_empty_git_repo(temp_dir)
 
-    # Copy --add-path files into the repo first, so that user-provided
-    # files take precedence over auto-generated configs
+    # Copy --add-path files into the repo
     files_added = _copy_add_paths(add_paths, temp_dir)
 
-    # Generate .mng/settings.toml (only if it doesn't already exist,
-    # so --add-path or cloned versions are preserved)
-    if agent_type is not None:
-        _write_mng_settings_toml(temp_dir, agent_type)
-
     # Commit any new files that were added to the repo
-    if git_url is None or files_added > 0 or agent_type is not None:
+    if git_url is None or files_added > 0:
         commit_files_in_repo(temp_dir, "Initial changeling setup")
 
 
-def _validate_settings_exist(temp_dir: Path) -> None:
-    """Validate that the repo has an entrypoint template."""
-    settings_path = temp_dir / _MNG_SETTINGS_REL_PATH
-    if not settings_path.exists():
-        raise MissingSettingsError(
-            "No .mng/settings.toml found. Either provide --agent-type to generate one, "
-            "or clone a repository that already contains one."
-        )
+def _resolve_agent_type(temp_dir: Path, cli_agent_type: str | None) -> str:
+    """Resolve the agent type from CLI flag or changelings.toml.
+
+    Resolution order:
+    1. CLI --agent-type flag (if provided)
+    2. agent_type field in changelings.toml (if present in the repo)
+    3. Error
+
+    Uses ``load_settings_from_path`` to parse changelings.toml through the
+    ``ClaudeChangelingSettings`` model, ensuring consistent validation.
+
+    Raises MissingAgentTypeError if no agent type can be determined.
+    """
+    if cli_agent_type is not None:
+        return cli_agent_type
+
+    settings_path = temp_dir / SETTINGS_FILENAME
+    try:
+        settings = load_settings_from_path(settings_path)
+    except (tomllib.TOMLDecodeError, ValidationError) as e:
+        raise MissingAgentTypeError(
+            "Failed to parse {}: {}. Fix the syntax error or provide --agent-type on the CLI.".format(
+                SETTINGS_FILENAME, e
+            )
+        ) from e
+
+    if settings.agent_type is not None:
+        return settings.agent_type
+
+    raise MissingAgentTypeError(
+        "No agent type specified. Either provide --agent-type on the CLI, "
+        "or set agent_type in changelings.toml in the repository."
+    )
 
 
 def _resolve_agent_name(name: str | None, agent_type: str | None) -> AgentName:
@@ -292,7 +295,7 @@ def _move_to_permanent_location(temp_dir: Path, changeling_dir: Path) -> None:
 @click.option(
     "--agent-type",
     default=None,
-    help="Agent type to deploy (e.g. 'elena-code'). Required when not cloning a repo that already has .mng/settings.toml.",
+    help="Agent type to deploy (e.g. 'elena-code'). Required unless the repo has agent_type in changelings.toml.",
 )
 @click.option(
     "--add-path",
@@ -350,9 +353,9 @@ def deploy(
 
     Either GIT_URL or --agent-type must be provided.
 
-    The changeling's agent type is defined by the entrypoint template in
-    .mng/settings.toml. When --agent-type is provided, this file is generated
-    automatically.
+    The agent type is passed directly to mng create. When --agent-type is provided,
+    it takes precedence. Otherwise, the agent type is read from changelings.toml
+    in the repository.
 
     Example:
 
@@ -380,16 +383,15 @@ def deploy(
         _prepare_repo(
             temp_dir=temp_dir,
             git_url=git_url,
-            agent_type=agent_type,
             branch=branch,
             add_paths=parsed_add_paths,
         )
-        _validate_settings_exist(temp_dir)
+        resolved_agent_type = _resolve_agent_type(temp_dir, agent_type)
     except click.ClickException:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
-    agent_name = _resolve_agent_name(name, agent_type)
+    agent_name = _resolve_agent_name(name, resolved_agent_type)
     provider_choice = _resolve_provider(provider)
     self_deploy_choice = _resolve_self_deploy(self_deploy)
 
@@ -418,6 +420,7 @@ def deploy(
             changeling_dir=changeling_dir,
             agent_name=agent_name,
             agent_id=agent_id,
+            agent_type=resolved_agent_type,
             provider=provider_choice,
             paths=paths,
             pass_env=pass_env,

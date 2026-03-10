@@ -21,7 +21,7 @@ Run the chat script with `--list`:
 $MNG_HOST_DIR/commands/chat.sh --list
 ```
 
-This reads `events/conversations/events.jsonl` and displays each conversation with:
+This reads the `changeling_conversations` table from the llm database and displays each conversation with:
 - Conversation ID
 - Creation timestamp
 - Model being used
@@ -29,5 +29,4 @@ This reads `events/conversations/events.jsonl` and displays each conversation wi
 ## Working with the results
 
 - Use a conversation ID with `chat.sh --resume <id>` to continue an existing conversation
-- The last event for each conversation ID determines its current state (e.g., if a `model_changed` event was emitted, the listed model reflects the change)
 - Conversations are append-only; there is no explicit "close" operation

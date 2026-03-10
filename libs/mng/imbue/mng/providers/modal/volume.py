@@ -3,6 +3,8 @@ from typing import Mapping
 
 import modal
 import modal.exception
+from grpclib.exceptions import ProtocolError
+from grpclib.exceptions import StreamTerminatedError
 from modal.volume import FileEntry
 from modal.volume import FileEntryType
 from pydantic import Field
@@ -18,7 +20,9 @@ from imbue.mng.interfaces.volume import BaseVolume
 # Retry parameters for Modal volume operations.
 # modal.exception.InternalError (e.g. "could not start volume metadata engine")
 # is transient and typically resolves on retry.
-_VOLUME_RETRY_PARAMS = retry_if_exception_type(modal.exception.InternalError)
+# grpclib StreamTerminatedError/ProtocolError are transient gRPC protocol errors
+# that occur when the HTTP/2 stream is terminated unexpectedly.
+_VOLUME_RETRY_PARAMS = retry_if_exception_type((modal.exception.InternalError, StreamTerminatedError, ProtocolError))
 _VOLUME_STOP_PARAMS = stop_after_attempt(3)
 _VOLUME_WAIT_PARAMS = wait_exponential(multiplier=1, min=1, max=3)
 

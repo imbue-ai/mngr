@@ -454,6 +454,7 @@ class AgentDetails(FrozenModel):
     type: str = Field(description="Agent type (claude, codex, etc.)")
     command: CommandString = Field(description="Command used to start the agent")
     work_dir: Path = Field(description="Working directory")
+    initial_branch: str | None = Field(description="Git branch name created for this agent")
     create_time: datetime = Field(description="Creation timestamp")
     start_on_boot: bool = Field(description="Whether agent starts on host boot")
 

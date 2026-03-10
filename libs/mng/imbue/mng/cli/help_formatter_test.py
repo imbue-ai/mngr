@@ -231,7 +231,7 @@ def test_create_command_help_contains_common_options() -> None:
     assert "--in" in help_output or "--new-host" in help_output
     assert "--host" in help_output
     assert "--name" in help_output
-    assert "--agent-type" in help_output
+    assert "--type" in help_output
 
 
 def test_create_command_help_contains_examples() -> None:

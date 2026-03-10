@@ -42,7 +42,7 @@ def test_deploy_test_coder_and_verify_matched_responses_model(deployed_test_code
 
     # Verify the chat settings have the matched-responses model configured
     work_dir = str(deployed_test_coder["work_dir"])
-    settings_path = Path(work_dir) / ".changelings" / "settings.toml"
+    settings_path = Path(work_dir) / "changelings.toml"
     assert settings_path.exists(), f"Settings file not found at {settings_path}"
     settings_content = settings_path.read_text()
     assert 'model = "matched-responses"' in settings_content, (

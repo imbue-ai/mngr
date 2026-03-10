@@ -80,7 +80,7 @@ class TestCoderAgent(ClaudeChangelingAgent):
         llm, creates event dirs, etc.) and then installs the
         llm-matched-responses plugin so the model is available for chat.
 
-        Also writes .changelings/settings.toml with model = "matched-responses"
+        Also writes changelings.toml with model = "matched-responses"
         so that chat.sh uses it by default.
         """
         super().provision(host, options, mng_ctx)
@@ -140,22 +140,13 @@ def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
 
 
 def _configure_model_as_default(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write .changelings/settings.toml with model = "matched-responses".
+    """Write changelings.toml with model = "matched-responses".
 
     This ensures chat.sh uses the matched-responses model by default, so no
     API keys are needed for the chat interface.
     """
-    settings_dir = work_dir / ".changelings"
-    settings_path = settings_dir / "settings.toml"
-
+    settings_path = work_dir / "changelings.toml"
     settings_content = '[chat]\nmodel = "{}"\n'.format(_MODEL_NAME)
-
-    mkdir_result = host.execute_command(
-        f"mkdir -p {settings_dir}",
-        timeout_seconds=10.0,
-    )
-    if not mkdir_result.success:
-        raise TestCoderProvisioningError(f"Failed to create settings directory {settings_dir}: {mkdir_result.stderr}")
     host.write_text_file(settings_path, settings_content)
     logger.info("Configured matched-responses model as default chat model")
 

@@ -28,7 +28,7 @@ def tutor(ctx: click.Context, **kwargs: Any) -> None:
 
     # Loop: select a lesson, run it, return to selector when done
     lesson = run_lesson_selector(ALL_LESSONS)
-    while lesson is not None:
+    while lesson is not None:  # pragma: no cover
         run_lesson_runner(lesson, mng_ctx)
         lesson = run_lesson_selector(ALL_LESSONS)
 

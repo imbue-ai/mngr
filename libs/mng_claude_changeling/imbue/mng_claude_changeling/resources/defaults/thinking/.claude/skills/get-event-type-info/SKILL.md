@@ -13,7 +13,7 @@ To inspect raw events for a specific source, read the corresponding log file:
 cat "$MNG_AGENT_STATE_DIR/events/<source>/events.jsonl"
 ```
 
-Where `<source>` is one of: `messages`, `mng_agents`, `scheduled`, `stop`, `conversations`, `monitor`.
+Where `<source>` is one of: `messages`, `mng/agents`, `scheduled`, `stop`, `conversations`, `monitor`.
 
 For the raw Claude transcript (not an event source), use: `cat "$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"`
 
@@ -40,5 +40,5 @@ grep '"conversation_id":"<cid>"' "$MNG_AGENT_STATE_DIR/events/messages/events.js
 Find events for a specific sub-agent:
 
 ```bash
-grep '"agent_id":"<agent_id>"' "$MNG_AGENT_STATE_DIR/events/mng_agents/events.jsonl"
+grep '"agent_id":"<agent_id>"' "$MNG_AGENT_STATE_DIR/events/mng/agents/events.jsonl"
 ```

@@ -1,18 +1,51 @@
 """Tests for logging module."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from imbue.imbue_common.logging import _build_flat_log_dict
+from imbue.imbue_common.logging import _format_arg_value
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.logging import make_jsonl_file_sink
 from imbue.imbue_common.logging import setup_logging
+from imbue.imbue_common.logging import trace_span
 from imbue.mng.errors import BaseMngError
+
+
+class LogCapture:
+    """Captures loguru messages and levels for test assertions."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.levels: list[str] = []
+        self.extras: list[dict[str, Any]] = []
+
+    def sink(self, message: Any) -> None:
+        record = message.record
+        self.messages.append(record["message"])
+        self.levels.append(record["level"].name)
+        self.extras.append(dict(record["extra"]))
+
+
+@contextmanager
+def capture_logs() -> Iterator[LogCapture]:
+    """Context manager that installs a loguru sink and yields a LogCapture."""
+    cap = LogCapture()
+    handler_id = logger.add(cap.sink, level="TRACE", format="{message}")
+    try:
+        yield cap
+    finally:
+        logger.remove(handler_id)
 
 
 def test_setup_logging_does_not_raise() -> None:
@@ -289,3 +322,173 @@ def test_build_flat_log_dict_handles_special_chars() -> None:
     # Must round-trip through JSON
     reparsed = json.loads(json.dumps(d, default=str))
     assert reparsed["message"] == d["message"]
+
+
+# =============================================================================
+# Tests for _format_arg_value
+# =============================================================================
+
+
+def test_format_arg_value_short_value_unchanged() -> None:
+    """Short values should be returned as-is."""
+    assert _format_arg_value("hello") == "'hello'"
+
+
+def test_format_arg_value_truncates_long_value() -> None:
+    """Values longer than _MAX_LOG_VALUE_REPR_LENGTH should be truncated."""
+    long_string = "x" * 300
+    result = _format_arg_value(long_string)
+    assert result.endswith("...")
+    assert len(result) == 200
+
+
+# =============================================================================
+# Tests for log_call
+# =============================================================================
+
+
+def test_log_call_logs_function_call_and_result() -> None:
+    """log_call should log the function call at debug and the result at trace."""
+
+    @log_call
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    with capture_logs() as cap:
+        result = add(1, 2)
+        assert result == 3
+        assert len(cap.messages) == 2
+        assert "Calling add" in cap.messages[0]
+        assert "Calling add [done in " in cap.messages[1]
+
+
+def test_log_call_preserves_function_name() -> None:
+    """log_call should preserve the original function name."""
+
+    @log_call
+    def my_function() -> None:
+        pass
+
+    assert my_function.__name__ == "my_function"
+
+
+# =============================================================================
+# Tests for trace_span
+# =============================================================================
+
+
+def test_trace_span_emits_trace_messages() -> None:
+    """trace_span should emit trace messages on entry and exit."""
+    with capture_logs() as cap:
+        with trace_span("processing"):
+            pass
+
+        assert len(cap.messages) == 2
+        assert cap.messages[0] == "processing"
+        assert cap.levels[0] == "TRACE"
+        assert "processing [done in " in cap.messages[1]
+        assert cap.levels[1] == "TRACE"
+
+
+def test_trace_span_disabled_skips_logging() -> None:
+    """trace_span with _is_trace_span_enabled=False should not log."""
+    with capture_logs() as cap:
+        with trace_span("should not log", _is_trace_span_enabled=False):
+            pass
+
+        assert len(cap.messages) == 0
+
+
+def test_trace_span_logs_on_exception() -> None:
+    """trace_span should log failed timing on exception."""
+    with capture_logs() as cap:
+        try:
+            with trace_span("risky"):
+                raise BaseMngError("boom")
+        except BaseMngError:
+            pass
+
+        assert len(cap.messages) == 2
+        assert "risky [failed after " in cap.messages[1]
+
+
+# =============================================================================
+# Tests for make_jsonl_file_sink
+# =============================================================================
+
+
+def test_make_jsonl_file_sink_writes_json_lines(tmp_path: Path) -> None:
+    """make_jsonl_file_sink should write valid JSONL to the specified file."""
+    log_file = tmp_path / "test.jsonl"
+    sink = make_jsonl_file_sink(
+        file_path=str(log_file),
+        event_type="mng",
+        event_source="test",
+        command="create",
+        max_size_bytes=1_000_000,
+    )
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
+    try:
+        logger.info("test message")
+    finally:
+        logger.remove(handler_id)
+
+    assert log_file.exists()
+    content = log_file.read_text()
+    parsed = json.loads(content.strip())
+    assert parsed["type"] == "mng"
+    assert parsed["source"] == "test"
+    assert parsed["command"] == "create"
+    assert parsed["message"] == "test message"
+
+
+def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
+    """make_jsonl_file_sink should rotate when file exceeds max_size_bytes."""
+    log_file = tmp_path / "test.jsonl"
+    sink = make_jsonl_file_sink(
+        file_path=str(log_file),
+        event_type="mng",
+        event_source="test",
+        command=None,
+        max_size_bytes=100,
+    )
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
+    try:
+        for i in range(5):
+            logger.info("message number {}", i)
+    finally:
+        logger.remove(handler_id)
+
+    # Should have rotated files
+    rotated = tmp_path / "test.jsonl.1"
+    assert rotated.exists()
+
+
+# =============================================================================
+# Tests for _build_flat_log_dict exception info
+# =============================================================================
+
+
+def test_build_flat_log_dict_includes_exception_info() -> None:
+    """_build_flat_log_dict should include exception info when an exception is logged."""
+    captured_dicts: list[dict[str, Any]] = []
+
+    def sink(message: Any) -> None:
+        captured_dicts.append(_build_flat_log_dict(message.record, "mng", "mng", None))
+
+    handler_id = logger.add(sink, level="TRACE", format="{message}")
+    try:
+        try:
+            raise ValueError("test error")
+        except ValueError:
+            logger.exception("Something failed")
+    finally:
+        logger.remove(handler_id)
+
+    exc_info = captured_dicts[0]["exception"]
+    assert exc_info is not None
+    assert exc_info["type"] == "ValueError"
+    assert "test error" in exc_info["value"]
+    assert exc_info["traceback"] is True

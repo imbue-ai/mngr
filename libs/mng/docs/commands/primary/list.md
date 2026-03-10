@@ -65,8 +65,6 @@ mng list [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided [experimental], fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
-| `--json` | boolean | Alias for --format json | `False` |
-| `--jsonl` | boolean | Alias for --format jsonl | `False` |
 | `-q`, `--quiet` | boolean | Suppress all console output | `False` |
 | `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
 | `--log-file` | path | Path to log file (overrides default ~/.mng/events/logs/<timestamp>-<pid>.json) | None |
@@ -122,6 +120,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `command` - The command used to start the agent
 - `url` - URL where the agent can be accessed (if reported)
 - `work_dir` - Working directory for this agent
+- `initial_branch` - Git branch name created for this agent
 - `create_time` - Creation timestamp
 - `start_time` - Timestamp for when the agent was last started
 - `runtime_seconds` - How long the agent has been running
