@@ -174,12 +174,7 @@ mng create my-task --in modal --target-path /workspace
 
 # you can upload files and run custom commands during host provisioning:
 mng create my-task --in modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
-# (--sudo-command runs as root; --append-to-file, --prepend-to-file, and --create-directory are also available)
-
-# you can add SSH known hosts for outbound SSH from the agent:
-mng create my-task --in modal --known-host "github.com ssh-ed25519 AAAA..."
-# that is particularly helpful when creating agents that you want to share with other people or other installations of mng, since they won't have your local machine's keys automatically
-# it can also be useful for setting up automations in CI (so that you can access them later)
+# (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mng create my-task --in modal --no-start-on-boot
@@ -231,7 +226,7 @@ mng create sisyphus --reuse --in modal
 # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
 
 # you can control connection retries and timeouts:
-mng create my-task --in modal --retry 5 --retry-delay 10s --ready-timeout 30
+mng create my-task --in modal --retry 5 --retry-delay 10s
 # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
 
 # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -258,15 +253,10 @@ mng config set commands.create.in modal
 
 # you can control output format for scripting:
 mng create my-task --no-connect --format json
-# (--json and --jsonl are shorthands; --quiet suppresses all output)
+# (--quiet suppresses all output)
 
-# you can wait for the agent to finish before the command returns (great for scripting):
-mng create my-task --no-connect --await-agent-stopped --message "Do the thing"
-# (--await-ready waits only until the agent is ready, not until it finishes)
-
-# you can send a message when resuming a stopped agent. This is very useful for making more robust agents (eg, that can resume after crashing or being interrupted)
-mng create my-task --resume-message "Continue where you left off"
-# (--resume-message-file reads the resume message from a file)
+# you can send a message when starting the agent (great for scripting):
+mng create my-task --no-connect --message "Do the thing"
 
 ## LEARNING MORE
 

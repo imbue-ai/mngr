@@ -42,21 +42,21 @@ class TestAutoFixCreateArgs:
     def test_adds_schedule_tag(self) -> None:
         result = auto_fix_create_args("my-agent", "nightly-build")
         parts = shlex.split(result)
-        assert "--tag" in parts
-        tag_idx = parts.index("--tag")
+        assert "--host-label" in parts
+        tag_idx = parts.index("--host-label")
         assert parts[tag_idx + 1] == "SCHEDULE=nightly-build"
 
     def test_skips_schedule_tag_when_already_present(self) -> None:
-        result = auto_fix_create_args("my-agent --tag SCHEDULE=custom", "nightly-build")
+        result = auto_fix_create_args("my-agent --host-label SCHEDULE=custom", "nightly-build")
         parts = shlex.split(result)
-        assert parts.count("--tag") == 1
-        tag_idx = parts.index("--tag")
+        assert parts.count("--host-label") == 1
+        tag_idx = parts.index("--host-label")
         assert parts[tag_idx + 1] == "SCHEDULE=custom"
 
     def test_skips_schedule_tag_when_present_in_equals_form(self) -> None:
-        result = auto_fix_create_args("my-agent --tag=SCHEDULE=custom", "nightly-build")
+        result = auto_fix_create_args("my-agent --host-label=SCHEDULE=custom", "nightly-build")
         parts = shlex.split(result)
-        # Should not add a duplicate --tag SCHEDULE=...
+        # Should not add a duplicate --host-label SCHEDULE=...
         assert sum(1 for p in parts if "SCHEDULE=" in p) == 1
 
     def test_preserves_passthrough_args(self) -> None:
@@ -74,7 +74,7 @@ class TestAutoFixCreateArgs:
         result = auto_fix_create_args("", "trigger-1")
         parts = shlex.split(result)
         assert "--no-connect" in parts
-        assert "--tag" in parts
+        assert "--host-label" in parts
 
     def test_preserves_existing_args(self) -> None:
         result = auto_fix_create_args(

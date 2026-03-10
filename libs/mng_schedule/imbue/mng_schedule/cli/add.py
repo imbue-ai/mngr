@@ -73,17 +73,17 @@ def _has_flag(mng_args: Sequence[str], flag: str, negative_flag: str | None = No
 
 
 @pure
-def _has_tag_with_key(mng_args: Sequence[str], tag_key: str) -> bool:
-    """Check if a --tag with the given key prefix exists in the args.
+def _has_host_label_with_key(mng_args: Sequence[str], label_key: str) -> bool:
+    """Check if a --host-label with the given key prefix exists in the args.
 
-    Handles both '--tag KEY=VALUE' (two tokens) and '--tag=KEY=VALUE' (single token) forms.
+    Handles both '--host-label KEY=VALUE' (two tokens) and '--host-label=KEY=VALUE' (single token) forms.
     """
     for i, part in enumerate(mng_args):
-        # Two-token form: --tag KEY=VALUE
-        if part == "--tag" and i + 1 < len(mng_args) and mng_args[i + 1].startswith(f"{tag_key}="):
+        # Two-token form: --host-label KEY=VALUE
+        if part == "--host-label" and i + 1 < len(mng_args) and mng_args[i + 1].startswith(f"{label_key}="):
             return True
-        # Single-token form: --tag=KEY=VALUE
-        if part.startswith(f"--tag={tag_key}="):
+        # Single-token form: --host-label=KEY=VALUE
+        if part.startswith(f"--host-label={label_key}="):
             return True
     return False
 
@@ -98,7 +98,7 @@ def auto_fix_create_args(
     Adds the following flags if not already present:
     - --headless: so we never attempt interactive prompts
     - --no-connect: so we don't try to automatically connect
-    - --tag SCHEDULE=<name>: to make it easy to filter scheduled agents
+    - --host-label SCHEDULE=<name>: to make it easy to filter scheduled agents
 
     Only the mng args (before any '--' separator) are checked and modified.
     """
@@ -112,8 +112,8 @@ def auto_fix_create_args(
     if not _has_flag(mng_args, "--no-connect", "--connect"):
         mng_args.append("--no-connect")
 
-    if not _has_tag_with_key(mng_args, "SCHEDULE"):
-        mng_args.extend(["--tag", f"SCHEDULE={trigger_name}"])
+    if not _has_host_label_with_key(mng_args, "SCHEDULE"):
+        mng_args.extend(["--host-label", f"SCHEDULE={trigger_name}"])
 
     return shlex.join(mng_args + passthrough_args)
 
@@ -178,7 +178,7 @@ def check_safe_create_command(args: str) -> str | None:
     default=True,
     show_default=True,
     help="Automatically add args to create commands to make sure they work as expected "
-    "(e.g. --no-connect, --await-ready, --authorized-key, --tag SCHEDULE=<name>).",
+    "(e.g. --headless, --no-connect, --host-label SCHEDULE=<name>).",
 )
 @optgroup.option(
     "--ensure-safe-commands/--no-ensure-safe-commands",
