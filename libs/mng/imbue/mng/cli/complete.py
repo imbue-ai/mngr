@@ -15,11 +15,29 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 
 from imbue.mng.cli.complete_names import resolve_names_from_discovery_stream
 from imbue.mng.config.host_dir import read_default_host_dir
 
 _COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
+
+
+class _CompletionContext(NamedTuple):
+    """Parsed shell completion state derived from COMP_WORDS and the cache."""
+
+    incomplete: str
+    comp_cword: int
+    prev_word: str | None
+    command_key: str
+    resolved_command: str | None
+    is_group: bool
+    commands: list[str]
+    aliases: dict[str, str]
+    subcommand_by_command: dict[str, list[str]]
+    options_by_command: dict[str, list[str]]
+    flag_options_by_command: dict[str, list[str]]
+    cache: dict[str, Any]
 
 
 def _get_completion_cache_dir() -> Path:
@@ -94,89 +112,95 @@ def _is_flag_option(word: str, flag_options: list[str]) -> bool:
     return all(f"-{ch}" in flag_options for ch in word[1:])
 
 
-def _get_completions() -> list[str]:
-    """Compute completion candidates from environment variables and the cache."""
+def _parse_completion_context() -> _CompletionContext | None:
+    """Parse COMP_WORDS, COMP_CWORD, and the cache into a structured context.
+
+    Returns None if the environment is invalid (e.g. COMP_CWORD is not an int).
+    """
     comp_words_raw = os.environ.get("COMP_WORDS", "")
     comp_cword_raw = os.environ.get("COMP_CWORD", "")
 
     try:
         comp_cword = int(comp_cword_raw)
     except ValueError:
-        return []
+        return None
 
     words = comp_words_raw.split()
-
-    # Determine the incomplete word being completed
-    if comp_cword < len(words):
-        incomplete = words[comp_cword]
-    else:
-        incomplete = ""
+    incomplete = words[comp_cword] if comp_cword < len(words) else ""
 
     cache = _read_cache()
-    commands: list[str] = cache.get("commands", [])
     aliases: dict[str, str] = cache.get("aliases", {})
     subcommand_by_command: dict[str, list[str]] = cache.get("subcommand_by_command", {})
-    options_by_command: dict[str, list[str]] = cache.get("options_by_command", {})
-    flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
-
-    # Resolve the command and subcommand from the words already typed
-    resolved_command: str | None = None
-    resolved_subcommand: str | None = None
 
     # words[0] = "mng", words[1] = command, words[2] = subcommand (if group)
-    # When comp_cword == 1, we are completing the command name itself and
-    # resolved_command stays None. When comp_cword > 1, word[1] is fully typed.
+    resolved_command: str | None = None
     if len(words) > 1 and comp_cword > 1:
         raw_cmd = words[1]
         resolved_command = aliases.get(raw_cmd, raw_cmd)
 
     is_group = resolved_command is not None and resolved_command in subcommand_by_command
-
+    resolved_subcommand: str | None = None
     if resolved_command is not None and is_group and len(words) > 2 and comp_cword > 2:
         resolved_subcommand = words[2]
 
-    # Determine the previous word (for option value completion)
     prev_word: str | None = None
     if comp_cword >= 1 and comp_cword - 1 < len(words):
         prev_word = words[comp_cword - 1]
 
-    # Determine the command key for option lookups
     if resolved_subcommand is not None:
-        option_key = f"{resolved_command}.{resolved_subcommand}"
+        command_key = f"{resolved_command}.{resolved_subcommand}"
     elif resolved_command is not None:
-        option_key = resolved_command
+        command_key = resolved_command
     else:
-        option_key = ""
+        command_key = ""
+
+    return _CompletionContext(
+        incomplete=incomplete,
+        comp_cword=comp_cword,
+        prev_word=prev_word,
+        command_key=command_key,
+        resolved_command=resolved_command,
+        is_group=is_group,
+        commands=cache.get("commands", []),
+        aliases=aliases,
+        subcommand_by_command=subcommand_by_command,
+        options_by_command=cache.get("options_by_command", {}),
+        flag_options_by_command=cache.get("flag_options_by_command", {}),
+        cache=cache,
+    )
+
+
+def _get_completions() -> list[str]:
+    """Compute completion candidates from environment variables and the cache."""
+    ctx = _parse_completion_context()
+    if ctx is None:
+        return []
 
     candidates: list[str]
 
-    if comp_cword == 1:
-        # Completing the command name (position 1)
-        candidates = _filter_aliases(commands, aliases, incomplete)
-    elif is_group and comp_cword == 2:
-        # Completing a subcommand of a group
-        assert resolved_command is not None
-        candidates = subcommand_by_command.get(resolved_command, [])
-    elif prev_word is not None and prev_word.startswith("-"):
-        flag_options = flag_options_by_command.get(option_key, [])
-        if _is_flag_option(prev_word, flag_options):
-            # Previous word is a flag -- next position is positional
-            if incomplete.startswith("--"):
-                candidates = options_by_command.get(option_key, [])
+    if ctx.comp_cword == 1:
+        candidates = _filter_aliases(ctx.commands, ctx.aliases, ctx.incomplete)
+    elif ctx.is_group and ctx.comp_cword == 2:
+        assert ctx.resolved_command is not None
+        candidates = ctx.subcommand_by_command.get(ctx.resolved_command, [])
+    elif ctx.prev_word is not None and ctx.prev_word.startswith("-"):
+        flag_options = ctx.flag_options_by_command.get(ctx.command_key, [])
+        if _is_flag_option(ctx.prev_word, flag_options):
+            if ctx.incomplete.startswith("--"):
+                candidates = ctx.options_by_command.get(ctx.command_key, [])
             else:
-                candidates = _get_positional_candidates(option_key, cache)
-        elif incomplete.startswith("--"):
-            # Previous word is value-taking, but user started typing an option
-            candidates = options_by_command.get(option_key, [])
+                candidates = _get_positional_candidates(ctx.command_key, ctx.cache)
+        elif ctx.incomplete.startswith("--"):
+            candidates = ctx.options_by_command.get(ctx.command_key, [])
         else:
-            choice_key = f"{option_key}.{prev_word}"
-            candidates = _get_option_value_candidates(choice_key, cache)
-    elif incomplete.startswith("--"):
-        candidates = options_by_command.get(option_key, [])
+            choice_key = f"{ctx.command_key}.{ctx.prev_word}"
+            candidates = _get_option_value_candidates(choice_key, ctx.cache)
+    elif ctx.incomplete.startswith("--"):
+        candidates = ctx.options_by_command.get(ctx.command_key, [])
     else:
-        candidates = _get_positional_candidates(option_key, cache)
+        candidates = _get_positional_candidates(ctx.command_key, ctx.cache)
 
-    return [c for c in candidates if c.startswith(incomplete)]
+    return [c for c in candidates if c.startswith(ctx.incomplete)]
 
 
 def _filter_aliases(
