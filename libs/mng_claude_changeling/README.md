@@ -44,7 +44,7 @@ The **thinking** role agent is the first role agent created when a changeling is
 
 When the thinking agent determines that work needs to be done, it creates other role agents by calling `mng create`. Each created role agent is a fully independent mng agent -- it appears in `mng list`, has its own lifecycle state, and runs in its own tmux session. Multiple instances of the same role can exist simultaneously (e.g., several workers tackling different tasks in parallel).
 
-The thinking agent learns about role agent state changes via the `events/mng_agents/events.jsonl` event stream. When a role agent transitions to "waiting", "done", or "crashed", an event is written and delivered to the thinking agent, which can then decide how to proceed (e.g., verify work, retry, or report to the user).
+The thinking agent learns about role agent state changes via the `events/mng/agents/events.jsonl` event stream. When a role agent transitions to "waiting", "done", or "crashed", an event is written and delivered to the thinking agent, which can then decide how to proceed (e.g., verify work, retry, or report to the user).
 
 All role agents share the same git repo as their working directory, and they all see the same `GLOBAL.md` instructions. Each role agent's specific behavior is determined by its role directory (prompt, skills, settings).
 
@@ -54,7 +54,7 @@ The "thinking" role is the default primary role agent. It does not chat directly
 
 - `events/messages/events.jsonl` - new conversation messages (synced from the `llm` database)
 - `events/scheduled/events.jsonl` - time-based triggers
-- `events/mng_agents/events.jsonl` - role agent state transitions (waiting, crashed, done, etc.)
+- `events/mng/agents/events.jsonl` - role agent state transitions (waiting, crashed, done, etc.)
 - `events/stop/events.jsonl` - shutdown detection (last chance to check for pending work)
 - `events/monitor/events.jsonl` - (future) metacognitive reminders from a monitor agent
 
@@ -93,7 +93,7 @@ All event data uses a consistent append-only JSONL format stored under `<agent-d
 Event sources:
 - `events/messages/events.jsonl` - all conversation messages across all conversations
 - `events/scheduled/events.jsonl` - scheduled triggers
-- `events/mng_agents/events.jsonl` - role agent state transitions
+- `events/mng/agents/events.jsonl` - role agent state transitions
 - `events/stop/events.jsonl` - shutdown detection
 - `events/monitor/events.jsonl` - (future) metacognitive reminders
 - `events/delivery_failures/events.jsonl` - event delivery failure notifications
