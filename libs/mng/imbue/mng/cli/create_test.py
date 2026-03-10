@@ -602,12 +602,12 @@ def test_parse_agent_opts_with_agent_id(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
 ) -> None:
-    """--agent-id should be parsed into agent_id field."""
+    """--id should be parsed into id field."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
     explicit_id = AgentId()
     opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().agent_id, str(explicit_id)),
+        to_update(default_create_cli_opts.field_ref().id, str(explicit_id)),
     )
 
     result = _parse_agent_opts(
@@ -627,7 +627,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
 ) -> None:
-    """Without --agent-id, agent_id should be None (auto-generated later)."""
+    """Without --id, id should be None (auto-generated later)."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
 

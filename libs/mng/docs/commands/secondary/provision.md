@@ -72,9 +72,9 @@ mng provision [OPTIONS] [AGENT]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--env`, `--agent-env` | text | Set environment variable KEY=VALUE | None |
-| `--env-file`, `--agent-env-file` | path | Load env file | None |
-| `--pass-env`, `--pass-agent-env` | text | Forward variable from shell | None |
+| `--env` | text | Set environment variable KEY=VALUE | None |
+| `--env-file` | path | Load env file | None |
+| `--pass-env` | text | Forward variable from shell | None |
 
 ## Common
 

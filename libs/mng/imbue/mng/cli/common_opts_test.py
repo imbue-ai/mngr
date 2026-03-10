@@ -235,7 +235,7 @@ def test_apply_create_template_multiple_templates_stack(mng_test_prefix: str) ->
         params={
             "template": ("host-template", "agent-template"),
             "new_host": None,
-            "agent_type": None,
+            "type": None,
             "name": "default",
         },
     )
@@ -244,14 +244,14 @@ def test_apply_create_template_multiple_templates_stack(mng_test_prefix: str) ->
         prefix=mng_test_prefix,
         create_templates={
             CreateTemplateName("host-template"): CreateTemplate(options={"new_host": "modal"}),
-            CreateTemplateName("agent-template"): CreateTemplate(options={"agent_type": "codex"}),
+            CreateTemplateName("agent-template"): CreateTemplate(options={"type": "codex"}),
         },
     )
 
     result = apply_create_template(ctx, ctx.params.copy(), config)
 
     assert result["new_host"] == "modal"
-    assert result["agent_type"] == "codex"
+    assert result["type"] == "codex"
 
 
 def test_apply_create_template_later_template_overrides_earlier(mng_test_prefix: str) -> None:

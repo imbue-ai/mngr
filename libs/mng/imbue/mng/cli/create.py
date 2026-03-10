@@ -160,7 +160,7 @@ class CreateCliOptions(CommonCliOptions):
     positional_agent_type: str | None
     agent_args: tuple[str, ...]
     template: tuple[str, ...]
-    agent_type: str | None
+    type: str | None
     reuse: bool
     connect: bool
     connect_command: str | None
@@ -170,7 +170,7 @@ class CreateCliOptions(CommonCliOptions):
     ensure_clean: bool
     snapshot_source: bool | None
     name: str | None
-    agent_id: str | None
+    id: str | None
     name_style: str
     command: str | None
     extra_window: tuple[str, ...]
@@ -195,9 +195,9 @@ class CreateCliOptions(CommonCliOptions):
     new_branch_prefix: str
     depth: int | None
     shallow_since: str | None
-    agent_env: tuple[str, ...]
-    agent_env_file: tuple[str, ...]
-    pass_agent_env: tuple[str, ...]
+    env: tuple[str, ...]
+    env_file: tuple[str, ...]
+    pass_env: tuple[str, ...]
     host: str | None
     new_host: str | None
     host_name: str | None
@@ -251,7 +251,7 @@ class CreateCliOptions(CommonCliOptions):
     help="Use a named template from create_templates config [repeatable, stacks in order]",
 )
 @optgroup.option("-n", "--name", help="Agent name (alternative to positional argument) [default: auto-generated]")
-@optgroup.option("--id", "agent_id", help="Explicit agent ID [default: auto-generated]")
+@optgroup.option("--id", help="Explicit agent ID [default: auto-generated]")
 @optgroup.option(
     "--name-style",
     type=click.Choice(_make_name_style_choices(), case_sensitive=False),
@@ -259,10 +259,9 @@ class CreateCliOptions(CommonCliOptions):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", "agent_type", help="Which type of agent to run [default: claude]")
+@optgroup.option("--type", help="Which type of agent to run [default: claude]")
 @optgroup.option(
     "--command",
-    "command",
     help="Run a literal command using the generic agent type (mutually exclusive with --type)",
 )
 @optgroup.option(
@@ -409,15 +408,14 @@ class CreateCliOptions(CommonCliOptions):
     help="Include gitignored files",
 )
 @optgroup.group("Agent Environment Variables")
-@optgroup.option("--env", "agent_env", multiple=True, help="Set environment variable KEY=VALUE")
+@optgroup.option("--env", multiple=True, help="Set environment variable KEY=VALUE")
 @optgroup.option(
     "--env-file",
-    "agent_env_file",
     type=click.Path(exists=True),
     multiple=True,
     help="Load env",
 )
-@optgroup.option("--pass-env", "pass_agent_env", multiple=True, help="Forward variable from shell")
+@optgroup.option("--pass-env", multiple=True, help="Forward variable from shell")
 @optgroup.group("Agent Provisioning")
 @optgroup.option("--grant", "grant", multiple=True, help="Grant a permission to the agent [repeatable]")
 @optgroup.option(
@@ -1343,8 +1341,8 @@ def _parse_agent_opts(
     )
 
     # Parse environment options
-    env_vars = resolve_env_vars(opts.pass_agent_env, opts.agent_env)
-    env_files = tuple(Path(f) for f in opts.agent_env_file)
+    env_vars = resolve_env_vars(opts.pass_env, opts.env)
+    env_files = tuple(Path(f) for f in opts.env_file)
 
     environment = AgentEnvironmentOptions(
         env_vars=env_vars,
@@ -1396,7 +1394,7 @@ def _parse_agent_opts(
     # Special case: --command implies using the "generic" agent type, which simply
     # runs the provided command. If --type is also specified to something other
     # than "generic", that's an error (they are mutually exclusive).
-    resolved_agent_type = opts.agent_type
+    resolved_agent_type = opts.type
     resolved_agent_args = opts.agent_args
 
     if opts.positional_agent_type:
@@ -1424,7 +1422,7 @@ def _parse_agent_opts(
         resolved_agent_type = "generic"
 
     agent_opts = CreateAgentOptions(
-        agent_id=AgentId(opts.agent_id) if opts.agent_id else None,
+        agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
         name=parsed_agent_name,
         command=CommandString(opts.command) if opts.command else None,
