@@ -316,7 +316,7 @@ class CreateCliOptions(CommonCliOptions):
     "--transfer",
     type=click.Choice(_make_transfer_mode_choices(), case_sensitive=False),
     default=None,
-    help="How to transfer source code: copy (rsync), git-push (git push --mirror), git-worktree (shared worktree) [default: git-worktree for local git repos, copy otherwise]",
+    help="How to transfer source code: copy (rsync), git-push (git push --mirror), git-worktree (shared worktree) [default: git-worktree for local git repos, git-push for remote git repos, copy for non-git]",
 )
 @optgroup.group("Agent Git Configuration")
 @optgroup.option(
@@ -997,7 +997,7 @@ def _parse_agent_opts(
 
     # Determine transfer_mode from CLI flags
     # Priority: explicit --transfer flag > --in-place > default behavior
-    # Default: git-worktree for local git repos, copy for non-git repos or remote hosts
+    # Default: git-worktree for local git repos, git-push for remote git repos, copy for non-git
     transfer_mode: TransferMode | None
     # None means "in-place" (no transfer)
     if opts.in_place:
@@ -1005,14 +1005,15 @@ def _parse_agent_opts(
     elif opts.transfer is not None:
         transfer_mode = TransferMode(opts.transfer.upper().replace("-", "_"))
     else:
-        # No explicit flag, apply defaults based on context
-        # When creating a new remote host (--in/--new-host), always use COPY
-        # since GIT_WORKTREE only works when source and target are on the same host
+        # No explicit flag, apply defaults based on context:
+        # - GIT_WORKTREE for local git repos (fast, shares objects)
+        # - GIT_PUSH for remote git repos (transfers only git objects via git push --mirror)
+        # - COPY for non-git sources (rsync everything)
         is_creating_remote_host = opts.new_host is not None and opts.new_host.lower() != LOCAL_PROVIDER_NAME
+        is_git_repo = source_location.host.is_local and _is_git_repo(source_location.path, mng_ctx.concurrency_group)
         if is_creating_remote_host:
-            transfer_mode = TransferMode.COPY
+            transfer_mode = TransferMode.GIT_PUSH if is_git_repo else TransferMode.COPY
         elif source_location.host.is_local:
-            is_git_repo = _is_git_repo(source_location.path, mng_ctx.concurrency_group)
             if is_git_repo:
                 transfer_mode = TransferMode.GIT_WORKTREE
             else:

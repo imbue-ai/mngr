@@ -101,7 +101,7 @@ By default, `mng create` uses the "local" host. Use these options to change that
 | `--target` | text | Target [HOST][:PATH]. Defaults to current dir if no other target args are given | None |
 | `--target-path` | text | Directory to mount source inside agent host. Incompatible with --in-place | None |
 | `--in-place` | boolean | Run directly in source directory. Incompatible with --target-path | `False` |
-| `--transfer` | choice (`copy` &#x7C; `git-push` &#x7C; `git-worktree`) | How to transfer source code: copy (rsync), git-push (git push --mirror), git-worktree (shared worktree) [default: git-worktree for local git repos, copy otherwise] | None |
+| `--transfer` | choice (`copy` &#x7C; `git-push` &#x7C; `git-worktree`) | How to transfer source code: copy (rsync), git-push (git push --mirror), git-worktree (shared worktree) [default: git-worktree for local git repos, git-push for remote git repos, copy for non-git] | None |
 
 ## Agent Git Configuration
 
