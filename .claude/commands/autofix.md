@@ -1,6 +1,6 @@
 ---
 description: Automatically find and fix code issues in the current branch. Iteratively verifies, plans fixes, and implements them with separate commits. Defers all review to the end.
-allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(mkdir *), Bash(date -u +%Y-%m-%dT%H:%M:%SZ), Read, Write(.autofix/plans/*), Agent, AskUserQuestion
+allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(mkdir *), Bash(date -u +%Y-%m-%dT%H:%M:%SZ), Bash(echo "${GIT_BASE_BRANCH:-main}"), Read, Write(.autofix/plans/*), Agent, AskUserQuestion
 ---
 
 # Autofix

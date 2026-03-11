@@ -1,6 +1,6 @@
 ---
 description: Assess whether the approach taken on a branch is the right way to solve the problem.
-allowed-tools: Bash(git rev-parse *), Bash(git worktree *), Bash(head *), Bash(xxd *), Read, Agent, AskUserQuestion
+allowed-tools: Bash(git rev-parse *), Bash(git worktree *), Bash(head *), Bash(xxd *), Bash(echo "${GIT_BASE_BRANCH:-main}"), Read, Agent, AskUserQuestion
 ---
 
 # Architecture Verification
