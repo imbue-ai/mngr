@@ -301,7 +301,9 @@ def test_build_board_widgets_none_snapshot_shows_loading() -> None:
 def test_build_board_widgets_empty_snapshot_shows_no_agents() -> None:
     walker, _ = _build_board_widgets(_make_snapshot())
     assert len(walker) == 1
-    assert "No agents found" in str(walker[0].get_text()[0])
+    widget = walker[0]
+    assert isinstance(widget, Text)
+    assert "No agents found" in str(widget.get_text()[0])
 
 
 def test_build_board_widgets_with_entries_creates_sections() -> None:
