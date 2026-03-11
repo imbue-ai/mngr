@@ -2006,7 +2006,7 @@ requires-dist = [
 [[package]]
 name = "mng-tmr"
 version = "0.1.0"
-source = { editable = "libs/mng_test_mapreduce" }
+source = { editable = "libs/mng_tmr" }
 dependencies = [
     { name = "markdown-it-py" },
     { name = "mng" },

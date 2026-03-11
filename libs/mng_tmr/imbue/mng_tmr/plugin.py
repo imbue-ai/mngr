@@ -3,7 +3,7 @@ from collections.abc import Sequence
 import click
 
 from imbue.mng import hookimpl
-from imbue.mng_test_mapreduce.cli import tmr
+from imbue.mng_tmr.cli import tmr
 
 
 @hookimpl

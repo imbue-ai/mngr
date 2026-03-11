@@ -6,11 +6,11 @@ from click.testing import CliRunner
 
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import OutputFormat
-from imbue.mng_test_mapreduce.cli import _emit_agents_launched
-from imbue.mng_test_mapreduce.cli import _emit_report_path
-from imbue.mng_test_mapreduce.cli import _emit_test_count
-from imbue.mng_test_mapreduce.cli import _split_pytest_args
-from imbue.mng_test_mapreduce.cli import tmr
+from imbue.mng_tmr.cli import _emit_agents_launched
+from imbue.mng_tmr.cli import _emit_report_path
+from imbue.mng_tmr.cli import _emit_test_count
+from imbue.mng_tmr.cli import _split_pytest_args
+from imbue.mng_tmr.cli import tmr
 
 
 def test_cli_help(cli_runner: CliRunner) -> None:
@@ -79,3 +79,25 @@ def test_emit_test_count_json() -> None:
 
 def test_emit_agents_launched_jsonl() -> None:
     _emit_agents_launched(7, OutputOptions(output_format=OutputFormat.JSONL))
+
+
+def test_emit_report_path_json() -> None:
+    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSON))
+
+
+def test_emit_report_path_jsonl() -> None:
+    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSONL))
+
+
+def test_emit_test_count_jsonl() -> None:
+    _emit_test_count(3, OutputOptions(output_format=OutputFormat.JSONL))
+
+
+def test_emit_agents_launched_json() -> None:
+    _emit_agents_launched(5, OutputOptions(output_format=OutputFormat.JSON))
+
+
+def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(tmr, ["--help"])
+    assert "--timeout" in result.output
+    assert "--integrator-timeout" in result.output

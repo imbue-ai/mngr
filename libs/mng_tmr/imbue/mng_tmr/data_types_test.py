@@ -2,13 +2,14 @@
 
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng_test_mapreduce.data_types import TestAgentInfo
-from imbue.mng_test_mapreduce.data_types import TestMapReduceResult
-from imbue.mng_test_mapreduce.data_types import TestOutcome
-from imbue.mng_test_mapreduce.data_types import TestResult
+from imbue.mng_tmr.data_types import TestAgentInfo
+from imbue.mng_tmr.data_types import TestMapReduceResult
+from imbue.mng_tmr.data_types import TestOutcome
+from imbue.mng_tmr.data_types import TestResult
 
 
 def test_test_outcome_values() -> None:
+    assert TestOutcome.PENDING == "PENDING"
     assert TestOutcome.RUN_SUCCEEDED == "RUN_SUCCEEDED"
     assert TestOutcome.FIX_TEST_SUCCEEDED == "FIX_TEST_SUCCEEDED"
     assert TestOutcome.FIX_IMPL_FAILED == "FIX_IMPL_FAILED"

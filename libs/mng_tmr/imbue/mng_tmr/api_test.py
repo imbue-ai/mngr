@@ -5,19 +5,23 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng_test_mapreduce.api import CollectTestsError
-from imbue.mng_test_mapreduce.api import PLUGIN_NAME
-from imbue.mng_test_mapreduce.api import _build_agent_prompt
-from imbue.mng_test_mapreduce.api import _build_grouped_tables
-from imbue.mng_test_mapreduce.api import _build_stacked_bar
-from imbue.mng_test_mapreduce.api import _render_markdown
-from imbue.mng_test_mapreduce.api import _sanitize_test_name_for_agent
-from imbue.mng_test_mapreduce.api import _short_random_id
-from imbue.mng_test_mapreduce.api import collect_tests
-from imbue.mng_test_mapreduce.api import generate_html_report
-from imbue.mng_test_mapreduce.data_types import TestMapReduceResult
-from imbue.mng_test_mapreduce.data_types import TestOutcome
+from imbue.mng_tmr.api import CollectTestsError
+from imbue.mng_tmr.api import PLUGIN_NAME
+from imbue.mng_tmr.api import _build_agent_prompt
+from imbue.mng_tmr.api import _build_grouped_tables
+from imbue.mng_tmr.api import _build_stacked_bar
+from imbue.mng_tmr.api import _render_markdown
+from imbue.mng_tmr.api import _sanitize_test_name_for_agent
+from imbue.mng_tmr.api import _short_random_id
+from imbue.mng_tmr.api import build_current_results
+from imbue.mng_tmr.api import collect_tests
+from imbue.mng_tmr.api import generate_html_report
+from imbue.mng_tmr.data_types import TestAgentInfo
+from imbue.mng_tmr.data_types import TestMapReduceResult
+from imbue.mng_tmr.data_types import TestOutcome
 
 
 def test_short_random_id_length() -> None:
@@ -258,3 +262,112 @@ def test_generate_html_report_empty_results(tmp_path: Path) -> None:
     output_path = tmp_path / "empty.html"
     generate_html_report([], output_path)
     assert "0 test(s)" in output_path.read_text()
+
+
+def test_generate_html_report_with_integrator_branch(tmp_path: Path) -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::a",
+            agent_name=AgentName("a"),
+            outcome=TestOutcome.FIX_IMPL_SUCCEEDED,
+            summary="fixed",
+            branch_name="mng-tmr/a",
+        ),
+    ]
+    output_path = tmp_path / "integrator.html"
+    generate_html_report(results, output_path, integrator_branch="mng-tmr/integrated-abc123")
+    content = output_path.read_text()
+    assert "integrator" in content
+    assert "mng-tmr/integrated-abc123" in content
+
+
+def test_generate_html_report_without_integrator_branch(tmp_path: Path) -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::a", agent_name=AgentName("a"), outcome=TestOutcome.RUN_SUCCEEDED, summary="ok"
+        ),
+    ]
+    output_path = tmp_path / "no_integrator.html"
+    generate_html_report(results, output_path)
+    content = output_path.read_text()
+    assert "Integrated branch:" not in content
+
+
+def test_generate_html_report_integrator_branch_html_escaped(tmp_path: Path) -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::a", agent_name=AgentName("a"), outcome=TestOutcome.RUN_SUCCEEDED, summary="ok"
+        ),
+    ]
+    output_path = tmp_path / "escape.html"
+    generate_html_report(results, output_path, integrator_branch="<script>alert('xss')</script>")
+    content = output_path.read_text()
+    assert "<script>" not in content
+    assert "&lt;script&gt;" in content
+
+
+def test_build_stacked_bar_pending_outcome() -> None:
+    bar_html = _build_stacked_bar({TestOutcome.PENDING: 3}, 3)
+    assert "PENDING: 3" in bar_html
+    assert "rgb(3, 169, 244)" in bar_html
+
+
+def test_build_grouped_tables_pending_first() -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::a", agent_name=AgentName("a"), outcome=TestOutcome.PENDING, summary="running"
+        ),
+        TestMapReduceResult(
+            test_node_id="t::b", agent_name=AgentName("b"), outcome=TestOutcome.RUN_SUCCEEDED, summary="ok"
+        ),
+    ]
+    tables_html = _build_grouped_tables(results)
+    assert tables_html.index("PENDING") < tables_html.index("RUN_SUCCEEDED")
+
+
+def test_build_current_results_pending_agents() -> None:
+    """Agents not in final_details should get PENDING outcome."""
+    no_host: OnlineHostInterface = None  # ty: ignore[invalid-assignment]
+    agents = [
+        TestAgentInfo(
+            test_node_id="tests/test_a.py::test_one",
+            agent_id=AgentId.generate(),
+            agent_name=AgentName("tmr-test-one-abc123"),
+        ),
+        TestAgentInfo(
+            test_node_id="tests/test_b.py::test_two",
+            agent_id=AgentId.generate(),
+            agent_name=AgentName("tmr-test-two-def456"),
+        ),
+    ]
+    results = build_current_results(
+        agents=agents,
+        final_details={},
+        timed_out_ids=set(),
+        host=no_host,
+    )
+    assert len(results) == 2
+    assert results[0].outcome == TestOutcome.PENDING
+    assert results[1].outcome == TestOutcome.PENDING
+    assert "still running" in results[0].summary
+
+
+def test_build_current_results_timed_out_agents() -> None:
+    """Timed-out agents should get TIMED_OUT outcome."""
+    no_host: OnlineHostInterface = None  # ty: ignore[invalid-assignment]
+    agent_id = AgentId.generate()
+    agents = [
+        TestAgentInfo(
+            test_node_id="tests/test_a.py::test_one",
+            agent_id=agent_id,
+            agent_name=AgentName("tmr-test-one-abc123"),
+        ),
+    ]
+    results = build_current_results(
+        agents=agents,
+        final_details={},
+        timed_out_ids={str(agent_id)},
+        host=no_host,
+    )
+    assert len(results) == 1
+    assert results[0].outcome == TestOutcome.TIMED_OUT

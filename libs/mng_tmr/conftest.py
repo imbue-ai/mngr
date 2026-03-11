@@ -1,6 +1,6 @@
-"""Project-level conftest for mng-test-mapreduce.
+"""Project-level conftest for mng-tmr.
 
-When running tests from libs/mng_test_mapreduce/, this conftest provides the common pytest hooks
+When running tests from libs/mng_tmr/, this conftest provides the common pytest hooks
 that would otherwise come from the monorepo root conftest.py (which is not discovered
 when pytest runs from a subdirectory).
 

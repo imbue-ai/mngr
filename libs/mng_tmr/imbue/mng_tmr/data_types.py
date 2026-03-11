@@ -12,6 +12,7 @@ from imbue.mng.primitives import AgentName
 class TestOutcome(str, Enum):
     """Outcome of running a single test via an agent."""
 
+    PENDING = "PENDING"
     RUN_SUCCEEDED = "RUN_SUCCEEDED"
     FIX_TEST_SUCCEEDED = "FIX_TEST_SUCCEEDED"
     FIX_TEST_FAILED = "FIX_TEST_FAILED"

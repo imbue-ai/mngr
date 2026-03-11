@@ -2,7 +2,7 @@
 
 import pluggy
 
-from imbue.mng_test_mapreduce.plugin import register_cli_commands
+from imbue.mng_tmr.plugin import register_cli_commands
 
 
 def test_register_cli_commands_returns_command() -> None:

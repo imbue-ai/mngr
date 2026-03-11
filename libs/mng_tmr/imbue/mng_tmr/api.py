@@ -38,10 +38,10 @@ from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import UncommittedChangesMode
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng_test_mapreduce.data_types import TestAgentInfo
-from imbue.mng_test_mapreduce.data_types import TestMapReduceResult
-from imbue.mng_test_mapreduce.data_types import TestOutcome
-from imbue.mng_test_mapreduce.data_types import TestResult
+from imbue.mng_tmr.data_types import TestAgentInfo
+from imbue.mng_tmr.data_types import TestMapReduceResult
+from imbue.mng_tmr.data_types import TestOutcome
+from imbue.mng_tmr.data_types import TestResult
 
 PLUGIN_NAME = "test-map-reduce"
 
@@ -54,6 +54,7 @@ _TERMINAL_STATES = frozenset(
 )
 
 _OUTCOME_COLORS: dict[TestOutcome, str] = {
+    TestOutcome.PENDING: "rgb(3, 169, 244)",
     TestOutcome.FIX_TEST_SUCCEEDED: "rgb(33, 150, 243)",
     TestOutcome.FIX_IMPL_SUCCEEDED: "rgb(33, 150, 243)",
     TestOutcome.FIX_TEST_FAILED: "rgb(244, 67, 54)",
@@ -65,6 +66,7 @@ _OUTCOME_COLORS: dict[TestOutcome, str] = {
 }
 
 _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
+    TestOutcome.PENDING,
     TestOutcome.FIX_IMPL_SUCCEEDED,
     TestOutcome.FIX_TEST_SUCCEEDED,
     TestOutcome.FIX_IMPL_FAILED,
@@ -255,6 +257,7 @@ def poll_until_all_done(
     poll_interval_seconds: float,
     host: OnlineHostInterface,
     deadline: float,
+    report_path: Path | None = None,
 ) -> tuple[dict[str, AgentDetails], set[str]]:
     """Poll agents until all have reached a terminal state or the deadline is reached.
 
@@ -265,6 +268,9 @@ def poll_until_all_done(
     Agents that disappear from listings are treated as errors after a grace period.
     Agents entering WAITING state are stopped after being recorded.
     When the deadline is reached, all pending agents are stopped unconditionally.
+
+    If report_path is provided, an intermediate HTML report is written after each
+    polling round and before returning on timeout.
     """
     pending_ids = {str(info.agent_id) for info in agents}
     agent_id_to_info = {str(info.agent_id): info for info in agents}
@@ -277,6 +283,9 @@ def poll_until_all_done(
             for agent_id_str in pending_ids:
                 info = agent_id_to_info[agent_id_str]
                 _stop_agent_on_host(host, AgentId(agent_id_str), info.agent_name)
+            if report_path is not None:
+                current_results = build_current_results(agents, final_details, set(pending_ids), host)
+                generate_html_report(current_results, report_path)
             return final_details, set(pending_ids)
 
         logger.info("Polling {} pending agent(s)...", len(pending_ids))
@@ -314,6 +323,10 @@ def poll_until_all_done(
                 if rounds >= _MISSING_AGENT_MAX_ROUNDS:
                     logger.warning("Agent {} disappeared after {} rounds, treating as error", agent_id_str, rounds)
                     pending_ids.discard(agent_id_str)
+
+        if report_path is not None:
+            current_results = build_current_results(agents, final_details, set(), host)
+            generate_html_report(current_results, report_path)
 
         if pending_ids:
             time.sleep(poll_interval_seconds)
@@ -454,7 +467,63 @@ def gather_results(
     return results
 
 
-def generate_html_report(results: list[TestMapReduceResult], output_path: Path) -> Path:
+def build_current_results(
+    agents: list[TestAgentInfo],
+    final_details: dict[str, AgentDetails],
+    timed_out_ids: set[str],
+    host: OnlineHostInterface,
+) -> list[TestMapReduceResult]:
+    """Build current results without pulling branches, for intermediate reports."""
+    results: list[TestMapReduceResult] = []
+
+    for agent_info in agents:
+        agent_id_str = str(agent_info.agent_id)
+
+        if agent_id_str in timed_out_ids:
+            results.append(
+                TestMapReduceResult(
+                    test_node_id=agent_info.test_node_id,
+                    agent_name=agent_info.agent_name,
+                    outcome=TestOutcome.TIMED_OUT,
+                    summary="Agent was stopped because the timeout was reached.",
+                )
+            )
+            continue
+
+        detail = final_details.get(agent_id_str)
+
+        if detail is None:
+            results.append(
+                TestMapReduceResult(
+                    test_node_id=agent_info.test_node_id,
+                    agent_name=agent_info.agent_name,
+                    outcome=TestOutcome.PENDING,
+                    summary="Agent is still running...",
+                )
+            )
+            continue
+
+        test_result = read_agent_result(detail, host)
+        branch_name = detail.initial_branch
+
+        results.append(
+            TestMapReduceResult(
+                test_node_id=agent_info.test_node_id,
+                agent_name=agent_info.agent_name,
+                outcome=test_result.outcome,
+                summary=test_result.summary,
+                branch_name=branch_name,
+            )
+        )
+
+    return results
+
+
+def generate_html_report(
+    results: list[TestMapReduceResult],
+    output_path: Path,
+    integrator_branch: str | None = None,
+) -> Path:
     """Generate an HTML report summarizing test-mapreduce results."""
     counts: dict[TestOutcome, int] = {}
     for r in results:
@@ -467,6 +536,11 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
 
     bar_html = _build_stacked_bar(counts, len(results))
     tables_html = _build_grouped_tables(results)
+
+    integrator_html = ""
+    if integrator_branch is not None:
+        escaped_branch = html.escape(integrator_branch)
+        integrator_html = f'  <p class="integrator">Integrated branch: <code>{escaped_branch}</code></p>\n'
 
     css = _html_report_css()
     report_html = f"""<!DOCTYPE html>
@@ -481,7 +555,7 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
 <body>
   <h1>Test Map-Reduce Report</h1>
   <p class="summary">{len(results)} test(s) -- {summary_text}</p>
-{bar_html}
+{integrator_html}{bar_html}
 {tables_html}
 </body>
 </html>
@@ -565,5 +639,97 @@ def _html_report_css() -> str:
         "    td.md p { margin: 0.25em 0; }\n"
         "    td.md p:first-child { margin-top: 0; }\n"
         "    td.md p:last-child { margin-bottom: 0; }\n"
-        "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }"
+        "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }\n"
+        "    .integrator { color: rgb(33, 150, 243); font-weight: 600; }"
     )
+
+
+def launch_integrator_agent(
+    fix_branches: list[str],
+    source_dir: Path,
+    local_host: OnlineHostInterface,
+    mng_ctx: MngContext,
+    agent_type: AgentTypeName,
+) -> TestAgentInfo:
+    """Launch an integrator agent that merges all fix branches into one."""
+    short_id = _short_random_id()
+    agent_name = AgentName(f"tmr-integrator-{short_id}")
+    branch_name = f"mng-tmr/integrated-{short_id}"
+
+    branch_list = "\n".join(f"  - {b}" for b in fix_branches)
+    prompt = f"""Merge the following branches into one integrated branch:
+{branch_list}
+
+For each branch, run `git merge <branch>` (resolve conflicts if needed).
+After merging all branches, verify that the code still compiles/passes basic checks.
+Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
+{{"outcome": "FIX_IMPL_SUCCEEDED", "summary": "Merged {len(fix_branches)} branches successfully."}}
+If merging fails, use outcome FIX_IMPL_FAILED.
+"""
+
+    agent_options = CreateAgentOptions(
+        agent_type=agent_type,
+        name=agent_name,
+        initial_message=prompt,
+        git=AgentGitOptions(
+            copy_mode=WorkDirCopyMode.WORKTREE,
+            new_branch_name=branch_name,
+        ),
+    )
+
+    source_location = HostLocation(host=local_host, path=source_dir)
+    target_host = NewHostOptions(provider=LOCAL_PROVIDER_NAME)
+
+    logger.info("Launching integrator agent '{}' to merge {} branches", agent_name, len(fix_branches))
+    create_result: CreateAgentResult = api_create(
+        source_location=source_location,
+        target_host=target_host,
+        agent_options=agent_options,
+        mng_ctx=mng_ctx,
+    )
+
+    return TestAgentInfo(
+        test_node_id="integrator",
+        agent_id=create_result.agent.id,
+        agent_name=create_result.agent.name,
+    )
+
+
+def wait_for_integrator(
+    integrator: TestAgentInfo,
+    mng_ctx: MngContext,
+    poll_interval_seconds: float,
+    host: OnlineHostInterface,
+    deadline: float,
+) -> str | None:
+    """Poll the integrator agent until it finishes or times out.
+
+    Returns the integrator's branch name if it finished successfully,
+    None if it timed out or errored.
+    """
+    agent_id_str = str(integrator.agent_id)
+
+    while time.monotonic() < deadline:
+        list_result = list_agents(
+            mng_ctx=mng_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        for agent_detail in list_result.agents:
+            if str(agent_detail.id) != agent_id_str:
+                continue
+
+            if agent_detail.state == AgentLifecycleState.WAITING:
+                _stop_agent_on_host(host, agent_detail.id, agent_detail.name)
+                return agent_detail.initial_branch
+
+            if agent_detail.state in _TERMINAL_STATES:
+                logger.info("Integrator agent finished (state={})", agent_detail.state)
+                return agent_detail.initial_branch
+
+        time.sleep(poll_interval_seconds)
+
+    logger.warning("Integrator agent timed out, stopping it")
+    _stop_agent_on_host(host, AgentId(agent_id_str), integrator.agent_name)
+    return None

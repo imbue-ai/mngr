@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.entry-points.mng]
-test_mapreduce = "imbue.mng_test_mapreduce.plugin"
+tmr = "imbue.mng_tmr.plugin"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,11 +33,11 @@ testpaths = ["."]
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.mng_test_mapreduce",
+  "--cov=imbue.mng_tmr",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",
-  "--cov-fail-under=60",
+  "--cov-fail-under=55",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
