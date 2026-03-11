@@ -446,6 +446,31 @@ def test_agent_observer_emit_agent_state_no_state_change_when_same_state(temp_mn
     assert len(lines) == 1
 
 
+def test_agent_observer_emit_agent_state_detects_state_transition(temp_mng_ctx: MngContext) -> None:
+    """Verify that _emit_agent_state emits a state change when state transitions from a known value."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    agent_running = make_test_agent_details(name="transitioning", state=AgentLifecycleState.RUNNING)
+
+    # First emit: None -> RUNNING
+    observer._emit_agent_state(agent_running)
+
+    # Second emit with a different state: RUNNING -> STOPPED
+    agent_stopped = make_test_agent_details(name="transitioning", state=AgentLifecycleState.STOPPED)
+    observer._last_agent_state_by_id[str(agent_stopped.id)] = "RUNNING"
+    observer._emit_agent_state(agent_stopped)
+
+    states_path = get_agent_states_events_path(temp_mng_ctx.config)
+    lines = states_path.read_text().strip().splitlines()
+    assert len(lines) == 2
+
+    # Second event should capture the RUNNING -> STOPPED transition
+    data = json.loads(lines[1])
+    assert data["type"] == "AGENT_STATE_CHANGE"
+    assert data["old_state"] == "RUNNING"
+    assert data["new_state"] == "STOPPED"
+    assert data["agent_name"] == "transitioning"
+
+
 def test_agent_observer_stop_sets_stop_event(temp_mng_ctx: MngContext) -> None:
     """Verify that stop() signals the observer to halt."""
     observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
