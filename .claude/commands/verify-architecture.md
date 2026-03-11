@@ -15,7 +15,7 @@ Write a CONCISE description of the problem the branch is trying to solve, based 
 
 ## Phase 2: Validate the Diff
 
-Determine the base branch: use `$GIT_BASE_BRANCH` if set, otherwise default to `main`.
+Base branch: !`echo "${GIT_BASE_BRANCH:-main}"`
 
 Read the diff validation prompt from `.claude/skills/autofix/validate-diff.md`. Spawn an Agent (`subagent_type: "general-purpose"`, `model: "haiku"`) with that prompt, providing the base branch name and the problem description from Phase 1.
 

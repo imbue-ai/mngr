@@ -20,8 +20,7 @@ git status --porcelain
 If there are any untracked, staged, or unstaged changes, commit them first (or add them to .gitignore if they should not be tracked). Do NOT proceed until `git status --porcelain` produces no output.
 
 - Initial HEAD (`initial_head`): !`git rev-parse HEAD`
-
-Determine the base branch: check the GIT_BASE_BRANCH environment variable. If it is set, use its value. Otherwise default to main.
+- Base branch (`base_branch`): !`echo "${GIT_BASE_BRANCH:-main}"`
 
 If you do not already know what the changes on this branch are supposed to accomplish, STOP and ask the user before continuing.
 
