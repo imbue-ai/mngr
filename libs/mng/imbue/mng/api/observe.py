@@ -177,30 +177,26 @@ def make_agent_state_change_event(
 # === File I/O ===
 
 
-def append_observe_event(config: MngConfig, event: EventEnvelope) -> None:
-    """Append a single observation event to the agents JSONL file.
+def _append_event_to_file(events_path: Path, event: EventEnvelope) -> None:
+    """Append a single event to a JSONL file.
 
     Creates parent directories if they do not exist. Uses a single write() call
     for safe concurrent appending under PIPE_BUF.
     """
-    events_path = get_observe_events_path(config)
     events_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n"
     with open(events_path, "a") as f:
         f.write(line)
+
+
+def append_observe_event(config: MngConfig, event: EventEnvelope) -> None:
+    """Append a single observation event to the agents JSONL file."""
+    _append_event_to_file(get_observe_events_path(config), event)
 
 
 def append_agent_state_change_event(config: MngConfig, event: AgentStateChangeEvent) -> None:
-    """Append a state change event to the agent_states JSONL file.
-
-    Creates parent directories if they do not exist. Uses a single write() call
-    for safe concurrent appending under PIPE_BUF.
-    """
-    events_path = get_agent_states_events_path(config)
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n"
-    with open(events_path, "a") as f:
-        f.write(line)
+    """Append a state change event to the agent_states JSONL file."""
+    _append_event_to_file(get_agent_states_events_path(config), event)
 
 
 # === History Loading ===
@@ -230,7 +226,8 @@ def load_base_state_from_history(
                 continue
             try:
                 data = json.loads(stripped)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.trace("Skipping malformed line in event history: {}", e)
                 continue
             if data.get("type") == ObserveEventType.AGENTS_FULL_STATE:
                 latest_agents_data = tuple(data.get("agents", ()))
@@ -545,14 +542,7 @@ class AgentObserver(MutableModel):
 
         # Emit state change events to the agent_states stream
         for agent, old_state in state_changes:
-            state_change_event = make_agent_state_change_event(agent, old_state)
-            append_agent_state_change_event(self.mng_ctx.config, state_change_event)
-            logger.debug(
-                "Emitted agent state change for {} ({} -> {})",
-                agent.name,
-                old_state,
-                agent.state.value,
-            )
+            self._emit_state_change(agent, old_state)
 
     def _emit_agent_state(self, agent: AgentDetails) -> None:
         """Emit a single agent state event, check for state field change, and update tracking."""
@@ -570,11 +560,15 @@ class AgentObserver(MutableModel):
             self._last_agent_state_by_id[agent_id_str] = new_state
 
         if old_state != new_state:
-            state_change_event = make_agent_state_change_event(agent, old_state)
-            append_agent_state_change_event(self.mng_ctx.config, state_change_event)
-            logger.debug(
-                "Emitted agent state change for {} ({} -> {})",
-                agent.name,
-                old_state,
-                new_state,
-            )
+            self._emit_state_change(agent, old_state)
+
+    def _emit_state_change(self, agent: AgentDetails, old_state: str | None) -> None:
+        """Emit a state change event to the agent_states stream."""
+        state_change_event = make_agent_state_change_event(agent, old_state)
+        append_agent_state_change_event(self.mng_ctx.config, state_change_event)
+        logger.debug(
+            "Emitted agent state change for {} ({} -> {})",
+            agent.name,
+            old_state,
+            agent.state.value,
+        )

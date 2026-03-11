@@ -483,19 +483,19 @@ def test_agent_observer_do_full_state_snapshot_writes_event(temp_mng_ctx: MngCon
     assert data["type"] == "AGENTS_FULL_STATE"
 
 
-def test_agent_observer_do_full_state_snapshot_emits_state_changes(temp_mng_ctx: MngContext) -> None:
-    """Verify that _do_full_state_snapshot checks for state field changes."""
+def test_agent_observer_emit_state_change_writes_to_agent_states_stream(temp_mng_ctx: MngContext) -> None:
+    """Verify that _emit_state_change writes an AGENT_STATE_CHANGE event to the agent_states file."""
     observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    agent = make_test_agent_details(name="transitioning-agent", state=AgentLifecycleState.STOPPED)
 
-    # Pre-populate tracking with a known agent state (simulating history load)
-    observer._last_agent_state_by_id["agent-xyz"] = "RUNNING"
+    observer._emit_state_change(agent, "RUNNING")
 
-    # Since list_agents returns no agents in test context, no state changes will be emitted.
-    # This test verifies the snapshot itself still works.
-    observer._do_full_state_snapshot()
-
-    events_path = get_observe_events_path(temp_mng_ctx.config)
-    lines = events_path.read_text().strip().splitlines()
+    states_path = get_agent_states_events_path(temp_mng_ctx.config)
+    assert states_path.exists()
+    lines = states_path.read_text().strip().splitlines()
     assert len(lines) == 1
     data = json.loads(lines[0])
-    assert data["type"] == "AGENTS_FULL_STATE"
+    assert data["type"] == "AGENT_STATE_CHANGE"
+    assert data["old_state"] == "RUNNING"
+    assert data["new_state"] == "STOPPED"
+    assert data["agent_name"] == "transitioning-agent"
