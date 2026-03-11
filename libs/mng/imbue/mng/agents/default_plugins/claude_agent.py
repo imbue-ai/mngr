@@ -1356,7 +1356,6 @@ class ClaudeAgent(BaseAgent):
 
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
-        last_session_id: str = ""
 
         for arg in adopt_session_args:
             session_id, source_project_dir = _resolve_adopt_session(arg)
