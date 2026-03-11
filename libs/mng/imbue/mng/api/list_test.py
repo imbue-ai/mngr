@@ -11,7 +11,6 @@ import pluggy
 import pytest
 from loguru import logger
 
-from imbue.imbue_common.model_update import to_update
 from imbue.mng import hookimpl
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
@@ -30,7 +29,6 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.host import CreateAgentOptions
-from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -41,7 +39,6 @@ from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.utils.cel_utils import compile_cel_filters
 
 # =============================================================================
@@ -676,11 +673,7 @@ def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
 class _FieldGeneratorPlugin:
     """Test plugin that registers field generators for agent listing."""
 
-    def __init__(
-        self,
-        plugin_name: str,
-        generators: dict[str, Any],
-    ) -> None:
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
         self._plugin_name = plugin_name
         self._generators = generators
 
@@ -697,21 +690,6 @@ class _NoneFieldGeneratorPlugin:
         return None
 
 
-def _make_mng_ctx_with_plugins(
-    temp_mng_ctx: MngContext,
-    plugins: list[object],
-) -> MngContext:
-    """Create a MngContext with test plugins registered."""
-    pm = pluggy.PluginManager("mng")
-    pm.add_hookspecs(hookspecs)
-    load_local_backend_only(pm)
-    for plugin in plugins:
-        pm.register(plugin)
-    return temp_mng_ctx.model_copy_update(
-        to_update(temp_mng_ctx.field_ref().pm, pm),
-    )
-
-
 def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
     """Find an agent by name in a ListResult, or raise."""
     for agent in result.agents:
@@ -726,19 +704,17 @@ def test_field_generators_populate_plugin_data(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
+    plugin_manager: pluggy.PluginManager,
 ) -> None:
     """list_agents should populate plugin data from registered field generators."""
-    ctx = _make_mng_ctx_with_plugins(
-        temp_mng_ctx,
-        [
-            _FieldGeneratorPlugin(
-                "test_plugin",
-                {
-                    "status": lambda a, h: "active",
-                    "score": lambda a, h: 42,
-                },
-            ),
-        ],
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "status": lambda a, h: "active",
+                "score": lambda a, h: 42,
+            },
+        )
     )
 
     agent = local_host.create_agent_state(
@@ -751,7 +727,7 @@ def test_field_generators_populate_plugin_data(
     )
     local_host.start_agents([agent.id])
 
-    result = list_agents(mng_ctx=ctx, is_streaming=False)
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-test")
@@ -763,19 +739,17 @@ def test_field_generators_omit_none_values(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
+    plugin_manager: pluggy.PluginManager,
 ) -> None:
     """list_agents should omit fields where the generator returns None."""
-    ctx = _make_mng_ctx_with_plugins(
-        temp_mng_ctx,
-        [
-            _FieldGeneratorPlugin(
-                "test_plugin",
-                {
-                    "present": lambda a, h: "yes",
-                    "absent": lambda a, h: None,
-                },
-            ),
-        ],
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "present": lambda a, h: "yes",
+                "absent": lambda a, h: None,
+            },
+        )
     )
 
     agent = local_host.create_agent_state(
@@ -788,7 +762,7 @@ def test_field_generators_omit_none_values(
     )
     local_host.start_agents([agent.id])
 
-    result = list_agents(mng_ctx=ctx, is_streaming=False)
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-none")
@@ -800,15 +774,11 @@ def test_field_generators_multiple_plugins(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
+    plugin_manager: pluggy.PluginManager,
 ) -> None:
     """list_agents should collect fields from multiple plugin generators."""
-    ctx = _make_mng_ctx_with_plugins(
-        temp_mng_ctx,
-        [
-            _FieldGeneratorPlugin("plugin_a", {"version": lambda a, h: "1.0"}),
-            _FieldGeneratorPlugin("plugin_b", {"count": lambda a, h: 5}),
-        ],
-    )
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_a", {"version": lambda a, h: "1.0"}))
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_b", {"count": lambda a, h: 5}))
 
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -820,7 +790,7 @@ def test_field_generators_multiple_plugins(
     )
     local_host.start_agents([agent.id])
 
-    result = list_agents(mng_ctx=ctx, is_streaming=False)
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-multi")
@@ -832,15 +802,11 @@ def test_field_generators_none_plugin_is_skipped(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
+    plugin_manager: pluggy.PluginManager,
 ) -> None:
     """list_agents should skip plugins that return None from agent_field_generators."""
-    ctx = _make_mng_ctx_with_plugins(
-        temp_mng_ctx,
-        [
-            _NoneFieldGeneratorPlugin(),
-            _FieldGeneratorPlugin("real_plugin", {"value": lambda a, h: "present"}),
-        ],
-    )
+    plugin_manager.register(_NoneFieldGeneratorPlugin())
+    plugin_manager.register(_FieldGeneratorPlugin("real_plugin", {"value": lambda a, h: "present"}))
 
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -852,7 +818,7 @@ def test_field_generators_none_plugin_is_skipped(
     )
     local_host.start_agents([agent.id])
 
-    result = list_agents(mng_ctx=ctx, is_streaming=False)
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-skip-none")
