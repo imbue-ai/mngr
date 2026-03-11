@@ -1,7 +1,7 @@
 ---
 argument-hint: [options...]
 description: Review the conversation transcript for behavioral issues (misleading behavior, disobeyed instructions, instructions worth saving).
-allowed-tools: Bash(bash ./scripts/export_transcript_paths.sh*), Bash(python3 scripts/filter_transcript.py *), Bash(git rev-parse HEAD), Bash(mkdir *), Bash(wc *), Read, Write(.reviews/conversation/*), Agent, AskUserQuestion
+allowed-tools: Bash(bash ./scripts/export_transcript_paths.sh*), Bash(python3 scripts/filter_transcript.py *), Bash(git rev-parse HEAD), Bash(wc *), Read, Write(.reviews/conversation/*), Agent, AskUserQuestion
 ---
 
 # Verify Conversation
@@ -67,8 +67,6 @@ Read the following files:
 ### Step 4: Spawn Agent
 
 Get the current HEAD hash: `git rev-parse HEAD`
-
-Create the output directory: `mkdir -p .reviews/conversation`
 
 Build the agent prompt by combining:
 

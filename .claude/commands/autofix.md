@@ -1,6 +1,6 @@
 ---
 description: Automatically find and fix code issues in the current branch. Iteratively verifies, plans fixes, and implements them with separate commits. Defers all review to the end.
-allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(mkdir -p *), Bash(date -u +%Y-%m-%dT%H:%M:%SZ), Bash(echo "${GIT_BASE_BRANCH:-main}"), Read, Write(.autofix/plans/*), Agent, AskUserQuestion
+allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(date -u +%Y-%m-%dT%H:%M:%SZ), Bash(echo "${GIT_BASE_BRANCH:-main}"), Read, Write(.autofix/plans/*), Agent, AskUserQuestion
 ---
 
 # Autofix
@@ -72,5 +72,4 @@ After the loop ends:
 
 - Get the current HEAD hash: `git rev-parse HEAD`
 - Get the current timestamp: `date -u +%Y-%m-%dT%H:%M:%SZ`
-- Create the plans directory: `mkdir -p .autofix/plans`
 - Use the Write tool to create `.autofix/plans/{hash}_verified.md` with content `Verified clean at {timestamp}`
