@@ -48,6 +48,7 @@ _TERMINAL_STATES = frozenset(
     {
         AgentLifecycleState.DONE,
         AgentLifecycleState.STOPPED,
+        AgentLifecycleState.WAITING,
     }
 )
 
