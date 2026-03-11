@@ -14,7 +14,6 @@ from imbue.mng.agents.agent_registry import list_registered_agent_types
 from imbue.mng.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mng.config.completion_cache import CompletionCacheData
 from imbue.mng.config.completion_cache import get_completion_cache_dir
-from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.utils.click_utils import detect_alias_to_canonical
 from imbue.mng.utils.file_utils import atomic_write
@@ -207,20 +206,27 @@ def _unwrap_optional(annotation: Any) -> Any:
     return annotation
 
 
-def _extract_config_value_choices(
-    model_class: type[BaseModel],
-    prefix: str = "",
-) -> dict[str, list[str]]:
-    """Introspect a pydantic model's fields to find constrained-value types.
+def _extract_config_value_choices(config: BaseModel) -> dict[str, list[str]]:
+    """Walk a config instance to find all fields with constrained-value types.
 
     For bool fields, returns ["true", "false"].
     For Enum subclass fields, returns the string values of the enum members.
     For nested BaseModel fields, recurses with a dotted prefix.
+    For dict fields whose values are BaseModel instances, iterates the
+    concrete keys from the instance and recurses into each value.
     Handles Optional[T] / T | None annotations by unwrapping to the inner type.
     """
     result: dict[str, list[str]] = {}
-    for field_name, field_info in model_class.model_fields.items():
+    _walk_model_for_choices(config, "", result)
+    return result
+
+
+def _walk_model_for_choices(obj: BaseModel, prefix: str, result: dict[str, list[str]]) -> None:
+    """Recursively walk a pydantic model instance, collecting constrained-value fields."""
+    field_values = obj.__dict__
+    for field_name, field_info in type(obj).model_fields.items():
         key = f"{prefix}{field_name}" if prefix else field_name
+        value = field_values[field_name]
         annotation = _unwrap_optional(field_info.annotation)
 
         if annotation is bool:
@@ -228,12 +234,15 @@ def _extract_config_value_choices(
         elif isinstance(annotation, type) and issubclass(annotation, Enum):
             result[key] = [str(e.value) for e in annotation]
         elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
-            result.update(_extract_config_value_choices(annotation, f"{key}."))
+            _walk_model_for_choices(value, f"{key}.", result)
+        elif isinstance(value, dict):
+            for dict_key, dict_value in value.items():
+                if isinstance(dict_value, BaseModel):
+                    _walk_model_for_choices(dict_value, f"{key}.{dict_key}.", result)
         else:
-            # Other types (str, int, Path, list, dict, etc.) have no constrained
-            # value set, so we skip them.
+            # Other types (str, int, Path, list, etc.) have no constrained
+            # value set -- skip them.
             continue
-    return result
 
 
 class _DynamicCompletions(NamedTuple):
@@ -263,7 +272,7 @@ def _build_dynamic_completions(mng_ctx: MngContext) -> _DynamicCompletions:
     provider_names = sorted(set(["local"] + [str(k) for k in config.providers.keys()]))
     plugin_names = sorted({name for name, _ in mng_ctx.pm.list_name_plugin() if name and not name.startswith("_")})
     config_keys = flatten_dict_keys(config.model_dump(mode="json"))
-    config_value_choices = _extract_config_value_choices(MngConfig)
+    config_value_choices = _extract_config_value_choices(config)
 
     return _DynamicCompletions(
         agent_type_names=agent_type_names,

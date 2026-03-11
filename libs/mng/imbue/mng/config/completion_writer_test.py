@@ -13,6 +13,11 @@ from imbue.mng.config.completion_writer import flatten_dict_keys
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.config.data_types import PluginConfig
+from imbue.mng.config.data_types import ProviderInstanceConfig
+from imbue.mng.primitives import PluginName
+from imbue.mng.primitives import ProviderBackendName
+from imbue.mng.primitives import ProviderInstanceName
 
 
 def test_get_completion_cache_dir_uses_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -359,14 +364,14 @@ def test_positional_nargs_simple_command(completion_cache_dir: Path) -> None:
 
 def test_extract_config_value_choices_includes_bool_fields() -> None:
     """Bool fields should produce ["true", "false"] choices."""
-    choices = _extract_config_value_choices(MngConfig)
+    choices = _extract_config_value_choices(MngConfig())
     assert choices["headless"] == ["true", "false"]
     assert choices["is_nested_tmux_allowed"] == ["true", "false"]
 
 
 def test_extract_config_value_choices_includes_enum_fields() -> None:
     """Enum fields should produce their string values as choices."""
-    choices = _extract_config_value_choices(MngConfig)
+    choices = _extract_config_value_choices(MngConfig())
     assert "logging.console_level" in choices
     assert "TRACE" in choices["logging.console_level"]
     assert "DEBUG" in choices["logging.console_level"]
@@ -376,16 +381,53 @@ def test_extract_config_value_choices_includes_enum_fields() -> None:
 
 def test_extract_config_value_choices_includes_nested_bool_fields() -> None:
     """Bool fields inside nested models should have dotted key paths."""
-    choices = _extract_config_value_choices(MngConfig)
+    choices = _extract_config_value_choices(MngConfig())
     assert choices["logging.is_logging_commands"] == ["true", "false"]
     assert choices["logging.is_logging_env_vars"] == ["true", "false"]
 
 
 def test_extract_config_value_choices_excludes_string_fields() -> None:
     """String fields (no constrained values) should not appear in choices."""
-    choices = _extract_config_value_choices(MngConfig)
+    choices = _extract_config_value_choices(MngConfig())
     assert "prefix" not in choices
     assert "connect_command" not in choices
+
+
+def test_extract_config_value_choices_discovers_plugin_fields() -> None:
+    """Plugin dict entries should produce bool choices for their enabled field."""
+    config = MngConfig(
+        plugins={
+            PluginName("modal"): PluginConfig(enabled=True),
+            PluginName("kanpan"): PluginConfig(enabled=False),
+        }
+    )
+    choices = _extract_config_value_choices(config)
+    assert choices["plugins.modal.enabled"] == ["true", "false"]
+    assert choices["plugins.kanpan.enabled"] == ["true", "false"]
+
+
+def test_extract_config_value_choices_discovers_provider_fields() -> None:
+    """Provider dict entries should produce bool choices for is_enabled."""
+    config = MngConfig(
+        providers={
+            ProviderInstanceName("modal"): ProviderInstanceConfig(
+                backend=ProviderBackendName("modal"), is_enabled=True
+            ),
+        }
+    )
+    choices = _extract_config_value_choices(config)
+    assert choices["providers.modal.is_enabled"] == ["true", "false"]
+
+
+def test_extract_config_value_choices_empty_dicts_match_default() -> None:
+    """With no plugins/providers, results should match the default config."""
+    default_choices = _extract_config_value_choices(MngConfig())
+    assert "plugins" not in {k.split(".")[0] for k in default_choices if "." in k} or True
+    # The key point: no plugin.* or provider.* keys should appear
+    plugin_keys = [k for k in default_choices if k.startswith("plugins.")]
+    provider_keys = [k for k in default_choices if k.startswith("providers.")]
+    assert plugin_keys == []
+    assert provider_keys == []
 
 
 def test_write_cli_completions_cache_with_mng_ctx_includes_config_value_choices(

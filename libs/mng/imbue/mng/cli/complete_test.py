@@ -1303,3 +1303,28 @@ def test_get_completions_config_set_pos1_with_interleaved_options(
 
     assert "TRACE" in result
     assert "DEBUG" in result
+
+
+def test_get_completions_config_set_dynamic_plugin_key(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """config set plugins.modal.enabled <TAB> should offer true/false for dynamic dict keys."""
+    data = CompletionCacheData(
+        commands=["config"],
+        subcommand_by_command={"config": ["set"]},
+        config_keys=["plugins.modal.enabled", "plugins.kanpan.enabled", "headless"],
+        positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], ["config_value_for_key"]]},
+        config_value_choices={
+            "plugins.modal.enabled": ["true", "false"],
+            "plugins.kanpan.enabled": ["true", "false"],
+            "headless": ["true", "false"],
+        },
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng config set plugins.modal.enabled ", "4")
+
+    result = _get_completions()
+
+    assert result == ["true", "false"]
