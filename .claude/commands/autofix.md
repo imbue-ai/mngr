@@ -70,4 +70,4 @@ After the loop ends:
 
 - Get the current HEAD hash: `git rev-parse HEAD`
 - Get the current timestamp: `date -u +%Y-%m-%dT%H:%M:%SZ`
-- Use the Write tool to create `.autofix/plans/{hash}_verified.md` with content `Verified clean at {timestamp}`
+- Use the Write tool to create `.autofix/plans/{hash}_verified.md` with content `Verified clean at {timestamp}`. The Write tool creates parent directories automatically -- do NOT check if the directory exists or try to create it first.
