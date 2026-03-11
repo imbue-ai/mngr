@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -27,6 +27,7 @@ members = [
     "mng-test-coder",
     "mng-ttyd",
     "mng-tutor",
+    "resource-guards",
     "sculptor-web",
     "slack-exporter",
 ]
@@ -1828,6 +1829,7 @@ dependencies = [
     { name = "pygtail" },
     { name = "pyinfra" },
     { name = "python-dotenv" },
+    { name = "resource-guards" },
     { name = "setproctitle" },
     { name = "tabulate" },
     { name = "tenacity" },
@@ -1854,6 +1856,7 @@ requires-dist = [
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "resource-guards", editable = "libs/resource_guards" },
     { name = "setproctitle", specifier = ">=1.3" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tenacity", specifier = ">=8.0" },
@@ -2846,6 +2849,26 @@ sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
 ]
+
+[[package]]
+name = "resource-guards"
+version = "0.1.0"
+source = { editable = "libs/resource_guards" }
+dependencies = [
+    { name = "pytest" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "inline-snapshot" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
+    { name = "pytest", specifier = ">=7.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "rich"

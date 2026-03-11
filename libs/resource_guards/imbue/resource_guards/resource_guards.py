@@ -7,38 +7,51 @@ Two guard mechanisms are provided:
    based on whether the test has the corresponding mark.
 
 2. SDK monkeypatches intercept Python SDK chokepoints. SDK-specific guards
-   are registered via register_sdk_guard() before session start, then
-   installed by create_sdk_resource_guards(). The monkeypatches call
-   enforce_sdk_guard, which mirrors the wrapper logic: block unmarked
-   usage and track marked usage.
+   are registered via register_sdk_guard() or create_sdk_method_guard()
+   before session start, then installed during start_resource_guards().
+   The monkeypatches call enforce_sdk_guard, which mirrors the wrapper
+   logic: block unmarked usage and track marked usage.
 
 Both mechanisms use per-test tracking files so that makereport can fail tests
 that invoke a resource without the mark or carry a mark without invoking it.
 
 Usage:
-    Register SDK guards via register_sdk_guard(name, install, cleanup) before
-    pytest_sessionstart. Call create_resource_guard_wrappers(resources) and
-    create_sdk_resource_guards() during pytest_sessionstart.
-    Call cleanup_sdk_resource_guards() and cleanup_resource_guard_wrappers()
-    during pytest_sessionfinish. Register the three runtest hooks
-    (pytest_runtest_setup, pytest_runtest_teardown, pytest_runtest_makereport)
-    into the conftest namespace.
+    Register binary guards via register_resource_guard(name) and SDK guards
+    via register_sdk_guard(name, install, cleanup) or
+    create_sdk_method_guard(name, methods) before pytest_sessionstart.
+    Call start_resource_guards(session) during pytest_sessionstart and
+    stop_resource_guards() during pytest_sessionfinish. The per-test hooks
+    are registered automatically as a pytest plugin by start_resource_guards().
 """
 
+import dataclasses
 import os
 import shutil
 import stat
 import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
+from enum import StrEnum
+from enum import auto
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
 
 class ResourceGuardViolation(Exception):
     """Raised when a test invokes an SDK resource without the required mark."""
+
+
+@dataclasses.dataclass
+class _PerTestGuardState:
+    """Per-test state stashed on pytest.Item during the test lifecycle."""
+
+    tracking_dir: str
+    marks: set[str]
+    env_patcher: patch.dict  # ty: ignore[invalid-type-form]
 
 
 # Module-level state for resource guard wrappers. The wrapper directory is created
@@ -52,7 +65,7 @@ class ResourceGuardViolation(Exception):
 # create_sdk_resource_guards(); the hooks read from it at session start.
 _guard_wrapper_dir: str | None = None
 _owns_guard_wrapper_dir: bool = False
-_session_env_patcher: patch.dict | None = None  # type: ignore[type-arg]
+_session_env_patcher: patch.dict | None = None  # ty: ignore[invalid-type-form]
 _guarded_resources: list[str] = []
 
 # Module-level state for SDK guards. Each entry is (name, install_fn, cleanup_fn).
@@ -252,14 +265,93 @@ def register_sdk_guard(
 ) -> None:
     """Register an SDK guard for use by create_sdk_resource_guards.
 
-    Callers (e.g. mng's register_guards module) call this before
-    register_conftest_hooks() to push SDK-specific guard implementations
-    into the infrastructure. Deduplicates by name so multiple conftest
-    files can safely call the registration function.
+    Callers (e.g. resource-guards-modal, resource-guards-docker) call this
+    before register_conftest_hooks() to push SDK-specific guard
+    implementations into the infrastructure. Deduplicates by name so
+    multiple conftest files can safely call the registration function.
     """
     registered_names = {entry[0] for entry in _registered_sdk_guards}
     if name not in registered_names:
         _registered_sdk_guards.append((name, install, cleanup))
+
+
+class MethodKind(StrEnum):
+    """How to wrap a guarded method."""
+
+    @staticmethod
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
+        return name.upper()
+
+    SYNC = auto()
+    ASYNC = auto()
+    ASYNC_GEN = auto()
+
+
+def _make_sync_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
+    def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+        enforce_sdk_guard(name)
+        return originals[key](self, *args, **kwargs)
+
+    return guarded
+
+
+def _make_async_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
+    async def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+        enforce_sdk_guard(name)
+        return await originals[key](self, *args, **kwargs)
+
+    return guarded
+
+
+def _make_async_gen_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
+    async def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+        enforce_sdk_guard(name)
+        async for item in originals[key](self, *args, **kwargs):
+            yield item
+
+    return guarded
+
+
+_WRAPPER_FACTORIES: dict[str, Callable[[str, dict[str, Any], str], Callable[..., Any]]] = {
+    MethodKind.SYNC: _make_sync_wrapper,
+    MethodKind.ASYNC: _make_async_wrapper,
+    MethodKind.ASYNC_GEN: _make_async_gen_wrapper,
+}
+
+
+def create_sdk_method_guard(
+    name: str,
+    methods: list[tuple[type, str, MethodKind]],
+) -> None:
+    """Register an SDK guard that monkeypatches one or more methods on classes.
+
+    Each entry in methods is (class, method_name, kind) where kind is one of
+    MethodKind.SYNC, MethodKind.ASYNC, or MethodKind.ASYNC_GEN.
+
+    Example:
+        create_sdk_method_guard("my_sdk", [
+            (SomeClient, "send", MethodKind.SYNC),
+        ])
+    """
+    originals: dict[str, Any] = {}
+    patches: list[tuple[type, str, str, MethodKind]] = []  # (cls, method_name, key, kind)
+
+    for cls, method_name, kind in methods:
+        key = uuid4().hex
+        patches.append((cls, method_name, key, kind))
+
+    def install() -> None:
+        for cls, method_name, key, kind in patches:
+            originals[key] = getattr(cls, method_name)
+            setattr(cls, method_name, _WRAPPER_FACTORIES[kind](name, originals, key))
+
+    def cleanup() -> None:
+        for cls, method_name, key, _kind in patches:
+            if key in originals:
+                setattr(cls, method_name, originals[key])
+        originals.clear()
+
+    register_sdk_guard(name, install, cleanup)
 
 
 def create_sdk_resource_guards() -> None:
@@ -281,8 +373,33 @@ def cleanup_sdk_resource_guards() -> None:
         cleanup()
 
 
+def start_resource_guards(session: pytest.Session) -> None:
+    """Create all resource guards and register per-test hooks.
+
+    Call this from pytest_sessionstart. Handles binary wrappers, SDK
+    monkeypatches, and hook registration in one call. Safe to call with
+    only binary guards, only SDK guards, or both registered.
+
+    Idempotent: if the guard plugin is already registered (e.g., from a
+    parent conftest.py), the call is a no-op for plugin registration.
+    """
+    create_resource_guard_wrappers()
+    create_sdk_resource_guards()
+    if session.config.pluginmanager.get_plugin("resource_guards") is None:
+        session.config.pluginmanager.register(_ResourceGuardPlugin(), "resource_guards")
+
+
+def stop_resource_guards() -> None:
+    """Clean up all resource guards (SDK monkeypatches and binary wrappers).
+
+    Call this from pytest_sessionfinish. Reverses start_resource_guards().
+    """
+    cleanup_sdk_resource_guards()
+    cleanup_resource_guard_wrappers()
+
+
 # ---------------------------------------------------------------------------
-# Pytest hook implementations (prefixed with _ to avoid accidental discovery)
+# Pytest hook implementations
 # ---------------------------------------------------------------------------
 
 
@@ -295,6 +412,32 @@ def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, s
     for resource in _guarded_resources:
         env[f"_PYTEST_GUARD_{resource.upper()}"] = "allow" if resource in marks else "block"
     return env
+
+
+class _ResourceGuardPlugin:
+    """Pytest plugin registered by start_resource_guards().
+
+    Encapsulates the per-test hooks so they coexist naturally with any
+    hooks defined in the consumer's conftest.py.
+    """
+
+    @staticmethod
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
+        yield from _pytest_runtest_setup(item)
+
+    @staticmethod
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
+        yield from _pytest_runtest_teardown(item)
+
+    @staticmethod
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(
+        item: pytest.Item,
+        call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
+    ) -> Generator[None, None, None]:
+        yield from _pytest_runtest_makereport(item, call)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -310,21 +453,21 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     Uses patch.dict to manage env vars so cleanup is automatic and the
     set of vars added in setup can never drift from what teardown removes.
     """
-    if _guard_wrapper_dir is None:
-        yield
-        return
+    assert _guard_wrapper_dir is not None, (
+        "Resource guard hooks are registered but create_resource_guard_wrappers() was never called. "
+        "Call create_resource_guard_wrappers() in pytest_sessionstart before tests run."
+    )
 
     marks = {m.name for m in item.iter_markers()}
-
-    # Create per-test tracking directory
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
-    setattr(item, "_resource_tracking_dir", tracking_dir)  # noqa: B010
-    setattr(item, "_resource_marks", marks)  # noqa: B010
+    env_patcher = patch.dict(os.environ, _build_per_test_guard_env(marks, tracking_dir))
+    env_patcher.start()
 
-    # Start a patch.dict that will be stopped in teardown
-    patcher = patch.dict(os.environ, _build_per_test_guard_env(marks, tracking_dir))
-    patcher.start()
-    setattr(item, "_guard_env_patcher", patcher)  # noqa: B010
+    item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
+        tracking_dir=tracking_dir,
+        marks=marks,
+        env_patcher=env_patcher,
+    )
 
     yield
 
@@ -334,48 +477,23 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
     """Clean up resource guard environment variables after teardown."""
     yield
 
-    patcher = getattr(item, "_guard_env_patcher", None)
-    if patcher is not None:
-        patcher.stop()
+    state: _PerTestGuardState = item._guard_state  # ty: ignore[unresolved-attribute]
+    state.env_patcher.stop()
 
 
-@pytest.hookimpl(hookwrapper=True)
-def _pytest_runtest_makereport(
-    item: pytest.Item,
-    call: pytest.CallInfo,  # type: ignore[type-arg]
-) -> Generator[None, None, None]:
-    """Enforce resource guard invariants after each test.
+def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
+    """Check resource guard invariants after the call phase and mutate the report if violated.
 
-    After the call phase, checks two things:
-    1. Blocked invocations: if a test without @pytest.mark.<resource> invoked
-       the resource anyway (and handled the non-zero exit or caught the
-       ResourceGuardViolation), the blocked_<resource> tracking file catches it.
-       This check runs regardless of test pass/fail so that the guard violation
-       is visible even when the test fails for a downstream reason.
-    2. Superfluous marks: if a test has @pytest.mark.<resource> but the resource
-       was never invoked, the test is failed. Only checked on passing tests.
+    Two checks:
+    1. Blocked invocations: a test without @pytest.mark.<resource> invoked
+       the resource anyway. Checked regardless of pass/fail so the guard
+       violation is visible even when the test fails for a downstream reason.
+    2. Superfluous marks: a test has @pytest.mark.<resource> but the resource
+       was never invoked. Only checked on passing tests.
     """
-    outcome = yield
-    report = outcome.get_result()
+    tracking_dir = state.tracking_dir
+    marks = state.marks
 
-    if call.when != "call":
-        # Clean up tracking dir on the final phase (teardown)
-        if call.when == "teardown":
-            tracking_dir = getattr(item, "_resource_tracking_dir", None)
-            if tracking_dir:
-                shutil.rmtree(tracking_dir, ignore_errors=True)
-        return
-
-    tracking_dir = getattr(item, "_resource_tracking_dir", None)
-    if tracking_dir is None:
-        return
-
-    marks: set[str] = getattr(item, "_resource_marks", set())
-
-    # Check for blocked invocations regardless of pass/fail. When a guard
-    # blocks a resource inside a subprocess (e.g., mng create -> tmux), the
-    # test often fails for a downstream reason ("Agent is stopped") that
-    # obscures the real cause. Surfacing the guard violation makes it clear.
     for resource in _guarded_resources:
         blocked_file = Path(tracking_dir) / f"blocked_{resource}"
         if blocked_file.exists():
@@ -387,11 +505,9 @@ def _pytest_runtest_makereport(
                 report.outcome = "failed"
                 report.longrepr = msg
             else:
-                # Append guard info to the existing failure so the root cause is visible.
                 report.longrepr = f"{report.longrepr}\n\n{msg}"
             return
 
-    # Superfluous mark check only matters if the test passed.
     if not report.passed:
         return
 
@@ -405,3 +521,22 @@ def _pytest_runtest_makereport(
                     f"Remove the mark or ensure the test exercises {resource}."
                 )
                 return
+
+
+@pytest.hookimpl(hookwrapper=True)
+def _pytest_runtest_makereport(
+    item: pytest.Item,
+    call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
+) -> Generator[None, None, None]:
+    """Enforce resource guard invariants after each test phase."""
+    outcome = yield
+    report = outcome.get_result()
+
+    state: _PerTestGuardState = item._guard_state  # ty: ignore[unresolved-attribute]
+
+    if call.when != "call":
+        if call.when == "teardown":
+            shutil.rmtree(state.tracking_dir, ignore_errors=True)
+        return
+
+    _check_guard_violations(state, report)
