@@ -4,7 +4,6 @@ import click
 from loguru import logger
 
 from imbue.mng.api.observe import AgentObserver
-from imbue.mng.api.observe import ObserveLockError
 from imbue.mng.api.observe import acquire_observe_lock
 from imbue.mng.api.observe import release_observe_lock
 from imbue.mng.cli.common_opts import add_common_options
@@ -37,8 +36,6 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
         logger.info("Starting agent observer (Ctrl+C to stop)")
         observer = AgentObserver(mng_ctx=mng_ctx)
         observer.run()
-    except ObserveLockError:
-        raise
     finally:
         release_observe_lock(lock_fd)
 

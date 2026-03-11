@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from imbue.mng.api.discovery_events import make_full_discovery_snapshot_event
+from imbue.mng.api.observe import AgentObserver
 from imbue.mng.api.observe import AgentStateEvent
 from imbue.mng.api.observe import FullAgentStateEvent
 from imbue.mng.api.observe import OBSERVE_EVENT_SOURCE
@@ -18,8 +20,11 @@ from imbue.mng.api.observe import make_agent_state_event
 from imbue.mng.api.observe import make_full_agent_state_event
 from imbue.mng.api.observe import release_observe_lock
 from imbue.mng.config.data_types import MngConfig
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.utils.testing import make_test_agent_details
+from imbue.mng.utils.testing import make_test_discovered_agent
+from imbue.mng.utils.testing import make_test_discovered_host
 
 # === Path Helper Tests ===
 
@@ -219,3 +224,128 @@ def test_full_agent_state_event_serializes_to_valid_json() -> None:
     parsed = json.loads(json_str)
     assert parsed["type"] == "AGENTS_FULL_STATE"
     assert len(parsed["agents"]) == 2
+
+
+# === AgentObserver Tests ===
+
+
+def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mng_ctx: MngContext) -> None:
+    """Verify that _handle_full_snapshot correctly populates known hosts from host records."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    host1 = make_test_discovered_host()
+    host2 = make_test_discovered_host()
+    agent1 = make_test_discovered_agent()
+
+    snapshot = make_full_discovery_snapshot_event([agent1], [host1, host2])
+
+    with observer._cg:
+        observer._handle_full_snapshot(snapshot)
+        assert len(observer._known_hosts) == 2
+        assert str(host1.host_id) in observer._known_hosts
+        assert str(host2.host_id) in observer._known_hosts
+        assert observer._known_hosts[str(host1.host_id)].host_name == host1.host_name
+
+
+def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mng_ctx: MngContext) -> None:
+    """Verify that hosts from a prior snapshot are removed when not in a new snapshot."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    host_a = make_test_discovered_host()
+    host_b = make_test_discovered_host()
+
+    with observer._cg:
+        # First snapshot: host_a is known
+        snapshot1 = make_full_discovery_snapshot_event([], [host_a])
+        observer._handle_full_snapshot(snapshot1)
+        assert str(host_a.host_id) in observer._known_hosts
+
+        # Second snapshot: only host_b -- host_a should be removed
+        snapshot2 = make_full_discovery_snapshot_event([], [host_b])
+        observer._handle_full_snapshot(snapshot2)
+        assert str(host_a.host_id) not in observer._known_hosts
+        assert str(host_b.host_id) in observer._known_hosts
+
+
+def test_agent_observer_on_activity_event_queues_host(temp_mng_ctx: MngContext) -> None:
+    """Verify that _on_activity_event adds the host to the activity queue."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer._on_activity_event('{"type":"SOME_EVENT"}', is_stdout=True, host_id_str="host-123")
+    assert observer._activity_queue.qsize() == 1
+    assert observer._activity_queue.get_nowait() == "host-123"
+
+
+def test_agent_observer_on_activity_event_ignores_stderr(temp_mng_ctx: MngContext) -> None:
+    """Verify that stderr output is ignored."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer._on_activity_event("some stderr", is_stdout=False, host_id_str="host-123")
+    assert observer._activity_queue.qsize() == 0
+
+
+def test_agent_observer_on_activity_event_ignores_empty_lines(temp_mng_ctx: MngContext) -> None:
+    """Verify that empty/whitespace lines are ignored."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer._on_activity_event("", is_stdout=True, host_id_str="host-123")
+    observer._on_activity_event("   \n", is_stdout=True, host_id_str="host-123")
+    assert observer._activity_queue.qsize() == 0
+
+
+def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mng_ctx: MngContext) -> None:
+    """Verify that _emit_agent_state writes an AGENT_STATE event to the events file."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    agent = make_test_agent_details(name="observed-agent")
+
+    observer._emit_agent_state(agent)
+
+    events_path = get_observe_events_path(temp_mng_ctx.config)
+    assert events_path.exists()
+    lines = events_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["type"] == "AGENT_STATE"
+    assert data["agent"]["name"] == "observed-agent"
+
+
+def test_agent_observer_emit_agent_state_updates_tracking(temp_mng_ctx: MngContext) -> None:
+    """Verify that _emit_agent_state updates the last known state tracking."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    agent = make_test_agent_details()
+
+    observer._emit_agent_state(agent)
+
+    assert str(agent.id) in observer._last_comparable_json_by_agent_id
+
+
+def test_agent_observer_stop_sets_stop_event(temp_mng_ctx: MngContext) -> None:
+    """Verify that stop() signals the observer to halt."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    assert not observer._stop_event.is_set()
+    observer.stop()
+    assert observer._stop_event.is_set()
+
+
+def test_agent_observer_on_list_stream_output_ignores_non_stdout(temp_mng_ctx: MngContext) -> None:
+    """Verify that stderr output from list --stream is ignored."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    # Should not raise or modify state
+    observer._on_list_stream_output("some error message", is_stdout=False)
+    assert len(observer._known_hosts) == 0
+
+
+def test_agent_observer_on_list_stream_output_ignores_invalid_json(temp_mng_ctx: MngContext) -> None:
+    """Verify that invalid JSON lines from list --stream are gracefully ignored."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer._on_list_stream_output("not valid json at all", is_stdout=True)
+    assert len(observer._known_hosts) == 0
+
+
+def test_agent_observer_do_full_state_snapshot_writes_event(temp_mng_ctx: MngContext) -> None:
+    """Verify that _do_full_state_snapshot writes a AGENTS_FULL_STATE event."""
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+
+    observer._do_full_state_snapshot()
+
+    events_path = get_observe_events_path(temp_mng_ctx.config)
+    assert events_path.exists()
+    lines = events_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["type"] == "AGENTS_FULL_STATE"

@@ -22,6 +22,7 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import log_span
@@ -210,25 +211,22 @@ def release_observe_lock(fd: int) -> None:
     """Release the observe file lock."""
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("Failed to unlock observe lock file: {}", e)
     try:
         os.close(fd)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("Failed to close observe lock file descriptor: {}", e)
 
 
 # === Observer ===
 
 
-class _KnownHost:
-    """Tracks a discovered host and its activity stream process."""
+class _KnownHost(FrozenModel):
+    """Tracks a discovered host."""
 
-    __slots__ = ("host_id", "host_name")
-
-    def __init__(self, host_id: HostId, host_name: HostName) -> None:
-        self.host_id = host_id
-        self.host_name = host_name
+    host_id: HostId = Field(description="Unique identifier for the host")
+    host_name: HostName = Field(description="Human-readable name of the host")
 
 
 class AgentObserver(MutableModel):
@@ -315,30 +313,15 @@ class AgentObserver(MutableModel):
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update known hosts from a full discovery snapshot and sync activity streams."""
-        # Build the new set of known hosts from discovery agents
+        # Build the new set of known hosts from the host records (which carry the
+        # authoritative host_name, unlike DiscoveredAgent which only has agent_name)
         new_hosts: dict[str, _KnownHost] = {}
-        for agent in event.agents:
-            host_id_str = str(agent.host_id)
-            if host_id_str not in new_hosts:
-                new_hosts[host_id_str] = _KnownHost(
-                    host_id=agent.host_id,
-                    host_name=HostName(agent.agent_name),
-                )
-
-        # Also use host data directly
         for host in event.hosts:
             host_id_str = str(host.host_id)
-            if host_id_str not in new_hosts:
-                new_hosts[host_id_str] = _KnownHost(
-                    host_id=host.host_id,
-                    host_name=host.host_name,
-                )
-            else:
-                # Prefer host name from the host record over from the agent
-                new_hosts[host_id_str] = _KnownHost(
-                    host_id=host.host_id,
-                    host_name=host.host_name,
-                )
+            new_hosts[host_id_str] = _KnownHost(
+                host_id=host.host_id,
+                host_name=host.host_name,
+            )
 
         with self._lock:
             previously_known = set(self._known_hosts.keys())
@@ -407,7 +390,7 @@ class AgentObserver(MutableModel):
 
             # Drain additional entries to debounce rapid activity
             hosts_to_fetch: set[str] = {host_id_str}
-            while True:
+            for _ in range(self._activity_queue.qsize()):
                 try:
                     hosts_to_fetch.add(self._activity_queue.get_nowait())
                 except queue.Empty:
