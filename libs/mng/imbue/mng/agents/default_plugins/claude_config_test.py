@@ -7,16 +7,16 @@ import pytest
 
 from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
-from imbue.mng.agents.default_plugins.claude_config import _find_project_config
 from imbue.mng.agents.default_plugins.claude_config import add_claude_trust_for_path
 from imbue.mng.agents.default_plugins.claude_config import check_claude_dialogs_dismissed
 from imbue.mng.agents.default_plugins.claude_config import check_effort_callout_dismissed
 from imbue.mng.agents.default_plugins.claude_config import check_source_directory_trusted
 from imbue.mng.agents.default_plugins.claude_config import dismiss_effort_callout
 from imbue.mng.agents.default_plugins.claude_config import ensure_claude_dialogs_dismissed
-from imbue.mng.agents.default_plugins.claude_config import extend_claude_trust_to_worktree
+from imbue.mng.agents.default_plugins.claude_config import find_project_config
 from imbue.mng.agents.default_plugins.claude_config import get_claude_config_backup_path
 from imbue.mng.agents.default_plugins.claude_config import get_claude_config_path
+from imbue.mng.agents.default_plugins.claude_config import is_source_directory_trusted
 from imbue.mng.agents.default_plugins.claude_config import remove_claude_trust_for_path
 
 
@@ -33,37 +33,37 @@ def test_get_claude_config_backup_path_returns_home_dot_claude_json_bak() -> Non
 
 
 def test_find_project_config_exact_match() -> None:
-    """Test that _find_project_config finds exact match."""
+    """Test that find_project_config finds exact match."""
     projects = {
         "/Users/test/project1": {"allowedTools": ["bash"], "hasTrustDialogAccepted": True},
         "/Users/test/project2": {"allowedTools": [], "hasTrustDialogAccepted": False},
     }
-    result = _find_project_config(projects, Path("/Users/test/project1"))
+    result = find_project_config(projects, Path("/Users/test/project1"))
     assert result == {"allowedTools": ["bash"], "hasTrustDialogAccepted": True}
 
 
 def test_find_project_config_ancestor_match() -> None:
-    """Test that _find_project_config finds closest ancestor."""
+    """Test that find_project_config finds closest ancestor."""
     projects = {
         "/Users/test/project": {"allowedTools": ["bash"], "hasTrustDialogAccepted": True},
     }
     # Search for a subdirectory
-    result = _find_project_config(projects, Path("/Users/test/project/src/components"))
+    result = find_project_config(projects, Path("/Users/test/project/src/components"))
     assert result == {"allowedTools": ["bash"], "hasTrustDialogAccepted": True}
 
 
 def test_find_project_config_no_match() -> None:
-    """Test that _find_project_config returns None when no match."""
+    """Test that find_project_config returns None when no match."""
     projects = {
         "/Users/test/project1": {"allowedTools": ["bash"], "hasTrustDialogAccepted": True},
     }
-    result = _find_project_config(projects, Path("/Users/other/project"))
+    result = find_project_config(projects, Path("/Users/other/project"))
     assert result is None
 
 
 def test_find_project_config_empty_projects() -> None:
-    """Test that _find_project_config returns None for empty projects."""
-    result = _find_project_config({}, Path("/Users/test/project"))
+    """Test that find_project_config returns None for empty projects."""
+    result = find_project_config({}, Path("/Users/test/project"))
     assert result is None
 
 
@@ -81,7 +81,7 @@ def test_check_source_directory_trusted_succeeds_when_trusted(tmp_path: Path) ->
     config_file.write_text(json.dumps(config, indent=2))
 
     # Should not raise
-    check_source_directory_trusted(source_path)
+    check_source_directory_trusted(config_file, source_path)
 
 
 def test_check_source_directory_trusted_succeeds_for_subdirectory(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_check_source_directory_trusted_succeeds_for_subdirectory(tmp_path: Path
     config_file.write_text(json.dumps(config, indent=2))
 
     # Should not raise - subdirectory inherits trust from ancestor
-    check_source_directory_trusted(source_path)
+    check_source_directory_trusted(config_file, source_path)
 
 
 def test_check_source_directory_trusted_raises_when_not_trusted(tmp_path: Path) -> None:
@@ -117,7 +117,7 @@ def test_check_source_directory_trusted_raises_when_not_trusted(tmp_path: Path) 
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeDirectoryNotTrustedError) as exc_info:
-        check_source_directory_trusted(source_path)
+        check_source_directory_trusted(config_file, source_path)
 
     assert str(source_path) in str(exc_info.value)
 
@@ -130,7 +130,7 @@ def test_check_source_directory_trusted_raises_when_no_config_file(tmp_path: Pat
     # Config file doesn't exist (HOME points to tmp_path via autouse fixture)
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_source_directory_trusted(source_path)
+        check_source_directory_trusted(get_claude_config_path(), source_path)
 
 
 def test_check_source_directory_trusted_raises_when_empty_config(tmp_path: Path) -> None:
@@ -142,7 +142,7 @@ def test_check_source_directory_trusted_raises_when_empty_config(tmp_path: Path)
     config_file.write_text("")
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_source_directory_trusted(source_path)
+        check_source_directory_trusted(config_file, source_path)
 
 
 def test_check_source_directory_trusted_raises_when_not_in_projects(tmp_path: Path) -> None:
@@ -155,7 +155,7 @@ def test_check_source_directory_trusted_raises_when_not_in_projects(tmp_path: Pa
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_source_directory_trusted(source_path)
+        check_source_directory_trusted(config_file, source_path)
 
 
 def test_check_source_directory_trusted_raises_when_trust_field_missing(tmp_path: Path) -> None:
@@ -172,7 +172,7 @@ def test_check_source_directory_trusted_raises_when_trust_field_missing(tmp_path
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_source_directory_trusted(source_path)
+        check_source_directory_trusted(config_file, source_path)
 
 
 def test_check_source_directory_trusted_raises_json_error_for_invalid_json() -> None:
@@ -182,7 +182,7 @@ def test_check_source_directory_trusted_raises_json_error_for_invalid_json() -> 
     config_file.write_text("{ invalid json }")
 
     with pytest.raises(json.JSONDecodeError):
-        check_source_directory_trusted(Path("/some/path"))
+        check_source_directory_trusted(config_file, Path("/some/path"))
 
 
 # Tests for add_claude_trust_for_path
@@ -197,7 +197,7 @@ def test_add_claude_trust_creates_config_when_none_exists(tmp_path: Path) -> Non
     config_file = get_claude_config_path()
     assert not config_file.exists()
 
-    add_claude_trust_for_path(source_path)
+    add_claude_trust_for_path(config_file, source_path)
 
     assert config_file.exists()
     config = json.loads(config_file.read_text())
@@ -214,7 +214,7 @@ def test_add_claude_trust_adds_entry_to_existing_config(tmp_path: Path) -> None:
     config = {"projects": {"/other/project": {"allowedTools": [], "hasTrustDialogAccepted": True}}}
     config_file.write_text(json.dumps(config, indent=2))
 
-    add_claude_trust_for_path(source_path)
+    add_claude_trust_for_path(config_file, source_path)
 
     updated = json.loads(config_file.read_text())
     # New entry added
@@ -238,7 +238,7 @@ def test_add_claude_trust_is_noop_when_already_trusted(tmp_path: Path) -> None:
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    add_claude_trust_for_path(source_path)
+    add_claude_trust_for_path(config_file, source_path)
 
     # No backup should be created (no modification)
     assert not backup_file.exists()
@@ -261,7 +261,7 @@ def test_add_claude_trust_updates_entry_when_trust_is_false(tmp_path: Path) -> N
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    add_claude_trust_for_path(source_path)
+    add_claude_trust_for_path(config_file, source_path)
 
     updated = json.loads(config_file.read_text())
     entry = updated["projects"][str(source_path)]
@@ -279,142 +279,10 @@ def test_add_claude_trust_handles_empty_config_file(tmp_path: Path) -> None:
 
     config_file.write_text("")
 
-    add_claude_trust_for_path(source_path)
+    add_claude_trust_for_path(config_file, source_path)
 
     config = json.loads(config_file.read_text())
     assert config["projects"][str(source_path)]["hasTrustDialogAccepted"] is True
-
-
-# Tests for extend_claude_trust_to_worktree
-
-
-def test_extend_claude_trust_creates_entry_for_worktree(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree creates an entry for the worktree."""
-    config_file = get_claude_config_path()
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    source_config = {
-        "allowedTools": ["bash", "read"],
-        "hasTrustDialogAccepted": True,
-        "mcpServers": {"example": {"command": "test"}},
-    }
-    config = {"projects": {str(source_path): source_config}}
-    config_file.write_text(json.dumps(config, indent=2))
-
-    extend_claude_trust_to_worktree(source_path, worktree_path)
-
-    updated_config = json.loads(config_file.read_text())
-    assert str(worktree_path) in updated_config["projects"]
-    worktree_config = updated_config["projects"][str(worktree_path)]
-    # Check source config fields are copied
-    assert worktree_config["allowedTools"] == source_config["allowedTools"]
-    assert worktree_config["hasTrustDialogAccepted"] == source_config["hasTrustDialogAccepted"]
-    assert worktree_config["mcpServers"] == source_config["mcpServers"]
-    # Check mng metadata is added
-    assert worktree_config["_mngCreated"] is True
-    assert worktree_config["_mngSourcePath"] == str(source_path)
-
-
-def test_extend_claude_trust_creates_backup(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree creates a backup."""
-    config_file = get_claude_config_path()
-    backup_file = get_claude_config_backup_path()
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    config = {
-        "projects": {
-            str(source_path): {"allowedTools": [], "hasTrustDialogAccepted": True},
-        }
-    }
-    config_file.write_text(json.dumps(config, indent=2))
-
-    extend_claude_trust_to_worktree(source_path, worktree_path)
-
-    # Verify backup was created
-    assert backup_file.exists()
-    backup_config = json.loads(backup_file.read_text())
-    # Backup should have the original config (without worktree)
-    assert str(worktree_path) not in backup_config["projects"]
-
-
-def test_extend_claude_trust_skips_if_entry_exists(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree skips if entry already exists."""
-    config_file = get_claude_config_path()
-    backup_file = get_claude_config_backup_path()
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    # Create config with both source and worktree already present
-    existing_worktree_config = {"allowedTools": ["existing"], "hasTrustDialogAccepted": True}
-    config = {
-        "projects": {
-            str(source_path): {"allowedTools": ["bash"], "hasTrustDialogAccepted": True},
-            str(worktree_path): existing_worktree_config,
-        }
-    }
-    config_file.write_text(json.dumps(config, indent=2))
-
-    extend_claude_trust_to_worktree(source_path, worktree_path)
-
-    # Verify the existing worktree config was not modified
-    updated_config = json.loads(config_file.read_text())
-    assert updated_config["projects"][str(worktree_path)] == existing_worktree_config
-    # No backup should be created when skipping
-    assert not backup_file.exists()
-
-
-def test_extend_claude_trust_raises_when_source_not_trusted(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree raises when source not trusted."""
-    config_file = get_claude_config_path()
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    config = {
-        "projects": {
-            str(source_path): {"allowedTools": [], "hasTrustDialogAccepted": False},
-        }
-    }
-    config_file.write_text(json.dumps(config, indent=2))
-
-    with pytest.raises(ClaudeDirectoryNotTrustedError):
-        extend_claude_trust_to_worktree(source_path, worktree_path)
-
-
-def test_extend_claude_trust_raises_when_no_config(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree raises when config doesn't exist."""
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    # Config file doesn't exist (HOME points to tmp_path via autouse fixture)
-
-    with pytest.raises(ClaudeDirectoryNotTrustedError):
-        extend_claude_trust_to_worktree(source_path, worktree_path)
-
-
-def test_extend_claude_trust_raises_when_empty_config(tmp_path: Path) -> None:
-    """Test that extend_claude_trust_to_worktree raises when config file is empty."""
-    config_file = get_claude_config_path()
-    source_path = tmp_path / "source"
-    worktree_path = tmp_path / "worktree"
-    source_path.mkdir()
-    worktree_path.mkdir()
-
-    config_file.write_text("")
-
-    with pytest.raises(ClaudeDirectoryNotTrustedError):
-        extend_claude_trust_to_worktree(source_path, worktree_path)
 
 
 # Tests for remove_claude_trust_for_path
@@ -439,7 +307,7 @@ def test_remove_claude_trust_removes_mng_created_entry(tmp_path: Path) -> None:
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(config_file, worktree_path)
 
     assert result is True
     updated_config = json.loads(config_file.read_text())
@@ -461,7 +329,7 @@ def test_remove_claude_trust_skips_non_mng_entry(tmp_path: Path) -> None:
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(config_file, worktree_path)
 
     # Should return False since it's not an mng-created entry
     assert result is False
@@ -483,7 +351,7 @@ def test_remove_claude_trust_returns_false_when_not_found(tmp_path: Path) -> Non
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(config_file, worktree_path)
 
     assert result is False
 
@@ -495,7 +363,7 @@ def test_remove_claude_trust_returns_false_when_no_config(tmp_path: Path) -> Non
 
     # Config file doesn't exist (HOME points to tmp_path via autouse fixture)
 
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(get_claude_config_path(), worktree_path)
 
     assert result is False
 
@@ -509,7 +377,7 @@ def test_remove_claude_trust_returns_false_on_error(tmp_path: Path) -> None:
     config_file.write_text("{ invalid json }")
 
     # Should not raise, but return False
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(config_file, worktree_path)
 
     assert result is False
 
@@ -522,7 +390,7 @@ def test_remove_claude_trust_returns_false_when_empty_config(tmp_path: Path) -> 
 
     config_file.write_text("")
 
-    result = remove_claude_trust_for_path(worktree_path)
+    result = remove_claude_trust_for_path(config_file, worktree_path)
 
     assert result is False
 
@@ -537,7 +405,7 @@ def test_check_effort_callout_dismissed_succeeds_when_dismissed() -> None:
     config_file.write_text(json.dumps(config, indent=2))
 
     # Should not raise
-    check_effort_callout_dismissed()
+    check_effort_callout_dismissed(config_file)
 
 
 def test_check_effort_callout_dismissed_raises_when_not_dismissed() -> None:
@@ -547,7 +415,7 @@ def test_check_effort_callout_dismissed_raises_when_not_dismissed() -> None:
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_effort_callout_dismissed()
+        check_effort_callout_dismissed(config_file)
 
 
 def test_check_effort_callout_dismissed_raises_when_field_missing() -> None:
@@ -557,13 +425,13 @@ def test_check_effort_callout_dismissed_raises_when_field_missing() -> None:
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_effort_callout_dismissed()
+        check_effort_callout_dismissed(config_file)
 
 
 def test_check_effort_callout_dismissed_raises_when_no_config() -> None:
     """Test that check_effort_callout_dismissed raises when config file doesn't exist."""
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_effort_callout_dismissed()
+        check_effort_callout_dismissed(get_claude_config_path())
 
 
 def test_check_effort_callout_dismissed_raises_when_empty_config() -> None:
@@ -572,7 +440,7 @@ def test_check_effort_callout_dismissed_raises_when_empty_config() -> None:
     config_file.write_text("")
 
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_effort_callout_dismissed()
+        check_effort_callout_dismissed(config_file)
 
 
 def test_dismiss_effort_callout_sets_field() -> None:
@@ -581,7 +449,7 @@ def test_dismiss_effort_callout_sets_field() -> None:
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
-    dismiss_effort_callout()
+    dismiss_effort_callout(config_file)
 
     updated = json.loads(config_file.read_text())
     assert updated["effortCalloutDismissed"] is True
@@ -595,7 +463,7 @@ def test_dismiss_effort_callout_is_noop_when_already_set() -> None:
     config = {"effortCalloutDismissed": True, "projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
-    dismiss_effort_callout()
+    dismiss_effort_callout(config_file)
 
     assert not backup_file.exists()
 
@@ -605,7 +473,7 @@ def test_dismiss_effort_callout_creates_config_when_none_exists() -> None:
     config_file = get_claude_config_path()
     assert not config_file.exists()
 
-    dismiss_effort_callout()
+    dismiss_effort_callout(config_file)
 
     assert config_file.exists()
     config = json.loads(config_file.read_text())
@@ -617,7 +485,7 @@ def test_dismiss_effort_callout_handles_empty_config() -> None:
     config_file = get_claude_config_path()
     config_file.write_text("")
 
-    dismiss_effort_callout()
+    dismiss_effort_callout(config_file)
 
     config = json.loads(config_file.read_text())
     assert config["effortCalloutDismissed"] is True
@@ -637,7 +505,7 @@ def test_check_claude_dialogs_dismissed_checks_trust(tmp_path: Path) -> None:
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeDirectoryNotTrustedError):
-        check_claude_dialogs_dismissed(source_path)
+        check_claude_dialogs_dismissed(config_file, source_path)
 
 
 def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) -> None:
@@ -655,28 +523,30 @@ def test_check_claude_dialogs_dismissed_checks_effort_callout(tmp_path: Path) ->
     config_file.write_text(json.dumps(config, indent=2))
 
     with pytest.raises(ClaudeEffortCalloutNotDismissedError):
-        check_claude_dialogs_dismissed(source_path)
+        check_claude_dialogs_dismissed(config_file, source_path)
 
 
 def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> None:
-    """Test that check_claude_dialogs_dismissed passes when trust and effort callout are set."""
+    """Test that check_claude_dialogs_dismissed passes when all dialogs are set."""
     config_file = get_claude_config_path()
     source_path = tmp_path / "source"
     source_path.mkdir()
 
     config = {
         "effortCalloutDismissed": True,
+        "hasCompletedOnboarding": True,
+        "bypassPermissionsModeAccepted": True,
         "projects": {
             str(source_path): {"hasTrustDialogAccepted": True},
         },
     }
     config_file.write_text(json.dumps(config, indent=2))
 
-    check_claude_dialogs_dismissed(source_path)
+    check_claude_dialogs_dismissed(config_file, source_path)
 
 
-def test_ensure_claude_dialogs_dismissed_sets_both(tmp_path: Path) -> None:
-    """Test that ensure_claude_dialogs_dismissed sets trust and effort callout."""
+def test_ensure_claude_dialogs_dismissed_sets_all(tmp_path: Path) -> None:
+    """Test that ensure_claude_dialogs_dismissed sets all dialog fields."""
     config_file = get_claude_config_path()
     source_path = tmp_path / "source"
     source_path.mkdir()
@@ -684,8 +554,38 @@ def test_ensure_claude_dialogs_dismissed_sets_both(tmp_path: Path) -> None:
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
-    ensure_claude_dialogs_dismissed(source_path)
+    ensure_claude_dialogs_dismissed(config_file, source_path)
 
     updated = json.loads(config_file.read_text())
     assert updated["effortCalloutDismissed"] is True
+    assert updated["hasCompletedOnboarding"] is True
     assert updated["projects"][str(source_path)]["hasTrustDialogAccepted"] is True
+    # bypassPermissionsModeAccepted is NOT set (Claude Code resets it;
+    # skipDangerousModePermissionPrompt in settings.json handles this instead)
+
+
+def test_functions_work_with_non_global_config_path(tmp_path: Path) -> None:
+    """Test that trust functions work with a non-global config path (per-agent config)."""
+    config_path = tmp_path / "agent_config" / ".claude.json"
+    config_path.parent.mkdir(parents=True)
+    source_path = tmp_path / "work"
+    source_path.mkdir()
+
+    # Should create the file at the custom path
+    add_claude_trust_for_path(config_path, source_path)
+
+    assert config_path.exists()
+    config = json.loads(config_path.read_text())
+    assert config["projects"][str(source_path)]["hasTrustDialogAccepted"] is True
+
+    # Should read from the custom path
+    assert is_source_directory_trusted(config_path, source_path) is True
+
+    # Dismiss effort callout at custom path
+    dismiss_effort_callout(config_path)
+    updated = json.loads(config_path.read_text())
+    assert updated["effortCalloutDismissed"] is True
+
+    # Global config should be untouched
+    global_config = get_claude_config_path()
+    assert not global_config.exists()

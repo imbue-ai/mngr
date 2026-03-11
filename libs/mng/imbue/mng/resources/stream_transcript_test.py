@@ -124,6 +124,7 @@ class ScriptRunner:
             **os.environ,
             "MNG_AGENT_STATE_DIR": str(self.agent_state_dir),
             "HOME": str(self.fake_home),
+            "CLAUDE_CONFIG_DIR": str(self.fake_home / ".claude"),
         }
         result = subprocess.run(
             ["bash", str(self.script_path), "--single-pass"],

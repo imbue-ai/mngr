@@ -634,11 +634,11 @@ def test_get_completions_git_branch_option(
     run_git_command(temp_git_repo_cwd, "branch", "develop")
     data = CompletionCacheData(
         commands=["create"],
-        options_by_command={"create": ["--base-branch", "--name"]},
-        git_branch_options=["create.--base-branch"],
+        options_by_command={"create": ["--branch", "--name"]},
+        git_branch_options=["create.--branch"],
     )
     _write_command_cache(completion_cache_dir, data)
-    set_comp_env("mng create --base-branch ", "3")
+    set_comp_env("mng create --branch ", "3")
 
     result = _get_completions()
 
@@ -655,11 +655,11 @@ def test_get_completions_git_branch_option_with_prefix(
     run_git_command(temp_git_repo_cwd, "branch", "feature/foo")
     data = CompletionCacheData(
         commands=["create"],
-        options_by_command={"create": ["--base-branch", "--name"]},
-        git_branch_options=["create.--base-branch"],
+        options_by_command={"create": ["--branch", "--name"]},
+        git_branch_options=["create.--branch"],
     )
     _write_command_cache(completion_cache_dir, data)
-    set_comp_env("mng create --base-branch dev", "3")
+    set_comp_env("mng create --branch dev", "3")
 
     result = _get_completions()
 
@@ -674,8 +674,8 @@ def test_get_completions_git_branch_option_not_triggered_for_other_options(
     """Options not in git_branch_options should not trigger git branch completion."""
     data = CompletionCacheData(
         commands=["create"],
-        options_by_command={"create": ["--base-branch", "--name"]},
-        git_branch_options=["create.--base-branch"],
+        options_by_command={"create": ["--branch", "--name"]},
+        git_branch_options=["create.--branch"],
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng create --name ", "3")

@@ -51,9 +51,10 @@ declare -A _OUTPUT_UUIDS=()
 # -- Helpers --
 
 # Find the JSONL file for a session ID.
-# Claude stores session files at ~/.claude/projects/<hash>/<session_id>.jsonl
+# Claude stores session files at $CLAUDE_CONFIG_DIR/projects/<hash>/<session_id>.jsonl
+# Falls back to ~/.claude/projects/ when CLAUDE_CONFIG_DIR is not set.
 _find_session_jsonl() {
-    find ~/.claude/projects/ -name "${1}.jsonl" 2>/dev/null | head -1
+    find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/" -name "${1}.jsonl" 2>/dev/null | head -1
 }
 
 _line_count() {

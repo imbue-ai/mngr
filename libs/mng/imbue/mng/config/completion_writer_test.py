@@ -78,7 +78,7 @@ def test_write_cli_completions_cache_includes_git_branch_options(completion_cach
     group = click.Group(
         name="test",
         commands={
-            "create": click.Command("create", params=[click.Option(["--base-branch"])]),
+            "create": click.Command("create", params=[click.Option(["--branch"])]),
         },
     )
 
@@ -86,7 +86,7 @@ def test_write_cli_completions_cache_includes_git_branch_options(completion_cach
     cache_path = completion_cache_dir / COMPLETION_CACHE_FILENAME
     data = json.loads(cache_path.read_text())
     assert "git_branch_options" in data
-    assert "create.--base-branch" in data["git_branch_options"]
+    assert "create.--branch" in data["git_branch_options"]
 
 
 def _read_cache(cache_dir: Path) -> dict:
