@@ -9,7 +9,7 @@ def test_register_cli_commands_returns_command() -> None:
     commands = register_cli_commands()
     assert commands is not None
     assert len(commands) == 1
-    assert commands[0].name == "test-mapreduce"
+    assert commands[0].name == "tmr"
 
 
 def test_plugin_registers_with_pluggy(plugin_manager: pluggy.PluginManager) -> None:
@@ -19,4 +19,4 @@ def test_plugin_registers_with_pluggy(plugin_manager: pluggy.PluginManager) -> N
         if result is not None:
             for cmd in result:
                 command_names.append(cmd.name)
-    assert "test-mapreduce" in command_names
+    assert "tmr" in command_names

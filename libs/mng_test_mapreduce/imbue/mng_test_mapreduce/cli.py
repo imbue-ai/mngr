@@ -28,8 +28,8 @@ from imbue.mng_test_mapreduce.api import launch_all_test_agents
 from imbue.mng_test_mapreduce.api import poll_until_all_done
 
 
-class TestMapReduceCliOptions(CommonCliOptions):
-    """Options passed from the CLI to the test-mapreduce command."""
+class TmrCliOptions(CommonCliOptions):
+    """Options passed from the CLI to the tmr command."""
 
     pytest_args: tuple[str, ...]
     agent_type: str
@@ -71,8 +71,8 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
-@click.command("test-mapreduce")
-@click.argument("pytest_args", nargs=-1)
+@click.command("tmr", context_settings={"ignore_unknown_options": True})
+@click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
     "--agent-type",
     default="claude",
@@ -100,11 +100,11 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
 )
 @add_common_options
 @click.pass_context
-def test_mapreduce(ctx: click.Context, **kwargs: object) -> None:
+def tmr(ctx: click.Context, **kwargs: object) -> None:
     mng_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
-        command_name="test-mapreduce",
-        command_class=TestMapReduceCliOptions,
+        command_name="tmr",
+        command_class=TmrCliOptions,
     )
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
@@ -172,11 +172,10 @@ def test_mapreduce(ctx: click.Context, **kwargs: object) -> None:
             )
 
 
-# Register help metadata for git-style help formatting
 CommandHelpMetadata(
-    key="test-mapreduce",
-    one_line_description="Run and fix tests in parallel using agents (map-reduce pattern)",
-    synopsis="mng test-mapreduce [PYTEST_ARGS...] [--agent-type <TYPE>] [--poll-interval <SECS>]",
+    key="tmr",
+    one_line_description="Run and fix tests in parallel using agents (test map-reduce)",
+    synopsis="mng tmr [PYTEST_ARGS...] [--agent-type <TYPE>] [--poll-interval <SECS>]",
     description="""This command implements a map-reduce pattern for tests:
 
 1. Collects tests using pytest --collect-only, passing through any arguments.
@@ -190,11 +189,11 @@ CommandHelpMetadata(
 Each agent writes its result to $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
 with an outcome enum and a short summary.""",
     examples=(
-        ("Run all tests in current directory", "mng test-mapreduce"),
-        ("Run tests in a specific file", "mng test-mapreduce tests/test_foo.py"),
-        ("Run a specific test", "mng test-mapreduce tests/test_foo.py::test_bar"),
-        ("Custom poll interval", "mng test-mapreduce --poll-interval 30"),
-        ("Specify output location", "mng test-mapreduce --output-html report.html"),
+        ("Run all tests in current directory", "mng tmr"),
+        ("Run tests in a specific file", "mng tmr tests/test_foo.py"),
+        ("Run a specific test", "mng tmr tests/test_foo.py::test_bar"),
+        ("Custom poll interval", "mng tmr --poll-interval 30"),
+        ("Specify output location", "mng tmr --output-html report.html"),
     ),
     see_also=(
         ("create", "Create a new agent"),
@@ -203,4 +202,4 @@ with an outcome enum and a short summary.""",
     ),
 ).register()
 
-add_pager_help_option(test_mapreduce)
+add_pager_help_option(tmr)

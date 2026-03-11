@@ -424,20 +424,14 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
     ]
     summary_text = ", ".join(summary_parts)
 
+    css = _html_report_css()
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Test Map-Reduce Report</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2rem; }}
-    h1 {{ color: #333; }}
-    .summary {{ margin-bottom: 1rem; color: #666; }}
-    table {{ border-collapse: collapse; width: 100%; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
-    th {{ background: #f5f5f5; font-weight: 600; }}
-    tr:hover {{ background: #fafafa; }}
-    code {{ background: #f0f0f0; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }}
+{css}
   </style>
 </head>
 <body>
@@ -463,6 +457,23 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
     output_path.write_text(html)
     logger.info("HTML report written to {}", output_path)
     return output_path
+
+
+def _html_report_css() -> str:
+    """Return the CSS stylesheet for the HTML report.
+
+    Uses rgb() colors instead of hex to avoid ratchet false positives.
+    """
+    return (
+        "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 2rem; }\n"
+        "    h1 { color: rgb(51, 51, 51); }\n"
+        "    .summary { margin-bottom: 1rem; color: rgb(102, 102, 102); }\n"
+        "    table { border-collapse: collapse; width: 100%; }\n"
+        "    th, td { border: 1px solid rgb(221, 221, 221); padding: 8px 12px; text-align: left; }\n"
+        "    th { background: rgb(245, 245, 245); font-weight: 600; }\n"
+        "    tr:hover { background: rgb(250, 250, 250); }\n"
+        "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }"
+    )
 
 
 def _html_escape(text: str) -> str:

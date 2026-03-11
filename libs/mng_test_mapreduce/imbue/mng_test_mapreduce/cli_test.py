@@ -1,4 +1,6 @@
-"""Unit tests for test-mapreduce CLI."""
+"""Unit tests for tmr CLI."""
+
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -7,17 +9,17 @@ from imbue.mng.primitives import OutputFormat
 from imbue.mng_test_mapreduce.cli import _emit_agents_launched
 from imbue.mng_test_mapreduce.cli import _emit_report_path
 from imbue.mng_test_mapreduce.cli import _emit_test_count
-from imbue.mng_test_mapreduce.cli import test_mapreduce
+from imbue.mng_test_mapreduce.cli import tmr
 
 
 def test_cli_help(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(test_mapreduce, ["--help"])
+    result = cli_runner.invoke(tmr, ["--help"])
     assert result.exit_code == 0
     assert "PYTEST_ARGS" in result.output
 
 
 def test_cli_help_contains_options(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(test_mapreduce, ["--help"])
+    result = cli_runner.invoke(tmr, ["--help"])
     assert "--agent-type" in result.output
     assert "--poll-interval" in result.output
     assert "--output-html" in result.output
@@ -40,8 +42,6 @@ def test_emit_agents_launched_human(capsys: object) -> None:
 
 def test_emit_report_path_human(capsys: object, tmp_path: object) -> None:
     """Smoke test: does not raise."""
-    from pathlib import Path
-
     _emit_report_path(Path("/tmp/report.html"), _human_output_opts())
 
 
