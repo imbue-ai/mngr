@@ -41,6 +41,19 @@ from imbue.mng.primitives import HostName
 
 # === Constants ===
 
+# Fields excluded from change comparison because they change continuously with time
+# rather than reflecting meaningful state transitions. This is a blacklist (not a
+# whitelist) so that new fields are compared by default.
+_VOLATILE_AGENT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "runtime_seconds",
+        "idle_seconds",
+        "user_activity_time",
+        "agent_activity_time",
+        "start_time",
+    }
+)
+
 OBSERVE_EVENT_SOURCE: Final[EventSource] = EventSource("mng/agents")
 AGENT_STATES_EVENT_SOURCE: Final[EventSource] = EventSource("mng/agent_states")
 OBSERVE_LOCK_FILENAME: Final[str] = "observe_lock"
@@ -486,9 +499,16 @@ class AgentObserver(MutableModel):
                     logger.warning("Failed to fetch agent state for host {}: {}", hid, e)
 
     @staticmethod
-    def _serialize_agent(agent: AgentDetails) -> str:
-        """Serialize an agent to a deterministic JSON string for change comparison."""
-        return json.dumps(agent.model_dump(mode="json"), sort_keys=True)
+    def _serialize_agent_for_comparison(agent: AgentDetails) -> str:
+        """Serialize an agent to a deterministic JSON string for change comparison.
+
+        Excludes continuously-changing timing fields so that events are only emitted
+        for meaningful state changes, not for the mere passage of time.
+        """
+        data = agent.model_dump(mode="json")
+        for field in _VOLATILE_AGENT_FIELDS:
+            data.pop(field, None)
+        return json.dumps(data, sort_keys=True)
 
     def _fetch_and_emit_agent_state_for_host(self, host_id_str: str) -> None:
         """Fetch current agent state for a host and emit events for changed agents."""
@@ -506,7 +526,7 @@ class AgentObserver(MutableModel):
             )
 
         for agent in result.agents:
-            agent_json = self._serialize_agent(agent)
+            agent_json = self._serialize_agent_for_comparison(agent)
             with self._lock:
                 has_changed = agent_json != self._last_agent_json_by_id.get(str(agent.id))
             if has_changed:
@@ -537,7 +557,7 @@ class AgentObserver(MutableModel):
                 if old_state != new_state:
                     state_changes.append((agent, old_state))
                     self._last_agent_state_by_id[agent_id_str] = new_state
-                self._last_agent_json_by_id[agent_id_str] = self._serialize_agent(agent)
+                self._last_agent_json_by_id[agent_id_str] = self._serialize_agent_for_comparison(agent)
 
         # Emit the full state event (includes all agents regardless of change)
         event = make_full_agent_state_event(agents)
@@ -562,7 +582,7 @@ class AgentObserver(MutableModel):
 
         with self._lock:
             old_state = self._last_agent_state_by_id.get(agent_id_str)
-            self._last_agent_json_by_id[agent_id_str] = self._serialize_agent(agent)
+            self._last_agent_json_by_id[agent_id_str] = self._serialize_agent_for_comparison(agent)
             self._last_agent_state_by_id[agent_id_str] = new_state
 
         if old_state != new_state:
