@@ -115,7 +115,7 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
 def _copy_directory(host: OnlineHostInterface, source: Path, dest: Path, *, label: str | None = None) -> None:
     """Copy a directory tree from a local source to dest."""
     with log_span(label or "Copying {} to {}", source, dest):
-        host.copy_directory(source, dest)
+        host.copy_directory(host, source, dest)
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
