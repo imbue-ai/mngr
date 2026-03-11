@@ -325,7 +325,7 @@ def test_get_completions_agent_names(
     """Completing agent names for commands that accept agent arguments."""
     data = CompletionCacheData(
         commands=["connect", "list"],
-        agent_name_arguments=["connect"],
+        positional_completions={"connect": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -343,7 +343,7 @@ def test_get_completions_agent_names_with_prefix(
     """Completing agent names with a prefix filter."""
     data = CompletionCacheData(
         commands=["connect"],
-        agent_name_arguments=["connect"],
+        positional_completions={"connect": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -358,10 +358,10 @@ def test_get_completions_no_agent_names_for_non_agent_command(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Commands not in agent_name_arguments should not complete agent names."""
+    """Commands not in positional_completions should not complete agent names."""
     data = CompletionCacheData(
         commands=["list"],
-        agent_name_arguments=["connect"],
+        positional_completions={"connect": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"])
@@ -380,7 +380,11 @@ def test_get_completions_subcommand_agent_names(
     data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create", "destroy", "list"]},
-        agent_name_arguments=["snapshot.create", "snapshot.destroy", "snapshot.list"],
+        positional_completions={
+            "snapshot.create": [["agent_names"]],
+            "snapshot.destroy": [["agent_names"]],
+            "snapshot.list": [["agent_names"]],
+        },
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -399,7 +403,7 @@ def test_get_completions_subcommand_agent_names_with_prefix(
     data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create", "destroy", "list"]},
-        agent_name_arguments=["snapshot.create"],
+        positional_completions={"snapshot.create": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -414,11 +418,11 @@ def test_get_completions_subcommand_no_agent_names_for_non_agent_subcommand(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Subcommands not in agent_name_arguments should not complete agent names."""
+    """Subcommands not in positional_completions should not complete agent names."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "list", "set"]},
-        agent_name_arguments=["snapshot.create"],
+        positional_completions={"snapshot.create": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"])
@@ -487,7 +491,7 @@ def test_get_completions_value_taking_option_suppresses_completions(
         subcommand_by_command={"snapshot": ["create"]},
         options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
         flag_options_by_command={"snapshot.create": ["--all", "--dry-run", "-a"]},
-        agent_name_arguments=["snapshot.create"],
+        positional_completions={"snapshot.create": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"])
@@ -507,7 +511,7 @@ def test_get_completions_long_flag_allows_positional(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
-        agent_name_arguments=["destroy"],
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -527,7 +531,7 @@ def test_get_completions_short_flag_allows_positional(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
-        agent_name_arguments=["destroy"],
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -548,7 +552,7 @@ def test_get_completions_combined_short_flags_allow_positional(
         aliases={"rm": "destroy"},
         options_by_command={"destroy": ["--all", "--force", "--remove-created-branch"]},
         flag_options_by_command={"destroy": ["--all", "--force", "--remove-created-branch", "-a", "-f", "-b"]},
-        agent_name_arguments=["destroy"],
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -568,7 +572,7 @@ def test_get_completions_combined_short_flags_with_unknown_flag(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
-        agent_name_arguments=["destroy"],
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"])
@@ -589,7 +593,7 @@ def test_get_completions_subcommand_flag_allows_positional(
         subcommand_by_command={"snapshot": ["create"]},
         options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
         flag_options_by_command={"snapshot.create": ["--all", "--dry-run", "-a"]},
-        agent_name_arguments=["snapshot.create"],
+        positional_completions={"snapshot.create": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
@@ -747,11 +751,10 @@ def test_get_completions_host_name_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Commands in host_name_arguments should offer host names as positional args."""
+    """Commands with host_names in positional_completions should offer host names."""
     data = CompletionCacheData(
         commands=["events"],
-        agent_name_arguments=["events"],
-        host_name_arguments=["events"],
+        positional_completions={"events": [["agent_names", "host_names"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent"], host_names=["saturn"])
@@ -814,8 +817,11 @@ def test_get_completions_plugin_name_positional(
     data = CompletionCacheData(
         commands=["plugin"],
         subcommand_by_command={"plugin": ["enable", "disable", "list"]},
-        plugin_name_arguments=["plugin.enable", "plugin.disable"],
         plugin_names=["claude", "docker", "modal"],
+        positional_completions={
+            "plugin.enable": [["plugin_names"]],
+            "plugin.disable": [["plugin_names"]],
+        },
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng plugin enable ", "3")
@@ -833,8 +839,8 @@ def test_get_completions_plugin_name_positional_with_prefix(
     data = CompletionCacheData(
         commands=["plugin"],
         subcommand_by_command={"plugin": ["enable", "disable"]},
-        plugin_name_arguments=["plugin.enable"],
         plugin_names=["claude", "docker", "modal"],
+        positional_completions={"plugin.enable": [["plugin_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng plugin enable cl", "3")
@@ -857,8 +863,12 @@ def test_get_completions_config_key_positional(
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset", "list"]},
-        config_key_arguments=["config.get", "config.set", "config.unset"],
         config_keys=["prefix", "logging.console_level", "logging.file_level"],
+        positional_completions={
+            "config.get": [["config_keys"]],
+            "config.set": [["config_keys"], []],
+            "config.unset": [["config_keys"]],
+        },
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng config get ", "3")
@@ -878,8 +888,8 @@ def test_get_completions_config_key_positional_with_prefix(
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset"]},
-        config_key_arguments=["config.get"],
         config_keys=["prefix", "logging.console_level", "logging.file_level"],
+        positional_completions={"config.get": [["config_keys"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng config get log", "3")
@@ -961,9 +971,9 @@ def test_get_completions_nargs_limit_reached(
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset", "list"]},
-        config_key_arguments=["config.set"],
         config_keys=["prefix", "logging.console_level"],
         positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     # "mng config set KEY VALUE <TAB>" -- 2 positional args already typed
@@ -982,9 +992,9 @@ def test_get_completions_nargs_limit_not_reached(
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["set"]},
-        config_key_arguments=["config.set"],
         config_keys=["prefix", "logging.console_level"],
         positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     # "mng config set <TAB>" -- 0 positional args typed
@@ -1006,19 +1016,18 @@ def test_get_completions_nargs_interleaved_options(
         subcommand_by_command={"config": ["set"]},
         options_by_command={"config.set": ["--scope"]},
         flag_options_by_command={},
-        config_key_arguments=["config.set"],
         config_keys=["prefix", "logging.console_level"],
         positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     # "mng config set --scope user KEY <TAB>" -- only 1 positional (KEY), room for VALUE
+    # Position 1 has empty sources (freeform), so no candidates should be offered.
     set_comp_env("mng config set --scope user prefix ", "6")
 
     result = _get_completions()
 
-    # Still under the limit (1 positional < 2), so candidates should be offered.
-    # The user has typed "prefix" as KEY and is now completing VALUE.
-    assert sorted(result) == ["logging.console_level", "prefix"]
+    assert result == []
 
 
 def test_get_completions_nargs_unlimited(
@@ -1028,8 +1037,8 @@ def test_get_completions_nargs_unlimited(
     """Commands with unlimited nargs (None) should always offer positional candidates."""
     data = CompletionCacheData(
         commands=["destroy"],
-        agent_name_arguments=["destroy"],
         positional_nargs_by_command={"destroy": None},
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["agent1", "agent2", "agent3"])
@@ -1050,8 +1059,8 @@ def test_get_completions_nargs_missing_entry(
     """Commands not in positional_nargs_by_command should be treated as unlimited."""
     data = CompletionCacheData(
         commands=["destroy"],
-        agent_name_arguments=["destroy"],
         positional_nargs_by_command={},
+        positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["agent1", "agent2"])
@@ -1074,9 +1083,9 @@ def test_get_completions_nargs_limit_after_flag(
         subcommand_by_command={"config": ["set"]},
         options_by_command={"config.set": ["--verbose"]},
         flag_options_by_command={"config.set": ["--verbose"]},
-        config_key_arguments=["config.set"],
         config_keys=["prefix"],
         positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
     )
     _write_command_cache(completion_cache_dir, data)
     # "mng config set KEY VALUE --verbose <TAB>" -- 2 positional args + a flag
@@ -1085,4 +1094,109 @@ def test_get_completions_nargs_limit_after_flag(
     result = _get_completions()
 
     # All 2 positional args consumed, so no more positional candidates
+    assert result == []
+
+
+# =============================================================================
+# Per-position positional completion tests
+# =============================================================================
+
+
+def test_get_completions_config_set_pos0_offers_keys(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """config set <TAB> at position 0 should offer config keys."""
+    data = CompletionCacheData(
+        commands=["config"],
+        subcommand_by_command={"config": ["set"]},
+        config_keys=["prefix", "logging.console_level"],
+        positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng config set ", "3")
+
+    result = _get_completions()
+
+    assert "prefix" in result
+    assert "logging.console_level" in result
+
+
+def test_get_completions_config_set_pos1_freeform(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """config set prefix <TAB> at position 1 should offer nothing (freeform)."""
+    data = CompletionCacheData(
+        commands=["config"],
+        subcommand_by_command={"config": ["set"]},
+        config_keys=["prefix", "logging.console_level"],
+        positional_nargs_by_command={"config.set": 2},
+        positional_completions={"config.set": [["config_keys"], []]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mng config set prefix ", "4")
+
+    result = _get_completions()
+
+    assert result == []
+
+
+def test_get_completions_events_pos0_agents_and_hosts(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """events <TAB> at position 0 should offer both agents and hosts."""
+    data = CompletionCacheData(
+        commands=["events"],
+        positional_completions={"events": [["agent_names", "host_names"], []]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent"], host_names=["saturn"])
+    set_comp_env("mng events ", "2")
+
+    result = _get_completions()
+
+    assert "my-agent" in result
+    assert "saturn" in result
+
+
+def test_get_completions_destroy_variadic_repeats(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """destroy a1 a2 <TAB> with variadic nargs should still offer agents (last entry repeats)."""
+    data = CompletionCacheData(
+        commands=["destroy"],
+        positional_nargs_by_command={"destroy": None},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["a1", "a2", "a3"])
+    set_comp_env("mng destroy a1 a2 ", "4")
+
+    result = _get_completions()
+
+    assert "a1" in result
+    assert "a2" in result
+    assert "a3" in result
+
+
+def test_get_completions_rename_pos1_freeform(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """rename my-agent <TAB> at position 1 should offer nothing (freeform new name)."""
+    data = CompletionCacheData(
+        commands=["rename"],
+        positional_nargs_by_command={"rename": 2},
+        positional_completions={"rename": [["agent_names"], []]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mng rename my-agent ", "3")
+
+    result = _get_completions()
+
     assert result == []

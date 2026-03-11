@@ -13,37 +13,39 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.utils.click_utils import detect_alias_to_canonical
 from imbue.mng.utils.file_utils import atomic_write
 
-# Commands whose positional arguments should complete against agent names.
-# This list is used by the cache writer to populate agent_name_arguments
-# in the completions cache. The lightweight completer (complete.py) reads
-# this field to decide when to offer agent name completions.
-_AGENT_NAME_COMMANDS: Final[frozenset[str]] = frozenset(
-    {
-        "connect",
-        "destroy",
-        "exec",
-        "limit",
-        "events",
-        "message",
-        "pair",
-        "provision",
-        "pull",
-        "push",
-        "rename",
-        "start",
-        "stop",
-    }
-)
+# Per-position positional completion spec for top-level commands.
+# Maps command name -> list of source identifier lists per position.
+# Each inner list contains source names for that position (empty = freeform).
+# For variadic commands (nargs=None), the last entry repeats.
+# Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys"
+_POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
+    "connect": [["agent_names"]],
+    "destroy": [["agent_names"]],
+    "exec": [["agent_names"]],
+    "limit": [["agent_names"]],
+    "events": [["agent_names", "host_names"], []],
+    "message": [["agent_names"]],
+    "pair": [["agent_names"]],
+    "provision": [["agent_names"]],
+    "pull": [["agent_names"], []],
+    "push": [["agent_names"], []],
+    "rename": [["agent_names"], []],
+    "start": [["agent_names"]],
+    "stop": [["agent_names"]],
+}
 
-# Subcommands (within groups) whose positional arguments should complete
-# against agent names. Uses dotted notation: "group.subcommand".
-_AGENT_NAME_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
-    {
-        "snapshot.create",
-        "snapshot.destroy",
-        "snapshot.list",
-    }
-)
+# Per-position positional completion spec for group subcommands.
+# Uses dotted notation: "group.subcommand".
+_POSITIONAL_COMPLETION_SUBCOMMAND_SPEC: Final[dict[str, list[list[str]]]] = {
+    "snapshot.create": [["agent_names"]],
+    "snapshot.destroy": [["agent_names"]],
+    "snapshot.list": [["agent_names"]],
+    "plugin.enable": [["plugin_names"]],
+    "plugin.disable": [["plugin_names"]],
+    "config.get": [["config_keys"]],
+    "config.set": [["config_keys"], []],
+    "config.unset": [["config_keys"]],
+}
 
 # Options (keyed as "command.--option") whose values should complete against
 # git branch names. The lightweight completer reads this field to decide when
@@ -63,37 +65,12 @@ _HOST_NAME_OPTIONS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Commands whose positional arguments should also complete against host names
-# (in addition to agent names, if they appear in _AGENT_NAME_COMMANDS).
-_HOST_NAME_COMMANDS: Final[frozenset[str]] = frozenset(
-    {
-        "events",
-    }
-)
-
 # Click option names (--long forms) that should complete against plugin names.
 _PLUGIN_NAME_OPTION_NAMES: Final[frozenset[str]] = frozenset(
     {
         "--plugin",
         "--enable-plugin",
         "--disable-plugin",
-    }
-)
-
-# Subcommands whose positional arguments should complete against plugin names.
-_PLUGIN_NAME_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
-    {
-        "plugin.enable",
-        "plugin.disable",
-    }
-)
-
-# Subcommands whose positional arguments should complete against config keys.
-_CONFIG_KEY_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
-    {
-        "config.get",
-        "config.set",
-        "config.unset",
     }
 )
 
@@ -310,16 +287,18 @@ def write_cli_completions_cache(
                 plugin_name_opts.extend(_extract_plugin_name_options_for_command(cmd, canonical_name))
                 positional_nargs_by_command[canonical_name] = _extract_positional_nargs(cmd)
 
-        # Include both top-level commands and group subcommands that take agent names
-        agent_name_args = (_AGENT_NAME_COMMANDS & canonical_names) | _filter_keys_by_registered_commands(
-            _AGENT_NAME_SUBCOMMANDS, canonical_names
-        )
-
         git_branch_opts = _filter_keys_by_registered_commands(_GIT_BRANCH_OPTIONS, canonical_names)
         host_name_opts = _filter_keys_by_registered_commands(_HOST_NAME_OPTIONS, canonical_names)
-        host_name_args = _HOST_NAME_COMMANDS & canonical_names
-        plugin_name_args = _filter_keys_by_registered_commands(_PLUGIN_NAME_SUBCOMMANDS, canonical_names)
-        config_key_args = _filter_keys_by_registered_commands(_CONFIG_KEY_SUBCOMMANDS, canonical_names)
+
+        # Build per-position positional completions from the spec dicts,
+        # filtering to only include commands that are actually registered.
+        positional_completions: dict[str, list[list[str]]] = {}
+        for cmd_name, entries in _POSITIONAL_COMPLETION_SPEC.items():
+            if cmd_name in canonical_names:
+                positional_completions[cmd_name] = entries
+        for dotted_key, entries in _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC.items():
+            if dotted_key.split(".")[0] in canonical_names:
+                positional_completions[dotted_key] = entries
 
         # Inject dynamic choice values from runtime context (config, registries)
         dynamic = _build_dynamic_completions(mng_ctx) if mng_ctx is not None else None
@@ -336,16 +315,13 @@ def write_cli_completions_cache(
             options_by_command=options_by_command,
             flag_options_by_command=flag_options_by_command,
             option_choices=option_choices,
-            agent_name_arguments=sorted(agent_name_args),
             git_branch_options=sorted(git_branch_opts),
             host_name_options=sorted(host_name_opts),
-            host_name_arguments=sorted(host_name_args),
             plugin_name_options=sorted(set(plugin_name_opts)),
             plugin_names=dynamic.get("plugin_names", []) if dynamic else [],
-            plugin_name_arguments=sorted(plugin_name_args),
-            config_key_arguments=sorted(config_key_args),
             config_keys=dynamic.get("config_keys", []) if dynamic else [],
             positional_nargs_by_command=positional_nargs_by_command,
+            positional_completions=positional_completions,
         )
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME

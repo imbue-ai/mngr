@@ -202,7 +202,7 @@ def _get_positional_candidates_with_nargs_limit(ctx: _CompletionContext) -> list
     nargs_limit = ctx.cache.positional_nargs_by_command.get(ctx.command_key)
     if nargs_limit is not None and ctx.positional_count >= nargs_limit:
         return []
-    return _get_positional_candidates(ctx.command_key, ctx.cache)
+    return _get_positional_candidates(ctx.command_key, ctx.positional_count, ctx.cache)
 
 
 def _get_completions() -> list[str]:
@@ -270,31 +270,45 @@ def _get_option_value_candidates(choice_key: str, cache: CompletionCacheData) ->
     return []
 
 
-def _get_positional_candidates(command_key: str, cache: CompletionCacheData) -> list[str]:
-    """Return positional argument candidates from all applicable completion sources.
+def _resolve_sources(sources: list[str], cache: CompletionCacheData) -> list[str]:
+    """Resolve completion source identifiers to actual candidate values.
 
-    command_key is the dotted command key (e.g. "destroy", "snapshot.create", or "").
-    Checks agent names, host names, plugin names, and config keys as appropriate.
+    Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys".
     """
-    if not command_key:
-        return []
-
     candidates: list[str] = []
-
-    needs_agents = command_key in cache.agent_name_arguments
-    needs_hosts = command_key in cache.host_name_arguments
+    needs_agents = "agent_names" in sources
+    needs_hosts = "host_names" in sources
     if needs_agents or needs_hosts:
         agent_names, host_names = _read_discovery_names()
         if needs_agents:
             candidates.extend(agent_names)
         if needs_hosts:
             candidates.extend(host_names)
-    if command_key in cache.plugin_name_arguments:
+    if "plugin_names" in sources:
         candidates.extend(cache.plugin_names)
-    if command_key in cache.config_key_arguments:
+    if "config_keys" in sources:
         candidates.extend(cache.config_keys)
-
     return candidates
+
+
+def _get_positional_candidates(command_key: str, positional_count: int, cache: CompletionCacheData) -> list[str]:
+    """Return positional argument candidates for a specific position.
+
+    command_key is the dotted command key (e.g. "destroy", "snapshot.create", or "").
+    positional_count is the number of positional words already typed.
+    Looks up per-position sources from cache.positional_completions and resolves them.
+    For variadic commands (nargs=None), the last entry repeats.
+    """
+    if not command_key:
+        return []
+    entries = cache.positional_completions.get(command_key)
+    if not entries:
+        return []
+    idx = min(positional_count, len(entries) - 1)
+    sources = entries[idx]
+    if not sources:
+        return []
+    return _resolve_sources(sources, cache)
 
 
 def _generate_zsh_script() -> str:

@@ -39,13 +39,10 @@ class CompletionCacheData(NamedTuple):
     options_by_command: dict[str, list[str]] = {}
     flag_options_by_command: dict[str, list[str]] = {}
     option_choices: dict[str, list[str]] = {}
-    agent_name_arguments: list[str] = []
     git_branch_options: list[str] = []
     host_name_options: list[str] = []
-    host_name_arguments: list[str] = []
     plugin_name_options: list[str] = []
     plugin_names: list[str] = []
-    plugin_name_arguments: list[str] = []
-    config_key_arguments: list[str] = []
     config_keys: list[str] = []
     positional_nargs_by_command: dict[str, int | None] = {}
+    positional_completions: dict[str, list[list[str]]] = {}

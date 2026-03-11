@@ -116,8 +116,10 @@ def test_write_cli_completions_cache_includes_host_name_options(completion_cache
     assert "create.--target-host" in data["host_name_options"]
 
 
-def test_write_cli_completions_cache_includes_host_name_arguments(completion_cache_dir: Path) -> None:
-    """Cache should include host_name_arguments for the events command."""
+def test_write_cli_completions_cache_includes_positional_completions_for_events(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should include per-position positional_completions for the events command."""
     group = click.Group(
         name="test",
         commands={
@@ -129,8 +131,9 @@ def test_write_cli_completions_cache_includes_host_name_arguments(completion_cac
     write_cli_completions_cache(cli_group=group)
     data = _read_cache(completion_cache_dir)
 
-    assert "events" in data["host_name_arguments"]
-    assert "list" not in data["host_name_arguments"]
+    assert "events" in data["positional_completions"]
+    assert data["positional_completions"]["events"] == [["agent_names", "host_names"], []]
+    assert "list" not in data["positional_completions"]
 
 
 def test_write_cli_completions_cache_includes_plugin_name_options(completion_cache_dir: Path) -> None:
@@ -154,8 +157,10 @@ def test_write_cli_completions_cache_includes_plugin_name_options(completion_cac
     assert "create.--plugin" in data["plugin_name_options"]
 
 
-def test_write_cli_completions_cache_includes_plugin_name_arguments(completion_cache_dir: Path) -> None:
-    """Cache should include plugin_name_arguments for plugin enable/disable subcommands."""
+def test_write_cli_completions_cache_includes_positional_completions_for_plugin(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should include positional_completions for plugin enable/disable subcommands."""
     plugin_group = click.Group(
         name="plugin",
         commands={
@@ -169,12 +174,14 @@ def test_write_cli_completions_cache_includes_plugin_name_arguments(completion_c
     write_cli_completions_cache(cli_group=group)
     data = _read_cache(completion_cache_dir)
 
-    assert "plugin.enable" in data["plugin_name_arguments"]
-    assert "plugin.disable" in data["plugin_name_arguments"]
+    assert data["positional_completions"]["plugin.enable"] == [["plugin_names"]]
+    assert data["positional_completions"]["plugin.disable"] == [["plugin_names"]]
 
 
-def test_write_cli_completions_cache_includes_config_key_arguments(completion_cache_dir: Path) -> None:
-    """Cache should include config_key_arguments for config get/set/unset subcommands."""
+def test_write_cli_completions_cache_includes_positional_completions_for_config(
+    completion_cache_dir: Path,
+) -> None:
+    """Cache should include positional_completions for config get/set/unset subcommands."""
     config_group = click.Group(
         name="config",
         commands={
@@ -189,9 +196,9 @@ def test_write_cli_completions_cache_includes_config_key_arguments(completion_ca
     write_cli_completions_cache(cli_group=group)
     data = _read_cache(completion_cache_dir)
 
-    assert "config.get" in data["config_key_arguments"]
-    assert "config.set" in data["config_key_arguments"]
-    assert "config.unset" in data["config_key_arguments"]
+    assert data["positional_completions"]["config.get"] == [["config_keys"]]
+    assert data["positional_completions"]["config.set"] == [["config_keys"], []]
+    assert data["positional_completions"]["config.unset"] == [["config_keys"]]
 
 
 def test_write_cli_completions_cache_with_mng_ctx(
