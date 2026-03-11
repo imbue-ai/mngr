@@ -110,9 +110,10 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
         )
     if len(matches) > 1:
         match_list = "\n".join(f"  {m}" for m in matches)
+        adopt_all = " ".join(f"--adopt-session {m}" for m in matches)
         raise UserInputError(
             f"Session {adopt_session_arg} found in multiple project directories:\n{match_list}\n"
-            "Pass the full path to the .jsonl file to specify which one."
+            f"Pass a specific path, or adopt all with: {adopt_all}"
         )
 
     return adopt_session_arg, matches[0].parent
