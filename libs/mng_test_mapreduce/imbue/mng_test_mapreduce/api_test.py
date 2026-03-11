@@ -9,12 +9,33 @@ from imbue.mng.primitives import AgentName
 from imbue.mng_test_mapreduce.api import CollectTestsError
 from imbue.mng_test_mapreduce.api import PLUGIN_NAME
 from imbue.mng_test_mapreduce.api import _build_agent_prompt
+from imbue.mng_test_mapreduce.api import _build_grouped_tables
+from imbue.mng_test_mapreduce.api import _build_stacked_bar
 from imbue.mng_test_mapreduce.api import _html_escape
 from imbue.mng_test_mapreduce.api import _sanitize_test_name_for_agent
+from imbue.mng_test_mapreduce.api import _short_random_id
 from imbue.mng_test_mapreduce.api import collect_tests
 from imbue.mng_test_mapreduce.api import generate_html_report
 from imbue.mng_test_mapreduce.data_types import TestMapReduceResult
 from imbue.mng_test_mapreduce.data_types import TestOutcome
+
+# --- _short_random_id ---
+
+
+def test_short_random_id_length() -> None:
+    rid = _short_random_id()
+    assert len(rid) == 6
+
+
+def test_short_random_id_is_hex() -> None:
+    rid = _short_random_id()
+    int(rid, 16)
+
+
+def test_short_random_id_is_unique() -> None:
+    ids = {_short_random_id() for _ in range(100)}
+    assert len(ids) == 100
+
 
 # --- _sanitize_test_name_for_agent ---
 
@@ -120,6 +141,66 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
         )
 
 
+# --- _build_stacked_bar ---
+
+
+def test_build_stacked_bar_empty() -> None:
+    assert _build_stacked_bar({}, 0) == ""
+
+
+def test_build_stacked_bar_single_outcome() -> None:
+    counts = {TestOutcome.RUN_SUCCEEDED: 5}
+    html = _build_stacked_bar(counts, 5)
+    assert "width: 100.0%" in html
+    assert "RUN_SUCCEEDED: 5" in html
+
+
+def test_build_stacked_bar_multiple_outcomes() -> None:
+    counts = {TestOutcome.RUN_SUCCEEDED: 3, TestOutcome.FIX_IMPL_FAILED: 2}
+    html = _build_stacked_bar(counts, 5)
+    assert "RUN_SUCCEEDED: 3" in html
+    assert "FIX_IMPL_FAILED: 2" in html
+
+
+# --- _build_grouped_tables ---
+
+
+def test_build_grouped_tables_groups_by_outcome() -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::a",
+            agent_name=AgentName("a"),
+            outcome=TestOutcome.RUN_SUCCEEDED,
+            summary="ok",
+        ),
+        TestMapReduceResult(
+            test_node_id="t::b",
+            agent_name=AgentName("b"),
+            outcome=TestOutcome.FIX_IMPL_SUCCEEDED,
+            summary="fixed",
+            branch_name="mng-tmr/b",
+        ),
+    ]
+    html = _build_grouped_tables(results)
+    fix_pos = html.index("FIX_IMPL_SUCCEEDED")
+    run_pos = html.index("RUN_SUCCEEDED")
+    assert fix_pos < run_pos
+
+
+def test_build_grouped_tables_shows_branch() -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::c",
+            agent_name=AgentName("c"),
+            outcome=TestOutcome.FIX_TEST_SUCCEEDED,
+            summary="fixed test",
+            branch_name="mng-tmr/c-abc123",
+        ),
+    ]
+    html = _build_grouped_tables(results)
+    assert "mng-tmr/c-abc123" in html
+
+
 # --- generate_html_report ---
 
 
@@ -160,6 +241,29 @@ def test_generate_html_report(tmp_path: Path) -> None:
     assert "FIX_UNCERTAIN" in content
     assert "mng-tmr/test-fixed" in content
     assert "3 test(s)" in content
+    # Stacked bar should be present
+    assert 'class="bar"' in content
+
+
+def test_generate_html_report_groups_run_succeeded_last(tmp_path: Path) -> None:
+    results = [
+        TestMapReduceResult(
+            test_node_id="t::pass1",
+            agent_name=AgentName("a1"),
+            outcome=TestOutcome.RUN_SUCCEEDED,
+            summary="ok",
+        ),
+        TestMapReduceResult(
+            test_node_id="t::fail1",
+            agent_name=AgentName("a2"),
+            outcome=TestOutcome.FIX_IMPL_FAILED,
+            summary="failed",
+        ),
+    ]
+    output_path = tmp_path / "grouped.html"
+    generate_html_report(results, output_path)
+    content = output_path.read_text()
+    assert content.index("FIX_IMPL_FAILED") < content.index("RUN_SUCCEEDED")
 
 
 def test_generate_html_report_escapes_html(tmp_path: Path) -> None:

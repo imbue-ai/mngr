@@ -6,6 +6,7 @@ HTML report.
 """
 
 import json
+import secrets
 import time
 from pathlib import Path
 
@@ -52,6 +53,28 @@ _TERMINAL_STATES = frozenset(
     }
 )
 
+_OUTCOME_COLORS: dict[TestOutcome, str] = {
+    TestOutcome.FIX_TEST_SUCCEEDED: "rgb(33, 150, 243)",
+    TestOutcome.FIX_IMPL_SUCCEEDED: "rgb(33, 150, 243)",
+    TestOutcome.FIX_TEST_FAILED: "rgb(244, 67, 54)",
+    TestOutcome.FIX_IMPL_FAILED: "rgb(244, 67, 54)",
+    TestOutcome.FIX_UNCERTAIN: "rgb(255, 152, 0)",
+    TestOutcome.RUN_SUCCEEDED: "rgb(76, 175, 80)",
+    TestOutcome.AGENT_ERROR: "rgb(158, 158, 158)",
+}
+
+_OUTCOME_GROUP_ORDER: list[TestOutcome] = [
+    TestOutcome.FIX_IMPL_SUCCEEDED,
+    TestOutcome.FIX_TEST_SUCCEEDED,
+    TestOutcome.FIX_IMPL_FAILED,
+    TestOutcome.FIX_TEST_FAILED,
+    TestOutcome.FIX_UNCERTAIN,
+    TestOutcome.AGENT_ERROR,
+    TestOutcome.RUN_SUCCEEDED,
+]
+
+_SHORT_ID_LENGTH = 6
+
 
 class CollectTestsError(MngError, RuntimeError):
     """Raised when pytest test collection fails."""
@@ -88,6 +111,11 @@ class TestMapReduceParams(FrozenModel):
     )
 
 
+def _short_random_id() -> str:
+    """Generate a short random hex suffix for agent name uniqueness."""
+    return secrets.token_hex(_SHORT_ID_LENGTH // 2)
+
+
 def collect_tests(
     pytest_args: tuple[str, ...],
     source_dir: Path,
@@ -103,8 +131,6 @@ def collect_tests(
     test_ids: list[str] = []
     for line in result.stdout.splitlines():
         stripped = line.strip()
-        # pytest -q --collect-only outputs lines like "tests/test_foo.py::test_bar"
-        # Skip blank lines, summary lines, and lines that don't contain "::"
         if stripped and "::" in stripped and not stripped.startswith("="):
             test_ids.append(stripped)
 
@@ -149,18 +175,14 @@ def _sanitize_test_name_for_agent(test_node_id: str) -> str:
     Strips the file path prefix and replaces characters that are not valid in
     agent names.
     """
-    # Take just the test function/method name for brevity
-    # e.g. "tests/test_foo.py::TestClass::test_bar" -> "test_bar"
     parts = test_node_id.split("::")
     short_name = parts[-1] if parts else test_node_id
-    # Replace non-alphanumeric chars with hyphens, collapse runs, strip edges
     cleaned = ""
     for ch in short_name:
         if ch.isalnum() or ch == "-":
             cleaned += ch
         else:
             cleaned += "-"
-    # Collapse multiple hyphens
     sanitized = ""
     for ch in cleaned:
         if ch == "-" and sanitized.endswith("-"):
@@ -178,7 +200,8 @@ def launch_test_agent(
 ) -> TestAgentInfo:
     """Launch a single agent to run and optionally fix one test."""
     agent_name_suffix = _sanitize_test_name_for_agent(test_node_id)
-    agent_name = AgentName(f"tmr-{agent_name_suffix}")
+    short_id = _short_random_id()
+    agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
     prompt = _build_agent_prompt(test_node_id)
 
     agent_options = CreateAgentOptions(
@@ -187,7 +210,7 @@ def launch_test_agent(
         initial_message=prompt,
         git=AgentGitOptions(
             copy_mode=WorkDirCopyMode.WORKTREE,
-            new_branch_name=f"mng-tmr/{agent_name_suffix}",
+            new_branch_name=f"mng-tmr/{agent_name_suffix}-{short_id}",
         ),
     )
 
@@ -282,8 +305,6 @@ def read_agent_result(
     host: OnlineHostInterface,
 ) -> TestResult:
     """Read the result.json from a finished agent's state directory."""
-    # The result file is at $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
-    # On the host, that maps to: host_dir/agents/<agent_id>/plugin/<plugin_name>/result.json
     agent_state_dir = host.host_dir / "agents" / str(agent_detail.id)
     result_path = agent_state_dir / "plugin" / PLUGIN_NAME / "result.json"
 
@@ -373,10 +394,12 @@ def gather_results(
 
         test_result = read_agent_result(detail, host)
 
+        # Always record the branch name from the agent for display
+        branch_name = detail.initial_branch
+
         # Pull the branch for successful fix outcomes
-        branch_name: str | None = None
         if test_result.outcome in (TestOutcome.FIX_TEST_SUCCEEDED, TestOutcome.FIX_IMPL_SUCCEEDED):
-            branch_name = pull_agent_branch(detail, host, source_dir, cg)
+            pull_agent_branch(detail, host, source_dir, cg)
 
         results.append(
             TestMapReduceResult(
@@ -393,37 +416,17 @@ def gather_results(
 
 def generate_html_report(results: list[TestMapReduceResult], output_path: Path) -> Path:
     """Generate an HTML report summarizing test-mapreduce results."""
-    outcome_colors = {
-        TestOutcome.RUN_SUCCEEDED: "#4caf50",
-        TestOutcome.FIX_TEST_SUCCEEDED: "#8bc34a",
-        TestOutcome.FIX_IMPL_SUCCEEDED: "#8bc34a",
-        TestOutcome.FIX_TEST_FAILED: "#f44336",
-        TestOutcome.FIX_IMPL_FAILED: "#f44336",
-        TestOutcome.FIX_UNCERTAIN: "#ff9800",
-        TestOutcome.AGENT_ERROR: "#9e9e9e",
-    }
-
-    rows = ""
-    for r in results:
-        color = outcome_colors.get(r.outcome, "#9e9e9e")
-        branch_cell = r.branch_name if r.branch_name else "-"
-        rows += f"""    <tr>
-      <td>{_html_escape(r.test_node_id)}</td>
-      <td style="color: {color}; font-weight: bold;">{r.outcome.value}</td>
-      <td>{_html_escape(r.summary)}</td>
-      <td><code>{_html_escape(str(r.agent_name))}</code></td>
-      <td><code>{_html_escape(branch_cell)}</code></td>
-    </tr>
-"""
-
-    # Count outcomes
     counts: dict[TestOutcome, int] = {}
     for r in results:
         counts[r.outcome] = counts.get(r.outcome, 0) + 1
+
     summary_parts = [
         f"{outcome.value}: {count}" for outcome, count in sorted(counts.items(), key=lambda x: x[0].value)
     ]
     summary_text = ", ".join(summary_parts)
+
+    bar_html = _build_stacked_bar(counts, len(results))
+    tables_html = _build_grouped_tables(results)
 
     css = _html_report_css()
     html = f"""<!DOCTYPE html>
@@ -438,19 +441,8 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
 <body>
   <h1>Test Map-Reduce Report</h1>
   <p class="summary">{len(results)} test(s) -- {summary_text}</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Test</th>
-        <th>Outcome</th>
-        <th>Summary</th>
-        <th>Agent</th>
-        <th>Branch</th>
-      </tr>
-    </thead>
-    <tbody>
-{rows}    </tbody>
-  </table>
+{bar_html}
+{tables_html}
 </body>
 </html>
 """
@@ -458,6 +450,53 @@ def generate_html_report(results: list[TestMapReduceResult], output_path: Path) 
     output_path.write_text(html)
     logger.info("HTML report written to {}", output_path)
     return output_path
+
+
+def _build_stacked_bar(counts: dict[TestOutcome, int], total: int) -> str:
+    """Build an HTML stacked bar showing outcome distribution."""
+    if total == 0:
+        return ""
+    segments = ""
+    for outcome in _OUTCOME_GROUP_ORDER:
+        count = counts.get(outcome, 0)
+        if count == 0:
+            continue
+        pct = count / total * 100
+        color = _OUTCOME_COLORS.get(outcome, "rgb(158, 158, 158)")
+        segments += (
+            f'    <div style="width: {pct:.1f}%; background: {color};" title="{outcome.value}: {count}"></div>\n'
+        )
+    return f'  <div class="bar">\n{segments}  </div>'
+
+
+def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
+    """Build HTML tables grouped by outcome, with RUN_SUCCEEDED last."""
+    grouped: dict[TestOutcome, list[TestMapReduceResult]] = {}
+    for r in results:
+        grouped.setdefault(r.outcome, []).append(r)
+
+    sections = ""
+    for outcome in _OUTCOME_GROUP_ORDER:
+        group = grouped.get(outcome)
+        if not group:
+            continue
+        color = _OUTCOME_COLORS.get(outcome, "rgb(158, 158, 158)")
+        sections += f'  <h2 style="color: {color};">{outcome.value} ({len(group)})</h2>\n'
+        sections += "  <table>\n    <thead>\n      <tr>"
+        sections += "<th>Test</th><th>Summary</th><th>Agent</th><th>Branch</th>"
+        sections += "</tr>\n    </thead>\n    <tbody>\n"
+        for r in group:
+            branch_cell = r.branch_name if r.branch_name else "-"
+            sections += f"""      <tr>
+        <td>{_html_escape(r.test_node_id)}</td>
+        <td>{_html_escape(r.summary)}</td>
+        <td><code>{_html_escape(str(r.agent_name))}</code></td>
+        <td><code>{_html_escape(branch_cell)}</code></td>
+      </tr>
+"""
+        sections += "    </tbody>\n  </table>\n"
+
+    return sections
 
 
 def _html_report_css() -> str:
@@ -468,8 +507,12 @@ def _html_report_css() -> str:
     return (
         "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 2rem; }\n"
         "    h1 { color: rgb(51, 51, 51); }\n"
-        "    .summary { margin-bottom: 1rem; color: rgb(102, 102, 102); }\n"
-        "    table { border-collapse: collapse; width: 100%; }\n"
+        "    h2 { margin-top: 1.5rem; font-size: 1.1rem; }\n"
+        "    .summary { margin-bottom: 0.5rem; color: rgb(102, 102, 102); }\n"
+        "    .bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden;"
+        " margin-bottom: 1.5rem; }\n"
+        "    .bar > div { min-width: 2px; }\n"
+        "    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }\n"
         "    th, td { border: 1px solid rgb(221, 221, 221); padding: 8px 12px; text-align: left; }\n"
         "    th { background: rgb(245, 245, 245); font-weight: 600; }\n"
         "    tr:hover { background: rgb(250, 250, 250); }\n"
