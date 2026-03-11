@@ -424,7 +424,7 @@ def modify_env_vars_for_deploy(
 
 @hookspec
 def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
-    """Return field generators for computing plugin-specific agent fields during listing.
+    """[experimental] Return field generators for computing plugin-specific agent fields during listing.
 
     Each plugin returns (plugin_name, generators) where generators maps field names
     to callables that receive (agent, host) and return a field value (or None to omit).
