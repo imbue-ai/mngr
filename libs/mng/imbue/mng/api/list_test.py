@@ -18,14 +18,17 @@ from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import _build_agent_details_from_online_agent
 from imbue.mng.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import Host
+from imbue.mng.interfaces.data_types import ActivityConfig
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -660,6 +663,137 @@ def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
     assert isinstance(providers, list)
     # At least the local provider should be present
     assert len(providers) > 0
+
+
+# =============================================================================
+# _build_agent_details_from_online_agent field_generators Tests
+# =============================================================================
+
+
+class _StubAgentForListing:
+    """Minimal stub satisfying the AgentInterface protocol used by _build_agent_details_from_online_agent."""
+
+    def __init__(self) -> None:
+        self.id = AgentId.generate()
+        self.name = AgentName("test-agent")
+        self.agent_type = AgentTypeName("claude")
+        self.work_dir = Path("/work")
+        self.create_time = datetime.now(timezone.utc)
+
+    def get_command(self) -> CommandString:
+        return CommandString("sleep 100")
+
+    def get_created_branch_name(self) -> str | None:
+        return "mng/test-agent"
+
+    def get_is_start_on_boot(self) -> bool:
+        return False
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return AgentLifecycleState.RUNNING
+
+    def get_reported_url(self) -> str | None:
+        return None
+
+    def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
+        return None
+
+    def get_labels(self) -> dict[str, str]:
+        return {}
+
+
+class _StubHostForListing:
+    """Minimal stub satisfying the OnlineHostInterface protocol used by _build_agent_details_from_online_agent."""
+
+    def get_activity_config(self) -> ActivityConfig:
+        return ActivityConfig(
+            idle_timeout_seconds=3600,
+            activity_sources=(ActivitySource.USER, ActivitySource.AGENT, ActivitySource.SSH),
+        )
+
+
+def _build_details_with_stubs(
+    field_generators: dict[str, dict[str, object]],
+) -> AgentDetails:
+    """Call _build_agent_details_from_online_agent with test stubs."""
+    return _build_agent_details_from_online_agent(
+        _StubAgentForListing(),  # ty: ignore[invalid-argument-type]
+        _make_host_details(),
+        _StubHostForListing(),  # ty: ignore[invalid-argument-type]
+        None,
+        field_generators,  # ty: ignore[invalid-argument-type]
+    )
+
+
+def test_build_agent_details_populates_plugin_data_from_field_generators() -> None:
+    """_build_agent_details_from_online_agent should populate plugin data when field_generators are provided."""
+    result = _build_details_with_stubs(
+        {
+            "my_plugin": {
+                "status": lambda a, h: "active",
+                "score": lambda a, h: 42,
+            },
+        }
+    )
+
+    assert result.plugin == {"my_plugin": {"status": "active", "score": 42}}
+
+
+def test_build_agent_details_omits_field_when_generator_returns_none() -> None:
+    """_build_agent_details_from_online_agent should omit fields when generators return None."""
+    result = _build_details_with_stubs(
+        {
+            "my_plugin": {
+                "present": lambda a, h: "yes",
+                "absent": lambda a, h: None,
+            },
+        }
+    )
+
+    assert result.plugin == {"my_plugin": {"present": "yes"}}
+    assert "absent" not in result.plugin.get("my_plugin", {})
+
+
+def test_build_agent_details_omits_plugin_when_all_generators_return_none() -> None:
+    """_build_agent_details_from_online_agent should omit plugin entry when all generators return None."""
+    result = _build_details_with_stubs(
+        {
+            "my_plugin": {
+                "field_a": lambda a, h: None,
+                "field_b": lambda a, h: None,
+            },
+        }
+    )
+
+    assert result.plugin == {}
+
+
+def test_build_agent_details_empty_field_generators_produces_empty_plugin() -> None:
+    """_build_agent_details_from_online_agent should produce plugin={} when field_generators is empty."""
+    result = _build_details_with_stubs({})
+
+    assert result.plugin == {}
+
+
+def test_build_agent_details_multiple_plugins() -> None:
+    """_build_agent_details_from_online_agent should handle multiple plugin field generators."""
+    result = _build_details_with_stubs(
+        {
+            "plugin_a": {
+                "version": lambda a, h: "1.0",
+            },
+            "plugin_b": {
+                "count": lambda a, h: 5,
+            },
+        }
+    )
+
+    assert result.plugin == {"plugin_a": {"version": "1.0"}, "plugin_b": {"count": 5}}
+
+
+# =============================================================================
+# discover_all_hosts_and_agents Tests
+# =============================================================================
 
 
 @pytest.mark.tmux
