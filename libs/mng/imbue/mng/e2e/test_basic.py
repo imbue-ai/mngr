@@ -14,7 +14,7 @@ from imbue.mng.e2e.conftest import MngRunFn
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 def test_help_succeeds(mng: MngRunFn) -> None:
     result = mng("--help")
     expect(result).to_succeed()
@@ -23,7 +23,7 @@ def test_help_succeeds(mng: MngRunFn) -> None:
     expect(result.stdout).to_contain("list")
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 def test_create_help_succeeds(mng: MngRunFn) -> None:
     result = mng("create --help")
     expect(result).to_succeed()
@@ -31,14 +31,14 @@ def test_create_help_succeeds(mng: MngRunFn) -> None:
     expect(result.stdout).to_contain("--agent-cmd")
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 def test_list_with_no_agents(mng: MngRunFn) -> None:
     result = mng("list")
     expect(result).to_succeed()
     expect(result.stdout).to_contain("No agents found")
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 def test_list_json_with_no_agents(mng: MngRunFn) -> None:
     result = mng("list --format json")
     expect(result).to_succeed()
@@ -46,7 +46,7 @@ def test_list_json_with_no_agents(mng: MngRunFn) -> None:
     assert parsed["agents"] == []
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_and_list_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     agent_name = create_agent("e2e-create")
@@ -56,7 +56,7 @@ def test_create_and_list_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> No
     expect(list_result.stdout).to_match(rf"{agent_name}\s+(RUNNING|WAITING)")
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_json_output(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     create_agent("e2e-json", extra_args="--format json")
@@ -68,7 +68,7 @@ def test_create_with_json_output(mng: MngRunFn, create_agent: CreateAgentFn) -> 
     assert len(parsed["agents"]) == 1
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_headless(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     agent_name = create_agent("e2e-headless", extra_args="--headless")
@@ -78,7 +78,7 @@ def test_create_headless(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     expect(list_result.stdout).to_contain(agent_name)
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_and_destroy_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     agent_name = create_agent("e2e-destroy")
@@ -91,7 +91,7 @@ def test_create_and_destroy_agent(mng: MngRunFn, create_agent: CreateAgentFn) ->
     expect(list_result.stdout).not_to_contain(agent_name)
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_and_rename_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     old_name = create_agent("e2e-rename-old")
@@ -106,7 +106,7 @@ def test_create_and_rename_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> 
     expect(list_result.stdout).not_to_contain(old_name)
 
 
-@pytest.mark.acceptance
+@pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_label_shows_in_list(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
     agent_name = create_agent("e2e-label", extra_args="--label team=backend")
