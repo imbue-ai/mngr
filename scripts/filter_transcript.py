@@ -121,18 +121,25 @@ def should_include(msg_type, args):
     return False
 
 
-def format_line(line_num, msg_type, text, use_json):
+def format_line(line_num, msg_type, text, use_json, show_line_numbers=True):
     """Format a single output line."""
     if use_json:
-        return json.dumps({"line": line_num, "type": msg_type, "text": text})
+        record = {"type": msg_type, "text": text}
+        if show_line_numbers:
+            record["line"] = line_num
+        return json.dumps(record)
 
     # Indent continuation lines
-    prefix = f"L{line_num}\t[{msg_type}]\t"
+    if show_line_numbers:
+        prefix = f"L{line_num}\t[{msg_type}]\t"
+        indent = "\t\t\t"
+    else:
+        prefix = f"[{msg_type}]\t"
+        indent = "\t\t"
     lines = text.split("\n")
     if len(lines) == 1:
         return f"{prefix}{lines[0]}"
     else:
-        indent = "\t\t\t"
         formatted = [f"{prefix}{lines[0]}"]
         for continuation in lines[1:]:
             formatted.append(f"{indent}{continuation}")
@@ -182,7 +189,7 @@ def main():
             if not text.strip():
                 continue
 
-            output = format_line(line_num, msg_type, text, args.json)
+            output = format_line(line_num, msg_type, text, args.json, show_line_numbers=not args.no_line_numbers)
 
             if args.size:
                 total_size += len(output.encode("utf-8")) + 1  # +1 for newline
