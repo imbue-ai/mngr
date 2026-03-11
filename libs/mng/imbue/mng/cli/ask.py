@@ -43,7 +43,8 @@ _QUERY_PREFIX: Final[str] = (
     "from the repo where you would like a Dockerfile created.\n\n"
     #
     "user: How do I spin up 5 agents on the cloud?\n"
-    "response: mng create -n 5 @.modal\n\n"
+    "response: mng create --provider modal\n"
+    "Run the command 5 times (once per agent). Each will get a unique auto-generated name.\n\n"
     #
     "user: How do I run multiple agents on the same cloud machine to save costs?\n"
     "response: Create them on a shared host:\n"
@@ -164,7 +165,8 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "here are some example questions and ideal responses:\n\n"
     #
     "user: spin up 5 agents on the cloud\n"
-    "response: mng create -n 5 @.modal\n\n"
+    "response: mng create @.modal\n"
+    "Run the command 5 times (once per agent).\n\n"
     #
     "user: send all agents a message to rebase on main\n"
     'response: mng message --all -m "rebase on main and resolve any conflicts"\n\n'

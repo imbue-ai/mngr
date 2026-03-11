@@ -3,7 +3,9 @@
 from pathlib import Path
 from typing import cast
 
+import pluggy
 import pytest
+from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.cli.create import AgentAddress
@@ -17,6 +19,7 @@ from imbue.mng.cli.create import _resolve_source_location
 from imbue.mng.cli.create import _resolve_target_host
 from imbue.mng.cli.create import _split_cli_args
 from imbue.mng.cli.create import _try_reuse_existing_agent
+from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import HostLocation
@@ -859,3 +862,114 @@ def test_parse_agent_address_rejects_multiple_dots() -> None:
 
     with pytest.raises(UserInputError, match="more than one dot"):
         _parse_agent_address("@host.provider.extra")
+
+
+def test_parse_agent_address_rejects_trailing_dot() -> None:
+    """A trailing dot (host name with empty provider) is rejected."""
+    with pytest.raises(UserInputError, match="trailing dot"):
+        _parse_agent_address("foo@host.")
+
+
+def test_parse_agent_address_bare_dot_is_valid() -> None:
+    """A lone dot '@.' means no host and no provider (both empty), not a trailing dot."""
+    result = _parse_agent_address("foo@.")
+    assert result.agent_name == AgentName("foo")
+    assert result.host_name is None
+    assert result.provider_name is None
+
+
+# =============================================================================
+# Tests for positional / --name mutual exclusivity
+# =============================================================================
+
+
+def test_create_rejects_positional_and_name_together(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Providing both a positional address and --name should fail."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+
+
+@pytest.mark.tmux
+def test_create_accepts_name_flag_alone(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--name alone (no positional) should work for specifying the agent address."""
+    result = cli_runner.invoke(
+        create,
+        ["--name", "@.local", "--command", "true", "--no-connect", "--source-path", str(temp_work_dir)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0
+
+
+# =============================================================================
+# Tests for --provider flag merge/conflict logic
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_provider_flag_sets_provider(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider without an address provider should be accepted."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--provider", "local", "--command", "true", "--no-connect", "--source-path", str(temp_work_dir)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0
+
+
+def test_create_provider_flag_conflicts_with_address_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider that conflicts with the address provider should abort."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent@.modal", "--provider", "docker", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Conflicting providers" in result.output
+
+
+@pytest.mark.tmux
+def test_create_provider_flag_redundant_with_address_is_ok(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider matching the address provider should succeed (redundant but not conflicting)."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "my-agent@.local",
+            "--provider",
+            "local",
+            "--command",
+            "true",
+            "--no-connect",
+            "--source-path",
+            str(temp_work_dir),
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0
