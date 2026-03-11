@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 from typing import Final
+from typing import cast
 
 import click
 from loguru import logger
@@ -54,6 +55,7 @@ from imbue.mng.errors import PluginMngError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import is_macos
+from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import FileTransferSpec
 from imbue.mng.interfaces.data_types import RelativePath
@@ -113,18 +115,9 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
 
 
 def _copy_directory(host: OnlineHostInterface, source: Path, dest: Path, *, label: str | None = None) -> None:
-    """Copy a directory tree from source to dest, using rsync for local hosts."""
+    """Copy a directory tree from a local source to dest via Host._rsync_files."""
     with log_span(label or "Copying {} to {}", source, dest):
-        if host.is_local:
-            host.execute_command(
-                f"rsync -a {shlex.quote(str(source))}/ {shlex.quote(str(dest))}/",
-                timeout_seconds=60.0,
-            )
-        else:
-            for file_path in source.rglob("*"):
-                if file_path.is_file():
-                    relative_path = file_path.relative_to(source)
-                    host.write_file(dest / relative_path, file_path.read_bytes())
+        cast(Host, host)._rsync_files(host, source, dest)
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
