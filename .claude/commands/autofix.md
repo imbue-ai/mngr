@@ -1,6 +1,6 @@
 ---
 description: Automatically find and fix code issues in the current branch. Iteratively verifies, plans fixes, and implements them with separate commits. Defers all review to the end.
-allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(mkdir *), Bash(echo *), Read, Agent, AskUserQuestion
+allowed-tools: Bash(git status *), Bash(git rev-parse *), Bash(git log *), Bash(git revert *), Bash(mkdir *), Bash(date -u +%Y-%m-%dT%H:%M:%SZ), Read, Write(.autofix/plans/*), Agent, AskUserQuestion
 ---
 
 # Autofix
@@ -71,8 +71,7 @@ After the loop ends:
 
 8. After all review and reverts are complete, create the verification marker so the stop hook knows this commit has been verified:
 
-```bash
-HASH=$(git rev-parse HEAD)
-mkdir -p .autofix/plans
-echo "Verified clean at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > ".autofix/plans/${HASH}_verified.md"
-```
+- Get the current HEAD hash: `git rev-parse HEAD`
+- Get the current timestamp: `date -u +%Y-%m-%dT%H:%M:%SZ`
+- Create the plans directory: `mkdir -p .autofix/plans`
+- Use the Write tool to create `.autofix/plans/{hash}_verified.md` with content `Verified clean at {timestamp}`
