@@ -10,14 +10,16 @@ from imbue.mng.cli.complete import _read_cache
 from imbue.mng.cli.complete import _read_discovery_names
 from imbue.mng.cli.complete import _read_git_branches
 from imbue.mng.cli.complete import _read_host_names
+from imbue.mng.config.completion_types import COMPLETION_CACHE_FILENAME
+from imbue.mng.config.completion_types import CompletionCacheData
 from imbue.mng.utils.testing import run_git_command
 from imbue.mng.utils.testing import write_discovery_snapshot_to_path
 
 
-def _write_command_cache(cache_dir: Path, data: dict[str, object]) -> None:
+def _write_command_cache(cache_dir: Path, data: CompletionCacheData) -> None:
     """Write a command completions cache file for testing."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / ".command_completions.json").write_text(json.dumps(data))
+    (cache_dir / COMPLETION_CACHE_FILENAME).write_text(json.dumps(data._asdict()))
 
 
 def _write_discovery_events(
@@ -28,43 +30,6 @@ def _write_discovery_events(
     """Write a DISCOVERY_FULL event to the discovery events file for testing."""
     events_path = host_dir / "events" / "mng" / "discovery" / "events.jsonl"
     write_discovery_snapshot_to_path(events_path, agent_names, host_names=host_names)
-
-
-def _make_cache_data(
-    commands: list[str] | None = None,
-    aliases: dict[str, str] | None = None,
-    subcommand_by_command: dict[str, list[str]] | None = None,
-    options_by_command: dict[str, list[str]] | None = None,
-    flag_options_by_command: dict[str, list[str]] | None = None,
-    option_choices: dict[str, list[str]] | None = None,
-    agent_name_arguments: list[str] | None = None,
-    git_branch_options: list[str] | None = None,
-    host_name_options: list[str] | None = None,
-    host_name_arguments: list[str] | None = None,
-    plugin_name_options: list[str] | None = None,
-    plugin_names: list[str] | None = None,
-    plugin_name_arguments: list[str] | None = None,
-    config_key_arguments: list[str] | None = None,
-    config_keys: list[str] | None = None,
-) -> dict:
-    """Build a command completions cache dict with sensible defaults."""
-    return {
-        "commands": commands or [],
-        "aliases": aliases or {},
-        "subcommand_by_command": subcommand_by_command or {},
-        "options_by_command": options_by_command or {},
-        "flag_options_by_command": flag_options_by_command or {},
-        "option_choices": option_choices or {},
-        "agent_name_arguments": agent_name_arguments or [],
-        "git_branch_options": git_branch_options or [],
-        "host_name_options": host_name_options or [],
-        "host_name_arguments": host_name_arguments or [],
-        "plugin_name_options": plugin_name_options or [],
-        "plugin_names": plugin_names or [],
-        "plugin_name_arguments": plugin_name_arguments or [],
-        "config_key_arguments": config_key_arguments or [],
-        "config_keys": config_keys or [],
-    }
 
 
 @pytest.fixture
@@ -93,26 +58,26 @@ def set_comp_env(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, str], None]:
 
 
 def test_read_cache_returns_data(completion_cache_dir: Path) -> None:
-    data = _make_cache_data(commands=["create", "list"])
+    data = CompletionCacheData(commands=["create", "list"])
     _write_command_cache(completion_cache_dir, data)
 
     result = _read_cache()
 
-    assert result["commands"] == ["create", "list"]
+    assert result.commands == ["create", "list"]
 
 
-def test_read_cache_returns_empty_dict_when_missing(completion_cache_dir: Path) -> None:
+def test_read_cache_returns_defaults_when_missing(completion_cache_dir: Path) -> None:
     result = _read_cache()
 
-    assert result == {}
+    assert result == CompletionCacheData()
 
 
-def test_read_cache_returns_empty_dict_for_malformed_json(completion_cache_dir: Path) -> None:
-    (completion_cache_dir / ".command_completions.json").write_text("not json {{{")
+def test_read_cache_returns_defaults_for_malformed_json(completion_cache_dir: Path) -> None:
+    (completion_cache_dir / COMPLETION_CACHE_FILENAME).write_text("not json {{{")
 
     result = _read_cache()
 
-    assert result == {}
+    assert result == CompletionCacheData()
 
 
 # =============================================================================
@@ -182,7 +147,7 @@ def test_get_completions_command_name(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing the command name at position 1."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["ask", "config", "connect", "create", "destroy", "list"],
     )
     _write_command_cache(completion_cache_dir, data)
@@ -198,7 +163,7 @@ def test_get_completions_command_name_all(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing with empty incomplete returns all commands."""
-    data = _make_cache_data(commands=["ask", "create", "list"])
+    data = CompletionCacheData(commands=["ask", "create", "list"])
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mng ", "1")
 
@@ -212,7 +177,7 @@ def test_get_completions_alias_filtering(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Aliases should be filtered when their canonical name also matches."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["c", "cfg", "config", "connect", "create"],
         aliases={"c": "create", "cfg": "config"},
     )
@@ -233,7 +198,7 @@ def test_get_completions_subcommand(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing subcommands of a group command."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["edit", "get", "list", "set"]},
     )
@@ -250,7 +215,7 @@ def test_get_completions_subcommand_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing subcommands with a prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["edit", "get", "list", "set"]},
     )
@@ -267,7 +232,7 @@ def test_get_completions_options(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing options for a command."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["list"],
         options_by_command={"list": ["--format", "--help", "--running", "--stopped"]},
     )
@@ -284,7 +249,7 @@ def test_get_completions_option_choices(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing values for an option with choices."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["list"],
         options_by_command={"list": ["--help", "--on-error"]},
         option_choices={"list.--on-error": ["abort", "continue"]},
@@ -302,7 +267,7 @@ def test_get_completions_option_choices_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing values for an option with choices and a prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["list"],
         options_by_command={"list": ["--help", "--on-error"]},
         option_choices={"list.--on-error": ["abort", "continue"]},
@@ -320,7 +285,7 @@ def test_get_completions_subcommand_options(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing options for a subcommand (dot-separated key)."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set"]},
         options_by_command={"config.get": ["--help", "--scope"]},
@@ -339,7 +304,7 @@ def test_get_completions_subcommand_option_choices(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing values for a subcommand option with choices."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set"]},
         options_by_command={"config.get": ["--help", "--scope"]},
@@ -358,7 +323,7 @@ def test_get_completions_agent_names(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing agent names for commands that accept agent arguments."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["connect", "list"],
         agent_name_arguments=["connect"],
     )
@@ -376,7 +341,7 @@ def test_get_completions_agent_names_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing agent names with a prefix filter."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["connect"],
         agent_name_arguments=["connect"],
     )
@@ -394,7 +359,7 @@ def test_get_completions_no_agent_names_for_non_agent_command(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Commands not in agent_name_arguments should not complete agent names."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["list"],
         agent_name_arguments=["connect"],
     )
@@ -412,7 +377,7 @@ def test_get_completions_subcommand_agent_names(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing agent names for group subcommands (e.g. mng snapshot create <TAB>)."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create", "destroy", "list"]},
         agent_name_arguments=["snapshot.create", "snapshot.destroy", "snapshot.list"],
@@ -431,7 +396,7 @@ def test_get_completions_subcommand_agent_names_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing agent names for group subcommands with a prefix filter."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create", "destroy", "list"]},
         agent_name_arguments=["snapshot.create"],
@@ -450,7 +415,7 @@ def test_get_completions_subcommand_no_agent_names_for_non_agent_subcommand(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Subcommands not in agent_name_arguments should not complete agent names."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "list", "set"]},
         agent_name_arguments=["snapshot.create"],
@@ -469,7 +434,7 @@ def test_get_completions_alias_resolves_to_canonical(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """An alias typed as the command should resolve to the canonical name for option lookup."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["conn", "connect"],
         aliases={"conn": "connect"},
         options_by_command={"connect": ["--help", "--start"]},
@@ -517,7 +482,7 @@ def test_get_completions_value_taking_option_suppresses_completions(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """After a value-taking option (--name), no completions should be offered."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create"]},
         options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
@@ -538,7 +503,7 @@ def test_get_completions_long_flag_allows_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """After a --long flag (--force), positional candidates should be offered."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
@@ -558,7 +523,7 @@ def test_get_completions_short_flag_allows_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """After a -short flag (-f), positional candidates should be offered."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
@@ -578,7 +543,7 @@ def test_get_completions_combined_short_flags_allow_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """After combined short flags (-fb), positional candidates should be offered."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["destroy"],
         aliases={"rm": "destroy"},
         options_by_command={"destroy": ["--all", "--force", "--remove-created-branch"]},
@@ -599,7 +564,7 @@ def test_get_completions_combined_short_flags_with_unknown_flag(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Combined flags where one character is not a known flag should suppress completions."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["destroy"],
         options_by_command={"destroy": ["--all", "--force"]},
         flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
@@ -619,7 +584,7 @@ def test_get_completions_subcommand_flag_allows_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """After a flag on a subcommand (--dry-run), positional candidates should be offered."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create"]},
         options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
@@ -667,7 +632,7 @@ def test_get_completions_git_branch_option(
 ) -> None:
     """Completing values for a git branch option should offer branch names."""
     run_git_command(temp_git_repo_cwd, "branch", "develop")
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--base-branch", "--name"]},
         git_branch_options=["create.--base-branch"],
@@ -688,7 +653,7 @@ def test_get_completions_git_branch_option_with_prefix(
     """Completing values for a git branch option should filter by prefix."""
     run_git_command(temp_git_repo_cwd, "branch", "develop")
     run_git_command(temp_git_repo_cwd, "branch", "feature/foo")
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--base-branch", "--name"]},
         git_branch_options=["create.--base-branch"],
@@ -707,7 +672,7 @@ def test_get_completions_git_branch_option_not_triggered_for_other_options(
     temp_git_repo_cwd: Path,
 ) -> None:
     """Options not in git_branch_options should not trigger git branch completion."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--base-branch", "--name"]},
         git_branch_options=["create.--base-branch"],
@@ -744,7 +709,7 @@ def test_get_completions_host_name_option(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing values for a host name option should offer host names."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--host", "--name"]},
         host_name_options=["create.--host"],
@@ -764,7 +729,7 @@ def test_get_completions_host_name_option_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Host name completion should filter by prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--host", "--name"]},
         host_name_options=["create.--host"],
@@ -783,7 +748,7 @@ def test_get_completions_host_name_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Commands in host_name_arguments should offer host names as positional args."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["events"],
         agent_name_arguments=["events"],
         host_name_arguments=["events"],
@@ -808,7 +773,7 @@ def test_get_completions_plugin_name_option(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing values for --plugin should offer plugin names."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--name", "--plugin"]},
         plugin_name_options=["create.--plugin"],
@@ -827,7 +792,7 @@ def test_get_completions_plugin_name_option_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Plugin name completion should filter by prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--name", "--plugin"]},
         plugin_name_options=["create.--plugin"],
@@ -846,7 +811,7 @@ def test_get_completions_plugin_name_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Plugin enable/disable subcommands should complete plugin names positionally."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["plugin"],
         subcommand_by_command={"plugin": ["enable", "disable", "list"]},
         plugin_name_arguments=["plugin.enable", "plugin.disable"],
@@ -865,7 +830,7 @@ def test_get_completions_plugin_name_positional_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Plugin name positional completion should filter by prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["plugin"],
         subcommand_by_command={"plugin": ["enable", "disable"]},
         plugin_name_arguments=["plugin.enable"],
@@ -889,7 +854,7 @@ def test_get_completions_config_key_positional(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Config get/set/unset should complete config keys positionally."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset", "list"]},
         config_key_arguments=["config.get", "config.set", "config.unset"],
@@ -910,7 +875,7 @@ def test_get_completions_config_key_positional_with_prefix(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Config key completion should filter by prefix."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset"]},
         config_key_arguments=["config.get"],
@@ -934,7 +899,7 @@ def test_get_completions_agent_type_option(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing --agent-type should offer agent type names from option_choices."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--agent-type", "--name"]},
         option_choices={"create.--agent-type": ["claude", "codex", "my-custom"]},
@@ -952,7 +917,7 @@ def test_get_completions_template_option(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing --template should offer template names from option_choices."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--name", "--template"]},
         option_choices={"create.--template": ["dev", "prod"]},
@@ -970,7 +935,7 @@ def test_get_completions_provider_option(
     set_comp_env: Callable[[str, str], None],
 ) -> None:
     """Completing --in should offer provider names from option_choices."""
-    data = _make_cache_data(
+    data = CompletionCacheData(
         commands=["create"],
         options_by_command={"create": ["--in", "--name"]},
         option_choices={"create.--in": ["docker", "local", "modal"]},

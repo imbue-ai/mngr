@@ -1,6 +1,4 @@
 import json
-import os
-from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -8,28 +6,12 @@ import click
 from loguru import logger
 
 from imbue.mng.agents.agent_registry import list_registered_agent_types
+from imbue.mng.config.completion_types import COMPLETION_CACHE_FILENAME
+from imbue.mng.config.completion_types import CompletionCacheData
+from imbue.mng.config.completion_types import get_completion_cache_dir
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.utils.click_utils import detect_alias_to_canonical
 from imbue.mng.utils.file_utils import atomic_write
-
-COMMAND_COMPLETIONS_CACHE_FILENAME: Final[str] = ".command_completions.json"
-
-
-def get_completion_cache_dir() -> Path:
-    """Return the directory used for completion cache files.
-
-    Uses MNG_COMPLETION_CACHE_DIR if set, otherwise the mng host directory
-    (MNG_HOST_DIR or ~/.mng). The directory is created if it does not exist.
-    """
-    env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
-    if env_dir:
-        cache_dir = Path(env_dir)
-    else:
-        cache_dir = read_default_host_dir()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
 
 # Commands whose positional arguments should complete against agent names.
 # This list is used by the cache writer to populate agent_name_arguments
@@ -328,25 +310,25 @@ def write_cli_completions_cache(
                 if cmd_name in canonical_names and data_key in dynamic:
                     option_choices[opt_key] = dynamic[data_key]
 
-        cache_data: dict[str, object] = {
-            "commands": all_command_names,
-            "aliases": alias_to_canonical,
-            "subcommand_by_command": subcommand_by_command,
-            "options_by_command": options_by_command,
-            "flag_options_by_command": flag_options_by_command,
-            "option_choices": option_choices,
-            "agent_name_arguments": sorted(agent_name_args),
-            "git_branch_options": sorted(git_branch_opts),
-            "host_name_options": sorted(host_name_opts),
-            "host_name_arguments": sorted(host_name_args),
-            "plugin_name_options": sorted(set(plugin_name_opts)),
-            "plugin_names": dynamic.get("plugin_names", []) if dynamic else [],
-            "plugin_name_arguments": sorted(plugin_name_args),
-            "config_key_arguments": sorted(config_key_args),
-            "config_keys": dynamic.get("config_keys", []) if dynamic else [],
-        }
+        cache_data = CompletionCacheData(
+            commands=all_command_names,
+            aliases=alias_to_canonical,
+            subcommand_by_command=subcommand_by_command,
+            options_by_command=options_by_command,
+            flag_options_by_command=flag_options_by_command,
+            option_choices=option_choices,
+            agent_name_arguments=sorted(agent_name_args),
+            git_branch_options=sorted(git_branch_opts),
+            host_name_options=sorted(host_name_opts),
+            host_name_arguments=sorted(host_name_args),
+            plugin_name_options=sorted(set(plugin_name_opts)),
+            plugin_names=dynamic.get("plugin_names", []) if dynamic else [],
+            plugin_name_arguments=sorted(plugin_name_args),
+            config_key_arguments=sorted(config_key_args),
+            config_keys=dynamic.get("config_keys", []) if dynamic else [],
+        )
 
-        cache_path = get_completion_cache_dir() / COMMAND_COMPLETIONS_CACHE_FILENAME
-        atomic_write(cache_path, json.dumps(cache_data))
+        cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
+        atomic_write(cache_path, json.dumps(cache_data._asdict()))
     except OSError:
         logger.debug("Failed to write CLI completions cache")

@@ -13,14 +13,12 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
-from typing import Any
 from typing import NamedTuple
 
 from imbue.mng.cli.complete_names import resolve_names_from_discovery_stream
-from imbue.mng.config.host_dir import read_default_host_dir
-
-_COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
+from imbue.mng.config.completion_types import COMPLETION_CACHE_FILENAME
+from imbue.mng.config.completion_types import CompletionCacheData
+from imbue.mng.config.completion_types import get_completion_cache_dir
 
 
 class _CompletionContext(NamedTuple):
@@ -32,37 +30,21 @@ class _CompletionContext(NamedTuple):
     command_key: str
     resolved_command: str | None
     is_group: bool
-    commands: list[str]
-    aliases: dict[str, str]
-    subcommand_by_command: dict[str, list[str]]
-    options_by_command: dict[str, list[str]]
-    flag_options_by_command: dict[str, list[str]]
-    cache: dict[str, Any]
+    cache: CompletionCacheData
 
 
-def _get_completion_cache_dir() -> Path:
-    """Return the directory used for completion cache files.
-
-    Mirrors get_completion_cache_dir() in completion_writer.py.
-    """
-    env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return read_default_host_dir()
-
-
-def _read_cache() -> dict:
-    """Read the command completions cache file. Returns empty dict on any error."""
+def _read_cache() -> CompletionCacheData:
+    """Read the command completions cache file. Returns defaults on any error."""
     try:
-        path = _get_completion_cache_dir() / _COMMAND_COMPLETIONS_CACHE_FILENAME
+        path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         if not path.is_file():
-            return {}
+            return CompletionCacheData()
         data = json.loads(path.read_text())
         if isinstance(data, dict):
-            return data
+            return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
     except (json.JSONDecodeError, OSError):
         pass
-    return {}
+    return CompletionCacheData()
 
 
 def _read_host_names() -> list[str]:
@@ -129,16 +111,14 @@ def _parse_completion_context() -> _CompletionContext | None:
     incomplete = words[comp_cword] if comp_cword < len(words) else ""
 
     cache = _read_cache()
-    aliases: dict[str, str] = cache.get("aliases", {})
-    subcommand_by_command: dict[str, list[str]] = cache.get("subcommand_by_command", {})
 
     # words[0] = "mng", words[1] = command, words[2] = subcommand (if group)
     resolved_command: str | None = None
     if len(words) > 1 and comp_cword > 1:
         raw_cmd = words[1]
-        resolved_command = aliases.get(raw_cmd, raw_cmd)
+        resolved_command = cache.aliases.get(raw_cmd, raw_cmd)
 
-    is_group = resolved_command is not None and resolved_command in subcommand_by_command
+    is_group = resolved_command is not None and resolved_command in cache.subcommand_by_command
     resolved_subcommand: str | None = None
     if resolved_command is not None and is_group and len(words) > 2 and comp_cword > 2:
         resolved_subcommand = words[2]
@@ -161,11 +141,6 @@ def _parse_completion_context() -> _CompletionContext | None:
         command_key=command_key,
         resolved_command=resolved_command,
         is_group=is_group,
-        commands=cache.get("commands", []),
-        aliases=aliases,
-        subcommand_by_command=subcommand_by_command,
-        options_by_command=cache.get("options_by_command", {}),
-        flag_options_by_command=cache.get("flag_options_by_command", {}),
         cache=cache,
     )
 
@@ -178,27 +153,28 @@ def _get_completions() -> list[str]:
 
     candidates: list[str]
 
+    c = ctx.cache
     if ctx.comp_cword == 1:
-        candidates = _filter_aliases(ctx.commands, ctx.aliases, ctx.incomplete)
+        candidates = _filter_aliases(c.commands, c.aliases, ctx.incomplete)
     elif ctx.is_group and ctx.comp_cword == 2:
         assert ctx.resolved_command is not None
-        candidates = ctx.subcommand_by_command.get(ctx.resolved_command, [])
+        candidates = c.subcommand_by_command.get(ctx.resolved_command, [])
     elif ctx.prev_word is not None and ctx.prev_word.startswith("-"):
-        flag_options = ctx.flag_options_by_command.get(ctx.command_key, [])
+        flag_options = c.flag_options_by_command.get(ctx.command_key, [])
         if _is_flag_option(ctx.prev_word, flag_options):
             if ctx.incomplete.startswith("--"):
-                candidates = ctx.options_by_command.get(ctx.command_key, [])
+                candidates = c.options_by_command.get(ctx.command_key, [])
             else:
-                candidates = _get_positional_candidates(ctx.command_key, ctx.cache)
+                candidates = _get_positional_candidates(ctx.command_key, c)
         elif ctx.incomplete.startswith("--"):
-            candidates = ctx.options_by_command.get(ctx.command_key, [])
+            candidates = c.options_by_command.get(ctx.command_key, [])
         else:
             choice_key = f"{ctx.command_key}.{ctx.prev_word}"
-            candidates = _get_option_value_candidates(choice_key, ctx.cache)
+            candidates = _get_option_value_candidates(choice_key, c)
     elif ctx.incomplete.startswith("--"):
-        candidates = ctx.options_by_command.get(ctx.command_key, [])
+        candidates = c.options_by_command.get(ctx.command_key, [])
     else:
-        candidates = _get_positional_candidates(ctx.command_key, ctx.cache)
+        candidates = _get_positional_candidates(ctx.command_key, c)
 
     return [c for c in candidates if c.startswith(ctx.incomplete)]
 
@@ -217,32 +193,24 @@ def _filter_aliases(
     return [c for c in matching if c not in aliases or aliases[c] not in matching_set]
 
 
-def _get_option_value_candidates(choice_key: str, cache: dict[str, Any]) -> list[str]:
+def _get_option_value_candidates(choice_key: str, cache: CompletionCacheData) -> list[str]:
     """Return completion candidates for a value-taking option.
 
     choice_key is the dotted key like "create.--host" or "list.--on-error".
     Checks predefined choices, git branches, host names, and plugin names.
     """
-    option_choices: dict[str, list[str]] = cache.get("option_choices", {})
-    if choice_key in option_choices:
-        return option_choices[choice_key]
-
-    git_branch_options: list[str] = cache.get("git_branch_options", [])
-    if choice_key in git_branch_options:
+    if choice_key in cache.option_choices:
+        return cache.option_choices[choice_key]
+    if choice_key in cache.git_branch_options:
         return _read_git_branches()
-
-    host_name_options: list[str] = cache.get("host_name_options", [])
-    if choice_key in host_name_options:
+    if choice_key in cache.host_name_options:
         return _read_host_names()
-
-    plugin_name_options: list[str] = cache.get("plugin_name_options", [])
-    if choice_key in plugin_name_options:
-        return cache.get("plugin_names", [])
-
+    if choice_key in cache.plugin_name_options:
+        return cache.plugin_names
     return []
 
 
-def _get_positional_candidates(command_key: str, cache: dict[str, Any]) -> list[str]:
+def _get_positional_candidates(command_key: str, cache: CompletionCacheData) -> list[str]:
     """Return positional argument candidates from all applicable completion sources.
 
     command_key is the dotted command key (e.g. "destroy", "snapshot.create", or "").
@@ -253,18 +221,18 @@ def _get_positional_candidates(command_key: str, cache: dict[str, Any]) -> list[
 
     candidates: list[str] = []
 
-    needs_agents = command_key in cache.get("agent_name_arguments", [])
-    needs_hosts = command_key in cache.get("host_name_arguments", [])
+    needs_agents = command_key in cache.agent_name_arguments
+    needs_hosts = command_key in cache.host_name_arguments
     if needs_agents or needs_hosts:
         agent_names, host_names = _read_discovery_names()
         if needs_agents:
             candidates.extend(agent_names)
         if needs_hosts:
             candidates.extend(host_names)
-    if command_key in cache.get("plugin_name_arguments", []):
-        candidates.extend(cache.get("plugin_names", []))
-    if command_key in cache.get("config_key_arguments", []):
-        candidates.extend(cache.get("config_keys", []))
+    if command_key in cache.plugin_name_arguments:
+        candidates.extend(cache.plugin_names)
+    if command_key in cache.config_key_arguments:
+        candidates.extend(cache.config_keys)
 
     return candidates
 

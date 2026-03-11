@@ -6,9 +6,9 @@ from pathlib import Path
 import click
 import pytest
 
-from imbue.mng.config.completion_writer import COMMAND_COMPLETIONS_CACHE_FILENAME
+from imbue.mng.config.completion_types import COMPLETION_CACHE_FILENAME
+from imbue.mng.config.completion_types import get_completion_cache_dir
 from imbue.mng.config.completion_writer import flatten_dict_keys
-from imbue.mng.config.completion_writer import get_completion_cache_dir
 from imbue.mng.config.completion_writer import write_cli_completions_cache
 from imbue.mng.config.data_types import MngContext
 
@@ -51,7 +51,7 @@ def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyP
         read_only_dir.chmod(0o755)
     # Verify the cache file was NOT created (write failed silently).
     # Check after restoring permissions so Path.exists() doesn't raise PermissionError.
-    assert not (read_only_dir / COMMAND_COMPLETIONS_CACHE_FILENAME).exists()
+    assert not (read_only_dir / COMPLETION_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_writes_valid_json(completion_cache_dir: Path) -> None:
@@ -65,7 +65,7 @@ def test_write_cli_completions_cache_writes_valid_json(completion_cache_dir: Pat
     )
 
     write_cli_completions_cache(cli_group=group)
-    cache_path = completion_cache_dir / COMMAND_COMPLETIONS_CACHE_FILENAME
+    cache_path = completion_cache_dir / COMPLETION_CACHE_FILENAME
     assert cache_path.exists()
     data = json.loads(cache_path.read_text())
     assert "commands" in data
@@ -83,7 +83,7 @@ def test_write_cli_completions_cache_includes_git_branch_options(completion_cach
     )
 
     write_cli_completions_cache(cli_group=group)
-    cache_path = completion_cache_dir / COMMAND_COMPLETIONS_CACHE_FILENAME
+    cache_path = completion_cache_dir / COMPLETION_CACHE_FILENAME
     data = json.loads(cache_path.read_text())
     assert "git_branch_options" in data
     assert "create.--base-branch" in data["git_branch_options"]
@@ -91,7 +91,7 @@ def test_write_cli_completions_cache_includes_git_branch_options(completion_cach
 
 def _read_cache(cache_dir: Path) -> dict:
     """Read and return the completion cache data."""
-    return json.loads((cache_dir / COMMAND_COMPLETIONS_CACHE_FILENAME).read_text())
+    return json.loads((cache_dir / COMPLETION_CACHE_FILENAME).read_text())
 
 
 def test_write_cli_completions_cache_includes_host_name_options(completion_cache_dir: Path) -> None:
