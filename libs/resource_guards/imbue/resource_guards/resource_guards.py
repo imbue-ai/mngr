@@ -32,6 +32,8 @@ import stat
 import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
+from enum import StrEnum
+from enum import auto
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -274,12 +276,16 @@ def register_sdk_guard(
         _registered_sdk_guards.append((name, install, cleanup))
 
 
-class _MethodKind:
+class MethodKind(StrEnum):
     """How to wrap a guarded method."""
 
-    SYNC = "sync"
-    ASYNC = "async"
-    ASYNC_GEN = "async_gen"
+    @staticmethod
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
+        return name.upper()
+
+    SYNC = auto()
+    ASYNC = auto()
+    ASYNC_GEN = auto()
 
 
 def create_sdk_method_guard(
@@ -289,11 +295,11 @@ def create_sdk_method_guard(
     """Register an SDK guard that monkeypatches one or more methods on classes.
 
     Each entry in methods is (class, method_name, kind) where kind is one of
-    _MethodKind.SYNC, _MethodKind.ASYNC, or _MethodKind.ASYNC_GEN.
+    MethodKind.SYNC, MethodKind.ASYNC, or MethodKind.ASYNC_GEN.
 
     Example:
         create_sdk_method_guard("my_sdk", [
-            (SomeClient, "send", _MethodKind.SYNC),
+            (SomeClient, "send", MethodKind.SYNC),
         ])
     """
     originals: dict[str, Any] = {}
@@ -326,9 +332,9 @@ def create_sdk_method_guard(
         return guarded
 
     _wrapper_factories = {
-        _MethodKind.SYNC: _make_sync_wrapper,
-        _MethodKind.ASYNC: _make_async_wrapper,
-        _MethodKind.ASYNC_GEN: _make_async_gen_wrapper,
+        MethodKind.SYNC: _make_sync_wrapper,
+        MethodKind.ASYNC: _make_async_wrapper,
+        MethodKind.ASYNC_GEN: _make_async_gen_wrapper,
     }
 
     def install() -> None:

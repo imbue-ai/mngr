@@ -1,6 +1,6 @@
 from docker.api.client import APIClient
 
-from imbue.resource_guards.resource_guards import _MethodKind
+from imbue.resource_guards.resource_guards import MethodKind
 from imbue.resource_guards.resource_guards import create_sdk_method_guard
 from imbue.resource_guards.resource_guards import register_resource_guard
 
@@ -19,4 +19,4 @@ def register_docker_sdk_guard() -> None:
 
     Monkeypatches APIClient.send to intercept in-process Docker SDK HTTP calls.
     """
-    create_sdk_method_guard("docker_sdk", [(APIClient, "send", _MethodKind.SYNC)])
+    create_sdk_method_guard("docker_sdk", [(APIClient, "send", MethodKind.SYNC)])

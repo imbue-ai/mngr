@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 import imbue.resource_guards.resource_guards as resource_guards
+from imbue.resource_guards.resource_guards import MethodKind
 from imbue.resource_guards.resource_guards import ResourceGuardViolation
-from imbue.resource_guards.resource_guards import _MethodKind
 from imbue.resource_guards.resource_guards import _PerTestGuardState
 from imbue.resource_guards.resource_guards import _build_per_test_guard_env
 from imbue.resource_guards.resource_guards import _check_guard_violations
@@ -403,7 +403,7 @@ def test_create_sdk_method_guard_sync(
             return x * 2
 
     original_call = Client.call
-    create_sdk_method_guard("test_sync", [(Client, "call", _MethodKind.SYNC)])
+    create_sdk_method_guard("test_sync", [(Client, "call", MethodKind.SYNC)])
     create_sdk_resource_guards()
 
     assert Client.call is not original_call
@@ -436,7 +436,7 @@ def test_create_sdk_method_guard_async(
             return x * 2
 
     original_call = Client.call
-    create_sdk_method_guard("test_async", [(Client, "call", _MethodKind.ASYNC)])
+    create_sdk_method_guard("test_async", [(Client, "call", MethodKind.ASYNC)])
     create_sdk_resource_guards()
 
     # Guard blocks
@@ -469,7 +469,7 @@ def test_create_sdk_method_guard_async_gen(
             yield 2
 
     original_stream = Client.stream
-    create_sdk_method_guard("test_agen", [(Client, "stream", _MethodKind.ASYNC_GEN)])
+    create_sdk_method_guard("test_agen", [(Client, "stream", MethodKind.ASYNC_GEN)])
     create_sdk_resource_guards()
 
     # Guard blocks
