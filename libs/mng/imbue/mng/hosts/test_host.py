@@ -2151,12 +2151,23 @@ def test_new_tmux_window_inherits_env_vars(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    tmp_home_dir: Path,
 ) -> None:
     """Test that new tmux windows created by the user also have env vars.
 
     This verifies that the default-command sources env files so that any new
     window/pane created by the user will have the agent's env vars available.
     """
+    # Write shell rc files with a known prompt in the fake HOME so we can
+    # reliably detect when the shell is ready. We need .zshenv (empty, to
+    # suppress errors from the real user's .zshenv which references paths
+    # under $HOME that don't exist in the fake HOME), plus .zshrc and
+    # .bashrc to set the prompt for whichever shell the user has.
+    prompt_sentinel = "MNG_TEST_READY>"
+    (tmp_home_dir / ".zshenv").write_text("")
+    (tmp_home_dir / ".zshrc").write_text(f"PS1='{prompt_sentinel} '\n")
+    (tmp_home_dir / ".bashrc").write_text(f"PS1='{prompt_sentinel} '\n")
+
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
     mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
     provider = LocalProviderInstance(
@@ -2188,16 +2199,42 @@ def test_new_tmux_window_inherits_env_vars(
     host.start_agents([agent.id])
 
     try:
-        # Create a new window in the session (simulating what a user would do)
-        # This window should inherit env vars via tmux set-environment
+        # Create a new window in the session (simulating what a user would do).
+        # This window should inherit env vars via the default-command which
+        # sources the agent's env files. Pass -e HOME/ZDOTDIR so the shell
+        # reads our controlled rc files (tmux overrides HOME from the passwd
+        # database for new window processes, so we must re-override it).
+        fake_home = str(tmp_home_dir)
         subprocess.run(
-            ["tmux", "new-window", "-t", session_name, "-n", "user-window"],
+            [
+                "tmux",
+                "new-window",
+                "-t",
+                session_name,
+                "-n",
+                "user-window",
+                "-e",
+                f"HOME={fake_home}",
+                "-e",
+                f"ZDOTDIR={fake_home}",
+            ],
             check=True,
             capture_output=True,
         )
 
-        # Keys sent before the shell is ready are buffered in the pty.
+        # Wait for the shell to be ready before sending keys
         window_target = f"{session_name}:user-window"
+
+        def shell_prompt_visible() -> bool:
+            pane = capture_tmux_pane_contents(window_target)
+            return prompt_sentinel in pane
+
+        if not poll_until(shell_prompt_visible, timeout=10.0):
+            pane_stdout = capture_tmux_pane_contents(window_target)
+            raise AssertionError(
+                f"Shell prompt did not appear in new tmux window within 10s.\nPane content:\n{pane_stdout}"
+            )
+
         subprocess.run(
             [
                 "tmux",

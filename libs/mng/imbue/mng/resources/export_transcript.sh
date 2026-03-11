@@ -17,7 +17,7 @@ set -euo pipefail
 _process_session() {
     local session_id="$1"
     local jsonl_file
-    jsonl_file=$(find ~/.claude/projects/ -name "$session_id.jsonl" 2>/dev/null | head -1)
+    jsonl_file=$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/" -name "$session_id.jsonl" 2>/dev/null | head -1)
     if [ -n "$jsonl_file" ] && [ -f "$jsonl_file" ]; then
         cat "$jsonl_file"
     fi
