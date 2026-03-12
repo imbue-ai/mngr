@@ -37,18 +37,19 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I create a container on modal with custom packages installed by default?\n"
     "response: Simply run:\n"
-    '    mng create --in modal -b "--file path/to/Dockerfile"\n'
+    '    mng create @.modal -b "--file path/to/Dockerfile"\n'
     "If you don't have a Dockerfile for your project, run:\n"
     "    mng bootstrap\n"
     "from the repo where you would like a Dockerfile created.\n\n"
     #
     "user: How do I spin up 5 agents on the cloud?\n"
-    "response: mng create -n 5 --in modal\n\n"
+    "response: mng create --provider modal\n"
+    "Run the command 5 times (once per agent). Each will get a unique auto-generated name.\n\n"
     #
     "user: How do I run multiple agents on the same cloud machine to save costs?\n"
     "response: Create them on a shared host:\n"
-    "    mng create agent-1 --in modal --host shared-host\n"
-    "    mng create agent-2 --in modal --host shared-host\n\n"
+    "    mng create agent-1@shared-host.modal --new-host\n"
+    "    mng create agent-2@shared-host\n\n"
     #
     "user: How do I launch an agent with a task without connecting to it?\n"
     'response: mng create --no-connect -m "fix all failing tests and commit"\n\n'
@@ -118,15 +119,15 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I launch 3 independent tasks in parallel on the cloud?\n"
     "response: Run multiple creates with --no-connect:\n"
-    '    mng create --in modal --no-connect -m "implement dark mode"\n'
-    '    mng create --in modal --no-connect -m "add i18n support"\n'
-    '    mng create --in modal --no-connect -m "optimize database queries"\n\n'
+    '    mng create @.modal --no-connect -m "implement dark mode"\n'
+    '    mng create @.modal --no-connect -m "add i18n support"\n'
+    '    mng create @.modal --no-connect -m "optimize database queries"\n\n'
     #
     "user: How do I launch an agent on Modal?\n"
-    "response: mng create --in modal\n\n"
+    "response: mng create @.modal\n\n"
     #
     "user: How do I launch an agent locally?\n"
-    "response: mng create --in local\n\n"
+    "response: mng create\n\n"
     #
     "user: How do I create an agent with a specific name?\n"
     "response: mng create my-task\n\n"
@@ -164,7 +165,8 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "here are some example questions and ideal responses:\n\n"
     #
     "user: spin up 5 agents on the cloud\n"
-    "response: mng create -n 5 --in modal\n\n"
+    "response: mng create @.modal\n"
+    "Run the command 5 times (once per agent).\n\n"
     #
     "user: send all agents a message to rebase on main\n"
     'response: mng message --all -m "rebase on main and resolve any conflicts"\n\n'
@@ -176,7 +178,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mng destroy --all --force\n\n"
     #
     "user: create a cloud agent that immediately starts fixing tests\n"
-    'response: mng create --in modal --no-connect -m "fix all failing tests and commit"\n\n'
+    'response: mng create @.modal --no-connect -m "fix all failing tests and commit"\n\n'
     #
     "user: list running agents as json\n"
     "response: mng list --running --format json\n\n"
@@ -203,7 +205,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mng pull my-agent --sync-mode git\n\n"
     #
     "user: create a local agent with opus\n"
-    "response: mng create --in local -- --model opus\n\n"
+    "response: mng create -- --model opus\n\n"
     #
     "now respond with ONLY the mng command for this request:\n"
     "user: "

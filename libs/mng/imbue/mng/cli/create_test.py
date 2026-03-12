@@ -3,9 +3,13 @@
 from pathlib import Path
 from typing import cast
 
+import pluggy
 import pytest
+from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.cli.create import AgentAddress
+from imbue.mng.cli.create import _parse_agent_address
 from imbue.mng.cli.create import _parse_agent_opts
 from imbue.mng.cli.create import _parse_branch_flag
 from imbue.mng.cli.create import _parse_host_lifecycle_options
@@ -14,6 +18,7 @@ from imbue.mng.cli.create import _resolve_source_location
 from imbue.mng.cli.create import _resolve_target_host
 from imbue.mng.cli.create import _split_cli_args
 from imbue.mng.cli.create import _try_reuse_existing_agent
+from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import CreateCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import UserInputError
@@ -395,13 +400,13 @@ def test_parse_project_name_returns_explicit_project(
     """When --project is specified, return it directly without validation."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=temp_work_dir)
+    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
         to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
-        to_update(default_create_cli_opts.field_ref().new_host, "docker"),
     )
 
-    result = _parse_project_name(source_location, opts, temp_mng_ctx)
+    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
 
     assert result == "explicit-project"
 
@@ -419,13 +424,14 @@ def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_agent(
 
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=different_project_dir)
+    # Address with provider but no host name implies new host
+    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
-        to_update(default_create_cli_opts.field_ref().new_host, "docker"),
     )
 
     with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, temp_mng_ctx)
+        _parse_project_name(source_location, opts, address, temp_mng_ctx)
 
 
 def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
@@ -440,13 +446,18 @@ def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
 
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=different_project_dir)
+    # Address with --new-host flag and a provider
+    address = AgentAddress(
+        host_name=HostName("myhost"),
+        provider_name=ProviderInstanceName("modal"),
+    )
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().source_host, "some-host"),
-        to_update(default_create_cli_opts.field_ref().new_host, "modal"),
+        to_update(default_create_cli_opts.field_ref().new_host, True),
     )
 
     with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, temp_mng_ctx)
+        _parse_project_name(source_location, opts, address, temp_mng_ctx)
 
 
 def test_parse_project_name_no_error_without_new_host(
@@ -461,12 +472,14 @@ def test_parse_project_name_no_error_without_new_host(
 
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=different_project_dir)
+    # Address targets existing host (not new)
+    address = AgentAddress(host_name=HostName("myhost"))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
     )
 
     # Should not raise - no new host means project tag doesn't matter
-    result = _parse_project_name(source_location, opts, temp_mng_ctx)
+    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
 
     assert result == "yet-another-project"
 
@@ -483,12 +496,11 @@ def test_parse_project_name_no_error_without_external_source(
 
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=some_dir)
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().new_host, "docker"),
-    )
+    # Address implies new host (provider only, no host name)
+    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
 
     # Should not raise - no source_agent/source_host means no external source
-    result = _parse_project_name(source_location, opts, temp_mng_ctx)
+    result = _parse_project_name(source_location, opts=default_create_cli_opts, address=address, mng_ctx=temp_mng_ctx)
 
     assert result == "some-project"
 
@@ -544,6 +556,7 @@ def test_parse_agent_opts_includes_labels(
 
     result, _ = _parse_agent_opts(
         opts=opts,
+        address=AgentAddress(),
         initial_message=None,
         source_location=source_location,
         mng_ctx=temp_mng_ctx,
@@ -568,6 +581,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
     with pytest.raises(UserInputError, match="KEY=VALUE"):
         _parse_agent_opts(
             opts=opts,
+            address=AgentAddress(),
             initial_message=None,
             source_location=source_location,
             mng_ctx=temp_mng_ctx,
@@ -586,6 +600,7 @@ def test_parse_agent_opts_empty_labels_by_default(
 
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
+        address=AgentAddress(),
         initial_message=None,
         source_location=source_location,
         mng_ctx=temp_mng_ctx,
@@ -610,6 +625,7 @@ def test_parse_agent_opts_with_agent_id(
 
     result, _ = _parse_agent_opts(
         opts=opts,
+        address=AgentAddress(),
         initial_message=None,
         source_location=source_location,
         mng_ctx=temp_mng_ctx,
@@ -630,6 +646,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
 
     result, _ = _parse_agent_opts(
         opts=default_create_cli_opts,
+        address=AgentAddress(),
         initial_message=None,
         source_location=source_location,
         mng_ctx=temp_mng_ctx,
@@ -728,3 +745,235 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
     assert base is None
     assert new == "my-exact-branch"
     assert has_explicit_base is False
+
+
+# =============================================================================
+# Tests for _parse_agent_address
+# =============================================================================
+
+
+def test_parse_agent_address_empty_string() -> None:
+    """Empty string produces an address with all None fields."""
+    result = _parse_agent_address("")
+
+    assert result.agent_name is None
+    assert result.host_name is None
+    assert result.provider_name is None
+
+
+def test_parse_agent_address_simple_name() -> None:
+    """A simple name with no @ produces just an agent name."""
+    result = _parse_agent_address("my-agent")
+
+    assert result.agent_name == AgentName("my-agent")
+    assert result.host_name is None
+    assert result.provider_name is None
+
+
+def test_parse_agent_address_name_and_host() -> None:
+    """NAME@HOST produces agent name and host name."""
+    result = _parse_agent_address("my-agent@myhost")
+
+    assert result.agent_name == AgentName("my-agent")
+    assert result.host_name == HostName("myhost")
+    assert result.provider_name is None
+
+
+def test_parse_agent_address_name_host_and_provider() -> None:
+    """NAME@HOST.PROVIDER produces all three components."""
+    result = _parse_agent_address("my-agent@myhost.modal")
+
+    assert result.agent_name == AgentName("my-agent")
+    assert result.host_name == HostName("myhost")
+    assert result.provider_name == ProviderInstanceName("modal")
+
+
+def test_parse_agent_address_name_and_provider_only() -> None:
+    """NAME@.PROVIDER produces agent name and provider (implies new host)."""
+    result = _parse_agent_address("my-agent@.modal")
+
+    assert result.agent_name == AgentName("my-agent")
+    assert result.host_name is None
+    assert result.provider_name == ProviderInstanceName("modal")
+    assert result.is_new_host_implied is True
+
+
+def test_parse_agent_address_no_name_with_host_and_provider() -> None:
+    """@HOST.PROVIDER produces host and provider, no agent name."""
+    result = _parse_agent_address("@myhost.modal")
+
+    assert result.agent_name is None
+    assert result.host_name == HostName("myhost")
+    assert result.provider_name == ProviderInstanceName("modal")
+
+
+def test_parse_agent_address_no_name_with_provider_only() -> None:
+    """@.PROVIDER produces just provider (implies new host, auto-generate name)."""
+    result = _parse_agent_address("@.docker")
+
+    assert result.agent_name is None
+    assert result.host_name is None
+    assert result.provider_name == ProviderInstanceName("docker")
+    assert result.is_new_host_implied is True
+
+
+def test_parse_agent_address_trailing_at_ignored() -> None:
+    """NAME@ is treated as just NAME (trailing @ with no host)."""
+    result = _parse_agent_address("my-agent@")
+
+    assert result.agent_name == AgentName("my-agent")
+    assert result.host_name is None
+    assert result.provider_name is None
+    assert result.has_host_component is False
+
+
+def test_parse_agent_address_has_host_component() -> None:
+    """has_host_component is True when any host info is present."""
+    assert _parse_agent_address("foo").has_host_component is False
+    assert _parse_agent_address("foo@host").has_host_component is True
+    assert _parse_agent_address("foo@.modal").has_host_component is True
+    assert _parse_agent_address("foo@host.modal").has_host_component is True
+
+
+def test_parse_agent_address_is_creating_new_host() -> None:
+    """is_creating_new_host reflects both address and flag."""
+    # Implied new host (no host name, has provider)
+    addr = _parse_agent_address("foo@.modal")
+    assert addr.is_creating_new_host(new_host_flag=False) is True
+    assert addr.is_creating_new_host(new_host_flag=True) is True
+
+    # Existing host (has host name)
+    addr = _parse_agent_address("foo@myhost.modal")
+    assert addr.is_creating_new_host(new_host_flag=False) is False
+    assert addr.is_creating_new_host(new_host_flag=True) is True
+
+    # No host component at all
+    addr = _parse_agent_address("foo")
+    assert addr.is_creating_new_host(new_host_flag=False) is False
+
+
+def test_parse_agent_address_rejects_multiple_dots() -> None:
+    """Addresses with more than one dot in the host part are invalid."""
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("foo@host.provider.extra")
+
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("foo@a.b.c")
+
+    with pytest.raises(UserInputError, match="more than one dot"):
+        _parse_agent_address("@host.provider.extra")
+
+
+def test_parse_agent_address_trailing_dot_means_host_only() -> None:
+    """A trailing dot 'host.' means host name with no provider."""
+    result = _parse_agent_address("foo@host.")
+
+    assert result.agent_name == AgentName("foo")
+    assert result.host_name == HostName("host")
+    assert result.provider_name is None
+
+
+def test_parse_agent_address_bare_dot_means_nothing() -> None:
+    """'@.' means no host and no provider (both parts empty)."""
+    result = _parse_agent_address("foo@.")
+
+    assert result.agent_name == AgentName("foo")
+    assert result.host_name is None
+    assert result.provider_name is None
+
+
+# =============================================================================
+# Tests for positional / --name mutual exclusivity
+# =============================================================================
+
+
+def test_create_rejects_positional_and_name_together(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Providing both a positional address and --name should fail."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+
+
+@pytest.mark.tmux
+def test_create_accepts_name_flag_alone(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--name alone (no positional) should work for specifying the agent address."""
+    result = cli_runner.invoke(
+        create,
+        ["--name", "@.local", "--command", "true", "--no-connect", "--source-path", str(temp_work_dir)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0
+
+
+# =============================================================================
+# Tests for --provider flag merge/conflict logic
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_provider_flag_sets_provider(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider without an address provider should be accepted."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--provider", "local", "--command", "true", "--no-connect", "--source-path", str(temp_work_dir)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0
+
+
+def test_create_provider_flag_conflicts_with_address_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider that conflicts with the address provider should abort."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent@.modal", "--provider", "docker", "--command", "true", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Conflicting providers" in result.output
+
+
+@pytest.mark.tmux
+def test_create_provider_flag_redundant_with_address_is_ok(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--provider matching the address provider should succeed (redundant but not conflicting)."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "my-agent@.local",
+            "--provider",
+            "local",
+            "--command",
+            "true",
+            "--no-connect",
+            "--source-path",
+            str(temp_work_dir),
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0

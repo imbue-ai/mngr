@@ -280,8 +280,8 @@ def _create_mng_agent(
     For local deployment, runs `mng create --in-place` so the agent runs
     directly in mind_dir.
 
-    For remote deployment, runs `mng create --in <provider> --source-path
-    <mind_dir>`, which copies the code to the remote host.
+    For remote deployment, runs `mng create --provider <provider>
+    --source-path <mind_dir>`, which copies the code to the remote host.
     """
     with log_span("Creating mng agent '{}' via provider '{}'", agent_name, provider.value):
         mng_command = [
@@ -315,7 +315,7 @@ def _create_mng_agent(
             # to the remote provider. The caller cleans up the directory.
             mng_command.extend(
                 [
-                    "--in",
+                    "--provider",
                     provider.value.lower(),
                     "--source-path",
                     str(mind_dir),

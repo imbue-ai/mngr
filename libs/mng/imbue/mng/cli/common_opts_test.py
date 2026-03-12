@@ -214,19 +214,19 @@ def test_apply_create_template_no_templates(mng_test_prefix: str) -> None:
 def test_apply_create_template_single_template(mng_test_prefix: str) -> None:
     """apply_create_template should apply a single template's values."""
     ctx = _make_click_context(
-        params={"template": ("mytemplate",), "new_host": None, "name": "default"},
+        params={"template": ("mytemplate",), "type": None, "name": "default"},
     )
 
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("mytemplate"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("mytemplate"): CreateTemplate(options={"type": "codex"}),
         },
     )
 
     result = apply_create_template(ctx, ctx.params.copy(), config)
 
-    assert result["new_host"] == "modal"
+    assert result["type"] == "codex"
 
 
 def test_apply_create_template_multiple_templates_stack(mng_test_prefix: str) -> None:
@@ -234,7 +234,7 @@ def test_apply_create_template_multiple_templates_stack(mng_test_prefix: str) ->
     ctx = _make_click_context(
         params={
             "template": ("host-template", "agent-template"),
-            "new_host": None,
+            "snapshot": None,
             "type": None,
             "name": "default",
         },
@@ -243,14 +243,14 @@ def test_apply_create_template_multiple_templates_stack(mng_test_prefix: str) ->
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("host-template"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("host-template"): CreateTemplate(options={"snapshot": "my-snapshot"}),
             CreateTemplateName("agent-template"): CreateTemplate(options={"type": "codex"}),
         },
     )
 
     result = apply_create_template(ctx, ctx.params.copy(), config)
 
-    assert result["new_host"] == "modal"
+    assert result["snapshot"] == "my-snapshot"
     assert result["type"] == "codex"
 
 
@@ -259,21 +259,21 @@ def test_apply_create_template_later_template_overrides_earlier(mng_test_prefix:
     ctx = _make_click_context(
         params={
             "template": ("first", "second"),
-            "new_host": None,
+            "type": None,
         },
     )
 
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("first"): CreateTemplate(options={"new_host": "docker"}),
-            CreateTemplateName("second"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("first"): CreateTemplate(options={"type": "codex"}),
+            CreateTemplateName("second"): CreateTemplate(options={"type": "claude"}),
         },
     )
 
     result = apply_create_template(ctx, ctx.params.copy(), config)
 
-    assert result["new_host"] == "modal"
+    assert result["type"] == "claude"
 
 
 def test_apply_create_template_cli_args_override_all_templates(mng_test_prefix: str) -> None:
@@ -281,24 +281,24 @@ def test_apply_create_template_cli_args_override_all_templates(mng_test_prefix: 
     ctx = _make_click_context(
         params={
             "template": ("first", "second"),
-            "new_host": "local",
+            "type": "generic",
         },
         source_by_param_name={
-            "new_host": ParameterSource.COMMANDLINE,
+            "type": ParameterSource.COMMANDLINE,
         },
     )
 
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("first"): CreateTemplate(options={"new_host": "docker"}),
-            CreateTemplateName("second"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("first"): CreateTemplate(options={"type": "codex"}),
+            CreateTemplateName("second"): CreateTemplate(options={"type": "claude"}),
         },
     )
 
     result = apply_create_template(ctx, ctx.params.copy(), config)
 
-    assert result["new_host"] == "local"
+    assert result["type"] == "generic"
 
 
 def test_apply_create_template_unknown_template_raises_error(mng_test_prefix: str) -> None:
@@ -310,7 +310,7 @@ def test_apply_create_template_unknown_template_raises_error(mng_test_prefix: st
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("existing"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("existing"): CreateTemplate(options={"type": "codex"}),
         },
     )
 
@@ -323,14 +323,14 @@ def test_apply_create_template_second_template_unknown_raises_error(mng_test_pre
     ctx = _make_click_context(
         params={
             "template": ("existing", "nonexistent"),
-            "new_host": None,
+            "type": None,
         },
     )
 
     config = MngConfig(
         prefix=mng_test_prefix,
         create_templates={
-            CreateTemplateName("existing"): CreateTemplate(options={"new_host": "modal"}),
+            CreateTemplateName("existing"): CreateTemplate(options={"type": "codex"}),
         },
     )
 

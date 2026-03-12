@@ -501,12 +501,12 @@ def test_create_mng_agent_local_uses_in_place(tmp_path: Path) -> None:
     assert len(cg.commands_run) == 1
     cmd = cg.commands_run[0]
     assert "--in-place" in cmd
-    assert "--in" not in cmd
+    assert "--provider" not in cmd
     assert "--source-path" not in cmd
 
 
-def test_create_mng_agent_modal_uses_in_modal_and_source_path(tmp_path: Path) -> None:
-    """Verify that modal deployment uses --in modal and --source-path."""
+def test_create_mng_agent_modal_uses_provider_modal_and_source_path(tmp_path: Path) -> None:
+    """Verify that modal deployment uses --provider modal and --source-path."""
     cg = make_fake_concurrency_group()
 
     _create_mng_agent(
@@ -521,16 +521,16 @@ def test_create_mng_agent_modal_uses_in_modal_and_source_path(tmp_path: Path) ->
     assert len(cg.commands_run) == 1
     cmd = cg.commands_run[0]
     assert "--in-place" not in cmd
-    assert "--in" in cmd
-    in_index = cmd.index("--in")
-    assert cmd[in_index + 1] == "modal"
+    assert "--provider" in cmd
+    provider_index = cmd.index("--provider")
+    assert cmd[provider_index + 1] == "modal"
     assert "--source-path" in cmd
     sp_index = cmd.index("--source-path")
     assert cmd[sp_index + 1] == str(tmp_path)
 
 
-def test_create_mng_agent_docker_uses_in_docker_and_source_path(tmp_path: Path) -> None:
-    """Verify that docker deployment uses --in docker and --source-path."""
+def test_create_mng_agent_docker_uses_provider_docker_and_source_path(tmp_path: Path) -> None:
+    """Verify that docker deployment uses --provider docker and --source-path."""
     cg = make_fake_concurrency_group()
 
     _create_mng_agent(
@@ -544,9 +544,9 @@ def test_create_mng_agent_docker_uses_in_docker_and_source_path(tmp_path: Path) 
 
     assert len(cg.commands_run) == 1
     cmd = cg.commands_run[0]
-    assert "--in" in cmd
-    in_index = cmd.index("--in")
-    assert cmd[in_index + 1] == "docker"
+    assert "--provider" in cmd
+    provider_index = cmd.index("--provider")
+    assert cmd[provider_index + 1] == "docker"
     assert "--source-path" in cmd
     sp_index = cmd.index("--source-path")
     assert cmd[sp_index + 1] == str(tmp_path)
