@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -415,6 +416,22 @@ def modify_env_vars_for_deploy(
     Plugins mutate env_vars in place: set keys to add or update variables,
     delete keys (via pop/del) to remove them. Plugins are called in
     registration order, so later plugins see changes made by earlier ones.
+    """
+
+
+# --- Field generators ---
+
+
+@hookspec
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """[experimental] Return field generators for computing plugin-specific agent fields during listing.
+
+    Each plugin returns (plugin_name, generators) where generators maps field names
+    to callables that receive (agent, host) and return a field value (or None to omit).
+    Fields are namespaced under plugin.<plugin_name> in AgentDetails.
+
+    Return None to contribute nothing. Generators must be thread-safe and fast
+    (they run per-agent in the listing hot path).
     """
 
 

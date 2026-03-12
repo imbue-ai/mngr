@@ -137,16 +137,16 @@ If you want to run scripts *whenever* an agent is started (not just the first ti
 
 - `$MNG_AGENT_STATE_DIR/hooks/start/`: runs after an agent is started. Does not block in any way.
 
-### Field Hooks [future]
+### Field Hooks
 
 Called when collecting data for hosts and agents. These allow plugins to compute additional attributes:
 
 | Hook                       | Description                                                                                                                                     |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`.   |
-| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies). Fields are namespaced under `plugin.<plugin_name>`.       |
+| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`. [future]  |
+| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies [future]). Fields are namespaced under `plugin.<plugin_name>`. [experimental]                 |
 
-**Dependency ordering:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B.
+**Dependency ordering [future]:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B. Currently, field generators receive the agent and host objects directly without dependency support.
 
 ## Writing a Plugin
 
