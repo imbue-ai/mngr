@@ -227,62 +227,102 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
 _MNG_REPO_URL: Final[str] = "https://github.com/imbue-ai/mng"
 
 
-def _find_mng_source_directory() -> Path | None:
-    """Find the mng source directory by walking up from this file.
+def _find_source_directories() -> list[Path]:
+    """Find source directories for mng and all related monorepo packages.
 
     For a source checkout (editable install / uv run), returns the project root
-    so that docs/ and other top-level files are included.  Detected by the
-    presence of pyproject.toml alongside the imbue/ package.
+    of every monorepo library that contributes to the ``imbue`` namespace.  This
+    includes mng itself, all plugins, and dependency libraries such as
+    imbue_common and concurrency_group.  Detected by the mng project root
+    containing a pyproject.toml.
 
-    For a regular install (site-packages), returns the imbue/ directory so the
-    agent can still read the Python source, but is not scoped to all of
-    site-packages.
+    For a regular install (site-packages), all packages merge into a single
+    ``imbue/`` directory, so a single path is returned.
 
-    Returns None only if the directory structure is completely unexpected.
+    Returns an empty list only if the directory structure is completely
+    unexpected.
     """
     # parents[0]=cli/, [1]=mng/, [2]=imbue/, [3]=project-root-or-site-packages
     imbue_dir = Path(__file__).resolve().parents[2]
     project_root = imbue_dir.parent
 
-    # Source checkout: project root has pyproject.toml
+    # Source checkout: mng's project root has pyproject.toml.
     if (project_root / "pyproject.toml").is_file():
-        return project_root
+        return _find_source_checkout_directories(project_root)
 
-    # Installed package: scope to imbue/ (contains only mng)
+    # Installed package: scope to imbue/ (covers mng + plugins + deps)
     if (imbue_dir / "mng").is_dir():
-        return imbue_dir
+        return [imbue_dir]
 
+    return []
+
+
+def _find_source_checkout_directories(mng_project_root: Path) -> list[Path]:
+    """Discover all monorepo library roots that are siblings of mng.
+
+    Scans the parent directory of mng's project root (typically ``libs/``) for
+    sibling packages that have both a ``pyproject.toml`` and an ``imbue/``
+    subdirectory.  This captures mng itself, all plugins (mng_opencode, etc.),
+    and dependency libraries (imbue_common, concurrency_group, etc.).
+    """
+    libs_dir = mng_project_root.parent
+    directories: list[Path] = []
+    for child in sorted(libs_dir.iterdir()):
+        if child.is_dir() and (child / "pyproject.toml").is_file() and (child / "imbue").is_dir():
+            directories.append(child)
+
+    # Ensure mng itself is always included (defensive).
+    if mng_project_root not in directories:
+        directories.append(mng_project_root)
+        directories.sort()
+
+    return directories
+
+
+def _find_mng_package_dir(source_directories: list[Path]) -> Path | None:
+    """Locate the mng Python package directory among the source directories."""
+    for d in source_directories:
+        # Source checkout: project root contains imbue/mng/
+        if (d / "imbue" / "mng").is_dir():
+            return d / "imbue" / "mng"
+        # Installed: imbue/ dir contains mng/
+        if (d / "mng").is_dir() and (d / "mng" / "cli").is_dir():
+            return d / "mng"
     return None
 
 
-def _build_source_access_context(source_directory: Path) -> str:
+def _build_source_access_context(source_directories: list[Path]) -> str:
     """Build system prompt section describing available source code access."""
     parts = [
         "\n\n# Source Code Access\n\n",
-        f"The mng source code is available on disk at: {source_directory}\n",
-        "You can use the Read, Glob, and Grep tools to explore it when answering questions.\n\n",
-        "Key directories:\n",
+        "You can use the Read, Glob, and Grep tools to explore source code "
+        "when answering questions.\n\n",
     ]
-    # Determine the path to the mng package within source_directory.
-    # For a source checkout, source_directory is the project root and the
-    # package is at imbue/mng/.  For an installed package, source_directory
-    # is the imbue/ directory and the package is at mng/.
-    if (source_directory / "imbue" / "mng").is_dir():
-        mng_pkg = source_directory / "imbue" / "mng"
-    else:
-        mng_pkg = source_directory / "mng"
 
-    is_docs_present = (source_directory / "docs").is_dir()
-    if is_docs_present:
-        parts.append(f"- {source_directory}/docs/ - User-facing documentation (markdown)\n")
-    parts += [
-        f"- {mng_pkg}/ - Python source code\n",
-        f"- {mng_pkg}/cli/ - CLI command implementations\n",
-        f"- {mng_pkg}/agents/ - Agent type implementations\n",
-        f"- {mng_pkg}/providers/ - Provider backends (docker, modal, local)\n",
-        f"- {mng_pkg}/plugins/ - Plugin system\n",
-        f"- {mng_pkg}/config/ - Configuration handling\n",
-    ]
+    mng_pkg = _find_mng_package_dir(source_directories)
+    mng_root: Path | None = None
+
+    if mng_pkg is not None:
+        # The mng project root is two levels above imbue/mng/, or one above mng/.
+        mng_root = mng_pkg.parent.parent if (mng_pkg.parent.name == "imbue") else mng_pkg.parent
+        parts.append("Key mng directories:\n")
+        if (mng_root / "docs").is_dir():
+            parts.append(f"- {mng_root}/docs/ - User-facing documentation (markdown)\n")
+        parts += [
+            f"- {mng_pkg}/ - Python source code\n",
+            f"- {mng_pkg}/cli/ - CLI command implementations\n",
+            f"- {mng_pkg}/agents/ - Agent type implementations\n",
+            f"- {mng_pkg}/providers/ - Provider backends (docker, modal, local)\n",
+            f"- {mng_pkg}/plugins/ - Plugin system\n",
+            f"- {mng_pkg}/config/ - Configuration handling\n",
+        ]
+
+    other_dirs = [d for d in source_directories if d != mng_root]
+    if other_dirs:
+        parts.append("\nOther accessible source directories (plugins and dependencies):\n")
+        for d in other_dirs:
+            parts.append(f"- {d}/\n")
+
     return "".join(parts)
 
 
@@ -322,14 +362,14 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
 
 
 def _build_read_only_tools_and_permissions(
-    source_directory: Path | None,
+    source_directories: list[Path],
     *,
     allow_web: bool,
 ) -> tuple[str, tuple[str, ...]]:
     """Build the --tools value and --allowedTools args for the ask agent.
 
-    When source_directory is provided, Read/Glob/Grep are included and
-    path-scoped to that directory. When None, only WebFetch (if enabled)
+    When source_directories is non-empty, Read/Glob/Grep are included and
+    path-scoped to those directories. When empty, only WebFetch (if enabled)
     is available.
 
     Returns (tools_csv, allowed_tools_args).
@@ -337,17 +377,18 @@ def _build_read_only_tools_and_permissions(
     tools_parts: list[str] = []
     allowed_tools_args: tuple[str, ...] = ()
 
-    if source_directory is not None:
+    if source_directories:
         tools_parts.append("Read,Glob,Grep")
-        scope = f"//{source_directory}/**"
-        allowed_tools_args += (
-            "--allowedTools",
-            f"Read({scope})",
-            "--allowedTools",
-            f"Glob({scope})",
-            "--allowedTools",
-            f"Grep({scope})",
-        )
+        for source_directory in source_directories:
+            scope = f"//{source_directory}/**"
+            allowed_tools_args += (
+                "--allowedTools",
+                f"Read({scope})",
+                "--allowedTools",
+                f"Glob({scope})",
+                "--allowedTools",
+                f"Grep({scope})",
+            )
 
     if allow_web:
         tools_parts.append("WebFetch")
@@ -368,7 +409,7 @@ def _headless_claude_output(
     prompt: str,
     system_prompt: str,
     *,
-    source_directory: Path | None = None,
+    source_directories: list[Path] | None = None,
     allow_web: bool = False,
 ) -> Iterator[StreamingHeadlessAgentMixin]:
     """Create a HeadlessClaude agent, yield it, and destroy it on exit.
@@ -377,8 +418,9 @@ def _headless_claude_output(
     and passes claude args for headless operation (--system-prompt, --output-format
     stream-json, --tools, --no-session-persistence).
 
-    When source_directory is provided, Read/Glob/Grep tools are path-scoped to
-    that directory. When allow_web is True, WebFetch is restricted to GitHub domains.
+    When source_directories is non-empty, Read/Glob/Grep tools are path-scoped
+    to those directories. When allow_web is True, WebFetch is restricted to
+    GitHub domains.
     """
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
     host_interface = provider.get_host(HostName("localhost"))
@@ -395,7 +437,7 @@ def _headless_claude_output(
         (work_path / ".mng-prompt").write_text(prompt)
 
         tools, allowed_tools_args = _build_read_only_tools_and_permissions(
-            source_directory, allow_web=allow_web,
+            source_directories or [], allow_web=allow_web,
         )
 
         agent_args = (
@@ -442,7 +484,7 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     """Runs claude via a HeadlessClaude agent for proper agent lifecycle management."""
 
     mng_ctx: MngContext
-    source_directory: Path | None = None
+    source_directories: list[Path] = []
     allow_web: bool = False
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
@@ -450,7 +492,7 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
             self.mng_ctx,
             prompt,
             system_prompt,
-            source_directory=self.source_directory,
+            source_directories=self.source_directories,
             allow_web=self.allow_web,
         ) as agent:
             yield from agent.stream_output()
@@ -547,15 +589,15 @@ def _run_ask_query(
     backend: ClaudeBackendInterface,
     query_string: str,
     *,
-    source_directory: Path | None,
+    source_directories: list[Path],
     execute: bool,
     allow_web: bool,
     output_format: OutputFormat,
 ) -> None:
     """Run a query against the claude backend and handle the response."""
     system_prompt = _build_ask_context()
-    if source_directory is not None:
-        system_prompt += _build_source_access_context(source_directory)
+    if source_directories:
+        system_prompt += _build_source_access_context(source_directories)
     if allow_web:
         system_prompt += _build_web_access_context()
     chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
@@ -585,14 +627,14 @@ def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info("Thinking...", output_opts.output_format)
 
-    source_dir = _find_mng_source_directory()
+    source_dirs = _find_source_directories()
     backend = HeadlessClaudeBackend(
-        mng_ctx=mng_ctx, source_directory=source_dir, allow_web=opts.allow_web,
+        mng_ctx=mng_ctx, source_directories=source_dirs, allow_web=opts.allow_web,
     )
     _run_ask_query(
         backend=backend,
         query_string=query_string,
-        source_directory=source_dir,
+        source_directories=source_dirs,
         execute=opts.execute,
         allow_web=opts.allow_web,
         output_format=output_opts.output_format,
