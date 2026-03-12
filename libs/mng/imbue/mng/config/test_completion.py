@@ -11,6 +11,7 @@ from pathlib import Path
 
 import click
 
+from imbue.mng.agents.agent_registry import list_registered_agent_types
 from imbue.mng.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mng.config.completion_cache import CompletionCacheData
 from imbue.mng.config.completion_writer import write_cli_completions_cache
@@ -52,7 +53,9 @@ def test_option_choices_reference_real_options(
     temp_mng_ctx: MngContext,
 ) -> None:
     """Every option_choices key must reference an option that exists on the real CLI."""
-    write_cli_completions_cache(cli_group=cli, mng_ctx=temp_mng_ctx)
+    write_cli_completions_cache(
+        cli_group=cli, mng_ctx=temp_mng_ctx, registered_agent_types=list_registered_agent_types()
+    )
     cache = _read_cache(completion_cache_dir)
 
     for choice_key in cache.option_choices:

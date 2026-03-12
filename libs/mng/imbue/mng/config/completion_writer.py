@@ -10,7 +10,6 @@ import click
 from loguru import logger
 from pydantic import BaseModel
 
-from imbue.mng.agents.agent_registry import list_registered_agent_types
 from imbue.mng.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mng.config.completion_cache import CompletionCacheData
 from imbue.mng.config.completion_cache import get_completion_cache_dir
@@ -297,7 +296,10 @@ def _is_excluded_config_key(key: str) -> bool:
     return any(key == prefix or key.startswith(f"{prefix}.") for prefix in _EXCLUDED_CONFIG_KEY_PREFIXES)
 
 
-def _build_dynamic_completions(mng_ctx: MngContext) -> _DynamicCompletions:
+def _build_dynamic_completions(
+    mng_ctx: MngContext,
+    registered_agent_types: list[str],
+) -> _DynamicCompletions:
     """Build dynamic completion data from the runtime context.
 
     Extracts agent type names, template names, provider names, plugin names,
@@ -305,9 +307,8 @@ def _build_dynamic_completions(mng_ctx: MngContext) -> _DynamicCompletions:
     """
     config = mng_ctx.config
 
-    registered = list_registered_agent_types()
     custom = [str(k) for k in config.agent_types.keys()]
-    agent_type_names = sorted(set(registered + custom))
+    agent_type_names = sorted(set(registered_agent_types + custom))
 
     provider_backend_names = list_registered_provider_backend_names()
 
@@ -340,6 +341,7 @@ def write_cli_completions_cache(
     *,
     cli_group: click.Group,
     mng_ctx: MngContext | None = None,
+    registered_agent_types: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -430,7 +432,7 @@ def write_cli_completions_cache(
                 positional_completions[dotted_key] = entries
 
         # Inject dynamic choice values from runtime context (config, registries)
-        dynamic = _build_dynamic_completions(mng_ctx) if mng_ctx is not None else None
+        dynamic = _build_dynamic_completions(mng_ctx, registered_agent_types or []) if mng_ctx is not None else None
         if dynamic is not None:
             dynamic_as_dict = dynamic._asdict()
             for opt_key, data_key in _DYNAMIC_CHOICE_OPTIONS.items():
