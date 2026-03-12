@@ -1,4 +1,5 @@
 import importlib.resources
+import shlex
 from typing import Any
 
 from loguru import logger
@@ -102,7 +103,7 @@ def on_after_provisioning(
     agent_dir = host.host_dir / "agents" / str(agent.id)
     ttyd_dir = agent_dir / "commands" / "ttyd"
 
-    host.execute_command(f"mkdir -p '{ttyd_dir}'", timeout_seconds=10.0)
+    host.execute_command(f"mkdir -p {shlex.quote(str(ttyd_dir))}", timeout_seconds=10.0)
 
     script_content = _load_ttyd_resource("ttyd_agent.sh")
     script_path = ttyd_dir / "agent.sh"

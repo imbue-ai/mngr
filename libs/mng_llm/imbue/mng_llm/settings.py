@@ -17,7 +17,7 @@ SETTINGS_FILENAME = "minds.toml"
 _T = TypeVar("_T", bound=BaseModel)
 
 
-def _load_from_path(settings_path: Path, settings_class: type[_T]) -> _T:
+def load_from_path(settings_path: Path, settings_class: type[_T]) -> _T:
     """Load settings from a local file, returning defaults if missing."""
     if not settings_path.exists():
         logger.debug("No settings file at {}, using defaults", settings_path)
@@ -28,7 +28,7 @@ def _load_from_path(settings_path: Path, settings_class: type[_T]) -> _T:
         return settings_class.model_validate(raw)
 
 
-def _load_from_host(host: OnlineHostInterface, work_dir: Path, settings_class: type[_T]) -> _T:
+def load_from_host(host: OnlineHostInterface, work_dir: Path, settings_class: type[_T]) -> _T:
     """Load settings from a host, returning defaults on any error."""
     settings_path = work_dir / SETTINGS_FILENAME
     quoted_path = shlex.quote(str(settings_path))
@@ -65,7 +65,7 @@ def load_settings_from_path(settings_path: Path) -> LlmSettings:
     If the file does not exist, returns all defaults.
     Raises tomllib.TOMLDecodeError if the file exists but has invalid TOML syntax.
     """
-    return _load_from_path(settings_path, LlmSettings)
+    return load_from_path(settings_path, LlmSettings)
 
 
 def load_settings_from_host(
@@ -77,4 +77,4 @@ def load_settings_from_host(
     Returns an LlmSettings with defaults for any missing values.
     If the file does not exist or cannot be parsed, returns all defaults.
     """
-    return _load_from_host(host, work_dir, LlmSettings)
+    return load_from_host(host, work_dir, LlmSettings)

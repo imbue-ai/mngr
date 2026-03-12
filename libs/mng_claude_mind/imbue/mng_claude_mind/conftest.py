@@ -1,6 +1,5 @@
 import os
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 import types
@@ -15,7 +14,14 @@ from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_claude_mind.resources import event_watcher as event_watcher_module
-from imbue.mng_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL
+from imbue.mng_llm.conftest import (
+    create_mind_conversations_table_in_test_db as create_mind_conversations_table_in_test_db,
+)
+from imbue.mng_llm.conftest import create_test_llm_db as create_test_llm_db
+from imbue.mng_llm.conftest import web_server_test_server as web_server_test_server
+from imbue.mng_llm.conftest import write_conversation_to_db as write_conversation_to_db
+from imbue.mng_llm.conftest import write_minds_settings_toml as write_minds_settings_toml
+from imbue.mng_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL as MIND_CONVERSATIONS_TABLE_SQL
 from imbue.mng_llm.provisioning import load_llm_resource
 
 register_plugin_test_fixtures(globals())
@@ -27,16 +33,6 @@ def _reset_loguru() -> Generator[None, None, None]:
     logger.remove()
     yield
     logger.remove()
-
-
-def write_minds_settings_toml(base_dir: Path, content: str) -> Path:
-    """Write minds.toml in the given directory for watcher tests.
-
-    Returns the path to the written file.
-    """
-    settings_path = base_dir / "minds.toml"
-    settings_path.write_text(content)
-    return settings_path
 
 
 @pytest.fixture(autouse=True)
@@ -85,12 +81,7 @@ class _ShellCommandResult:
 
 
 class LocalShellHost:
-    """Test double that executes commands via subprocess on the local filesystem.
-
-    Unlike StubHost (which records commands without executing them), this host
-    actually runs commands via subprocess.run(shell=True). Used by integration
-    tests that need real filesystem side effects (symlinks, directories, etc.).
-    """
+    """Test double that executes commands via subprocess on the local filesystem."""
 
     def __init__(self, host_dir: Path) -> None:
         self.host_dir = host_dir
@@ -123,17 +114,11 @@ def local_shell_host(temp_host_dir: Path) -> LocalShellHost:
 
 
 class ChatScriptEnv:
-    """Environment for running the chat.sh script in tests.
-
-    Provides the script path, agent state directory, and environment variables
-    needed to invoke chat.sh in a subprocess. Sets up the llm database with
-    the mind_conversations table.
-    """
+    """Environment for running the chat.sh script in tests."""
 
     def __init__(self, temp_host_dir: Path) -> None:
         self.agent_state_dir = temp_host_dir / "agents" / "test-agent"
 
-        # chat.sh and mng_log.sh are now provisioned to $MNG_AGENT_STATE_DIR/commands/
         commands_dir = self.agent_state_dir / "commands"
         commands_dir.mkdir(parents=True)
 
@@ -141,14 +126,12 @@ class ChatScriptEnv:
         self.chat_script.write_text(load_llm_resource("chat.sh"))
         os.chmod(self.chat_script, 0o755)
 
-        # Write the shared logging library (sourced by chat.sh and other scripts)
         mng_log_path = commands_dir / "mng_log.sh"
         mng_log_path.write_text(load_resource_script("mng_log.sh"))
         os.chmod(mng_log_path, 0o755)
         self.messages_dir = self.agent_state_dir / "events" / "messages"
         self.messages_dir.mkdir(parents=True)
 
-        # Set up LLM_USER_PATH and create the DB with the mind_conversations table
         self.llm_data_dir = self.agent_state_dir / "llm_data"
         self.llm_data_dir.mkdir(parents=True)
         self.llm_db_path = self.llm_data_dir / "logs.db"
@@ -194,15 +177,7 @@ class StubCommandResult:
 
 
 class StubHost:
-    """Concrete test double for OnlineHostInterface that records operations.
-
-    Records all execute_command calls and write_file/write_text_file calls
-    for assertion in tests. Supports optional text_file_contents for
-    read_text_file stubbing.
-
-    If execute_mkdir is True, 'mkdir -p' commands will actually create
-    directories on the local filesystem in addition to being recorded.
-    """
+    """Concrete test double for OnlineHostInterface that records operations."""
 
     def __init__(
         self,
@@ -227,7 +202,6 @@ class StubHost:
         for pattern, result in self._command_results.items():
             if pattern in command:
                 return result
-        # For `cd <path> && pwd`, return the path as stdout
         if "&& pwd" in command and "cd " in command:
             path = command.split("cd ")[1].split(" &&")[0].strip("'\"")
             return StubCommandResult(stdout=path + "\n")
@@ -261,69 +235,8 @@ def temp_git_repo(tmp_path: Path) -> Path:
     return repo_dir
 
 
-# -- Shared test helpers for watcher and integration tests --
-
-# SQL schema matching the llm tool's responses table.
-# Used by conversation watcher sync tests that create a real SQLite DB.
-LLM_RESPONSES_SCHEMA = """
-    CREATE TABLE responses (
-        id TEXT PRIMARY KEY,
-        system TEXT,
-        prompt TEXT,
-        response TEXT,
-        model TEXT,
-        datetime_utc TEXT,
-        conversation_id TEXT,
-        input_tokens INTEGER,
-        output_tokens INTEGER,
-        token_details TEXT,
-        response_json TEXT,
-        reply_to_id TEXT,
-        chat_id INTEGER,
-        duration_ms INTEGER,
-        attachment_type TEXT,
-        attachment_path TEXT,
-        attachment_url TEXT,
-        attachment_content TEXT
-    )
-"""
-
-
-def create_mind_conversations_table_in_test_db(db_path: Path) -> None:
-    """Create the mind_conversations and llm conversations tables in the given database."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(MIND_CONVERSATIONS_TABLE_SQL)
-        conn.execute(LLM_CONVERSATIONS_SCHEMA)
-        conn.commit()
-
-
-def create_test_llm_db(db_path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> None:
-    """Create a minimal llm-compatible SQLite database with responses and mind_conversations.
-
-    Each row is (id, prompt, response, model, datetime_utc, conversation_id).
-    """
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(LLM_RESPONSES_SCHEMA)
-        conn.execute(LLM_CONVERSATIONS_SCHEMA)
-        conn.execute(MIND_CONVERSATIONS_TABLE_SQL)
-        for row_id, prompt, response, model, dt, conversation_id in rows:
-            conn.execute(
-                "INSERT INTO responses (id, prompt, response, model, datetime_utc, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (row_id, prompt, response, model, dt, conversation_id),
-            )
-        conn.commit()
-
-
 def create_fake_mng_binary(bin_dir: Path) -> Path:
-    """Create a fake mng binary at <bin_dir>/mng.
-
-    This satisfies the get_mng_command() check that the per-agent mng
-    binary exists. The binary delegates to the system mng.
-
-    Returns the path to the fake mng binary.
-    """
+    """Create a fake mng binary at <bin_dir>/mng."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     mng_bin = bin_dir / "mng"
     mng_bin.write_text('#!/bin/bash\nexec mng "$@"\n')
@@ -333,13 +246,7 @@ def create_fake_mng_binary(bin_dir: Path) -> Path:
 
 @pytest.fixture()
 def fake_mng_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Create a fake mng binary and set UV_TOOL_BIN_DIR to point to it.
-
-    Use this fixture in tests that invoke code paths which call
-    get_mng_command() (e.g. event_watcher._send_message, web_server polling).
-
-    Returns the path to the bin dir containing the fake mng binary.
-    """
+    """Create a fake mng binary and set UV_TOOL_BIN_DIR to point to it."""
     bin_dir = tmp_path / "fake_bin"
     create_fake_mng_binary(bin_dir)
     monkeypatch.setenv("UV_TOOL_BIN_DIR", str(bin_dir))
@@ -377,63 +284,10 @@ def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch, fake_mng_binary: Pa
     return capture
 
 
-LLM_CONVERSATIONS_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        model TEXT
-    )
-"""
-
-
-def write_conversation_to_db(
-    db_path: Path,
-    conversation_id: str,
-    model: str = "claude-sonnet-4-6",
-    tags: str = "{}",
-    created_at: str = "2025-01-15T10:00:00.000Z",
-) -> None:
-    """Insert a conversation into both the mind and llm conversations tables.
-
-    The model is stored in the llm-native ``conversations`` table (matching
-    how the llm tool works), while tags and created_at go into the
-    ``mind_conversations`` table.
-    """
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(MIND_CONVERSATIONS_TABLE_SQL)
-        conn.execute(LLM_CONVERSATIONS_SCHEMA)
-        conn.execute(
-            "INSERT OR REPLACE INTO mind_conversations (conversation_id, tags, created_at) VALUES (?, ?, ?)",
-            (conversation_id, tags, created_at),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO conversations (id, name, model) VALUES (?, ?, ?)",
-            (conversation_id, conversation_id, model),
-        )
-        conn.commit()
-
-
-@pytest.fixture()
-def web_server_test_server() -> Generator[tuple[object, int], None, None]:
-    """Start and stop a test HTTP server for web_server handler tests."""
-    import threading
-    from http.server import ThreadingHTTPServer
-
-    # Import inside fixture to avoid underscore-prefixed import at module level
-    from imbue.mng_llm.resources import web_server as ws_mod
-
-    handler_class = ws_mod._WebServerHandler  # noqa: SLF001
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server, port
-    server.shutdown()
-
-
 def assert_conversation_exists_in_db(db_path: Path, conversation_id: str) -> None:
     """Assert that a conversation record exists in the mind_conversations table."""
+    import sqlite3
+
     with sqlite3.connect(str(db_path)) as conn:
         rows = conn.execute(
             "SELECT conversation_id FROM mind_conversations WHERE conversation_id = ?",

@@ -5,8 +5,8 @@ from pathlib import Path
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng_claude_mind.data_types import ClaudeMindSettings
 from imbue.mng_llm.settings import SETTINGS_FILENAME as SETTINGS_FILENAME
-from imbue.mng_llm.settings import _load_from_host
-from imbue.mng_llm.settings import _load_from_path
+from imbue.mng_llm.settings import load_from_host
+from imbue.mng_llm.settings import load_from_path
 
 
 def load_settings_from_path(settings_path: Path) -> ClaudeMindSettings:
@@ -16,7 +16,7 @@ def load_settings_from_path(settings_path: Path) -> ClaudeMindSettings:
     If the file does not exist, returns all defaults.
     Raises tomllib.TOMLDecodeError if the file exists but has invalid TOML syntax.
     """
-    return _load_from_path(settings_path, ClaudeMindSettings)
+    return load_from_path(settings_path, ClaudeMindSettings)
 
 
 def load_settings_from_host(
@@ -28,4 +28,4 @@ def load_settings_from_host(
     Returns a ClaudeMindSettings with defaults for any missing values.
     If the file does not exist or cannot be parsed, returns all defaults.
     """
-    return _load_from_host(host, work_dir, ClaudeMindSettings)
+    return load_from_host(host, work_dir, ClaudeMindSettings)
