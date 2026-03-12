@@ -219,7 +219,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions_in_non_test_code() -> None:
-    rc.check_inline_functions(_DIR, snapshot(6))
+    rc.check_inline_functions(_DIR, snapshot(3))
 
 
 def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:

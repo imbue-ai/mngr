@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
@@ -22,6 +24,7 @@ from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import GitHubData
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.data_types import RefreshHook
 from imbue.mng_kanpan.github import fetch_all_prs
 
 PLUGIN_NAME = "kanpan"
@@ -135,16 +138,25 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
 
 def fetch_board_snapshot(
     mng_ctx: MngContext,
-    include_filters: tuple[str, ...] = (),
-    exclude_filters: tuple[str, ...] = (),
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+    on_before_refresh: list[RefreshHook] | None,
+    on_after_refresh: list[RefreshHook] | None,
+    prev_snapshot: BoardSnapshot | None,
 ) -> BoardSnapshot:
-    """Full fetch: local snapshot enriched with GitHub PR data.
+    """Full fetch: local snapshot enriched with GitHub PR data, with optional refresh hooks.
 
     Lists agents once and uses the result for both local and remote fetching.
+    Before-hooks run against the previous snapshot's entries (skipped when prev_snapshot is None).
+    After-hooks run against the new snapshot's entries.
+    Hook errors are appended to the snapshot's errors but do not block the refresh.
     """
     start_time = time.monotonic()
     errors: list[str] = []
     cg = mng_ctx.concurrency_group
+
+    if prev_snapshot is not None and on_before_refresh:
+        errors.extend(run_refresh_hooks(cg, on_before_refresh, prev_snapshot.entries))
 
     result = list_agents(
         mng_ctx,
@@ -188,13 +200,72 @@ def fetch_board_snapshot(
             )
         )
 
-    elapsed = time.monotonic() - start_time
-    return BoardSnapshot(
+    # fetch_time_seconds captures before-hooks + data fetch but not after-hooks,
+    # because the snapshot (and its displayed timing) is constructed before
+    # after-hooks run. Before-hooks are included since they can mutate state
+    # that the fetch reads (e.g. clearing labels before re-fetching).
+    snapshot = BoardSnapshot(
         entries=tuple(entries),
         errors=(*errors, *remote.errors),
         prs_loaded=remote.prs_loaded,
-        fetch_time_seconds=elapsed,
+        fetch_time_seconds=time.monotonic() - start_time,
     )
+
+    if on_after_refresh:
+        after_errors = run_refresh_hooks(cg, on_after_refresh, snapshot.entries)
+        if after_errors:
+            snapshot = BoardSnapshot(
+                entries=snapshot.entries,
+                errors=(*snapshot.errors, *after_errors),
+                prs_loaded=snapshot.prs_loaded,
+                fetch_time_seconds=snapshot.fetch_time_seconds,
+            )
+
+    return snapshot
+
+
+def run_refresh_hooks(
+    cg: ConcurrencyGroup,
+    hooks: list[RefreshHook],
+    entries: tuple[AgentBoardEntry, ...],
+) -> list[str]:
+    """Run refresh hook commands for each agent in parallel. Returns list of error messages."""
+    errors: list[str] = []
+    for hook in hooks:
+        processes: list[tuple[AgentBoardEntry, RunningProcess]] = []
+        with cg.make_concurrency_group(name=f"hook-{hook.name}") as child_cg:
+            for entry in entries:
+                env = _build_hook_env(entry)
+                proc = child_cg.run_process_in_background(
+                    ["sh", "-c", hook.command],
+                    timeout=30.0,
+                    is_checked_by_group=False,
+                    env=env,
+                )
+                processes.append((entry, proc))
+        for entry, proc in processes:
+            rc = proc.returncode
+            if rc is not None and rc != 0:
+                stderr = proc.read_stderr().strip()
+                msg = f"Hook '{hook.name}' failed for {entry.name} (exit {rc})"
+                if stderr:
+                    msg = f"{msg}: {stderr}"
+                errors.append(msg)
+    return errors
+
+
+def _build_hook_env(entry: AgentBoardEntry) -> dict[str, str]:
+    """Build environment variables for a hook command from an agent board entry."""
+    return {
+        **os.environ,
+        "MNG_AGENT_NAME": str(entry.name),
+        "MNG_AGENT_BRANCH": entry.branch or "",
+        "MNG_AGENT_STATE": str(entry.state),
+        "MNG_AGENT_PROVIDER": str(entry.provider_name),
+        "MNG_AGENT_PR_NUMBER": str(entry.pr.number) if entry.pr else "",
+        "MNG_AGENT_PR_URL": entry.pr.url if entry.pr else "",
+        "MNG_AGENT_PR_STATE": str(entry.pr.state) if entry.pr else "",
+    }
 
 
 def toggle_agent_mute(mng_ctx: MngContext, agent_name: AgentName) -> bool:

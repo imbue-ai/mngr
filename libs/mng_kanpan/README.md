@@ -66,3 +66,31 @@ refresh_interval_seconds = 600.0
 # Seconds before retrying after a failed full refresh
 retry_cooldown_seconds = 60.0
 ```
+
+## Refresh hooks
+
+Run shell commands before and/or after each full refresh. Each hook runs once per agent, in parallel across all agents. Hook failures are reported as board errors but do not block the refresh.
+
+```toml
+[plugins.kanpan.on_before_refresh.notify]
+name = "Pre-refresh notify"
+command = "echo Refreshing $MNG_AGENT_NAME"
+
+[plugins.kanpan.on_after_refresh.sync]
+name = "Post-refresh sync"
+command = "my-sync-script"
+```
+
+Before-hooks run against the previous snapshot's entries (skipped on the first refresh). After-hooks run against the new snapshot's entries. Set `enabled = false` to disable a hook without removing it.
+
+Each hook command receives the following environment variables:
+
+| Variable | Description |
+|---|---|
+| `MNG_AGENT_NAME` | Agent name |
+| `MNG_AGENT_BRANCH` | Git branch (empty if none) |
+| `MNG_AGENT_STATE` | Agent lifecycle state (e.g. `RUNNING`, `DONE`) |
+| `MNG_AGENT_PROVIDER` | Provider instance name |
+| `MNG_AGENT_PR_NUMBER` | PR number (empty if no PR) |
+| `MNG_AGENT_PR_URL` | PR URL (empty if no PR) |
+| `MNG_AGENT_PR_STATE` | PR state such as `OPEN`, `MERGED`, `CLOSED` (empty if no PR) |
