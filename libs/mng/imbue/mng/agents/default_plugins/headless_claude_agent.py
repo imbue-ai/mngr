@@ -16,7 +16,7 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.interfaces.agent import AgentInterface
-from imbue.mng.interfaces.agent import NoPermissionsAgentMixin
+from imbue.mng.interfaces.agent import SafePermissionsAgentMixin
 from imbue.mng.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -104,11 +104,12 @@ def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
             yield text
 
 
-class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
-    """ClaudeAgent with no permissions granted (no tools, no trust needed).
+class SafePermissionsClaudeAgent(ClaudeAgent, SafePermissionsAgentMixin):
+    """ClaudeAgent whose permissions are safe enough to skip user confirmation.
 
     Skips trust validation and dialog dismissal during provisioning since
-    the agent cannot perform any actions that require permissions. All other
+    the agent's permissions are sufficiently restricted (e.g. read-only,
+    path-scoped) that user confirmation is unnecessary. All other
     provisioning (config dir setup, installation, hooks) runs normally.
     """
 
@@ -118,17 +119,17 @@ class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
         options: CreateAgentOptions,
         mng_ctx: MngContext,
     ) -> None:
-        """No-op: skip trust/dialog validation for no-permissions agents."""
+        """No-op: skip trust/dialog validation for safe-permissions agents."""
 
     def _ensure_no_blocking_dialogs(self, source_path: Path | None, mng_ctx: MngContext) -> None:
-        """No-op: no permissions means no dialogs to check."""
+        """No-op: safe permissions means no dialogs to check."""
 
 
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
     """Config for the headless_claude agent type."""
 
 
-class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
+class HeadlessClaude(SafePermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     """Agent type for non-interactive (headless) Claude usage.
 
     Runs `claude --print` with stdout redirected to a file so callers can

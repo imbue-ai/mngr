@@ -224,6 +224,120 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
 )
 
 
+_MNG_REPO_URL: Final[str] = "https://github.com/imbue-ai/mng"
+
+
+# Monorepo library directory names whose source the ask agent can read.
+# Keep in sync with scripts/utils.py PACKAGES -- validated by
+# test_monorepo_package_dirs_matches_release_packages in ask_test.py.
+_MONOREPO_PACKAGE_DIRS: Final[tuple[str, ...]] = (
+    "concurrency_group",
+    "imbue_common",
+    "mng",
+    "mng_kanpan",
+    "mng_opencode",
+    "mng_pair",
+    "mng_tutor",
+)
+
+
+def _find_source_directories() -> list[Path]:
+    """Find source directories for mng and all related monorepo packages.
+
+    For a source checkout (editable install / uv run), returns the project root
+    of every library listed in ``_MONOREPO_PACKAGE_DIRS`` that exists on disk.
+    Detected by the mng project root containing a pyproject.toml.
+
+    For a regular install (site-packages), all packages merge into a single
+    ``imbue/`` directory, so a single path is returned.
+
+    Returns an empty list only if the directory structure is completely
+    unexpected.
+    """
+    # parents[0]=cli/, [1]=mng/, [2]=imbue/, [3]=project-root-or-site-packages
+    imbue_dir = Path(__file__).resolve().parents[2]
+    project_root = imbue_dir.parent
+
+    # Source checkout: mng's project root has pyproject.toml.
+    if (project_root / "pyproject.toml").is_file():
+        return _find_source_checkout_directories(project_root)
+
+    # Installed package: scope to imbue/ (covers mng + plugins + deps)
+    if (imbue_dir / "mng").is_dir():
+        return [imbue_dir]
+
+    return []
+
+
+def _find_source_checkout_directories(mng_project_root: Path) -> list[Path]:
+    """Return project roots for all monorepo libraries listed in _MONOREPO_PACKAGE_DIRS."""
+    libs_dir = mng_project_root.parent
+    directories: list[Path] = []
+    for dir_name in _MONOREPO_PACKAGE_DIRS:
+        candidate = libs_dir / dir_name
+        if candidate.is_dir():
+            directories.append(candidate)
+    return sorted(directories)
+
+
+def _find_mng_package_dir(source_directories: list[Path]) -> Path | None:
+    """Locate the mng Python package directory among the source directories."""
+    for d in source_directories:
+        # Source checkout: project root contains imbue/mng/
+        if (d / "imbue" / "mng").is_dir():
+            return d / "imbue" / "mng"
+        # Installed: imbue/ dir contains mng/
+        if (d / "mng").is_dir() and (d / "mng" / "cli").is_dir():
+            return d / "mng"
+    return None
+
+
+def _build_source_access_context(source_directories: list[Path]) -> str:
+    """Build system prompt section describing available source code access."""
+    parts = [
+        "\n\n# Source Code Access\n\n",
+        "You can use the Read, Glob, and Grep tools to explore source code "
+        "when answering questions.\n\n",
+    ]
+
+    mng_pkg = _find_mng_package_dir(source_directories)
+    mng_root: Path | None = None
+
+    if mng_pkg is not None:
+        # The mng project root is two levels above imbue/mng/, or one above mng/.
+        mng_root = mng_pkg.parent.parent if (mng_pkg.parent.name == "imbue") else mng_pkg.parent
+        parts.append("Key mng directories:\n")
+        if (mng_root / "docs").is_dir():
+            parts.append(f"- {mng_root}/docs/ - User-facing documentation (markdown)\n")
+        parts += [
+            f"- {mng_pkg}/ - Python source code\n",
+            f"- {mng_pkg}/cli/ - CLI command implementations\n",
+            f"- {mng_pkg}/agents/ - Agent type implementations\n",
+            f"- {mng_pkg}/providers/ - Provider backends (docker, modal, local)\n",
+            f"- {mng_pkg}/plugins/ - Plugin system\n",
+            f"- {mng_pkg}/config/ - Configuration handling\n",
+        ]
+
+    other_dirs = [d for d in source_directories if d != mng_root]
+    if other_dirs:
+        parts.append("\nOther accessible source directories (plugins and dependencies):\n")
+        for d in other_dirs:
+            parts.append(f"- {d}/\n")
+
+    return "".join(parts)
+
+
+def _build_web_access_context() -> str:
+    """Build system prompt section describing available web access."""
+    return (
+        "\n\n# Web Access\n\n"
+        "You have access to the WebFetch tool, restricted to the mng GitHub repository.\n"
+        f"The repository is at: {_MNG_REPO_URL}\n"
+        "Use WebFetch to read source files, documentation, issues, or pull requests\n"
+        "from the repository when the information is not available locally.\n"
+    )
+
+
 class ClaudeBackendInterface(MutableModel, ABC):
     """Abstraction over the claude backend for testability."""
 
@@ -248,15 +362,66 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
             logger.debug("Failed to destroy ask agent {}", agent.name)
 
 
+def _build_read_only_tools_and_permissions(
+    source_directories: list[Path],
+    *,
+    allow_web: bool,
+) -> tuple[str, tuple[str, ...]]:
+    """Build the --tools value and --allowedTools args for the ask agent.
+
+    When source_directories is non-empty, Read/Glob/Grep are included and
+    path-scoped to those directories. When empty, only WebFetch (if enabled)
+    is available.
+
+    Returns (tools_csv, allowed_tools_args).
+    """
+    tools_parts: list[str] = []
+    allowed_tools_args: tuple[str, ...] = ()
+
+    if source_directories:
+        tools_parts.append("Read,Glob,Grep")
+        for source_directory in source_directories:
+            scope = f"//{source_directory}/**"
+            allowed_tools_args += (
+                "--allowedTools",
+                f"Read({scope})",
+                "--allowedTools",
+                f"Glob({scope})",
+                "--allowedTools",
+                f"Grep({scope})",
+            )
+
+    if allow_web:
+        tools_parts.append("WebFetch")
+        allowed_tools_args += (
+            "--allowedTools",
+            "WebFetch(domain:github.com)",
+            "--allowedTools",
+            "WebFetch(domain:raw.githubusercontent.com)",
+        )
+
+    tools_csv = ",".join(tools_parts)
+    return tools_csv, allowed_tools_args
+
+
 @contextmanager
 def _headless_claude_output(
-    mng_ctx: MngContext, prompt: str, system_prompt: str
+    mng_ctx: MngContext,
+    prompt: str,
+    system_prompt: str,
+    *,
+    source_directories: list[Path] | None = None,
+    allow_web: bool = False,
 ) -> Iterator[StreamingHeadlessAgentMixin]:
     """Create a HeadlessClaude agent, yield it, and destroy it on exit.
 
     Creates a temporary directory as the work path (no git branch creation),
     and passes claude args for headless operation (--system-prompt, --output-format
-    stream-json, --tools "", --no-session-persistence).
+    stream-json, --tools, --no-session-persistence).
+
+    When source_directories is non-empty, Read/Glob/Grep tools are path-scoped
+    to those directories. When allow_web is True, WebFetch is restricted to
+    GitHub domains.
     """
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
     host_interface = provider.get_host(HostName("localhost"))
@@ -272,6 +437,10 @@ def _headless_claude_output(
         (work_path / ".mng-system-prompt").write_text(system_prompt)
         (work_path / ".mng-prompt").write_text(prompt)
 
+        tools, allowed_tools_args = _build_read_only_tools_and_permissions(
+            source_directories or [], allow_web=allow_web,
+        )
+
         agent_args = (
             "--system-prompt",
             '"$(cat "$MNG_AGENT_WORK_DIR/.mng-system-prompt")"',
@@ -280,7 +449,10 @@ def _headless_claude_output(
             "--verbose",
             "--include-partial-messages",
             "--tools",
-            '""',
+            f'"{tools}"',
+            *allowed_tools_args,
+            "--permission-mode",
+            "dontAsk",
             "--no-session-persistence",
             '"$(cat "$MNG_AGENT_WORK_DIR/.mng-prompt")"',
         )
@@ -313,9 +485,17 @@ class HeadlessClaudeBackend(ClaudeBackendInterface):
     """Runs claude via a HeadlessClaude agent for proper agent lifecycle management."""
 
     mng_ctx: MngContext
+    source_directories: list[Path] = []
+    allow_web: bool = False
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        with _headless_claude_output(self.mng_ctx, prompt, system_prompt) as agent:
+        with _headless_claude_output(
+            self.mng_ctx,
+            prompt,
+            system_prompt,
+            source_directories=self.source_directories,
+            allow_web=self.allow_web,
+        ) as agent:
             yield from agent.stream_output()
 
 
@@ -380,6 +560,7 @@ class AskCliOptions(CommonCliOptions):
 
     query: tuple[str, ...]
     execute: bool
+    allow_web: bool
 
 
 @click.command(name="ask")
@@ -390,6 +571,11 @@ class AskCliOptions(CommonCliOptions):
     is_flag=True,
     help="Execute the generated CLI command instead of just printing it",
 )
+@optgroup.option(
+    "--allow-web",
+    is_flag=True,
+    help="Allow fetching content from the mng GitHub repository",
+)
 @add_common_options
 @click.pass_context
 def ask(ctx: click.Context, **kwargs: Any) -> None:
@@ -398,6 +584,30 @@ def ask(ctx: click.Context, **kwargs: Any) -> None:
     except AbortError as e:
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
+
+
+def _run_ask_query(
+    backend: ClaudeBackendInterface,
+    query_string: str,
+    *,
+    source_directories: list[Path],
+    execute: bool,
+    allow_web: bool,
+    output_format: OutputFormat,
+) -> None:
+    """Run a query against the claude backend and handle the response."""
+    system_prompt = _build_ask_context()
+    if source_directories:
+        system_prompt += _build_source_access_context(source_directories)
+    if allow_web:
+        system_prompt += _build_web_access_context()
+    chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
+
+    if execute:
+        response = _accumulate_chunks(chunks)
+        _execute_response(response=response, output_format=output_format)
+    else:
+        _stream_or_accumulate_response(chunks=chunks, output_format=output_format)
 
 
 def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
@@ -418,16 +628,18 @@ def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info("Thinking...", output_opts.output_format)
 
-    backend = HeadlessClaudeBackend(mng_ctx=mng_ctx)
-    system_prompt = _build_ask_context()
-    chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
-
-    if opts.execute:
-        # Accumulate all chunks for execute mode (don't stream to user)
-        response = _accumulate_chunks(chunks)
-        _execute_response(response=response, output_format=output_opts.output_format)
-    else:
-        _stream_or_accumulate_response(chunks=chunks, output_format=output_opts.output_format)
+    source_dirs = _find_source_directories()
+    backend = HeadlessClaudeBackend(
+        mng_ctx=mng_ctx, source_directories=source_dirs, allow_web=opts.allow_web,
+    )
+    _run_ask_query(
+        backend=backend,
+        query_string=query_string,
+        source_directories=source_dirs,
+        execute=opts.execute,
+        allow_web=opts.allow_web,
+        output_format=output_opts.output_format,
+    )
 
 
 def _stream_or_accumulate_response(chunks: Iterator[str], output_format: OutputFormat) -> None:
@@ -474,7 +686,7 @@ def _execute_response(response: str, output_format: OutputFormat) -> None:
 CommandHelpMetadata(
     key="ask",
     one_line_description="Chat with mng for help [experimental]",
-    synopsis="mng ask [--execute] QUERY...",
+    synopsis="mng ask [--execute] [--allow-web] QUERY...",
     description="""Ask a question and mng will generate the appropriate CLI command.
 If no query is provided, shows general help about available commands
 and common workflows.

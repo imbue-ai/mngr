@@ -398,12 +398,12 @@ class AgentInterface(MutableModel, ABC):
         ...
 
 
-class NoPermissionsAgentMixin:
-    """Marker mixin for agents that are granted no permissions.
+class SafePermissionsAgentMixin:
+    """Marker mixin for agents whose granted permissions are safe enough to skip user confirmation.
 
-    These agents have no tool access and cannot perform destructive actions
-    (e.g. configured with --tools ""). Because no permissions are granted,
-    trust validation and permission dialogs are unnecessary during provisioning.
+    These agents may have tool access, but their permissions are sufficiently
+    restricted (e.g. read-only tools scoped to a specific directory) that trust
+    validation and permission dialogs are unnecessary during provisioning.
     """
 
 
