@@ -1,5 +1,6 @@
 """Unit tests for the mng_claude_mind plugin."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -194,18 +195,28 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
 
 def test_modify_env_vars_sets_uv_tool_dirs() -> None:
     """Verify that modify_env_vars sets UV_TOOL_DIR and UV_TOOL_BIN_DIR."""
-    agent = ClaudeMindAgent.model_construct(agent_config=ClaudeMindConfig())
+    host_stub = SimpleNamespace(host_dir=Path("/home/user/.mng"))
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        host=host_stub,
+        id="abc",
+    )
     env_vars = {"MNG_AGENT_STATE_DIR": "/home/user/.mng/agents/abc"}
-    agent.modify_env_vars(cast(Any, None), env_vars)
+    agent.modify_env_vars(cast(Any, host_stub), env_vars)
     assert env_vars["UV_TOOL_DIR"] == "/home/user/.mng/agents/abc/tools"
     assert env_vars["UV_TOOL_BIN_DIR"] == "/home/user/.mng/agents/abc/bin"
 
 
 def test_modify_env_vars_noop_without_state_dir() -> None:
     """Verify that modify_env_vars does nothing when MNG_AGENT_STATE_DIR is not set."""
-    agent = ClaudeMindAgent.model_construct(agent_config=ClaudeMindConfig())
+    host_stub = SimpleNamespace(host_dir=Path("/home/user/.mng"))
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        host=host_stub,
+        id="abc",
+    )
     env_vars: dict[str, str] = {}
-    agent.modify_env_vars(cast(Any, None), env_vars)
+    agent.modify_env_vars(cast(Any, host_stub), env_vars)
     assert "UV_TOOL_DIR" not in env_vars
     assert "UV_TOOL_BIN_DIR" not in env_vars
 
