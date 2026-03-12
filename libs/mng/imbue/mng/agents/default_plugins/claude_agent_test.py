@@ -18,6 +18,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
+from imbue.mng.agents.default_plugins.claude_agent import WaitingReason
 from imbue.mng.agents.default_plugins.claude_agent import _build_install_command_hint
 from imbue.mng.agents.default_plugins.claude_agent import _claude_json_has_primary_api_key
 from imbue.mng.agents.default_plugins.claude_agent import _get_claude_version
@@ -25,6 +26,7 @@ from imbue.mng.agents.default_plugins.claude_agent import _has_api_credentials_a
 from imbue.mng.agents.default_plugins.claude_agent import _install_claude
 from imbue.mng.agents.default_plugins.claude_agent import _parse_claude_version_output
 from imbue.mng.agents.default_plugins.claude_agent import _read_macos_keychain_credential
+from imbue.mng.agents.default_plugins.claude_agent import agent_field_generators
 from imbue.mng.agents.default_plugins.claude_agent import get_files_for_deploy
 from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
@@ -659,6 +661,69 @@ def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     ):
         with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
             assert agent.get_lifecycle_state() == state
+
+
+def test_agent_field_generators_returns_correct_structure() -> None:
+    """agent_field_generators returns ('claude', {waiting_reason: <callable>})."""
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "claude"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_agent_field_generators_waiting_reason_returns_permissions(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """waiting_reason returns PERMISSIONS when permissions_waiting file exists."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "permissions_waiting").touch()
+
+    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+
+
+def test_agent_field_generators_waiting_reason_returns_end_of_turn(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """waiting_reason returns END_OF_TURN when no active file and no permissions_waiting."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    assert waiting_reason(agent, host) == WaitingReason.END_OF_TURN
+
+
+def test_agent_field_generators_waiting_reason_returns_none_when_active(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
+) -> None:
+    """waiting_reason returns None when active file exists (agent is running)."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "active").touch()
+
+    assert waiting_reason(agent, host) is None
 
 
 def test_get_expected_process_name_returns_claude(

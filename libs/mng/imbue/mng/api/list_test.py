@@ -731,7 +731,7 @@ def test_field_generators_populate_plugin_data(
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-test")
-    assert details.plugin == {"test_plugin": {"status": "active", "score": 42}}
+    assert details.plugin["test_plugin"] == {"status": "active", "score": 42}
 
 
 @pytest.mark.tmux
@@ -766,7 +766,7 @@ def test_field_generators_omit_none_values(
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-none")
-    assert details.plugin == {"test_plugin": {"present": "yes"}}
+    assert details.plugin["test_plugin"] == {"present": "yes"}
 
 
 @pytest.mark.tmux
@@ -794,7 +794,8 @@ def test_field_generators_multiple_plugins(
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-multi")
-    assert details.plugin == {"plugin_a": {"version": "1.0"}, "plugin_b": {"count": 5}}
+    assert details.plugin["plugin_a"] == {"version": "1.0"}
+    assert details.plugin["plugin_b"] == {"count": 5}
 
 
 @pytest.mark.tmux
@@ -822,7 +823,8 @@ def test_field_generators_none_plugin_is_skipped(
     local_host.destroy_agent(agent)
 
     details = _find_agent_by_name(result, "field-gen-skip-none")
-    assert details.plugin == {"real_plugin": {"value": "present"}}
+    assert details.plugin["real_plugin"] == {"value": "present"}
+    assert "none_plugin" not in details.plugin
 
 
 def test_no_field_generators_produces_empty_plugin(
