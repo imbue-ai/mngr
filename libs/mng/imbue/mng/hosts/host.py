@@ -16,6 +16,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from paramiko import SSHException
@@ -71,7 +72,6 @@ from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng.primitives import default_branch_name
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
@@ -504,7 +504,7 @@ class Host(BaseHost, OnlineHostInterface):
         joined_dirs = " ".join(f"'{str(p)}'" for p in paths)
         self.execute_command(f"mkdir -p {joined_dirs}")
 
-    def _get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote.
 
         Returns (user, hostname, port, private_key_path) if remote, None if local.
@@ -733,6 +733,10 @@ class Host(BaseHost, OnlineHostInterface):
     # =========================================================================
     # Environment
     # =========================================================================
+
+    def get_host_env_path(self) -> Path:
+        """Get the path to the host env file."""
+        return self.host_dir / "env"
 
     def get_env_vars(self) -> dict[str, str]:
         """Get all environment variables from the host env file."""
@@ -1025,12 +1029,12 @@ class Host(BaseHost, OnlineHostInterface):
         source_path: Path,
         target_path: Path,
         options: CreateAgentOptions,
-    ) -> str:
+    ) -> str | None:
         """Transfer a git repository from source to target.
 
-        Returns the name of the branch created on the target.
+        Returns the name of the branch created on the target, or None if no new branch.
         """
-        new_branch_name = self._determine_branch_name(options)
+        new_branch_name = options.git.new_branch_name if options.git else None
         if options.git and options.git.base_branch:
             base_branch_name = options.git.base_branch
         elif source_host.is_local:
@@ -1086,16 +1090,27 @@ class Host(BaseHost, OnlineHostInterface):
             self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
+                if new_branch_name:
+                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                else:
+                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
                 config_commands = [
                     "git config --bool core.bare false",
-                    f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}",
+                    checkout_cmd,
                 ]
                 if git_author_name:
                     config_commands.append(f"git config user.name {shlex.quote(git_author_name)}")
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    config_commands.append(f"git remote add origin {shlex.quote(origin_url)}")
+                    # Use set-url if origin already exists (e.g. from --mirror push),
+                    # otherwise add it.
+                    set_or_add = (
+                        f"git remote set-url origin {shlex.quote(origin_url)}"
+                        f" 2>/dev/null"
+                        f" || git remote add origin {shlex.quote(origin_url)}"
+                    )
+                    config_commands.append(set_or_add)
                 result = self.execute_command(
                     " && ".join(config_commands),
                     cwd=target_path,
@@ -1117,15 +1132,36 @@ class Host(BaseHost, OnlineHostInterface):
         target_path: Path,
     ) -> None:
         """Copy .git/info/exclude from source to target if it exists."""
-        exclude_path = Path(".git") / "info" / "exclude"
+        # Resolve the git common dir on the source so this works in worktrees,
+        # where .git is a file rather than a directory.
+        if source_host.is_local:
+            try:
+                result = self.mng_ctx.concurrency_group.run_process_to_completion(
+                    ["git", "-C", str(source_path), "rev-parse", "--git-common-dir"],
+                )
+            except ProcessError:
+                logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
+                return
+            git_common_dir = Path(result.stdout.strip())
+        else:
+            result = source_host.execute_command("git rev-parse --git-common-dir", cwd=source_path)
+            if not result.success:
+                logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
+                return
+            git_common_dir = Path(result.stdout.strip())
+        if not git_common_dir.is_absolute():
+            git_common_dir = source_path / git_common_dir
+
+        source_exclude_path = git_common_dir / "info" / "exclude"
+        target_exclude_path = target_path / ".git" / "info" / "exclude"
         try:
-            content = source_host.read_file(source_path / exclude_path)
-        except FileNotFoundError:
-            logger.trace("No .git/info/exclude in source, skipping")
+            content = source_host.read_file(source_exclude_path)
+        except (FileNotFoundError, NotADirectoryError):
+            logger.trace("No info/exclude in source, skipping")
             return
 
         with log_span("Copying .git/info/exclude to target"):
-            self.write_file(target_path / exclude_path, content)
+            self.write_file(target_exclude_path, content)
 
     def _git_push_to_target(
         self,
@@ -1135,13 +1171,13 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target using git push --mirror."""
         self._warn_if_submodules_detected(source_host, source_path)
-        target_ssh_info = self._get_ssh_connection_info()
+        target_ssh_info = self.get_ssh_connection_info()
 
         if target_ssh_info is None:
             if source_host.is_local:
                 git_url = str(target_path / ".git")
             else:
-                source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+                source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
                 if source_ssh_info is None:
                     raise MngError("Cannot determine SSH connection info for remote source host")
                 user, hostname, port, key_path = source_ssh_info
@@ -1289,6 +1325,23 @@ class Host(BaseHost, OnlineHostInterface):
             finally:
                 files_from_path.unlink(missing_ok=True)
 
+    def copy_directory(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        extra_args: str | None = None,
+        exclude_git: bool = False,
+    ) -> None:
+        """Copy a directory from source_host:source_path to self:target_path using rsync."""
+        self._rsync_files(
+            source_host,
+            source_path,
+            target_path,
+            extra_args=extra_args,
+            exclude_git=exclude_git,
+        )
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -1325,7 +1378,7 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = "rsync: local to local"
         elif source_host.is_local and not self.is_local:
             # Local to remote
-            target_ssh_info = self._get_ssh_connection_info()
+            target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
             user, hostname, port, key_path = target_ssh_info
             rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
@@ -1333,7 +1386,7 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = f"rsync: local to remote {user}@{hostname}:{port}"
         elif not source_host.is_local and self.is_local:
             # Remote to local
-            source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
             user, hostname, port, key_path = source_ssh_info
             rsync_args.extend(["-e", f"ssh -i {shlex.quote(str(key_path))} -p {port} -o StrictHostKeyChecking=no"])
@@ -1341,9 +1394,9 @@ class Host(BaseHost, OnlineHostInterface):
             rsync_description = f"rsync: remote to local {user}@{hostname}:{port}"
         else:
             # Remote to remote: sync via local temp directory as intermediary
-            source_ssh_info = source_host._get_ssh_connection_info() if isinstance(source_host, Host) else None
+            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
             assert source_ssh_info is not None
-            target_ssh_info = self._get_ssh_connection_info()
+            target_ssh_info = self.get_ssh_connection_info()
             assert target_ssh_info is not None
 
             src_user, src_hostname, src_port, src_key_path = source_ssh_info
@@ -1407,19 +1460,22 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mng/worktrees/<agent-id>/ by default.
+        Worktrees are placed at ~/.mng/worktrees/<name>-<uuid>/ by default.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
 
-        agent_id = AgentId.generate()
-
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            work_dir_path = self.host_dir / "worktrees" / str(agent_id)
+            agent_name = options.name or AgentName("agent")
+            work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
+            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
-        branch_name = self._determine_branch_name(options)
+        # Worktree mode always requires a new branch (enforced at CLI)
+        if not options.git or not options.git.new_branch_name:
+            raise UserInputError("Worktree mode requires a new branch name in git options")
+        branch_name = options.git.new_branch_name
 
         with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
             cmd = f"mkdir -p {work_dir_path.parent} && git -C {shlex.quote(str(source_path))} worktree add {shlex.quote(str(work_dir_path))} -b {shlex.quote(branch_name)}"
@@ -1435,16 +1491,6 @@ class Host(BaseHost, OnlineHostInterface):
             self._add_generated_work_dir(work_dir_path)
 
             return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
-
-    def _determine_branch_name(self, options: CreateAgentOptions) -> str:
-        """Determine the branch name for a new work_dir."""
-        if options.git and options.git.new_branch_name:
-            return options.git.new_branch_name
-
-        agent_name = options.name or AgentName("agent")
-        branch_prefix = options.git.new_branch_prefix if options.git else "mng/"
-
-        return default_branch_name(agent_name, prefix=branch_prefix)
 
     def create_agent_state(
         self,
@@ -1558,6 +1604,7 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars["MNG_AGENT_NAME"] = str(agent.name)
         env_vars["MNG_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNG_AGENT_WORK_DIR"] = str(agent.work_dir)
+        env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
 
         # 2. Add programmatic defaults
         env_vars["GIT_BASE_BRANCH"] = (options.git.base_branch if options.git else None) or ""
@@ -1571,6 +1618,9 @@ class Host(BaseHost, OnlineHostInterface):
         # 4. Add explicit env_vars
         for env_var in options.environment.env_vars:
             env_vars[env_var.key] = env_var.value
+
+        # 5. Let the agent modify env vars (e.g. set UV_TOOL_DIR for per-agent mng)
+        agent.modify_env_vars(host=self, env_vars=env_vars)
 
         return env_vars
 
@@ -1590,7 +1640,7 @@ class Host(BaseHost, OnlineHostInterface):
         agent_env_path = self.get_agent_env_path(agent)
         return build_source_env_shell_commands(host_env_path, agent_env_path)
 
-    def _build_source_env_prefix(self, agent: AgentInterface) -> str:
+    def build_source_env_prefix(self, agent: AgentInterface) -> str:
         """Build a shell prefix that sources host and agent env files if they exist."""
         commands = self._build_source_env_commands(agent)
         return " && ".join(commands) + " && "
@@ -1607,12 +1657,13 @@ class Host(BaseHost, OnlineHostInterface):
         1. Call agent.on_before_provisioning() (validation only)
         2. Call agent.get_provision_file_transfers() to collect file transfers
         3. Validate required files exist, execute file transfers
-        4. Call agent.provision() (agent-type-specific provisioning)
-        5. Create directories (so paths exist for uploads)
-        6. Upload files (files exist before modifications)
-        7. Append text to files
-        8. Prepend text to files
-        9. Write environment variables to agent env file
+        4. Write environment variables to agent env file (before agent.provision()
+           so agent provisioning can use env vars like UV_TOOL_DIR)
+        5. Call agent.provision() (agent-type-specific provisioning)
+        6. Create directories (so paths exist for uploads)
+        7. Upload files (files exist before modifications)
+        8. Append text to files
+        9. Prepend text to files
         10. Run sudo commands (system-level setup, with env vars sourced)
         11. Run user commands (user-level setup, with env vars sourced)
         12. Call agent.on_after_provisioning() (finalization)
@@ -1628,7 +1679,12 @@ class Host(BaseHost, OnlineHostInterface):
         # 3. Validate required files exist and execute transfers
         self._execute_agent_file_transfers(agent, all_file_transfers)
 
-        # 4. Call agent.provision() for agent-type-specific provisioning
+        # 4. Write environment variables to agent env file (before agent.provision()
+        # so that agent provisioning can use env vars like UV_TOOL_DIR)
+        env_vars = self._collect_agent_env_vars(agent, options)
+        self._write_agent_env_file(agent, env_vars)
+
+        # 5. Call agent.provision() for agent-type-specific provisioning
         with log_span("Calling provision for agent {}", agent.name):
             agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
@@ -1643,34 +1699,30 @@ class Host(BaseHost, OnlineHostInterface):
             sudo_cmds=len(provisioning.sudo_commands),
             user_cmds=len(provisioning.user_commands),
         ):
-            # 5. Create directories
+            # 6. Create directories
             for directory in provisioning.create_directories:
                 self._mkdir(directory)
                 logger.trace("Created directory: {}", directory)
 
-            # 6. Upload files (read from local filesystem, write to host)
+            # 7. Upload files (read from local filesystem, write to host)
             for upload_spec in provisioning.upload_files:
                 # Read from local filesystem (not via host primitives)
                 local_content = upload_spec.local_path.read_bytes()
                 self.write_file(upload_spec.remote_path, local_content)
                 logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 7. Append text to files
+            # 8. Append text to files
             for append_spec in provisioning.append_to_files:
                 self._append_to_file(append_spec.remote_path, append_spec.text)
                 logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # 8. Prepend text to files
+            # 9. Prepend text to files
             for prepend_spec in provisioning.prepend_to_files:
                 self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
                 logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
-            # 9. Write environment variables to agent env file
-            env_vars = self._collect_agent_env_vars(agent, options)
-            self._write_agent_env_file(agent, env_vars)
-
             # Build the source prefix for commands (sources host env, then agent env)
-            source_prefix = self._build_source_env_prefix(agent)
+            source_prefix = self.build_source_env_prefix(agent)
 
             # 10. Run sudo commands (with env vars sourced)
             for cmd in provisioning.sudo_commands:

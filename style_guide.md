@@ -1423,7 +1423,7 @@ Every JSONL line must include these envelope fields:
 
 ## Self-describing events
 
-Include enough context in each line to be self-describing. Every event should have a timestamp, an event type, and enough identifiers (conversation ID, agent name, source, etc.) that you could split the data in different ways later if you change your mind. This is the most important principle: if each line is self-contained, your file organization becomes a performance/convenience choice rather than a correctness one. You should never need to know the name of the file that an event came from.
+Include enough context in each line to be self-describing. Every event should have a timestamp, an event type, and enough identifiers (conversation ID, agent name, source, etc.) that you could split the data in different ways later if you want. This is the most important principle: if each line is self-contained, your file organization becomes a performance/convenience choice rather than a correctness one. You should never need to know the name of the file that an event came from.
 
 ## Append-only semantics
 
@@ -1875,6 +1875,8 @@ Every project in the monorepo must have a `test_ratchets.py` file that checks fo
 When adding a new ratchet to any project's `test_ratchets.py`, you must add the same test function to every other project's `test_ratchets.py` as well (the meta test will fail otherwise).
 
 Ratchet values use `inline_snapshot` so they can be automatically updated with `--inline-snapshot=fix`.
+
+**Important:** Ratchet tests do not work correctly with unstaged changes. Always stage or commit your changes before running ratchet tests.
 
 #### Project-specific ratchets (`test_project_ratchets.py`)
 

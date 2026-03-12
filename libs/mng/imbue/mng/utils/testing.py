@@ -38,9 +38,13 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.polling import wait_for
 
@@ -128,7 +132,7 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     This is the minimal test isolation needed to prevent tests from reading
     or modifying the real home directory. Use this directly for lightweight
-    test suites (e.g. changelings). For full mng test isolation (MNG_HOST_DIR,
+    test suites (e.g. minds). For full mng test isolation (MNG_HOST_DIR,
     MNG_PREFIX, tmux server, etc.) use setup_test_mng_env instead.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -201,7 +205,7 @@ def get_subprocess_test_env(
 
     Sets MNG_ROOT_NAME to a value that doesn't have a corresponding config directory,
     preventing subprocess tests from picking up .mng/settings.toml which might have
-    settings like add_command that would interfere with tests.
+    settings like extra_window that would interfere with tests.
 
     The root_name parameter defaults to "mng-test" but can be set to a descriptive
     name for your test category (e.g., "mng-acceptance-test", "mng-release-test").
@@ -359,6 +363,19 @@ def capture_tmux_pane_contents(session_name: str) -> str:
     return result.stdout
 
 
+def wait_for_agent_session(session_name: str, timeout: float = 15.0) -> None:
+    """Wait for an agent's tmux session to appear.
+
+    Use this after creating an agent with --no-connect in tests that invoke
+    the CLI via subprocess (where the session may take a moment to register).
+    """
+    wait_for(
+        lambda: tmux_session_exists(session_name),
+        timeout=timeout,
+        error_message=f"Expected tmux session {session_name} to exist",
+    )
+
+
 def tmux_session_exists(session_name: str) -> bool:
     """Check if a tmux session exists."""
     result = subprocess.run(
@@ -391,20 +408,24 @@ def create_test_agent_via_cli(
         [
             "--name",
             agent_name,
-            "--agent-cmd",
+            "--command",
             agent_cmd,
             "--source",
             str(temp_work_dir),
             "--no-connect",
-            "--await-ready",
-            "--no-copy-work-dir",
             "--no-ensure-clean",
         ],
         obj=plugin_manager,
         catch_exceptions=False,
     )
     assert create_result.exit_code == 0, f"Create source failed with: {create_result.output}"
-    assert tmux_session_exists(session_name), f"Expected source session {session_name} to exist"
+
+    # Wait for the tmux session to appear
+    wait_for(
+        lambda: tmux_session_exists(session_name),
+        timeout=15.0,
+        error_message=f"Expected source session {session_name} to exist",
+    )
 
     return session_name
 
@@ -464,10 +485,14 @@ def make_test_agent_details(
     name: str = "test-agent",
     state: AgentLifecycleState = AgentLifecycleState.RUNNING,
     create_time: datetime | None = None,
+    initial_branch: str | None = None,
     snapshots: list[SnapshotInfo] | None = None,
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    host_id: HostId | None = None,
+    provider_name: ProviderInstanceName | None = None,
+    ssh: SSHInfo | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -475,13 +500,14 @@ def make_test_agent_details(
     construction logic. Accepts optional overrides for commonly varied fields.
     """
     host_details = HostDetails(
-        id=HostId.generate(),
+        id=host_id or HostId.generate(),
         name="test-host",
-        provider_name=ProviderInstanceName("local"),
+        provider_name=provider_name or ProviderInstanceName("local"),
         snapshots=snapshots or [],
         state=HostState.RUNNING,
         plugin=host_plugin or {},
         tags=host_tags or {},
+        ssh=ssh,
     )
     return AgentDetails(
         id=AgentId.generate(),
@@ -489,6 +515,7 @@ def make_test_agent_details(
         type="generic",
         command=CommandString("sleep 100"),
         work_dir=Path("/tmp/test"),
+        initial_branch=initial_branch,
         create_time=create_time or datetime.now(timezone.utc),
         start_on_boot=False,
         state=state,
@@ -943,7 +970,7 @@ AllowUsers {current_user}
     sshd_config_path.write_text(sshd_config)
 
     # Start sshd
-    proc = subprocess.Popen(
+    process = subprocess.Popen(
         [sshd_path, "-D", "-f", str(sshd_config_path), "-e"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -961,9 +988,64 @@ AllowUsers {current_user}
 
     finally:
         # Stop sshd
-        proc.send_signal(signal.SIGTERM)
+        process.send_signal(signal.SIGTERM)
         try:
-            proc.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            process.kill()
+            process.wait()
+
+
+# =============================================================================
+# Discovery event test factories
+# =============================================================================
+
+
+def make_test_discovered_agent() -> DiscoveredAgent:
+    """Create a DiscoveredAgent with random IDs and realistic certified_data for testing."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName(f"test-agent-{uuid4().hex}")
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=agent_id,
+        agent_name=agent_name,
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "id": str(agent_id),
+            "name": str(agent_name),
+            "type": "claude",
+            "command": "claude --model sonnet",
+            "work_dir": "/tmp/test",
+            "start_on_boot": False,
+            "labels": {},
+            "permissions": [],
+        },
+    )
+
+
+def make_test_discovered_host() -> DiscoveredHost:
+    """Create a DiscoveredHost with random IDs for testing."""
+    return DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName(f"test-host-{uuid4().hex}"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def write_discovery_snapshot_to_path(events_path: Path, agent_names: Sequence[str]) -> None:
+    """Write a DISCOVERY_FULL event to a JSONL file for testing completion and event replay."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    agents = [
+        {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
+        for i, name in enumerate(agent_names)
+    ]
+    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    event = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-snapshot",
+        "source": "mng/discovery",
+        "agents": agents,
+        "hosts": hosts,
+    }
+    events_path.write_text(json.dumps(event) + "\n")

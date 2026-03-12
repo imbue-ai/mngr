@@ -11,11 +11,11 @@ from imbue.mng.api.connect import connect_to_agent
 from imbue.mng.api.connect import resolve_connect_command
 from imbue.mng.api.connect import run_connect_command
 from imbue.mng.api.data_types import ConnectionOptions
+from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_provider_instance
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -24,6 +24,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.primitives import AgentLifecycleState
@@ -244,6 +245,9 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         # Start each agent on this host
         agent_ids_to_start = [match.agent_id for match in agent_list]
         online_host.start_agents(agent_ids_to_start)
+
+        # Emit discovery events for started agents and host
+        emit_discovery_events_for_host(mng_ctx.config, online_host)
 
         for match in agent_list:
             started_agents.append(str(match.agent_name))

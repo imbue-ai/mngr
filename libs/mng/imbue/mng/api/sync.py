@@ -503,7 +503,7 @@ def sync_files(
             rsync_stdout = result.stdout
         else:
             # Remote host: run rsync locally with SSH transport
-            ssh_info = host._get_ssh_connection_info()
+            ssh_info = host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
 
             rsync_cmd = _build_remote_rsync_command(
@@ -911,7 +911,7 @@ def _sync_git_push(
                     cg,
                 )
         else:
-            ssh_info = host._get_ssh_connection_info()
+            ssh_info = host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
             if is_mirror:
                 commits_transferred = _remote_git_push_mirror(
@@ -1078,7 +1078,7 @@ def _sync_git_pull(
     original_branch = get_current_branch(local_path, cg)
 
     # Get SSH info for remote hosts so _fetch_and_merge can use SSH URLs
-    ssh_info = host._get_ssh_connection_info() if not host.is_local else None
+    ssh_info = host.get_ssh_connection_info() if not host.is_local else None
 
     with _stash_guard(git_ctx, local_path, uncommitted_changes):
         commits_transferred = _fetch_and_merge(

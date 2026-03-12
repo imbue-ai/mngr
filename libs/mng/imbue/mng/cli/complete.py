@@ -1,9 +1,10 @@
 """Lightweight tab completion entrypoint -- no heavy third-party imports.
 
 Reads COMP_WORDS and COMP_CWORD from the environment (same protocol click
-uses), resolves the completion context from a JSON cache file, and prints
-results. This avoids importing click, pydantic, pluggy, or any plugin code
-on every TAB press.
+uses), resolves command completions from a JSON cache file and agent name
+completions from the discovery event stream, then prints results. This
+avoids importing click, pydantic, pluggy, or any plugin code on every TAB
+press.
 
 Invoked as: python -m imbue.mng.cli.complete {zsh|bash}
 """
@@ -12,14 +13,12 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
+from imbue.mng.cli.complete_names import resolve_names_from_discovery_stream
 from imbue.mng.config.host_dir import read_default_host_dir
 
 _COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
-_AGENT_COMPLETIONS_CACHE_FILENAME = ".agent_completions.json"
-_BACKGROUND_REFRESH_COOLDOWN_SECONDS = 30
 
 
 def _get_completion_cache_dir() -> Path:
@@ -48,41 +47,42 @@ def _read_cache() -> dict:
 
 
 def _read_agent_names() -> list[str]:
-    """Read agent names from the agent completions cache file."""
+    """Read agent names from the discovery event stream."""
     try:
-        path = _get_completion_cache_dir() / _AGENT_COMPLETIONS_CACHE_FILENAME
-        if not path.is_file():
-            return []
-        data = json.loads(path.read_text())
-        names = data.get("names")
-        if not isinstance(names, list):
-            return []
-        return sorted(name for name in names if isinstance(name, str) and name)
-    except (json.JSONDecodeError, OSError):
+        agent_names, _ = resolve_names_from_discovery_stream()
+        return agent_names
+    except (OSError, json.JSONDecodeError):
         return []
 
 
-def _trigger_background_refresh() -> None:
-    """Fire-and-forget a background process to refresh the completion cache.
-
-    Checks the agent cache age and spawns a detached subprocess if stale.
-    """
+def _read_git_branches() -> list[str]:
+    """Read local and remote git branch names via ``git for-each-ref``."""
     try:
-        cache_path = _get_completion_cache_dir() / _AGENT_COMPLETIONS_CACHE_FILENAME
-        if cache_path.is_file():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _BACKGROUND_REFRESH_COOLDOWN_SECONDS:
-                return
-
-        devnull = subprocess.DEVNULL
-        subprocess.Popen(
-            [sys.executable, "-c", "from imbue.mng.main import cli; cli(['list', '--format', 'json', '-q'])"],
-            stdout=devnull,
-            stderr=devnull,
-            start_new_session=True,
+        result = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/remotes/"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-    except OSError:
-        pass
+        if result.returncode != 0:
+            return []
+        return [line for line in result.stdout.splitlines() if line]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def _is_flag_option(word: str, flag_options: list[str]) -> bool:
+    """Check if word is a known flag option.
+
+    Handles exact matches (--force, -f) and combined short flags (-fb).
+    For combined short flags, every character after the leading dash must
+    map to a known single-character flag in flag_options.
+    """
+    if word in flag_options:
+        return True
+    if not word.startswith("-") or word.startswith("--") or len(word) < 3:
+        return False
+    return all(f"-{ch}" in flag_options for ch in word[1:])
 
 
 def _get_completions() -> list[str]:
@@ -111,6 +111,7 @@ def _get_completions() -> list[str]:
     flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
     option_choices: dict[str, list[str]] = cache.get("option_choices", {})
     agent_name_arguments: list[str] = cache.get("agent_name_arguments", [])
+    git_branch_options: list[str] = cache.get("git_branch_options", [])
 
     # Resolve the command and subcommand from the words already typed
     resolved_command: str | None = None
@@ -156,7 +157,7 @@ def _get_completions() -> list[str]:
         if choice_key in option_choices:
             # Option with predefined choices (e.g. --on-error abort|continue)
             candidates = option_choices[choice_key]
-        elif prev_word in flag_options:
+        elif _is_flag_option(prev_word, flag_options):
             # Previous word is a flag -- next position is positional
             if incomplete.startswith("--"):
                 candidates = options_by_command.get(option_key, [])
@@ -165,6 +166,9 @@ def _get_completions() -> list[str]:
         elif incomplete.startswith("--"):
             # Previous word is value-taking, but user started typing an option
             candidates = options_by_command.get(option_key, [])
+        elif choice_key in git_branch_options:
+            # Option whose value should complete against git branch names
+            candidates = _read_git_branches()
         else:
             # Previous word is value-taking, current word is its value -- no completions
             candidates = []
@@ -250,8 +254,6 @@ def main() -> None:
     completions = _get_completions()
     if completions:
         sys.stdout.write("\n".join(completions) + "\n")
-
-    _trigger_background_refresh()
 
 
 if __name__ == "__main__":

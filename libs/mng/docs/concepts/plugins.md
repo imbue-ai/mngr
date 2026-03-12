@@ -47,8 +47,8 @@ Called to collect files for baking into deployed images (ex: if you're scheduled
 
 | Hook                         | Description                                                                                                    |
 |------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. [experimental] |
-| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. [experimental] |
+| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. |
+| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. |
 
 ### Program lifecycle hooks
 
@@ -75,7 +75,7 @@ Called during `mng create` and `mng destroy` operations:
 | Hook                          | Description                                                                                       |
 |-------------------------------|---------------------------------------------------------------------------------------------------|
 | `on_before_host_create`       | Before creating a new host (receives host name and provider name). [experimental]                 |
-| `on_host_created`             | After a new host has been created via provider.create_host(). [experimental]                      |
+| `on_host_created`             | After a new host has been created via provider.create_host().                                     |
 | `on_before_host_destroy`      | Before destroying a host via provider.destroy_host(). [experimental]                              |
 | `on_host_destroyed`           | After a host has been destroyed. The Python object is still available for metadata. [experimental] |
 
@@ -108,7 +108,7 @@ Called during `mng create` and `mng destroy` operations:
 | `on_agent_state_dir_created`  | After the agent's state directory and data.json have been created, before provisioning. [experimental]               |
 | `on_before_provisioning`      | Before provisioning an agent (plugin hook, distinct from agent method). [experimental]                               |
 | `on_after_provisioning`       | After provisioning an agent (plugin hook, distinct from agent method). [experimental]                                |
-| `on_agent_created`            | After an agent is fully created and started. [experimental]                                                          |
+| `on_agent_created`            | After an agent is fully created and started.                                                                         |
 | `on_before_agent_destroy`     | Before an online agent is destroyed. Does not fire for offline host destruction. [experimental]                      |
 | `on_agent_destroyed`          | After an online agent has been destroyed. The Python object is still available for metadata. [experimental]          |
 
@@ -137,16 +137,196 @@ If you want to run scripts *whenever* an agent is started (not just the first ti
 
 - `$MNG_AGENT_STATE_DIR/hooks/start/`: runs after an agent is started. Does not block in any way.
 
-### Field Hooks [future]
+### Field Hooks
 
 Called when collecting data for hosts and agents. These allow plugins to compute additional attributes:
 
 | Hook                       | Description                                                                                                                                     |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`.   |
-| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies). Fields are namespaced under `plugin.<plugin_name>`.       |
+| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`. [future]  |
+| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies [future]). Fields are namespaced under `plugin.<plugin_name>`. [experimental]                 |
 
-**Dependency ordering:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B.
+**Dependency ordering [future]:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B. Currently, field generators receive the agent and host objects directly without dependency support.
+
+## Writing a Plugin
+
+A plugin is a Python package that declares an entry point for the `mng` group and contains functions decorated with `@hookimpl`.
+
+### Package setup
+
+Register your plugin via a setuptools entry point in `pyproject.toml`:
+
+```toml
+[project.entry-points.mng]
+my_plugin = "my_package.plugin_module"
+```
+
+The entry point name (here `my_plugin`) becomes your plugin's identity -- it appears in `mng plugin list` and is the name users pass to `mng plugin enable my_plugin`. The value points to any Python module containing your `@hookimpl` functions.
+
+### Hook implementations
+
+Decorate module-level functions with `@hookimpl` to implement hooks:
+
+```python
+from imbue.mng import hookimpl
+
+@hookimpl
+def on_after_provisioning(agent, host, mng_ctx):
+    # your logic here
+    ...
+```
+
+Hooks must be module-level functions (not methods on a class). The function name must match the hook name exactly. You only need to implement the hooks you care about.
+
+### Plugin configuration
+
+If your plugin needs user-configurable settings, define a config class and register it at import time:
+
+```python
+from pydantic import Field
+from imbue.mng.config.data_types import PluginConfig
+from imbue.mng.config.plugin_registry import register_plugin_config
+
+class MyPluginConfig(PluginConfig):
+    some_option: str = Field(default="default_value")
+
+    def merge_with(self, override: "PluginConfig") -> "MyPluginConfig":
+        if not isinstance(override, MyPluginConfig):
+            return self
+        return MyPluginConfig(
+            enabled=override.enabled if override.enabled is not None else self.enabled,
+            some_option=override.some_option if override.some_option is not None else self.some_option,
+        )
+
+# This MUST be at module level (not inside a hook) -- the config system
+# needs to know the class before it parses TOML files.
+register_plugin_config("my_plugin", MyPluginConfig)
+```
+
+The base `PluginConfig` provides an `enabled: bool` field automatically. Custom config classes must implement `merge_with()` so that config layering (user, project, profile) works correctly.
+
+Users configure your plugin in their TOML settings:
+
+```toml
+[plugins.my_plugin]
+enabled = true
+some_option = "custom_value"
+```
+
+To access your config at runtime, use `mng_ctx.get_plugin_config()`:
+
+```python
+config = mng_ctx.get_plugin_config("my_plugin", MyPluginConfig)
+# Returns MyPluginConfig with defaults if no config entry exists.
+# Raises ConfigParseError if the entry exists but has the wrong type.
+```
+
+### How hooks receive state
+
+Hooks receive context through their function arguments. The hookspecs define what each hook gets. There are three patterns:
+
+**Return value hooks** receive nothing and return data. Used by registration hooks:
+
+```python
+@hookimpl
+def register_cli_commands():
+    return [my_command]
+```
+
+**Mutable dict hooks** receive a dict and modify it in place. Used by `on_load_config`, `override_command_options`, and `modify_env_vars_for_deploy`:
+
+```python
+@hookimpl
+def override_command_options(command_name, command_class, params):
+    if command_name != "create":
+        return
+    existing = params.get("extra_window", ())
+    params["extra_window"] = (*existing, 'my_window="my-command"')
+```
+
+**Chained hooks** receive the previous hook's output and return a modified copy (or `None` to pass through). Used by `on_before_create`:
+
+```python
+@hookimpl
+def on_before_create(args):
+    # Return modified args, or None to pass through unchanged
+    return args.model_copy(update={"create_work_dir": False})
+```
+
+The `MngContext` object is the central state carrier. Hooks that receive it can access `mng_ctx.config` (the merged config), `mng_ctx.pm` (the plugin manager), and `mng_ctx.profile_dir` (user profile directory).
+
+### CLI commands
+
+To add a new top-level command to `mng`, implement `register_cli_commands` and follow the standard command pattern:
+
+```python
+# cli.py
+import click
+from imbue.mng.config.data_types import CommonCliOptions
+from imbue.mng.cli.common_opts import add_common_options
+from imbue.mng.cli.common_opts import setup_command_context
+from imbue.mng.cli.help_formatter import CommandHelpMetadata
+from imbue.mng.cli.help_formatter import add_pager_help_option
+
+
+class MyCommandOptions(CommonCliOptions):
+    my_arg: str | None
+
+
+@click.command()
+@click.argument("my_arg", default=None, required=False)
+@add_common_options
+@click.pass_context
+def my_command(ctx, **kwargs):
+    mng_ctx, output_opts, opts = setup_command_context(
+        ctx=ctx, command_name="my-command", command_class=MyCommandOptions,
+    )
+    # opts.my_arg is now typed and available
+    ...
+
+
+CommandHelpMetadata(
+    key="my-command",
+    one_line_description="Brief description of what this does",
+    synopsis="mng my-command [MY_ARG]",
+    description="Extended description.",
+).register()
+
+add_pager_help_option(my_command)
+```
+
+```python
+# plugin.py
+from imbue.mng import hookimpl
+from my_package.cli import my_command
+
+@hookimpl
+def register_cli_commands():
+    return [my_command]
+```
+
+### Extending existing commands
+
+Use `override_command_options` to modify the behavior of existing commands. Convention: always check `command_name` first and return early for commands you don't care about. When appending to tuple-valued params, preserve existing values:
+
+```python
+@hookimpl
+def override_command_options(command_name, command_class, params):
+    if command_name != "create":
+        return
+    existing = params.get("env", ())
+    params["env"] = (*existing, "MY_VAR=1")
+```
+
+To add visible CLI options to existing commands (so they appear in `--help`), implement `register_cli_options`.
+
+### Error handling
+
+Raise `MngError` (from `imbue.mng.errors`) for operational errors that should abort the current command with a user-facing message. Lifecycle hooks that can abort operations (like `on_before_host_create`) do so by raising exceptions.
+
+### Cross-plugin dependencies
+
+If your plugin depends on another plugin, declare it as a standard Python package dependency. You can then import from that plugin's modules directly.
 
 ## Built-in Plugins
 
@@ -173,6 +353,15 @@ Utility plugins [future] for additional features:
 - **chat_history**: Persistent, globally accessible chat history
 
 These are enabled by default but can be disabled like any other plugin.
+
+## Per-Agent Plugin Data
+
+Plugins can store per-agent data under `$MNG_AGENT_STATE_DIR/plugin/<plugin_name>/`. Use the agent interface methods:
+
+- `agent.get_reported_plugin_file(plugin_name, filename)` -- read a file
+- `agent.set_reported_plugin_file(plugin_name, filename, data)` -- write a file
+- `agent.list_reported_plugin_files(plugin_name)` -- list files
+- `agent.get_plugin_data(plugin_name)` / `agent.set_plugin_data(plugin_name, data)` -- read/write structured JSON stored in the agent's `data.json`
 
 ## Plugin Dependencies
 

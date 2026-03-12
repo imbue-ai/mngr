@@ -14,8 +14,8 @@ from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
-from imbue.mng.api.list import _agent_details_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
@@ -23,7 +23,6 @@ from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import CpuResources
 from imbue.mng.interfaces.data_types import HostDetails
 from imbue.mng.interfaces.data_types import HostResources
-from imbue.mng.interfaces.data_types import SSHInfo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
@@ -33,6 +32,7 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.utils.cel_utils import compile_cel_filters
 from imbue.mng.utils.testing import create_test_agent_via_cli
 from imbue.mng.utils.testing import tmux_session_cleanup
@@ -111,7 +111,7 @@ def test_list_result_defaults_to_empty_lists() -> None:
 
 
 def test_agent_details_to_cel_context_basic_fields() -> None:
-    """Test that _agent_details_to_cel_context converts basic AgentDetails fields."""
+    """Test that agent_details_to_cel_context converts basic AgentDetails fields."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -123,13 +123,14 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["resource_type"] == "agent"
     assert context["type"] == "claude"
@@ -140,7 +141,7 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
 
 
 def test_agent_details_to_cel_context_with_runtime() -> None:
-    """Test that _agent_details_to_cel_context includes runtime when available."""
+    """Test that agent_details_to_cel_context includes runtime when available."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -152,6 +153,7 @@ def test_agent_details_to_cel_context_with_runtime() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch=None,
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -159,13 +161,13 @@ def test_agent_details_to_cel_context_with_runtime() -> None:
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["runtime"] == 123.45
 
 
 def test_agent_details_to_cel_context_with_activity_time() -> None:
-    """Test that _agent_details_to_cel_context computes idle from activity times."""
+    """Test that agent_details_to_cel_context computes idle from activity times."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -178,6 +180,7 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="feature/custom-branch",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -185,7 +188,7 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     # Idle should be computed and be very small (just computed)
     assert "idle" in context
@@ -193,7 +196,7 @@ def test_agent_details_to_cel_context_with_activity_time() -> None:
 
 
 def test_agent_details_to_cel_context_with_state() -> None:
-    """Test that _agent_details_to_cel_context flattens state enum to lowercase string."""
+    """Test that agent_details_to_cel_context flattens state enum to lowercase string."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -205,13 +208,14 @@ def test_agent_details_to_cel_context_with_state() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.STOPPED,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["state"] == AgentLifecycleState.STOPPED.value
 
@@ -229,6 +233,7 @@ def test_apply_cel_filters_with_include_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -258,6 +263,7 @@ def test_apply_cel_filters_with_non_matching_include() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -287,6 +293,7 @@ def test_apply_cel_filters_with_exclude_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -316,6 +323,7 @@ def test_apply_cel_filters_with_state_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -345,6 +353,7 @@ def test_apply_cel_filters_with_host_provider_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -506,7 +515,7 @@ def test_list_agents_with_error_behavior_continue(
 
 
 def test_agent_details_to_cel_context_with_host_state() -> None:
-    """Test that _agent_details_to_cel_context includes host.state field."""
+    """Test that agent_details_to_cel_context includes host.state field."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -519,19 +528,20 @@ def test_agent_details_to_cel_context_with_host_state() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["state"] == HostState.RUNNING.value
 
 
 def test_agent_details_to_cel_context_with_host_resources() -> None:
-    """Test that _agent_details_to_cel_context includes host.resource fields."""
+    """Test that agent_details_to_cel_context includes host.resource fields."""
     resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
     host_details = HostDetails(
         id=HostId.generate(),
@@ -545,20 +555,21 @@ def test_agent_details_to_cel_context_with_host_resources() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["resource"]["memory_gb"] == 16.0
     assert context["host"]["resource"]["disk_gb"] == 100.0
 
 
 def test_agent_details_to_cel_context_with_host_ssh() -> None:
-    """Test that _agent_details_to_cel_context includes host.ssh fields."""
+    """Test that agent_details_to_cel_context includes host.ssh fields."""
     ssh_info = SSHInfo(
         user="root",
         host="example.com",
@@ -578,13 +589,14 @@ def test_agent_details_to_cel_context_with_host_ssh() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["ssh"]["user"] == "root"
     assert context["host"]["ssh"]["host"] == "example.com"
@@ -605,6 +617,7 @@ def test_apply_cel_filters_with_host_state_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -636,6 +649,7 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -653,7 +667,7 @@ def test_apply_cel_filters_with_host_resource_filter() -> None:
 
 
 def test_agent_details_to_cel_context_with_host_lock_fields() -> None:
-    """Test that _agent_details_to_cel_context includes host.is_locked and host.locked_time fields."""
+    """Test that agent_details_to_cel_context includes host.is_locked and host.locked_time fields."""
     lock_time = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
     host_details = HostDetails(
         id=HostId.generate(),
@@ -668,20 +682,21 @@ def test_agent_details_to_cel_context_with_host_lock_fields() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["is_locked"] is True
     assert context["host"]["locked_time"] is not None
 
 
 def test_agent_details_to_cel_context_with_host_not_locked() -> None:
-    """Test that _agent_details_to_cel_context includes is_locked=False when no lock file exists."""
+    """Test that agent_details_to_cel_context includes is_locked=False when no lock file exists."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -695,13 +710,14 @@ def test_agent_details_to_cel_context_with_host_not_locked() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["host"]["is_locked"] is False
     assert context["host"]["locked_time"] is None
@@ -722,6 +738,7 @@ def test_apply_cel_filters_with_host_is_locked_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -753,6 +770,7 @@ def test_apply_cel_filters_with_host_uptime_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -784,6 +802,7 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -806,7 +825,7 @@ def test_apply_cel_filters_with_host_tags_filter() -> None:
 
 
 def test_agent_details_to_cel_context_with_idle_mode() -> None:
-    """Test that _agent_details_to_cel_context includes idle_mode field."""
+    """Test that agent_details_to_cel_context includes idle_mode field."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -818,6 +837,7 @@ def test_agent_details_to_cel_context_with_idle_mode() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -825,13 +845,13 @@ def test_agent_details_to_cel_context_with_idle_mode() -> None:
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["idle_mode"] == IdleMode.AGENT.value
 
 
 def test_agent_details_to_cel_context_with_idle_seconds() -> None:
-    """Test that _agent_details_to_cel_context includes idle_seconds field."""
+    """Test that agent_details_to_cel_context includes idle_seconds field."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -843,6 +863,7 @@ def test_agent_details_to_cel_context_with_idle_seconds() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -850,7 +871,7 @@ def test_agent_details_to_cel_context_with_idle_seconds() -> None:
         host=host_details,
     )
 
-    context = _agent_details_to_cel_context(agent_details)
+    context = agent_details_to_cel_context(agent_details)
 
     assert context["idle_seconds"] == 300.5
 
@@ -868,6 +889,7 @@ def test_apply_cel_filters_with_idle_mode_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -898,6 +920,7 @@ def test_apply_cel_filters_with_idle_seconds_filter() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work/dir"),
+        initial_branch="mng/test-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,

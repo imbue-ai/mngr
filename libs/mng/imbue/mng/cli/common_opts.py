@@ -17,10 +17,10 @@ from click_option_group import optgroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -45,38 +45,11 @@ TDecorated = TypeVar("TDecorated", bound=Callable[..., Any])
 TCommand = TypeVar("TCommand", bound=click.Command)
 
 
-class CommonCliOptions(FrozenModel):
-    """Base class for common CLI options shared across all commands.
-
-    This captures the options added by the @add_common_options decorator.
-    All command-specific option classes should inherit from this class.
-
-    Note that this class VERY INTENTIONALLY DOES NOT use Field() decorators with descriptions, defaults, etc.
-    For that information, see the @add_common_options decorator and its click.option() decorators.
-    """
-
-    headless: bool = False
-    output_format: str
-    json_flag: bool = False
-    jsonl_flag: bool = False
-    quiet: bool
-    verbose: int
-    log_file: str | None
-    log_commands: bool | None
-    log_command_output: bool | None
-    log_env_vars: bool | None
-    project_context_path: str | None
-    plugin: tuple[str, ...]
-    disable_plugin: tuple[str, ...]
-
-
 def add_common_options(command: TDecorated) -> TDecorated:
     """Decorator to add common options to a command.
 
     Adds the following options in the "Common" option group:
     - --format: Output format (human/json/jsonl, or a template string)
-    - --json: Alias for --format json
-    - --jsonl: Alias for --format jsonl
     - -q, --quiet: Suppress console output
     - -v, --verbose: Increase verbosity
     - --log-file: Override log file path
@@ -126,25 +99,11 @@ def add_common_options(command: TDecorated) -> TDecorated:
     )(command)
     command = optgroup.option("-q", "--quiet", is_flag=True, help="Suppress all console output")(command)
     command = optgroup.option(
-        "--jsonl",
-        "jsonl_flag",
-        is_flag=True,
-        default=False,
-        help="Alias for --format jsonl",
-    )(command)
-    command = optgroup.option(
-        "--json",
-        "json_flag",
-        is_flag=True,
-        default=False,
-        help="Alias for --format json",
-    )(command)
-    command = optgroup.option(
         "--format",
         "output_format",
         default="human",
         show_default=True,
-        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided [experimental], fields use standard python templating like 'name: {agent.name}' See below for available fields.",
+        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields.",
     )(command)
     # Start the "Common" option group - applied last since decorators run in reverse order
     command = optgroup.group(COMMON_OPTIONS_GROUP_NAME)(command)
@@ -234,12 +193,9 @@ def setup_command_context(
     # Re-create options with config defaults applied
     opts = command_class(**known_updated_params)
 
-    # Resolve --json / --jsonl flags into output_format before parsing output options.
-    effective_format = _resolve_format_flags(ctx, opts)
-
     # Parse output options and resolve logging config with CLI overrides applied.
     output_opts, resolved_logging_config = parse_output_options(
-        output_format=effective_format,
+        output_format=opts.output_format,
         quiet=opts.quiet,
         verbose=opts.verbose,
         log_file=opts.log_file,
@@ -285,26 +241,6 @@ def setup_command_context(
     pm.hook.on_before_command(command_name=command_name, command_params=updated_params)
 
     return mng_ctx, output_opts, opts
-
-
-def _resolve_format_flags(ctx: click.Context, opts: CommonCliOptions) -> str:
-    """Resolve --json / --jsonl convenience flags into a single format string.
-
-    Validates mutual exclusivity: --json and --jsonl cannot be used together,
-    and neither can be combined with an explicit --format value.
-    """
-    if opts.json_flag and opts.jsonl_flag:
-        raise click.UsageError("--json and --jsonl are mutually exclusive")
-
-    if opts.json_flag or opts.jsonl_flag:
-        format_source = ctx.get_parameter_source("output_format")
-        is_format_explicit = format_source is not None and format_source != ParameterSource.DEFAULT
-        if is_format_explicit:
-            flag_name = "--json" if opts.json_flag else "--jsonl"
-            raise click.UsageError(f"{flag_name} is mutually exclusive with --format")
-        return "json" if opts.json_flag else "jsonl"
-
-    return opts.output_format
 
 
 def parse_output_options(

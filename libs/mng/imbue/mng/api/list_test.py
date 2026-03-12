@@ -5,19 +5,24 @@ from datetime import timedelta
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
+import pluggy
 import pytest
 from loguru import logger
 
+from imbue.mng import hookimpl
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
+from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import AgentErrorInfo
 from imbue.mng.api.list import ErrorInfo
 from imbue.mng.api.list import HostErrorInfo
 from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import ProviderErrorInfo
-from imbue.mng.api.list import _agent_details_to_cel_context
 from imbue.mng.api.list import _apply_cel_filters
+from imbue.mng.api.list import _maybe_write_full_discovery_snapshot
+from imbue.mng.api.list import agent_details_to_cel_context
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.hosts.host import Host
@@ -56,6 +61,7 @@ def _make_agent_details(name: str, host_details: HostDetails) -> AgentDetails:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work"),
+        initial_branch=f"mng/{name}",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
@@ -267,15 +273,15 @@ def test_list_result_allows_appending() -> None:
 
 
 # =============================================================================
-# _agent_details_to_cel_context Tests
+# agent_details_to_cel_context Tests
 # =============================================================================
 
 
 def test_agent_details_to_cel_context_basic_fields() -> None:
-    """_agent_details_to_cel_context should convert AgentDetails to a dict with basic fields."""
+    """agent_details_to_cel_context should convert AgentDetails to a dict with basic fields."""
     host_details = _make_host_details()
     agent = _make_agent_details("my-agent", host_details)
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
 
     assert context["name"] == "my-agent"
     assert context["type"] == "claude"
@@ -284,7 +290,7 @@ def test_agent_details_to_cel_context_basic_fields() -> None:
 
 
 def test_agent_details_to_cel_context_computes_age() -> None:
-    """_agent_details_to_cel_context should compute 'age' from create_time."""
+    """agent_details_to_cel_context should compute 'age' from create_time."""
     host_details = _make_host_details()
     create_time = datetime.now(timezone.utc) - timedelta(hours=2)
     agent = AgentDetails(
@@ -293,12 +299,13 @@ def test_agent_details_to_cel_context_computes_age() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work"),
+        initial_branch=None,
         create_time=create_time,
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         host=host_details,
     )
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
 
     assert "age" in context
     # Age should be approximately 7200 seconds (2 hours), with some tolerance
@@ -307,7 +314,7 @@ def test_agent_details_to_cel_context_computes_age() -> None:
 
 
 def test_agent_details_to_cel_context_computes_runtime() -> None:
-    """_agent_details_to_cel_context should set 'runtime' from runtime_seconds."""
+    """agent_details_to_cel_context should set 'runtime' from runtime_seconds."""
     host_details = _make_host_details()
     agent = AgentDetails(
         id=AgentId.generate(),
@@ -315,19 +322,20 @@ def test_agent_details_to_cel_context_computes_runtime() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work"),
+        initial_branch="feature/custom-work",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         runtime_seconds=3600.0,
         host=host_details,
     )
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
 
     assert context["runtime"] == 3600.0
 
 
 def test_agent_details_to_cel_context_computes_idle() -> None:
-    """_agent_details_to_cel_context should compute 'idle' from activity times."""
+    """agent_details_to_cel_context should compute 'idle' from activity times."""
     host_details = _make_host_details()
     activity_time = datetime.now(timezone.utc) - timedelta(minutes=5)
     agent = AgentDetails(
@@ -336,13 +344,14 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
         type="claude",
         command=CommandString("sleep 100"),
         work_dir=Path("/work"),
+        initial_branch="mng/idle-agent",
         create_time=datetime.now(timezone.utc),
         start_on_boot=False,
         state=AgentLifecycleState.RUNNING,
         user_activity_time=activity_time,
         host=host_details,
     )
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
 
     assert "idle" in context
     # Idle should be approximately 300 seconds (5 minutes)
@@ -351,14 +360,14 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
 
 
 def test_agent_details_to_cel_context_normalizes_host_provider() -> None:
-    """_agent_details_to_cel_context should rename host.provider_name to host.provider."""
+    """agent_details_to_cel_context should rename host.provider_name to host.provider."""
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
         provider_name=ProviderInstanceName("modal"),
     )
     agent = _make_agent_details("test-agent", host_details)
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
 
     assert "host" in context
     host = context["host"]
@@ -410,6 +419,99 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
     host_details = _make_host_details()
     agent = _make_agent_details("any-agent", host_details)
     assert _apply_cel_filters(agent, [], []) is True
+
+
+# =============================================================================
+# _maybe_write_full_discovery_snapshot Tests
+# =============================================================================
+
+
+def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_free(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("snapshot-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_FULL" in content
+    assert "snapshot-agent" in content
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("error-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+    result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when provider_names is set."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("filtered-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=("local",),
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_skips_when_include_filters_set(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_maybe_write_full_discovery_snapshot does not write when include_filters are set."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("include-filtered-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+
+    _maybe_write_full_discovery_snapshot(
+        mng_ctx=temp_mng_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=('name == "include-filtered-agent"',),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mng_ctx.config)
+    assert not events_path.exists()
 
 
 # =============================================================================
@@ -561,6 +663,182 @@ def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
     assert isinstance(providers, list)
     # At least the local provider should be present
     assert len(providers) > 0
+
+
+# =============================================================================
+# agent_field_generators integration tests
+# =============================================================================
+
+
+class _FieldGeneratorPlugin:
+    """Test plugin that registers field generators for agent listing."""
+
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
+        self._plugin_name = plugin_name
+        self._generators = generators
+
+    @hookimpl
+    def agent_field_generators(self) -> tuple[str, dict[str, Any]] | None:
+        return (self._plugin_name, self._generators)
+
+
+class _NoneFieldGeneratorPlugin:
+    """Test plugin that returns None from agent_field_generators."""
+
+    @hookimpl
+    def agent_field_generators(self) -> None:
+        return None
+
+
+def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
+    """Find an agent by name in a ListResult, or raise."""
+    for agent in result.agents:
+        if str(agent.name) == name:
+            return agent
+    found = [str(a.name) for a in result.agents]
+    raise AssertionError(f"Agent {name!r} not found in results: {found}")
+
+
+@pytest.mark.tmux
+def test_field_generators_populate_plugin_data(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should populate plugin data from registered field generators."""
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "status": lambda a, h: "active",
+                "score": lambda a, h: 42,
+            },
+        )
+    )
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847310"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-test")
+    assert details.plugin["test_plugin"] == {"status": "active", "score": 42}
+
+
+@pytest.mark.tmux
+def test_field_generators_omit_none_values(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should omit fields where the generator returns None."""
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "present": lambda a, h: "yes",
+                "absent": lambda a, h: None,
+            },
+        )
+    )
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-none"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847311"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-none")
+    assert details.plugin["test_plugin"] == {"present": "yes"}
+
+
+@pytest.mark.tmux
+def test_field_generators_multiple_plugins(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should collect fields from multiple plugin generators."""
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_a", {"version": lambda a, h: "1.0"}))
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_b", {"count": lambda a, h: 5}))
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-multi"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847312"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-multi")
+    assert details.plugin["plugin_a"] == {"version": "1.0"}
+    assert details.plugin["plugin_b"] == {"count": 5}
+
+
+@pytest.mark.tmux
+def test_field_generators_none_plugin_is_skipped(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should skip plugins that return None from agent_field_generators."""
+    plugin_manager.register(_NoneFieldGeneratorPlugin())
+    plugin_manager.register(_FieldGeneratorPlugin("real_plugin", {"value": lambda a, h: "present"}))
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-skip-none"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847313"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-skip-none")
+    assert details.plugin["real_plugin"] == {"value": "present"}
+    assert "none_plugin" not in details.plugin
+
+
+def test_no_field_generators_produces_empty_plugin(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """list_agents with no field generator plugins should leave plugin={} on all agents."""
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    for agent in result.agents:
+        assert agent.plugin == {}
+
+
+# =============================================================================
+# discover_all_hosts_and_agents Tests
+# =============================================================================
 
 
 @pytest.mark.tmux

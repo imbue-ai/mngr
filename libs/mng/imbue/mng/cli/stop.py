@@ -5,10 +5,10 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_provider_instance
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.destroy import get_agent_name_from_session
@@ -18,6 +18,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import HostOfflineError
 from imbue.mng.errors import UserInputError
@@ -221,6 +222,9 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                 for m in agent_list:
                     stopped_agents.append(str(m.agent_name))
                     _output(f"Stopped agent: {m.agent_name}", output_opts)
+
+                # Emit discovery events for stopped agents and host
+                emit_discovery_events_for_host(mng_ctx.config, online_host)
             case HostInterface():
                 raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
             case _ as unreachable:

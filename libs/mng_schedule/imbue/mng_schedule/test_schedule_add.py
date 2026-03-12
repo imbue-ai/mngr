@@ -186,7 +186,7 @@ def test_schedule_list_shows_deployed_schedule() -> None:
 
         # List schedules and verify the deployed schedule appears
         list_result = subprocess.run(
-            ["uv", "run", "mng", "schedule", "list", "--provider", "modal", "--json"],
+            ["uv", "run", "mng", "schedule", "list", "--provider", "modal", "--format", "json"],
             capture_output=True,
             text=True,
             timeout=60,

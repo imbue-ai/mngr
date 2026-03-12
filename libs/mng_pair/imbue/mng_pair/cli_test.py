@@ -1,8 +1,15 @@
 """Unit tests for the pair CLI command."""
 
+from pathlib import Path
+
+import pytest
 from click.testing import CliRunner
 
+from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.primitives import OutputFormat
 from imbue.mng_pair.cli import PairCliOptions
+from imbue.mng_pair.cli import _emit_pair_started
+from imbue.mng_pair.cli import _emit_pair_stopped
 from imbue.mng_pair.cli import pair
 
 
@@ -46,7 +53,6 @@ def test_pair_sync_direction_choices() -> None:
     runner = CliRunner()
     result = runner.invoke(pair, ["--help"])
     assert result.exit_code == 0
-    # The help should show the valid choices
     assert "both" in result.output.lower() or "source" in result.output.lower()
 
 
@@ -55,7 +61,6 @@ def test_pair_conflict_choices() -> None:
     runner = CliRunner()
     result = runner.invoke(pair, ["--help"])
     assert result.exit_code == 0
-    # The help should mention conflict resolution
     assert "conflict" in result.output.lower()
 
 
@@ -64,5 +69,31 @@ def test_pair_uncommitted_changes_choices() -> None:
     runner = CliRunner()
     result = runner.invoke(pair, ["--help"])
     assert result.exit_code == 0
-    # The help should mention uncommitted changes handling
     assert "uncommitted" in result.output.lower()
+
+
+@pytest.mark.parametrize("output_format", [OutputFormat.HUMAN, OutputFormat.JSON, OutputFormat.JSONL])
+def test_emit_pair_started_exercises_all_format_branches(
+    output_format: OutputFormat,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """_emit_pair_started should handle all output formats without error."""
+    output_opts = OutputOptions(output_format=output_format)
+    _emit_pair_started(Path("/src"), Path("/dst"), output_opts)
+    captured = capsys.readouterr()
+    if output_format == OutputFormat.HUMAN:
+        assert "/src" in captured.out
+        assert "/dst" in captured.out
+
+
+@pytest.mark.parametrize("output_format", [OutputFormat.HUMAN, OutputFormat.JSON, OutputFormat.JSONL])
+def test_emit_pair_stopped_exercises_all_format_branches(
+    output_format: OutputFormat,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """_emit_pair_stopped should handle all output formats without error."""
+    output_opts = OutputOptions(output_format=output_format)
+    _emit_pair_stopped(output_opts)
+    captured = capsys.readouterr()
+    if output_format == OutputFormat.HUMAN:
+        assert "stopped" in captured.out.lower()

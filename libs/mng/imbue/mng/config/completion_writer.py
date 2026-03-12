@@ -1,7 +1,5 @@
 import json
 import os
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -12,7 +10,6 @@ from imbue.mng.config.host_dir import read_default_host_dir
 from imbue.mng.utils.click_utils import detect_alias_to_canonical
 from imbue.mng.utils.file_utils import atomic_write
 
-AGENT_COMPLETIONS_CACHE_FILENAME: Final[str] = ".agent_completions.json"
 COMMAND_COMPLETIONS_CACHE_FILENAME: Final[str] = ".command_completions.json"
 
 
@@ -60,6 +57,15 @@ _AGENT_NAME_SUBCOMMANDS: Final[frozenset[str]] = frozenset(
         "snapshot.create",
         "snapshot.destroy",
         "snapshot.list",
+    }
+)
+
+# Options (keyed as "command.--option") whose values should complete against
+# git branch names. The lightweight completer reads this field to decide when
+# to offer git branch completions.
+_GIT_BRANCH_OPTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "create.--branch",
     }
 )
 
@@ -177,6 +183,13 @@ def write_cli_completions_cache(cli_group: click.Group) -> None:
             if group_name in canonical_names:
                 agent_name_args = agent_name_args | {sub_key}
 
+        # Include git branch options for commands that are actually registered
+        git_branch_opts: set[str] = set()
+        for opt_key in _GIT_BRANCH_OPTIONS:
+            cmd_name = opt_key.split(".")[0]
+            if cmd_name in canonical_names:
+                git_branch_opts.add(opt_key)
+
         cache_data: dict[str, object] = {
             "commands": all_command_names,
             "aliases": alias_to_canonical,
@@ -185,58 +198,10 @@ def write_cli_completions_cache(cli_group: click.Group) -> None:
             "flag_options_by_command": flag_options_by_command,
             "option_choices": option_choices,
             "agent_name_arguments": sorted(agent_name_args),
+            "git_branch_options": sorted(git_branch_opts),
         }
 
         cache_path = get_completion_cache_dir() / COMMAND_COMPLETIONS_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data))
     except OSError:
         logger.debug("Failed to write CLI completions cache")
-
-
-def write_agent_names_cache(cache_dir: Path, agent_names: list[str]) -> None:
-    """Write agent names to the completion cache file (best-effort).
-
-    Writes a JSON file with agent names so that shell completion can read it
-    without importing the mng config system. The cache file is written to
-    {cache_dir}/.agent_completions.json.
-
-    Catches OSError from cache writes so filesystem failures do not break
-    the caller. Other exceptions are allowed to propagate.
-    """
-    try:
-        cache_data = {
-            "names": sorted(set(agent_names)),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        cache_path = cache_dir / AGENT_COMPLETIONS_CACHE_FILENAME
-        atomic_write(cache_path, json.dumps(cache_data))
-    except OSError:
-        logger.debug("Failed to write agent name completion cache")
-
-
-def add_agent_name_to_cache(agent_name: str) -> None:
-    """Add a single agent name to the completion cache (best-effort).
-
-    Reads the existing agent completions cache, appends the new name if not
-    already present, and writes the updated cache back. This avoids a full
-    provider query just to update completions after creating a single agent.
-
-    The cache is eventually consistent: the next background refresh will
-    reconcile the full list from all providers.
-
-    Catches OSError and json.JSONDecodeError so failures do not break the
-    caller.
-    """
-    try:
-        cache_dir = get_completion_cache_dir()
-        cache_path = cache_dir / AGENT_COMPLETIONS_CACHE_FILENAME
-        if not cache_path.is_file():
-            write_agent_names_cache(cache_dir, [agent_name])
-            return
-
-        data = json.loads(cache_path.read_text())
-        existing_names: list[str] = data.get("names", [])
-        write_agent_names_cache(cache_dir, existing_names + [agent_name])
-    except (OSError, json.JSONDecodeError):
-        logger.debug("Failed to add agent name to completion cache")

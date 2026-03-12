@@ -9,10 +9,6 @@ from typing import Any
 
 from loguru import logger
 from pydantic import Field
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
@@ -23,11 +19,13 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
+from imbue.mng.api.discovery_events import emit_host_ssh_info
+from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_listing
+from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.api.providers import get_all_provider_instances
-from imbue.mng.config.completion_writer import get_completion_cache_dir
-from imbue.mng.config.completion_writer import write_agent_names_cache
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
+from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import MngError
@@ -37,7 +35,6 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import HostDetails
-from imbue.mng.interfaces.data_types import SSHInfo
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
@@ -51,6 +48,7 @@ from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SSHInfo
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mng.utils.cel_utils import compile_cel_filters
@@ -132,6 +130,9 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
+        default_factory=dict,
+    )
 
 
 @log_call
@@ -166,12 +167,20 @@ def list_agents(
 
     try:
         results_lock = Lock()
+
+        field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
+        for hook_result in mng_ctx.pm.hook.agent_field_generators():
+            if hook_result is not None:
+                plugin_name, generators = hook_result
+                field_generators[plugin_name] = generators
+
         params = _ListAgentsParams(
             compiled_include_filters=compiled_include_filters,
             compiled_exclude_filters=compiled_exclude_filters,
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            field_generators=field_generators,
         )
 
         if is_streaming:
@@ -203,10 +212,37 @@ def list_agents(
         if on_error:
             on_error(error_info)
 
-    agent_names = [str(agent.name) for agent in result.agents]
-    write_agent_names_cache(get_completion_cache_dir(), agent_names)
-
+    _maybe_write_full_discovery_snapshot(mng_ctx, result, provider_names, include_filters, exclude_filters)
     return result
+
+
+def _maybe_write_full_discovery_snapshot(
+    mng_ctx: MngContext,
+    result: ListResult,
+    provider_names: tuple[str, ...] | None,
+    include_filters: tuple[str, ...],
+    exclude_filters: tuple[str, ...],
+) -> None:
+    """Write a full discovery snapshot when this listing represents all known agents.
+
+    A snapshot is written only when the listing is complete and error-free:
+    - All providers were queried (no provider_names filter)
+    - No CEL filters were applied (the result contains every agent)
+    - No errors occurred during listing (otherwise we may be missing agents)
+    """
+    is_full_listing = provider_names is None and not include_filters and not exclude_filters
+    if not is_full_listing:
+        return
+    if result.errors:
+        logger.trace("Skipping full discovery snapshot: {} error(s) during listing", len(result.errors))
+        return
+    try:
+        discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
+        write_full_discovery_snapshot(mng_ctx.config, discovered_agents, discovered_hosts)
+        for host_id, ssh_info in host_ssh_infos:
+            emit_host_ssh_info(mng_ctx.config, host_id, ssh_info)
+    except (MngError, OSError) as e:
+        logger.warning("Failed to write full discovery snapshot: {}", e)
 
 
 def _list_agents_batch(
@@ -364,7 +400,7 @@ def _build_host_details_from_host(
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, Host):
-        ssh_connection = host._get_ssh_connection_info()
+        ssh_connection = host.get_ssh_connection_info()
         if ssh_connection is not None:
             user, hostname, port, key_path = ssh_connection
             ssh_info = SSHInfo(
@@ -422,6 +458,7 @@ def _build_agent_details_from_online_agent(
     host_details: HostDetails,
     host: OnlineHostInterface,
     ssh_activity: datetime | None,
+    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
 ) -> AgentDetails:
     """Build AgentDetails from a live agent on an online host."""
     # Get activity config from host
@@ -441,12 +478,24 @@ def _build_agent_details_from_online_agent(
     # idle_seconds: include host-level ssh_activity; 0.0 if no activity yet
     idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
 
+    # Compute plugin-specific fields from field generators
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, generator in generators.items():
+            value = generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
+
     return AgentDetails(
         id=agent.id,
         name=agent.name,
         type=str(agent.agent_type),
         command=agent.get_command(),
         work_dir=agent.work_dir,
+        initial_branch=agent.get_created_branch_name(),
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
         state=agent.get_lifecycle_state(),
@@ -461,7 +510,7 @@ def _build_agent_details_from_online_agent(
         activity_sources=tuple(s.value for s in activity_config.activity_sources),
         labels=agent.get_labels(),
         host=host_details,
-        plugin={},
+        plugin=plugin_data,
     )
 
 
@@ -477,6 +526,7 @@ def _build_agent_details_from_offline_ref(
         type=str(agent_ref.agent_type) if agent_ref.agent_type else "unknown",
         command=agent_ref.command or CommandString(""),
         work_dir=agent_ref.work_dir or Path("/"),
+        initial_branch=agent_ref.created_branch_name,
         create_time=create_time,
         start_on_boot=agent_ref.start_on_boot,
         state=AgentLifecycleState.STOPPED,
@@ -493,13 +543,6 @@ def _build_agent_details_from_offline_ref(
     )
 
 
-# retry exactly once if there is a HostConnectionError (hopefully we then simply load the offline version of the host)
-@retry(
-    retry=retry_if_exception_type(HostConnectionError),
-    stop=stop_after_attempt(2),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    reraise=True,
-)
 def _collect_and_emit_details_for_host(
     host_ref: DiscoveredHost,
     agent_refs: list[DiscoveredAgent],
@@ -529,9 +572,10 @@ def _collect_and_emit_details_for_host(
 
         # Fall back to per-field collection
         host = provider.get_host(host_ref.host_id)
-    except HostAuthenticationError:
+    except HostConnectionError as e:
+        logger.debug("Host {} unreachable, falling back to offline data: {}", host_ref.host_id, e)
         host = provider.to_offline_host(host_ref.host_id)
-        is_authentication_failure = True
+        is_authentication_failure = isinstance(e, HostAuthenticationError)
 
     # Build host details
     host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
@@ -560,7 +604,9 @@ def _collect_and_emit_details_for_host(
                         params.on_error(error_info)
                     continue
 
-                agent_details = _build_agent_details_from_online_agent(agent, host_details, host, ssh_activity)
+                agent_details = _build_agent_details_from_online_agent(
+                    agent, host_details, host, ssh_activity, params.field_generators
+                )
 
             # if this host is offline, or if we failed to get the online host (ex: because it went offline)
             if agents is None or agent_details is None:
@@ -611,7 +657,7 @@ def _process_host_with_error_handling(
             results_lock,
         )
 
-    except MngError as e:
+    except (MngError, BaseMngError) as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             raise
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
@@ -622,7 +668,7 @@ def _process_host_with_error_handling(
 
 
 @pure
-def _agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
+def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     """Convert an AgentDetails object to a CEL-friendly dict.
 
     Converts the agent into a flat dictionary suitable for CEL evaluation,
@@ -676,7 +722,7 @@ def _apply_cel_filters(
     Returns True if the agent should be included (matches all include filters
     and doesn't match any exclude filters).
     """
-    context = _agent_details_to_cel_context(agent)
+    context = agent_details_to_cel_context(agent)
     return apply_cel_filters_to_context(
         context=context,
         include_filters=include_filters,

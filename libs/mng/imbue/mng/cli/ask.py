@@ -16,7 +16,6 @@ from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -26,6 +25,7 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.errors import MngError
 from imbue.mng.primitives import OutputFormat
 
@@ -37,18 +37,19 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I create a container on modal with custom packages installed by default?\n"
     "response: Simply run:\n"
-    '    mng create --in modal --build-arg "--file path/to/Dockerfile"\n'
+    '    mng create @.modal -b "--file path/to/Dockerfile"\n'
     "If you don't have a Dockerfile for your project, run:\n"
     "    mng bootstrap\n"
     "from the repo where you would like a Dockerfile created.\n\n"
     #
     "user: How do I spin up 5 agents on the cloud?\n"
-    "response: mng create -n 5 --in modal\n\n"
+    "response: mng create --provider modal\n"
+    "Run the command 5 times (once per agent). Each will get a unique auto-generated name.\n\n"
     #
     "user: How do I run multiple agents on the same cloud machine to save costs?\n"
     "response: Create them on a shared host:\n"
-    "    mng create agent-1 --in modal --host shared-host\n"
-    "    mng create agent-2 --in modal --host shared-host\n\n"
+    "    mng create agent-1@shared-host.modal --new-host\n"
+    "    mng create agent-2@shared-host\n\n"
     #
     "user: How do I launch an agent with a task without connecting to it?\n"
     'response: mng create --no-connect -m "fix all failing tests and commit"\n\n'
@@ -78,15 +79,15 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I destroy all my agents?\n"
     "response: mng destroy --all --force\n\n"
     #
-    "user: How do I create an agent with environment secrets and GitHub SSH access?\n"
-    "response: mng create --env-file .env.secrets --known-host github.com\n\n"
+    "user: How do I create an agent with environment secrets?\n"
+    "response: mng create --env-file .env.secrets\n\n"
     #
     "user: How do I create an agent from a saved template?\n"
     "response: mng create --template gpu-heavy\n\n"
     #
     "user: How do I run a test watcher alongside my agent?\n"
-    "response: Use --add-command to open an extra tmux window:\n"
-    '    mng create --add-command "watch -n5 pytest"\n\n'
+    "response: Use --extra-window (or -w) to open an extra tmux window:\n"
+    '    mng create -w "watch -n5 pytest"\n\n'
     #
     "user: How do I get a list of running agent names as JSON?\n"
     "response: mng list --running --format json\n\n"
@@ -94,21 +95,39 @@ _QUERY_PREFIX: Final[str] = (
     "user: How do I watch agent status in real time?\n"
     "response: mng list --watch 5\n\n"
     #
+    "user: How do I list all agents that are running or waiting?\n"
+    "response: Use a CEL filter on the `state` field:\n"
+    '    mng list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    #
+    "user: How do I list agents whose name contains 'prod'?\n"
+    "response: mng list --include 'name.contains(\"prod\")'\n\n"
+    #
+    "user: How do I find agents that have been idle for more than an hour?\n"
+    "response: mng list --include 'idle_seconds > 3600'\n\n"
+    #
+    "user: How do I list running agents on Modal?\n"
+    'response: mng list --include \'state == "RUNNING" && host.provider == "modal"\'\n'
+    "To include agents that are waiting for input, add WAITING:\n"
+    '    mng list --include \'(state == "RUNNING" || state == "WAITING") && host.provider == "modal"\'\n\n'
+    #
+    "user: How do I list agents for the mng project?\n"
+    "response: mng list --include 'labels.project == \"mng\"'\n\n"
+    #
     "user: How do I message only agents with a specific tag?\n"
     "response: Use a CEL filter:\n"
     '    mng message --include \'tags.feature == "auth"\' -m "run the auth test suite"\n\n'
     #
     "user: How do I launch 3 independent tasks in parallel on the cloud?\n"
     "response: Run multiple creates with --no-connect:\n"
-    '    mng create --in modal --no-connect -m "implement dark mode"\n'
-    '    mng create --in modal --no-connect -m "add i18n support"\n'
-    '    mng create --in modal --no-connect -m "optimize database queries"\n\n'
+    '    mng create @.modal --no-connect -m "implement dark mode"\n'
+    '    mng create @.modal --no-connect -m "add i18n support"\n'
+    '    mng create @.modal --no-connect -m "optimize database queries"\n\n'
     #
     "user: How do I launch an agent on Modal?\n"
-    "response: mng create --in modal\n\n"
+    "response: mng create @.modal\n\n"
     #
     "user: How do I launch an agent locally?\n"
-    "response: mng create --in local\n\n"
+    "response: mng create\n\n"
     #
     "user: How do I create an agent with a specific name?\n"
     "response: mng create my-task\n\n"
@@ -146,7 +165,8 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "here are some example questions and ideal responses:\n\n"
     #
     "user: spin up 5 agents on the cloud\n"
-    "response: mng create -n 5 --in modal\n\n"
+    "response: mng create @.modal\n"
+    "Run the command 5 times (once per agent).\n\n"
     #
     "user: send all agents a message to rebase on main\n"
     'response: mng message --all -m "rebase on main and resolve any conflicts"\n\n'
@@ -158,10 +178,25 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mng destroy --all --force\n\n"
     #
     "user: create a cloud agent that immediately starts fixing tests\n"
-    'response: mng create --in modal --no-connect -m "fix all failing tests and commit"\n\n'
+    'response: mng create @.modal --no-connect -m "fix all failing tests and commit"\n\n'
     #
     "user: list running agents as json\n"
     "response: mng list --running --format json\n\n"
+    #
+    "user: list all agents that are running or waiting\n"
+    'response: mng list --include \'state == "RUNNING" || state == "WAITING"\'\n\n'
+    #
+    "user: list agents whose name contains prod\n"
+    "response: mng list --include 'name.contains(\"prod\")'\n\n"
+    #
+    "user: find agents idle for more than an hour\n"
+    "response: mng list --include 'idle_seconds > 3600'\n\n"
+    #
+    "user: list running agents on modal\n"
+    'response: mng list --include \'state == "RUNNING" && host.provider == "modal"\'\n\n'
+    #
+    "user: list agents for the mng project\n"
+    "response: mng list --include 'labels.project == \"mng\"'\n\n"
     #
     "user: clone my-agent into a new agent called experiment\n"
     "response: mng clone my-agent experiment\n\n"
@@ -170,7 +205,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mng pull my-agent --sync-mode git\n\n"
     #
     "user: create a local agent with opus\n"
-    "response: mng create --in local -- --model opus\n\n"
+    "response: mng create -- --model opus\n\n"
     #
     "now respond with ONLY the mng command for this request:\n"
     "user: "

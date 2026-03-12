@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Combined background tasks for Claude agents.
 #
 # This script runs continuously while the agent's tmux session is alive,
@@ -8,13 +8,12 @@
 #      $MNG_AGENT_STATE_DIR/active file)
 #   2. Transcript streaming: launches stream_transcript.sh which watches
 #      all session JSONL files and streams new lines to
-#      $MNG_AGENT_STATE_DIR/events/claude_transcript/events.jsonl
+#      $MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
 # Requires environment variables:
-#   MNG_AGENT_STATE_DIR  - the agent's state directory
-#   MNG_HOST_DIR         - the host data directory (contains commands/)
+#   MNG_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
 #
 # Uses a pidfile to prevent duplicate instances for the same session.
 
@@ -43,12 +42,12 @@ mkdir -p "$MNG_AGENT_STATE_DIR/events"
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="claude_background_tasks"
 _MNG_LOG_SOURCE="logs/claude_background_tasks"
-_MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/claude_background_tasks/events.jsonl"
+_MNG_LOG_FILE="$MNG_AGENT_STATE_DIR/events/logs/claude_background_tasks/events.jsonl"
 # shellcheck source=mng_log.sh
-source "$MNG_HOST_DIR/commands/mng_log.sh"
+source "$MNG_AGENT_STATE_DIR/commands/mng_log.sh"
 
 # Start transcript streaming in the background
-STREAM_SCRIPT="$MNG_HOST_DIR/commands/stream_transcript.sh"
+STREAM_SCRIPT="$MNG_AGENT_STATE_DIR/commands/stream_transcript.sh"
 _STREAM_PID=""
 if [ -x "$STREAM_SCRIPT" ]; then
     bash "$STREAM_SCRIPT" &

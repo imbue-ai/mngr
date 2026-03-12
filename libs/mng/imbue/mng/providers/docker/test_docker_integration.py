@@ -15,6 +15,7 @@ from pathlib import Path
 
 import docker
 import docker.errors
+import docker.models.containers
 import pytest
 
 from imbue.mng.config.data_types import MngContext
@@ -56,11 +57,17 @@ def _create_test_container(
     name: str = "test-host",
     tags: dict[str, str] | None = None,
 ) -> tuple[docker.models.containers.Container, HostId]:
-    """Create a bare container with labels (no SSH setup)."""
+    """Create a bare container with labels (no SSH setup).
+
+    The container name uses the provider's MNG prefix so that
+    ``_list_containers`` (which filters by prefix) can find it during
+    cleanup.
+    """
     if host_id is None:
         host_id = HostId.generate()
     labels = build_container_labels(host_id, HostName(name), str(provider.name), tags)
-    container_name = f"mng-integ-{get_short_random_string()}"
+    prefix = provider.mng_ctx.config.prefix
+    container_name = f"{prefix}integ-{get_short_random_string()}"
     container = provider._docker_client.containers.run(
         image=TEST_IMAGE,
         name=container_name,
@@ -420,6 +427,7 @@ def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) 
     container.reload()
     assert container.status in ("exited", "stopped")
     # Exit code 0 means clean shutdown via trap
+    assert container.attrs is not None
     assert container.attrs["State"]["ExitCode"] == 0
 
 

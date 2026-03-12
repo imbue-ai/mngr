@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # This script exists to create a tarball of a "keyframe" commit of the current git repository. This keyframe is then
 # cached within the Docker or Modal image, which allows us to speed up CI builds by avoiding having to clone the entire

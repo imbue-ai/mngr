@@ -10,7 +10,6 @@ from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.default_command_group import DefaultCommandGroup
@@ -24,6 +23,7 @@ from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import format_size
 from imbue.mng.cli.output_helpers import on_error
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import BaseMngError
@@ -393,11 +393,11 @@ def _emit_destroy_result(
 
 
 class _SnapshotGroup(DefaultCommandGroup):
-    """Snapshot group that defaults to 'create' when no subcommand is given.
+    """Snapshot command group with configurable default subcommand.
 
-    This is safe because the next argument must be a valid agent name,
-    so typos like ``mng snapshot destory`` will fail with
-    "Agent or host not found" rather than silently doing something wrong.
+    Like the top-level mng group, bare invocation shows help by default.
+    Users can set ``[commands.snapshot] default_subcommand = "create"``
+    in config to restore the old forwarding behavior.
     """
 
     _config_key = "snapshot"
@@ -875,7 +875,7 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
 
 CommandHelpMetadata(
     key="snapshot",
-    one_line_description="Create, list, and destroy host snapshots [experimental]",
+    one_line_description="Create, list, and destroy host snapshots",
     synopsis="mng [snapshot|snap] [create|list|destroy] [AGENTS...] [OPTIONS]",
     description="""Snapshots capture the complete filesystem state of a host, allowing it to be
 restored later. Because the snapshot is at the host level, the state of all
@@ -912,7 +912,7 @@ add_pager_help_option(snapshot)
 
 CommandHelpMetadata(
     key="snapshot.create",
-    one_line_description="Create a snapshot of agent host(s) [experimental]",
+    one_line_description="Create a snapshot of agent host(s)",
     synopsis="mng snapshot create [IDENTIFIERS...] [OPTIONS]",
     description="""Positional arguments can be agent names/IDs or host names/IDs. Each
 identifier is automatically resolved: if it matches a known agent, that
@@ -937,7 +937,7 @@ add_pager_help_option(snapshot_create)
 
 CommandHelpMetadata(
     key="snapshot.list",
-    one_line_description="List snapshots for agent host(s) [experimental]",
+    one_line_description="List snapshots for agent host(s)",
     synopsis="mng snapshot list [IDENTIFIERS...] [OPTIONS]",
     description="""Shows snapshot ID, name, creation time, size, and host for each snapshot.
 
@@ -963,7 +963,7 @@ add_pager_help_option(snapshot_list)
 
 CommandHelpMetadata(
     key="snapshot.destroy",
-    one_line_description="Destroy snapshots for agent host(s) [experimental]",
+    one_line_description="Destroy snapshots for agent host(s)",
     synopsis="mng snapshot destroy [AGENTS...] [OPTIONS]",
     description="""Requires either --snapshot (to delete specific snapshots) or --all-snapshots
 (to delete all snapshots for the resolved hosts). A confirmation prompt is

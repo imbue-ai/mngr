@@ -17,8 +17,8 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import HostId
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
+from imbue.mng_claude_mind.plugin import ClaudeMindAgent
+from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 from imbue.mng_elena_code.plugin import ELENA_SYSTEM_PROMPT
 from imbue.mng_elena_code.plugin import ElenaCodeAgent
 from imbue.mng_elena_code.plugin import _merge_system_prompt_into_args
@@ -45,25 +45,25 @@ def _make_elena_agent(tmp_path: Path) -> tuple[ElenaCodeAgent, OnlineHostInterfa
         create_time=datetime.now(timezone.utc),
         host_id=HostId.generate(),
         mng_ctx=mng_ctx,
-        agent_config=ClaudeZygoteConfig(check_installation=False),
+        agent_config=ClaudeMindConfig(check_installation=False),
         host=host,
     )
     return agent, host
 
 
-def test_elena_code_registers_with_claude_zygote_config() -> None:
-    """Verify that register_agent_type returns ClaudeZygoteConfig (not ClaudeAgentConfig).
+def test_elena_code_registers_with_claude_mind_config() -> None:
+    """Verify that register_agent_type returns ClaudeMindConfig (not ClaudeAgentConfig).
 
     This ensures elena-code inherits trust_working_directory=True so the
     Claude trust dialog does not appear when deploying with --in-place.
     """
     _agent_type_name, _agent_class, config_class = register_agent_type()
-    assert config_class is ClaudeZygoteConfig
+    assert config_class is ClaudeMindConfig
 
 
-def test_elena_code_agent_inherits_from_claude_zygote_agent() -> None:
-    """Verify that ElenaCodeAgent is a subclass of ClaudeZygoteAgent."""
-    assert issubclass(ElenaCodeAgent, ClaudeZygoteAgent)
+def test_elena_code_agent_inherits_from_claude_mind_agent() -> None:
+    """Verify that ElenaCodeAgent is a subclass of ClaudeMindAgent."""
+    assert issubclass(ElenaCodeAgent, ClaudeMindAgent)
 
 
 def test_elena_code_agent_inherits_from_claude_agent() -> None:
@@ -71,14 +71,14 @@ def test_elena_code_agent_inherits_from_claude_agent() -> None:
     assert issubclass(ElenaCodeAgent, ClaudeAgent)
 
 
-def test_elena_system_prompt_is_conversational() -> None:
-    """Verify that the system prompt instructs Elena to be conversational."""
-    assert "conversational" in ELENA_SYSTEM_PROMPT.lower()
+def test_elena_system_prompt_identifies_elena() -> None:
+    """Verify that the system prompt identifies the assistant as Elena."""
+    assert "Elena" in ELENA_SYSTEM_PROMPT
 
 
-def test_elena_system_prompt_forbids_code_writing() -> None:
-    """Verify that the system prompt instructs Elena not to write code."""
-    assert "NEVER write code" in ELENA_SYSTEM_PROMPT
+def test_elena_system_prompt_mentions_claude_code() -> None:
+    """Verify that the system prompt mentions Claude Code."""
+    assert "Claude Code" in ELENA_SYSTEM_PROMPT
 
 
 def test_elena_assemble_command_includes_system_prompt(tmp_path: Path) -> None:

@@ -30,6 +30,7 @@ from imbue.mng.cli.limit import limit
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.message import message
 from imbue.mng.cli.migrate import migrate
+from imbue.mng.cli.observe import observe
 from imbue.mng.cli.plugin import plugin as plugin_command
 from imbue.mng.cli.provision import provision
 from imbue.mng.cli.pull import pull
@@ -71,8 +72,9 @@ def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
 class AliasAwareGroup(DefaultCommandGroup):
     """Custom click.Group that shows aliases inline with commands in --help.
 
-    When no subcommand is given, defaults to 'create'. When an unrecognized
-    subcommand is given, it is treated as arguments to 'create' (e.g.
+    When no subcommand is given, shows help. Users can configure a default
+    subcommand via ``[commands.mng] default_subcommand`` in config files
+    (e.g. set to ``"create"`` to restore the old behavior where
     ``mng my-task`` is equivalent to ``mng create my-task``).
     """
 
@@ -314,6 +316,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     config,
     gc,
     plugin_command,
+    observe,
 ]
 
 for cmd in BUILTIN_COMMANDS:

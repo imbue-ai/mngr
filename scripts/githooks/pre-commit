@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This script uses uv to call pre-commit to run hooks on files about to be committed.
 #

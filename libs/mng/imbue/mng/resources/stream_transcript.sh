@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Robust transcript streaming for Claude agents.
 #
 # Watches ALL Claude session JSONL files and appends new lines to
-# events/claude_transcript/events.jsonl. Designed to handle:
+# logs/claude_transcript/events.jsonl. Designed to handle:
 #   - Any session file being written to at any time (not just the "current" one)
 #   - Restarts (reconciles per-session offsets against the output file)
 #   - Late-appearing session files (re-checks each poll cycle, no timeouts)
@@ -19,13 +19,12 @@
 # Usage: stream_transcript.sh
 #
 # Requires environment variables:
-#   MNG_AGENT_STATE_DIR  - the agent's state directory
-#   MNG_HOST_DIR         - the host data directory (contains commands/)
+#   MNG_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
 
 set -euo pipefail
 
 SESSION_HISTORY="${MNG_AGENT_STATE_DIR:?MNG_AGENT_STATE_DIR must be set}/claude_session_id_history"
-OUTPUT_FILE="$MNG_AGENT_STATE_DIR/events/claude_transcript/events.jsonl"
+OUTPUT_FILE="$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
 OFFSET_DIR="$MNG_AGENT_STATE_DIR/plugin/claude/.transcript_offsets"
 POLL_INTERVAL=1
 
@@ -35,9 +34,9 @@ touch "$OUTPUT_FILE"
 # Configure and source the shared logging library
 _MNG_LOG_TYPE="stream_transcript"
 _MNG_LOG_SOURCE="logs/stream_transcript"
-_MNG_LOG_FILE="$MNG_HOST_DIR/events/logs/stream_transcript/events.jsonl"
+_MNG_LOG_FILE="$MNG_AGENT_STATE_DIR/events/logs/stream_transcript/events.jsonl"
 # shellcheck source=mng_log.sh
-source "$MNG_HOST_DIR/commands/mng_log.sh"
+source "$MNG_AGENT_STATE_DIR/commands/mng_log.sh"
 
 # -- Per-session state (bash 4+ associative arrays) --
 # Note: explicit =() is required for set -u compatibility (empty associative
@@ -52,9 +51,10 @@ declare -A _OUTPUT_UUIDS=()
 # -- Helpers --
 
 # Find the JSONL file for a session ID.
-# Claude stores session files at ~/.claude/projects/<hash>/<session_id>.jsonl
+# Claude stores session files at $CLAUDE_CONFIG_DIR/projects/<hash>/<session_id>.jsonl
+# Falls back to ~/.claude/projects/ when CLAUDE_CONFIG_DIR is not set.
 _find_session_jsonl() {
-    find ~/.claude/projects/ -name "${1}.jsonl" 2>/dev/null | head -1
+    find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/" -name "${1}.jsonl" 2>/dev/null | head -1
 }
 
 _line_count() {

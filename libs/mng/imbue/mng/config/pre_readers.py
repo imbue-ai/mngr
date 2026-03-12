@@ -3,8 +3,6 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.consts import ROOT_CONFIG_FILENAME
@@ -23,10 +21,7 @@ def try_load_toml(path: Path | None) -> dict[str, Any] | None:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except FileNotFoundError:
-        return None
-    except tomllib.TOMLDecodeError as e:
-        logger.trace("Skipped malformed config file: {} ({})", path, e)
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
         return None
 
 
@@ -136,12 +131,13 @@ def _resolve_config_files(
 # --- Default subcommand pre-reader ---
 
 
-def read_default_command(command_name: str) -> str:
+def read_default_command(command_name: str) -> str | None:
     """Return the configured default subcommand for command_name.
 
-    If no config files set default_subcommand for the given command
-    group, falls back to "create".  An empty string means "disabled"
-    (the caller should show help instead of defaulting).
+    Returns None if no config files set default_subcommand for the given
+    command group (the caller should use its compile-time default).
+    An empty string means "explicitly disabled" (the caller should show
+    help instead of defaulting).
     """
     merged: dict[str, str] = {}
     for raw in _resolve_config_files():
@@ -154,7 +150,7 @@ def read_default_command(command_name: str) -> str:
             value = cmd_section.get("default_subcommand")
             if value is not None:
                 merged[cmd_name] = str(value)
-    return merged.get(command_name, "create")
+    return merged.get(command_name)
 
 
 # --- Disabled plugins pre-reader ---

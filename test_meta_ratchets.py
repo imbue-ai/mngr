@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import pytest
+import tomlkit
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
@@ -136,4 +137,95 @@ def test_prevent_old_mngr_name_in_file_paths() -> None:
     mngr_paths = [p for p in all_paths if "mngr" in str(p.relative_to(_REPO_ROOT))]
     assert len(mngr_paths) <= snapshot(0), f"Found {len(mngr_paths)} file paths containing 'mngr':\n" + "\n".join(
         f"  {p.relative_to(_REPO_ROOT)}" for p in mngr_paths
+    )
+
+
+def test_every_project_has_pypi_readme() -> None:
+    """Ensure each project's pyproject.toml has a readme field pointing to an existing file.
+
+    Every published package should have a README so that PyPI displays useful
+    information. This checks two things:
+    1. The [project] section contains a `readme` key
+    2. The referenced file exists on disk
+    """
+    missing_field: list[str] = []
+    missing_file: list[str] = []
+
+    for project_dir in _get_all_project_dirs():
+        pyproject_path = project_dir / "pyproject.toml"
+        pyproject = tomlkit.parse(pyproject_path.read_text())
+        project_section = pyproject.get("project", {})
+
+        readme_value = project_section.get("readme")
+        if not isinstance(readme_value, str):
+            missing_field.append(project_dir.name)
+            continue
+
+        if not (project_dir / readme_value).exists():
+            missing_file.append(f"{project_dir.name} (references {readme_value})")
+
+    errors: list[str] = []
+    if missing_field:
+        errors.append("Missing readme field in [project]: " + ", ".join(missing_field))
+    if missing_file:
+        errors.append("readme file does not exist: " + ", ".join(missing_file))
+
+    assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+def _has_test_files(project_dir: Path) -> bool:
+    """Return True if the project contains any test files."""
+    for pattern in ["*_test.py", "test_*.py"]:
+        if list(project_dir.rglob(pattern)):
+            return True
+    return False
+
+
+def test_every_project_with_tests_has_coverage_config() -> None:
+    """Ensure each project with tests has pytest coverage configuration in its pyproject.toml.
+
+    Every project that contains test files must have:
+    1. A [tool.pytest.ini_options] section with a --cov flag scoped to the project's package
+    2. A [tool.coverage.run] section with omit patterns for test files
+    """
+    missing_pytest: list[str] = []
+    missing_cov_flag: list[str] = []
+    missing_coverage_run: list[str] = []
+
+    for project_dir in _get_all_project_dirs():
+        if not _has_test_files(project_dir):
+            continue
+
+        pyproject_path = project_dir / "pyproject.toml"
+        pyproject = tomlkit.parse(pyproject_path.read_text())
+
+        tool = pyproject.get("tool", {})
+
+        # Check for [tool.pytest.ini_options]
+        pytest_opts = tool.get("pytest", {}).get("ini_options", {})
+        if not pytest_opts:
+            missing_pytest.append(project_dir.name)
+            continue
+
+        # Check that addopts contains a --cov flag
+        addopts = pytest_opts.get("addopts", [])
+        has_cov_flag = any(str(opt).startswith("--cov=") for opt in addopts)
+        if not has_cov_flag:
+            missing_cov_flag.append(project_dir.name)
+
+        # Check for [tool.coverage.run]
+        coverage_run = tool.get("coverage", {}).get("run", {})
+        if not coverage_run:
+            missing_coverage_run.append(project_dir.name)
+
+    errors: list[str] = []
+    if missing_pytest:
+        errors.append("Missing [tool.pytest.ini_options]: " + ", ".join(missing_pytest))
+    if missing_cov_flag:
+        errors.append("Missing --cov= in addopts: " + ", ".join(missing_cov_flag))
+    if missing_coverage_run:
+        errors.append("Missing [tool.coverage.run]: " + ", ".join(missing_coverage_run))
+
+    assert len(errors) == 0, "Projects with tests are missing coverage configuration:\n" + "\n".join(
+        f"  - {e}" for e in errors
     )

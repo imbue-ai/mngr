@@ -1564,9 +1564,9 @@ def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
 
 
 def test_get_ssh_connection_info_returns_none_for_local_host(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that _get_ssh_connection_info returns None for local hosts."""
+    """Test that get_ssh_connection_info returns None for local hosts."""
     host, _ = host_with_temp_dir
-    ssh_info = host._get_ssh_connection_info()
+    ssh_info = host.get_ssh_connection_info()
     assert ssh_info is None
 
 
@@ -1836,7 +1836,7 @@ def test_create_work_dir_generates_new_branch(
     host_with_temp_dir: tuple[Host, Path],
     setup_git_config: None,
 ) -> None:
-    """Test that git transfer creates a new branch when is_new_branch is True."""
+    """Test that git transfer creates a new branch when new_branch_name is set."""
     host, temp_dir = host_with_temp_dir
 
     source_path = temp_dir / "source_new_branch"
@@ -1852,7 +1852,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/new-branch-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1860,7 +1860,7 @@ def test_create_work_dir_generates_new_branch(
     assert work_dir == target_path
     assert (work_dir / "file.txt").read_text() == "content"
 
-    # Check the branch name starts with test/
+    # Check the branch name
     result = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=work_dir,
@@ -1868,7 +1868,7 @@ def test_create_work_dir_generates_new_branch(
         text=True,
     )
     assert result.returncode == 0
-    assert result.stdout.strip().startswith("test/")
+    assert result.stdout.strip() == "test/new-branch-test"
 
 
 @pytest.mark.rsync
@@ -1900,7 +1900,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/origin-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1940,7 +1940,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
-        git=AgentGitOptions(is_new_branch=True, new_branch_prefix="test/"),
+        git=AgentGitOptions(new_branch_name="test/no-origin-test"),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -2151,12 +2151,23 @@ def test_new_tmux_window_inherits_env_vars(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    tmp_home_dir: Path,
 ) -> None:
     """Test that new tmux windows created by the user also have env vars.
 
     This verifies that the default-command sources env files so that any new
     window/pane created by the user will have the agent's env vars available.
     """
+    # Write shell rc files with a known prompt in the fake HOME so we can
+    # reliably detect when the shell is ready. We need .zshenv (empty, to
+    # suppress errors from the real user's .zshenv which references paths
+    # under $HOME that don't exist in the fake HOME), plus .zshrc and
+    # .bashrc to set the prompt for whichever shell the user has.
+    prompt_sentinel = "MNG_TEST_READY>"
+    (tmp_home_dir / ".zshenv").write_text("")
+    (tmp_home_dir / ".zshrc").write_text(f"PS1='{prompt_sentinel} '\n")
+    (tmp_home_dir / ".bashrc").write_text(f"PS1='{prompt_sentinel} '\n")
+
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
     mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
     provider = LocalProviderInstance(
@@ -2188,16 +2199,42 @@ def test_new_tmux_window_inherits_env_vars(
     host.start_agents([agent.id])
 
     try:
-        # Create a new window in the session (simulating what a user would do)
-        # This window should inherit env vars via tmux set-environment
+        # Create a new window in the session (simulating what a user would do).
+        # This window should inherit env vars via the default-command which
+        # sources the agent's env files. Pass -e HOME/ZDOTDIR so the shell
+        # reads our controlled rc files (tmux overrides HOME from the passwd
+        # database for new window processes, so we must re-override it).
+        fake_home = str(tmp_home_dir)
         subprocess.run(
-            ["tmux", "new-window", "-t", session_name, "-n", "user-window"],
+            [
+                "tmux",
+                "new-window",
+                "-t",
+                session_name,
+                "-n",
+                "user-window",
+                "-e",
+                f"HOME={fake_home}",
+                "-e",
+                f"ZDOTDIR={fake_home}",
+            ],
             check=True,
             capture_output=True,
         )
 
-        # Keys sent before the shell is ready are buffered in the pty.
+        # Wait for the shell to be ready before sending keys
         window_target = f"{session_name}:user-window"
+
+        def shell_prompt_visible() -> bool:
+            pane = capture_tmux_pane_contents(window_target)
+            return prompt_sentinel in pane
+
+        if not poll_until(shell_prompt_visible, timeout=10.0):
+            pane_stdout = capture_tmux_pane_contents(window_target)
+            raise AssertionError(
+                f"Shell prompt did not appear in new tmux window within 10s.\nPane content:\n{pane_stdout}"
+            )
+
         subprocess.run(
             [
                 "tmux",

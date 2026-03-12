@@ -19,7 +19,6 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.config import ConfigScope
@@ -34,12 +33,19 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import PluginSpecifierError
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import PluginName
+from imbue.mng.uv_tool import build_uv_tool_install_add
+from imbue.mng.uv_tool import build_uv_tool_install_add_git
+from imbue.mng.uv_tool import build_uv_tool_install_add_path
+from imbue.mng.uv_tool import build_uv_tool_install_remove
+from imbue.mng.uv_tool import read_receipt
+from imbue.mng.uv_tool import require_uv_tool_receipt
 
 # Default fields to display
 DEFAULT_FIELDS: Final[tuple[str, ...]] = ("name", "version", "description", "enabled")
@@ -229,32 +235,14 @@ def _parse_pypi_package_name(specifier: str) -> str | None:
     requirement.
     """
     try:
-        req = Requirement(specifier)
+        requirement = Requirement(specifier)
     except InvalidRequirement:
         return None
-    return req.name
-
-
-def _build_uv_pip_install_command_for_path(local_path: str) -> tuple[str, ...]:
-    """Build the uv pip install command for a local path (editable mode)."""
-    resolved = str(Path(local_path).expanduser().resolve())
-    return ("uv", "pip", "install", "--python", sys.executable, "-e", resolved)
-
-
-@pure
-def _build_uv_pip_install_command_for_name_or_url(specifier: str) -> tuple[str, ...]:
-    """Build the uv pip install command for a PyPI name or git URL."""
-    return ("uv", "pip", "install", "--python", sys.executable, specifier)
-
-
-@pure
-def _build_uv_pip_uninstall_command(package_name: str) -> tuple[str, ...]:
-    """Build the uv pip uninstall command for a given package name."""
-    return ("uv", "pip", "uninstall", "--python", sys.executable, package_name)
+    return requirement.name
 
 
 def _get_installed_package_names(concurrency_group: Any) -> set[str]:
-    """Get the set of currently installed package names via `uv pip list --format json`."""
+    """Get the set of currently installed package names via ``uv pip list``."""
     result = concurrency_group.run_process_to_completion(
         ("uv", "pip", "list", "--python", sys.executable, "--format", "json")
     )
@@ -503,19 +491,30 @@ def _plugin_add_impl(ctx: click.Context) -> None:
         command_class=PluginCliOptions,
     )
 
+    # Validate arguments before checking uv tool receipt so users get clear
+    # argument-validation errors rather than a "not installed via uv tool" error.
     source = _parse_add_source(opts)
 
-    # Build the install command and determine the display specifier
+    receipt_path = require_uv_tool_receipt()
+    receipt = read_receipt(receipt_path)
+
+    # Build the uv tool install command and determine the display specifier
     match source:
         case _PathSource(path=path):
+            resolved_path = str(Path(path).expanduser().resolve())
             specifier = path
-            command = _build_uv_pip_install_command_for_path(path)
+            try:
+                package_name = _read_package_name_from_pyproject(path)
+            except PluginSpecifierError:
+                logger.debug("Could not read package name from pyproject.toml at '{}', using raw path", path)
+                package_name = path
+            command = build_uv_tool_install_add_path(receipt, resolved_path, package_name)
         case _GitSource(url=url):
             specifier = url
-            command = _build_uv_pip_install_command_for_name_or_url(url)
+            command = build_uv_tool_install_add_git(receipt, url)
         case _PypiSource(name=name):
             specifier = name
-            command = _build_uv_pip_install_command_for_name_or_url(name)
+            command = build_uv_tool_install_add(receipt, name)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -537,12 +536,8 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     match source:
         case _PypiSource(name=name):
             resolved_package_name = _parse_pypi_package_name(name) or name
-        case _PathSource(path=path):
-            try:
-                resolved_package_name = _read_package_name_from_pyproject(path)
-            except PluginSpecifierError:
-                logger.debug("Could not read package name from pyproject.toml at '{}', using raw path", path)
-                resolved_package_name = path
+        case _PathSource():
+            resolved_package_name = package_name
         case _GitSource(url=url):
             assert packages_before is not None
             packages_after = _get_installed_package_names(mng_ctx.concurrency_group)
@@ -563,7 +558,12 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
         command_class=PluginCliOptions,
     )
 
+    # Validate arguments before checking uv tool receipt so users get clear
+    # argument-validation errors rather than a "not installed via uv tool" error.
     source = _parse_remove_source(opts)
+
+    receipt_path = require_uv_tool_receipt()
+    receipt = read_receipt(receipt_path)
 
     match source:
         case _PathSource(path=path):
@@ -577,13 +577,12 @@ def _plugin_remove_impl(ctx: click.Context) -> None:
         case _ as unreachable:
             assert_never(unreachable)
 
-    # Verify the package is actually installed before trying to uninstall
-    try:
-        importlib.metadata.distribution(package_name)
-    except importlib.metadata.PackageNotFoundError:
-        raise AbortError(f"Package '{package_name}' is not installed") from None
+    # Verify the package is actually a dependency before trying to remove
+    extra_names = {r.name for r in receipt.extras}
+    if package_name not in extra_names:
+        raise AbortError(f"Package '{package_name}' is not installed as a plugin")
 
-    command = _build_uv_pip_uninstall_command(package_name)
+    command = build_uv_tool_install_remove(receipt, package_name)
 
     with log_span("Removing plugin package '{}'", package_name):
         try:
@@ -723,7 +722,7 @@ def _emit_plugin_toggle_result(
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="plugin",
-    one_line_description="Manage available and active plugins [experimental]",
+    one_line_description="Manage available and active plugins",
     synopsis="mng [plugin|plug] <subcommand> [OPTIONS]",
     description="""Install, remove, view, enable, and disable plugins registered with mng.
 Plugins provide agent types, provider backends, CLI commands, and lifecycle hooks.""",
@@ -749,7 +748,7 @@ add_pager_help_option(plugin)
 
 CommandHelpMetadata(
     key="plugin.list",
-    one_line_description="List discovered plugins [experimental]",
+    one_line_description="List discovered plugins",
     synopsis="mng plugin list [OPTIONS]",
     description="""Shows all plugins registered with mng, including built-in plugins
 and any externally installed plugins.
@@ -772,7 +771,7 @@ add_pager_help_option(plugin_list)
 
 CommandHelpMetadata(
     key="plugin.add",
-    one_line_description="Install a plugin package [experimental]",
+    one_line_description="Install a plugin package",
     synopsis="mng plugin add [NAME] [OPTIONS]",
     description="""Provide exactly one of NAME (positional), --path, or --git. NAME is a PyPI
 package specifier (e.g., 'mng-pair' or 'mng-pair>=1.0'). --path installs
@@ -792,7 +791,7 @@ add_pager_help_option(plugin_add)
 
 CommandHelpMetadata(
     key="plugin.remove",
-    one_line_description="Uninstall a plugin package [experimental]",
+    one_line_description="Uninstall a plugin package",
     synopsis="mng plugin remove [NAME] [OPTIONS]",
     description="""Provide exactly one of NAME (positional) or --path. For local paths,
 the package name is read from pyproject.toml.""",
@@ -809,7 +808,7 @@ add_pager_help_option(plugin_remove)
 
 CommandHelpMetadata(
     key="plugin.enable",
-    one_line_description="Enable a plugin [experimental]",
+    one_line_description="Enable a plugin",
     synopsis="mng plugin enable NAME [OPTIONS]",
     description="""Sets plugins.<name>.enabled = true in the configuration file at the
 specified scope.""",
@@ -827,7 +826,7 @@ add_pager_help_option(plugin_enable)
 
 CommandHelpMetadata(
     key="plugin.disable",
-    one_line_description="Disable a plugin [experimental]",
+    one_line_description="Disable a plugin",
     synopsis="mng plugin disable NAME [OPTIONS]",
     description="""Sets plugins.<name>.enabled = false in the configuration file at the
 specified scope.""",

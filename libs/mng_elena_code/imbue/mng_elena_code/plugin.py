@@ -7,18 +7,10 @@ from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteAgent
-from imbue.mng_claude_zygote.plugin import ClaudeZygoteConfig
+from imbue.mng_claude_mind.plugin import ClaudeMindAgent
+from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 
-ELENA_SYSTEM_PROMPT = (
-    "You are Elena, a friendly and conversational AI assistant. "
-    "Your purpose is to have engaging conversations, answer questions, and help users think through problems. "
-    "You should be warm, thoughtful, and direct in your responses. "
-    "IMPORTANT: You must NEVER write code, create files, or make any changes to the filesystem. "
-    "You are purely conversational. If a user asks you to write code, politely explain that you are a conversational "
-    "assistant and suggest they use a different tool for coding tasks. "
-    "Keep your responses concise and focused on the conversation."
-)
+ELENA_SYSTEM_PROMPT = "You are Elena, an assistant powered by Claude Code that helps users write software."
 
 
 _APPEND_SYSTEM_PROMPT_FLAG = "--append-system-prompt"
@@ -70,8 +62,8 @@ def _shell_unquote(value: str) -> str:
     return value
 
 
-class ElenaCodeAgent(ClaudeZygoteAgent):
-    """A conversational AI changeling agent powered by Claude Code.
+class ElenaCodeAgent(ClaudeMindAgent):
+    """A conversational AI mind agent powered by Claude Code.
 
     Elena is designed to be purely conversational -- she interacts with users
     via a web-accessible Claude Code session but is instructed to never write
@@ -92,10 +84,13 @@ class ElenaCodeAgent(ClaudeZygoteAgent):
         flag is added.
         """
         merged_args = _merge_system_prompt_into_args(ELENA_SYSTEM_PROMPT, agent_args)
+        # FOLLOWUP: we have to remove this!!!  There are lots of permissions prompts to work through though
+        if "--dangerously-skip-permissions" not in merged_args:
+            merged_args += ("--dangerously-skip-permissions",)
         return super().assemble_command(host, merged_args, command_override)
 
 
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
     """Register the elena-code agent type."""
-    return ("elena-code", ElenaCodeAgent, ClaudeZygoteConfig)
+    return ("elena-code", ElenaCodeAgent, ClaudeMindConfig)
