@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from imbue.mng.cli.create import create
 from imbue.mng.cli.provision import provision
 from imbue.mng.cli.stop import stop
+from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.mng.utils.testing import run_mng_subprocess
@@ -380,8 +381,13 @@ def test_provision_running_agent_restarts_by_default(
 
     assert result.exit_code == 0, f"Provision failed with: {result.output}"
 
-    # Agent should still be running after provisioning (restarted)
-    assert tmux_session_exists(session_name), "Agent should be running after provision with restart"
+    # Agent should still be running after provisioning (restarted).
+    # Use wait_for to tolerate brief delays when the agent is restarted under heavy xdist load.
+    wait_for(
+        lambda: tmux_session_exists(session_name),
+        timeout=10.0,
+        error_message="Agent should be running after provision with restart",
+    )
 
 
 @pytest.mark.tmux
