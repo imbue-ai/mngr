@@ -57,7 +57,7 @@ Sum the filtered sizes across all session files.
 
 ### Step 3: Gather Progress Data
 
-Use the Read tool to read `.reviews/conversation/progress.jsonl` if it exists -- this tracks which parts of the transcript have already been reviewed. If it exists, for each session file from Step 1, compare the current line count (`wc -l`) against the line count recorded in the progress file.
+Use the Read tool to read `.reviews/conversation/progress.jsonl` -- this tracks which parts of the transcript have already been reviewed. If it has content, for each session file from Step 1, compare the current line count (`wc -l`) against the line count recorded in the progress file.
 
 ### Step 4: Spawn Agent
 
