@@ -8,27 +8,15 @@ You are reviewing a Claude Code conversation transcript for behavioral issues. Y
 
 # Reading Transcripts
 
-A filter utility is available at `scripts/filter_transcript.py`. Use it to get a readable view of any transcript file:
+A filter utility is available at `scripts/filter_transcript.py`. Run `python3 scripts/filter_transcript.py --help` to see all options. Basic usage:
 
 ```bash
 python3 scripts/filter_transcript.py <file.jsonl>
 ```
 
-This outputs filtered, human-readable text with line numbers (corresponding to the original JSONL file). By default it shows only user and assistant messages. The output format is:
+This outputs filtered, human-readable text with line numbers. By default it shows only user and assistant messages.
 
-```
-L5    [user]     the plan here is to replace the reviewer...
-L7    [assistant] Let me start by understanding the current setup...
-```
-
-Useful flags:
-- `--tool-use` -- also show tool_use messages (which tools were called)
-- `--tool-results` -- also show tool results
-- `--all` -- show all message types
-- `--size` -- output only the byte count of filtered output (for size estimation)
-- `--json` -- output as JSON instead of formatted text
-
-If you need raw context for a specific line (e.g., to see the full tool result or system message that was filtered out), use the Read tool with `offset` and `limit` parameters to read that specific line from the original file.
+If you need raw context for a specific line, use the Read tool with `offset` and `limit` parameters to read that line from the original file.
 
 # Instructions
 
