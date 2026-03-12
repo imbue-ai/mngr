@@ -78,7 +78,7 @@ def test_prevent_import_datetime() -> None:
 
 
 def test_prevent_importlib_import_module() -> None:
-    rc.check_importlib_import_module(_DIR, snapshot(1))
+    rc.check_importlib_import_module(_DIR, snapshot(0))
 
 
 def test_prevent_getattr() -> None:
@@ -223,7 +223,7 @@ def test_prevent_inline_functions_in_non_test_code() -> None:
 
 
 def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(2))
+    rc.check_underscore_imports(_DIR, snapshot(0))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:

@@ -746,7 +746,7 @@ def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv
     write_conversation_to_db(chat_env.llm_db_path, cid1, model="claude-sonnet-4-6")
     write_conversation_to_db(chat_env.llm_db_path, cid2, model="claude-haiku-4-5")
 
-    # Use the conversation_db module directly (same logic as mng minddb)
+    # Use the conversation_db module directly (same logic as mng llmdb)
     import io
 
     from imbue.mng_llm.resources.conversation_db import lookup_model
