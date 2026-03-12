@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -85,19 +84,10 @@ def _make_user_event(
     )
 
 
-_STUB_LOG_SH = textwrap.dedent("""\
-    #!/bin/bash
-    log_info() { :; }
-    log_debug() { :; }
-    log_warn() { :; }
-    log_error() { :; }
-""")
-
-
 class ScriptRunner:
     """Helper to run common_transcript.sh in a test environment."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, stub_mng_log_sh: str) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
 
@@ -108,7 +98,7 @@ class ScriptRunner:
 
         # Write stub mng_log.sh
         log_path = self.agent_state_dir / "commands" / "mng_log.sh"
-        log_path.write_text(_STUB_LOG_SH)
+        log_path.write_text(stub_mng_log_sh)
         log_path.chmod(0o755)
 
         # Standard paths
@@ -155,25 +145,25 @@ class ScriptRunner:
 # -- Tests --
 
 
-def test_no_input_file_produces_no_output(tmp_path: Path) -> None:
+def test_no_input_file_produces_no_output(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """With no input file, the script should produce no output."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert runner.get_output_events() == []
 
 
-def test_empty_input_file_produces_no_output(tmp_path: Path) -> None:
+def test_empty_input_file_produces_no_output(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """An empty input file should produce no output."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([])
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert runner.get_output_events() == []
 
 
-def test_converts_user_text_message(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_converts_user_text_message(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
 
     result = runner.run_single_pass()
@@ -187,8 +177,8 @@ def test_converts_user_text_message(tmp_path: Path) -> None:
     assert events[0]["source"] == "common_transcript"
 
 
-def test_converts_assistant_message(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_converts_assistant_message(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([_make_assistant_event("uuid-2", "2026-01-01T00:00:01Z", text="Hi there!")])
 
     result = runner.run_single_pass()
@@ -204,8 +194,8 @@ def test_converts_assistant_message(tmp_path: Path) -> None:
     assert events[0]["usage"]["input_tokens"] == 100
 
 
-def test_converts_tool_calls(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_converts_tool_calls(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input(
         [
             _make_assistant_event(
@@ -227,8 +217,8 @@ def test_converts_tool_calls(tmp_path: Path) -> None:
     assert events[0]["tool_calls"][0]["tool_call_id"] == "toolu_1"
 
 
-def test_converts_tool_results(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_converts_tool_results(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     assistant = _make_assistant_event(
         "uuid-4",
         "2026-01-01T00:00:03Z",
@@ -255,8 +245,8 @@ def test_converts_tool_results(tmp_path: Path) -> None:
     assert tool_results[0]["is_error"] is False
 
 
-def test_deduplicates_by_event_id(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_deduplicates_by_event_id(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
 
     # Pre-populate output with the same event_id
@@ -273,8 +263,8 @@ def test_deduplicates_by_event_id(tmp_path: Path) -> None:
     assert len(events) == 1
 
 
-def test_skips_progress_events(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_skips_progress_events(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     progress = json.dumps(
         {
             "type": "progress",
@@ -290,8 +280,8 @@ def test_skips_progress_events(tmp_path: Path) -> None:
     assert runner.get_output_events() == []
 
 
-def test_handles_malformed_json(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_handles_malformed_json(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     valid = _make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="valid")
     runner.write_input(["not json", valid])
 
@@ -303,8 +293,8 @@ def test_handles_malformed_json(tmp_path: Path) -> None:
     assert events[0]["content"] == "valid"
 
 
-def test_skips_events_without_uuid(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_skips_events_without_uuid(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     no_uuid = json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "hi"}})
     runner.write_input([no_uuid])
 
@@ -313,9 +303,9 @@ def test_skips_events_without_uuid(tmp_path: Path) -> None:
     assert runner.get_output_events() == []
 
 
-def test_user_with_text_and_tool_results(tmp_path: Path) -> None:
+def test_user_with_text_and_tool_results(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """A user message with both text and tool results should emit both."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     assistant = _make_assistant_event(
         "uuid-a",
         "2026-01-01T00:00:01Z",
@@ -348,8 +338,8 @@ def test_user_with_text_and_tool_results(tmp_path: Path) -> None:
     assert "tool_result" in types_found
 
 
-def test_truncates_tool_input_preview(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_truncates_tool_input_preview(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     long_input = {"file": "x" * 500}
     runner.write_input(
         [
@@ -370,8 +360,8 @@ def test_truncates_tool_input_preview(tmp_path: Path) -> None:
     assert len(input_preview) <= 203
 
 
-def test_truncates_long_tool_output(tmp_path: Path) -> None:
-    runner = ScriptRunner(tmp_path)
+def test_truncates_long_tool_output(tmp_path: Path, stub_mng_log_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     assistant = _make_assistant_event(
         "uuid-tr",
         "2026-01-01T00:00:01Z",
@@ -394,9 +384,9 @@ def test_truncates_long_tool_output(tmp_path: Path) -> None:
     assert len(tool_results[0]["output"]) <= 2003
 
 
-def test_tool_result_with_list_content(tmp_path: Path) -> None:
+def test_tool_result_with_list_content(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Tool result content can be a list of text blocks."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     assistant = _make_assistant_event(
         "uuid-lc",
         "2026-01-01T00:00:01Z",
@@ -431,9 +421,9 @@ def test_tool_result_with_list_content(tmp_path: Path) -> None:
     assert tool_results[0]["output"] == "part 1\npart 2"
 
 
-def test_sorts_by_timestamp(tmp_path: Path) -> None:
+def test_sorts_by_timestamp(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Events should be output sorted by timestamp."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     later = _make_user_event("uuid-later", "2026-01-01T00:00:02Z", text="Later")
     earlier = _make_user_event("uuid-earlier", "2026-01-01T00:00:01Z", text="Earlier")
     runner.write_input([later, earlier])
@@ -447,9 +437,9 @@ def test_sorts_by_timestamp(tmp_path: Path) -> None:
     assert events[1]["content"] == "Later"
 
 
-def test_cache_read_and_write_tokens(tmp_path: Path) -> None:
+def test_cache_read_and_write_tokens(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Verify cache_read and cache_write tokens are captured from usage."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input(
         [
             _make_assistant_event(
@@ -475,9 +465,9 @@ def test_cache_read_and_write_tokens(tmp_path: Path) -> None:
     assert usage["cache_write_tokens"] == 20
 
 
-def test_unknown_tool_name_defaults(tmp_path: Path) -> None:
+def test_unknown_tool_name_defaults(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Tool results for unknown tool_call_ids should get tool_name='unknown'."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     user = _make_user_event(
         "uuid-unk",
         "2026-01-01T00:00:01Z",
@@ -493,9 +483,9 @@ def test_unknown_tool_name_defaults(tmp_path: Path) -> None:
     assert tool_results[0]["tool_name"] == "unknown"
 
 
-def test_output_writes_to_correct_path(tmp_path: Path) -> None:
+def test_output_writes_to_correct_path(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Output should go to events/claude/common_transcript/events.jsonl."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
 
     result = runner.run_single_pass()
@@ -506,9 +496,9 @@ def test_output_writes_to_correct_path(tmp_path: Path) -> None:
     assert len(expected_path.read_text().strip().splitlines()) == 1
 
 
-def test_incremental_conversion(tmp_path: Path) -> None:
+def test_incremental_conversion(tmp_path: Path, stub_mng_log_sh: str) -> None:
     """Running twice with new input should append without duplicates."""
-    runner = ScriptRunner(tmp_path)
+    runner = ScriptRunner(tmp_path, stub_mng_log_sh)
     runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="First")])
 
     result = runner.run_single_pass()

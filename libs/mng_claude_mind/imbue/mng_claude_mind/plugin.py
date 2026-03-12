@@ -290,8 +290,8 @@ def inject_supporting_services(params: dict[str, Any]) -> None:
     - Event watcher (sends new events to primary role agent via mng message)
     - Web server (main web interface with conversation selector and agent list)
 
-    Note: transcript conversion (common_transcript) is now handled by the
-    claude plugin's background tasks script, controlled by emit_common_transcript.
+    Transcript conversion (common_transcript) is handled by the claude
+    plugin's background tasks script, controlled by emit_common_transcript.
 
     Agent and chat terminal access is provided by the consolidated ttyd
     server (from mng_ttyd) via URL-arg dispatch to commands/ttyd/*.sh scripts.
