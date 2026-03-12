@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Print out Claude Code conversation history in a way that is easier to read and analyze.
 # Prints all sessions in chronological order using the session ID history file.
 #

@@ -15,7 +15,7 @@ class _DummyCommandClass:
 
 def test_adds_ttyd_command_to_create() -> None:
     """Verify that the plugin adds a ttyd command when creating agents."""
-    params: dict[str, Any] = {"add_command": ()}
+    params: dict[str, Any] = {"extra_window": ()}
 
     override_command_options(
         command_name="create",
@@ -23,14 +23,14 @@ def test_adds_ttyd_command_to_create() -> None:
         params=params,
     )
 
-    assert len(params["add_command"]) == 1
-    assert TTYD_WINDOW_NAME in params["add_command"][0]
-    assert TTYD_COMMAND in params["add_command"][0]
+    assert len(params["extra_window"]) == 1
+    assert TTYD_WINDOW_NAME in params["extra_window"][0]
+    assert TTYD_COMMAND in params["extra_window"][0]
 
 
-def test_preserves_existing_add_commands() -> None:
-    """Verify that the plugin preserves any existing additional commands."""
-    params: dict[str, Any] = {"add_command": ('monitor="htop"',)}
+def test_preserves_existing_extra_windows() -> None:
+    """Verify that the plugin preserves any existing extra windows."""
+    params: dict[str, Any] = {"extra_window": ('monitor="htop"',)}
 
     override_command_options(
         command_name="create",
@@ -38,14 +38,14 @@ def test_preserves_existing_add_commands() -> None:
         params=params,
     )
 
-    assert len(params["add_command"]) == 2
-    assert params["add_command"][0] == 'monitor="htop"'
-    assert TTYD_COMMAND in params["add_command"][1]
+    assert len(params["extra_window"]) == 2
+    assert params["extra_window"][0] == 'monitor="htop"'
+    assert TTYD_COMMAND in params["extra_window"][1]
 
 
 def test_does_not_modify_non_create_commands() -> None:
     """Verify that the plugin does not modify params for non-create commands."""
-    params: dict[str, Any] = {"add_command": ()}
+    params: dict[str, Any] = {"extra_window": ()}
 
     override_command_options(
         command_name="connect",
@@ -53,11 +53,11 @@ def test_does_not_modify_non_create_commands() -> None:
         params=params,
     )
 
-    assert params["add_command"] == ()
+    assert params["extra_window"] == ()
 
 
-def test_handles_missing_add_command_param() -> None:
-    """Verify that the plugin handles the case where add_command is not yet in params."""
+def test_handles_missing_extra_window_param() -> None:
+    """Verify that the plugin handles the case where extra_window is not yet in params."""
     params: dict[str, Any] = {}
 
     override_command_options(
@@ -66,8 +66,8 @@ def test_handles_missing_add_command_param() -> None:
         params=params,
     )
 
-    assert len(params["add_command"]) == 1
-    assert TTYD_COMMAND in params["add_command"][0]
+    assert len(params["extra_window"]) == 1
+    assert TTYD_COMMAND in params["extra_window"][0]
 
 
 def test_ttyd_command_is_parseable_as_named_command() -> None:
@@ -80,7 +80,7 @@ def test_ttyd_command_is_parseable_as_named_command() -> None:
         params=params,
     )
 
-    named_cmd = NamedCommand.from_string(params["add_command"][0])
+    named_cmd = NamedCommand.from_string(params["extra_window"][0])
     assert named_cmd.window_name == TTYD_WINDOW_NAME
     assert str(named_cmd.command) == TTYD_COMMAND
 

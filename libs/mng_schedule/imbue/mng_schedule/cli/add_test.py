@@ -78,7 +78,7 @@ class TestAutoFixCreateArgs:
 
     def test_preserves_existing_args(self) -> None:
         result = auto_fix_create_args(
-            "my-agent --type claude --message 'fix bugs' --in modal",
+            "my-agent --type claude --message 'fix bugs' --provider modal",
             "trigger-1",
         )
         parts = shlex.split(result)
@@ -86,7 +86,7 @@ class TestAutoFixCreateArgs:
         assert "--type" in parts
         assert "--message" in parts
         assert "fix bugs" in parts
-        assert "--in" in parts
+        assert "--provider" in parts
         assert "modal" in parts
 
 
@@ -99,29 +99,29 @@ class TestCheckSafeCreateCommand:
     """Tests for check_safe_create_command."""
 
     def test_passes_with_reuse(self) -> None:
-        result = check_safe_create_command("my-agent --reuse --in modal")
+        result = check_safe_create_command("my-agent --reuse --provider modal")
         assert result is None
 
     def test_passes_with_branch_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --branch ':agent-run-{DATE}' --in modal")
+        result = check_safe_create_command("my-agent --branch ':agent-run-{DATE}' --provider modal")
         assert result is None
 
     def test_passes_with_branch_equals_date_placeholder(self) -> None:
-        result = check_safe_create_command("my-agent --branch=:agent-run-{DATE} --in modal")
+        result = check_safe_create_command("my-agent --branch=:agent-run-{DATE} --provider modal")
         assert result is None
 
     def test_fails_with_branch_equals_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --branch=:static-branch --in modal")
+        result = check_safe_create_command("my-agent --branch=:static-branch --provider modal")
         assert result is not None
 
     def test_fails_without_reuse_or_branch_date(self) -> None:
-        result = check_safe_create_command("my-agent --in modal")
+        result = check_safe_create_command("my-agent --provider modal")
         assert result is not None
         assert "--branch" in result
         assert "--reuse" in result
 
     def test_fails_with_branch_without_date(self) -> None:
-        result = check_safe_create_command("my-agent --branch ':static-branch' --in modal")
+        result = check_safe_create_command("my-agent --branch ':static-branch' --provider modal")
         assert result is not None
 
     def test_passes_with_empty_args_and_reuse(self) -> None:
@@ -142,5 +142,5 @@ class TestCheckSafeCreateCommand:
         assert result is None
 
     def test_passes_with_branch_base_and_date(self) -> None:
-        result = check_safe_create_command("my-agent --branch 'main:run-{DATE}' --in modal")
+        result = check_safe_create_command("my-agent --branch 'main:run-{DATE}' --provider modal")
         assert result is None

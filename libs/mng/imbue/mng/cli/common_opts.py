@@ -17,10 +17,10 @@ from click_option_group import optgroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -43,29 +43,6 @@ COMMON_OPTIONS_GROUP_NAME = "Common"
 TCommandOptions = TypeVar("TCommandOptions", bound="CommonCliOptions")
 TDecorated = TypeVar("TDecorated", bound=Callable[..., Any])
 TCommand = TypeVar("TCommand", bound=click.Command)
-
-
-class CommonCliOptions(FrozenModel):
-    """Base class for common CLI options shared across all commands.
-
-    This captures the options added by the @add_common_options decorator.
-    All command-specific option classes should inherit from this class.
-
-    Note that this class VERY INTENTIONALLY DOES NOT use Field() decorators with descriptions, defaults, etc.
-    For that information, see the @add_common_options decorator and its click.option() decorators.
-    """
-
-    headless: bool = False
-    output_format: str
-    quiet: bool
-    verbose: int
-    log_file: str | None
-    log_commands: bool | None
-    log_command_output: bool | None
-    log_env_vars: bool | None
-    project_context_path: str | None
-    plugin: tuple[str, ...]
-    disable_plugin: tuple[str, ...]
 
 
 def add_common_options(command: TDecorated) -> TDecorated:
@@ -126,7 +103,7 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "output_format",
         default="human",
         show_default=True,
-        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided [experimental], fields use standard python templating like 'name: {agent.name}' See below for available fields.",
+        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields.",
     )(command)
     # Start the "Common" option group - applied last since decorators run in reverse order
     command = optgroup.group(COMMON_OPTIONS_GROUP_NAME)(command)

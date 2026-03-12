@@ -93,6 +93,39 @@ def _detect_changed_packages(since_tag: str) -> set[str]:
     return changed
 
 
+def _detect_new_packages(since_tag: str) -> set[str]:
+    """Return the set of pypi names for packages that didn't exist at the given tag.
+
+    A package is considered new if its pyproject.toml didn't exist at the tag.
+    """
+    new: set[str] = set()
+    for pkg in PACKAGES:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{since_tag}:libs/{pkg.dir_name}/pyproject.toml"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            new.add(pkg.pypi_name)
+    return new
+
+
+def _confirm_new_packages(new_packages: set[str], current_versions: dict[str, str]) -> set[str]:
+    """Prompt the user to confirm first-time publication for each new package.
+
+    Returns the set of confirmed package names.
+    """
+    confirmed: set[str] = set()
+    for name in sorted(new_packages):
+        version = current_versions[name]
+        answer = input(f"\n{name} appears to be a new package. Publish it for the first time at {version}? [y/N] ")
+        if answer.lower() == "y":
+            confirmed.add(name)
+        else:
+            print(f"  Skipping {name}.")
+    return confirmed
+
+
 def _cascade_reverse_deps(
     seeds: deque[str],
     reverse_deps: dict[str, list[str]],
@@ -335,6 +368,7 @@ def _print_bump_summary(
     bump_levels: dict[str, str],
     current_versions: dict[str, str],
     new_versions: dict[str, str],
+    confirmed_new: set[str],
 ) -> None:
     """Print a summary of what will be bumped and why."""
     print("Directly changed packages:")
@@ -344,20 +378,31 @@ def _print_bump_summary(
     else:
         print("  (none)")
 
+    if confirmed_new:
+        print()
+        print("New packages (first publication):")
+        for pkg in PACKAGES:
+            if pkg.pypi_name in confirmed_new:
+                print(f"  {pkg.pypi_name}: {current_versions[pkg.pypi_name]} (new)")
+
     print()
     print("Packages to bump:")
-    for pkg in PACKAGES:
-        if pkg.pypi_name in to_bump:
+    bumped = [pkg for pkg in PACKAGES if pkg.pypi_name in to_bump]
+    if bumped:
+        for pkg in bumped:
             name = pkg.pypi_name
             reason = to_bump[name]
             level = bump_levels[name]
             old_v = current_versions[name]
             new_v = new_versions[name]
             print(f"  {name}: {old_v} -> {new_v} ({level}, {reason})")
+    else:
+        print("  (none)")
 
     print()
     print("Packages unchanged:")
-    unchanged = [pkg.pypi_name for pkg in PACKAGES if pkg.pypi_name not in to_bump]
+    all_included = set(to_bump) | confirmed_new
+    unchanged = [pkg.pypi_name for pkg in PACKAGES if pkg.pypi_name not in all_included]
     if unchanged:
         for name in unchanged:
             print(f"  {name} (stays at {current_versions[name]})")
@@ -472,8 +517,34 @@ def main() -> None:
             print("\nNo packages changed since the last release. Nothing to do.")
         return
 
+    # Detect new packages (not present at last tag) and confirm with user
+    new_packages = _detect_new_packages(last_tag) & directly_changed
+    current_versions = get_package_versions()
+    if new_packages and not args.dry_run:
+        confirmed_new = _confirm_new_packages(new_packages, current_versions)
+    elif new_packages:
+        # In dry-run mode, assume all new packages are confirmed for the preview
+        confirmed_new = new_packages
+    else:
+        confirmed_new = set()
+
+    # Remove new packages (confirmed or not) from the changed set before computing bumps.
+    # Confirmed new packages are published at their current version, not bumped.
+    # Declined new packages are excluded entirely.
+    directly_changed_for_bump = directly_changed - new_packages
+
+    if not directly_changed_for_bump and not confirmed_new:
+        print("\nNo packages to release (new packages were declined). Nothing to do.")
+        return
+
     # Compute the full bump set (includes cascades and mng-always rule)
-    to_bump = _compute_bump_set(directly_changed)
+    to_bump = _compute_bump_set(directly_changed_for_bump)
+
+    # Remove confirmed new packages from bump set -- they publish at current version,
+    # not a bumped version. They may have entered to_bump via cascade (e.g. mng is
+    # always bumped, and most packages depend on mng).
+    for name in confirmed_new:
+        to_bump.pop(name, None)
 
     # Warn if any overrides target packages not in the bump set
     for pkg_name in overrides:
@@ -483,7 +554,6 @@ def main() -> None:
 
     # Compute per-package bump levels with DAG cascade
     bump_levels = _compute_bump_levels(to_bump, base_kind, overrides)
-    current_versions = get_package_versions()
     new_versions = bump_package_versions(bump_levels, current_versions)
 
     # Compute what the full version map will look like after bumping
@@ -494,7 +564,7 @@ def main() -> None:
     tag = f"v{new_mng_version}"
 
     # Show summary
-    _print_bump_summary(directly_changed, to_bump, bump_levels, current_versions, new_versions)
+    _print_bump_summary(directly_changed, to_bump, bump_levels, current_versions, new_versions, confirmed_new)
     print()
     print(f"Tag: {tag}")
 
@@ -527,10 +597,13 @@ def main() -> None:
         print("Aborted.")
         return
 
-    # Bump versions for selected packages
+    # Bump versions for bumped packages (new packages keep their current version)
     for name, new_version in new_versions.items():
         _write_version(name, new_version)
-    print(f"\nBumped versions for {len(new_versions)} package(s).")
+    if new_versions:
+        print(f"\nBumped versions for {len(new_versions)} package(s).")
+    if confirmed_new:
+        print(f"Publishing {len(confirmed_new)} new package(s) at current version.")
 
     # Update internal dependency pins to match new versions
     pin_modified = update_internal_dep_pins(all_versions_after)
@@ -541,8 +614,8 @@ def main() -> None:
     run("uv", "lock")
 
     # Commit, tag, push
-    bumped_names = sorted(new_versions.keys())
-    commit_msg = f"Release {tag} ({', '.join(bumped_names)})"
+    all_released_names = sorted(set(new_versions.keys()) | confirmed_new)
+    commit_msg = f"Release {tag} ({', '.join(all_released_names)})"
 
     files_to_add = [str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES] + ["uv.lock"]
     run("git", "add", *files_to_add)

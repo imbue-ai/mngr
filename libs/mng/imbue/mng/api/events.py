@@ -1075,7 +1075,8 @@ def _tail_source_thread_local(
                 save_on_end=True,
                 read_from_end=False,
                 full_lines=True,
-                copytruncate=False,
+                # files can and do get rotated, and we need to handle that
+                copytruncate=True,
             )
             for line in tail:
                 if stop_event.is_set():

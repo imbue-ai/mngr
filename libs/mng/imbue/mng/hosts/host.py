@@ -16,6 +16,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from paramiko import SSHException
@@ -107,6 +108,12 @@ _retry_on_socket_closed = retry(
     ),
     reraise=True,
 )
+
+
+@pure
+def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Compute the state directory path for an agent given the host directory and agent ID."""
+    return host_dir / "agents" / str(agent_id)
 
 
 class HostLocation(FrozenModel):
@@ -1324,6 +1331,25 @@ class Host(BaseHost, OnlineHostInterface):
             finally:
                 files_from_path.unlink(missing_ok=True)
 
+    def copy_directory(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        extra_args: str | None = None,
+        exclude_git: bool = False,
+    ) -> None:
+        """Copy a directory from source_host:source_path to self:target_path using rsync."""
+        # Ensure the target directory exists -- rsync does not create intermediate parents.
+        self.execute_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
+        self._rsync_files(
+            source_host,
+            source_path,
+            target_path,
+            extra_args=extra_args,
+            exclude_git=exclude_git,
+        )
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -1442,17 +1468,17 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mng/worktrees/<agent-id>/ by default.
+        Worktrees are placed at ~/.mng/worktrees/<name>-<uuid>/ by default.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
 
-        agent_id = AgentId.generate()
-
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            work_dir_path = self.host_dir / "worktrees" / str(agent_id)
+            agent_name = options.name or AgentName("agent")
+            work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
+            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
         # Worktree mode always requires a new branch (enforced at CLI)
         if not options.git or not options.git.new_branch_name:
@@ -1492,7 +1518,7 @@ class Host(BaseHost, OnlineHostInterface):
         ):
             resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
-            state_dir = self.host_dir / "agents" / str(agent_id)
+            state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             self._mkdirs([state_dir, state_dir / "events"])
 
             create_time = datetime.now(timezone.utc)
@@ -1553,7 +1579,7 @@ class Host(BaseHost, OnlineHostInterface):
 
     def _get_agent_state_dir(self, agent: AgentInterface) -> Path:
         """Get the state directory for an agent."""
-        return self.host_dir / "agents" / str(agent.id)
+        return get_agent_state_dir_path(self.host_dir, agent.id)
 
     def get_agent_env_path(self, agent: AgentInterface) -> Path:
         """Get the path to the agent's environment file."""

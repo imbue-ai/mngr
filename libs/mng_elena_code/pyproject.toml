@@ -1,11 +1,12 @@
 [project]
 name = "mng-elena-code"
 version = "0.1.0"
-description = "Elena Code agent plugin for mng - a conversational AI changeling powered by Claude Code"
+description = "Elena Code agent plugin for mng - a conversational AI mind powered by Claude Code"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
-    "mng-claude-changeling==0.1.0",
+    "mng-claude-mind==0.1.0",
 ]
 
 [project.entry-points.mng]
@@ -20,7 +21,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
-mng-claude-changeling = { workspace = true }
+mng-claude-mind = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

@@ -19,7 +19,7 @@ After that, gather context (as appropriate) from the project in this repo that i
 
 Finally, think carefully about how best to convert this task into a complete, concise, clear prompt that can be sent along to an AI coding model.
 
-Keep the following guidelines in mind:
+Adhere to the following guidelines:
 
 - You may need to gather more context about the project in order to resolve some ambiguities or uncertainty and figure out what was meant by the task. Feel free to do so.
 - The purpose of creating the prompt for me is to save me time. If you're unsure of what was meant, it's ok to make some assumptions, or even to make multiple variants (separated by "---" within the file)

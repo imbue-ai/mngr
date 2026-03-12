@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # stop_hook_pr_and_ci.sh
 #

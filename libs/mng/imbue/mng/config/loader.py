@@ -18,6 +18,7 @@ from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import CommandDefaults
+from imbue.mng.config.data_types import CreateCliOptions
 from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
@@ -484,6 +485,13 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
     templates: dict[CreateTemplateName, CreateTemplate] = {}
 
     for template_name, raw_options in raw_templates.items():
+        # make sure the options don't define anything that cannot be handled:
+        for field in raw_options.keys():
+            if field not in CreateCliOptions.model_fields:
+                raise ConfigParseError(
+                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
+                )
+        # fine, add the template
         templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
 
     return templates

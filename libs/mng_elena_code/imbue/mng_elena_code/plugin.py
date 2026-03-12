@@ -7,8 +7,8 @@ from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
-from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
+from imbue.mng_claude_mind.plugin import ClaudeMindAgent
+from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 
 ELENA_SYSTEM_PROMPT = "You are Elena, an assistant powered by Claude Code that helps users write software."
 
@@ -62,8 +62,8 @@ def _shell_unquote(value: str) -> str:
     return value
 
 
-class ElenaCodeAgent(ClaudeChangelingAgent):
-    """A conversational AI changeling agent powered by Claude Code.
+class ElenaCodeAgent(ClaudeMindAgent):
+    """A conversational AI mind agent powered by Claude Code.
 
     Elena is designed to be purely conversational -- she interacts with users
     via a web-accessible Claude Code session but is instructed to never write
@@ -93,4 +93,4 @@ class ElenaCodeAgent(ClaudeChangelingAgent):
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface], type[AgentTypeConfig]]:
     """Register the elena-code agent type."""
-    return ("elena-code", ElenaCodeAgent, ClaudeChangelingConfig)
+    return ("elena-code", ElenaCodeAgent, ClaudeMindConfig)

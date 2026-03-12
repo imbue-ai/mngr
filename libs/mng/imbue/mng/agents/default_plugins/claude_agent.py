@@ -9,9 +9,11 @@ import random
 import shlex
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -23,6 +25,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -58,6 +61,8 @@ from imbue.mng.interfaces.data_types import FileTransferSpec
 from imbue.mng.interfaces.data_types import RelativePath
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mng.plugins.hookspecs import OptionStackItem
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import WorkDirCopyMode
@@ -76,6 +81,43 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
     "commands",
     "plugins",
 )
+
+
+def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
+    """Resolve an --adopt-session argument to a (session_id, project_dir) pair.
+
+    Accepts either:
+    - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
+    - A session ID string (searched in $CLAUDE_CONFIG_DIR/projects/ or ~/.claude/projects/)
+
+    Returns (session_id, source_project_dir).
+    """
+    if adopt_session_arg.endswith(".jsonl"):
+        session_file = Path(adopt_session_arg).resolve()
+        if not session_file.exists():
+            raise UserInputError(f"Session file not found: {session_file}")
+        return session_file.stem, session_file.parent
+
+    # Search by session ID
+    source_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+    source_projects_dir = source_config_dir / "projects"
+    if not source_projects_dir.exists():
+        raise UserInputError(f"No projects directory found at {source_projects_dir}. Cannot find session to adopt.")
+
+    matches = list(source_projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
+    if not matches:
+        raise UserInputError(
+            f"Session {adopt_session_arg} not found in {source_projects_dir}. "
+            "Check that the session ID is correct, or pass a path to the .jsonl file."
+        )
+    if len(matches) > 1:
+        match_list = "\n".join(f"  {m}" for m in matches)
+        raise UserInputError(
+            f"Session {adopt_session_arg} found in multiple project directories:\n{match_list}\n"
+            "Pass the full path to the .jsonl file to specify which one."
+        )
+
+    return adopt_session_arg, matches[0].parent
 
 
 class ClaudeAgentConfig(AgentTypeConfig):
@@ -1132,7 +1174,7 @@ class ClaudeAgent(BaseAgent):
                 # settings.json is handled separately above
                 if relative_path == Path("settings.json"):
                     continue
-                host.write_text_file(config_dir / relative_path, source_path.read_text())
+                host.write_file(config_dir / relative_path, source_path.read_bytes())
 
         # 3. Always ship .claude.json
         # Resolve the work_dir on the remote host so the trust entry matches
@@ -1282,6 +1324,12 @@ class ClaudeAgent(BaseAgent):
                 _install_claude(host, config.version)
                 logger.info("Claude installed successfully")
 
+        # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
+        # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
+        # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
+        if options.source_agent_state_dir is not None:
+            self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+
         # Set up per-agent config directory (for both local and remote hosts)
         self._setup_per_agent_config_dir(host, options, mng_ctx)
 
@@ -1290,6 +1338,62 @@ class ClaudeAgent(BaseAgent):
 
         # Provision background task scripts to the agent state directory
         _provision_background_scripts(host, self._get_agent_dir())
+
+    def on_after_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mng_ctx: MngContext,
+    ) -> None:
+        """Adopt sessions when --adopt-session is used.
+
+        For each specified session, searches the user's Claude config directory
+        by ID (or reads a .jsonl path directly), copies the containing project
+        directory into the per-agent config dir, and writes the last session ID
+        so --resume picks it up.
+        """
+        adopt_session_args: tuple[str, ...] = options.plugin_data.get("adopt_session", ())
+        if not adopt_session_args:
+            return
+
+        config_dir = self.get_claude_config_dir()
+        copied_project_dirs: set[str] = set()
+
+        for arg in adopt_session_args:
+            session_id, source_project_dir = _resolve_adopt_session(arg)
+            # Deduplicate project dir copies (multiple sessions may be in the same project)
+            if source_project_dir.name not in copied_project_dirs:
+                dest_project_dir = config_dir / "projects" / source_project_dir.name
+                with log_span("Adopting session {}", session_id):
+                    host.copy_directory(host, source_project_dir, dest_project_dir)
+                copied_project_dirs.add(source_project_dir.name)
+            last_session_id = session_id
+
+        assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
+        host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
+        logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
+
+    def _transfer_source_plugin_data(
+        self,
+        host: OnlineHostInterface,
+        source_agent_state_dir: Path,
+    ) -> None:
+        """Transfer plugin data from a source agent's state directory during clone.
+
+        Copies the source agent's plugin/ directory into this agent's state
+        directory. This runs before _setup_per_agent_config_dir, which will
+        overwrite identity-specific config files with fresh values for the
+        new agent.
+        """
+        source_plugin_dir = source_agent_state_dir / "plugin"
+        dest_plugin_dir = self._get_agent_dir() / "plugin"
+
+        if not source_plugin_dir.exists():
+            logger.debug("No plugin directory in source agent, skipping clone transfer")
+            return
+
+        with log_span("Transferring source plugin data"):
+            host.copy_directory(host, source_plugin_dir, dest_plugin_dir)
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Clean up per-agent credentials and trust entries.
@@ -1366,6 +1470,81 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
+
+
+class WaitingReason(UpperCaseStrEnum):
+    """Why a Claude agent is in the WAITING lifecycle state."""
+
+    PERMISSIONS = auto()
+    END_OF_TURN = auto()
+
+
+def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
+    """Check if a file exists on the host without SSH overhead."""
+    try:
+        host.read_text_file(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Checks the agent state directory for marker files rather than calling
+    get_lifecycle_state() (which involves tmux/ps SSH commands).
+
+    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
+    - active file absent -> END_OF_TURN (idle, turn complete)
+    - otherwise -> None (agent is actively running)
+    """
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    if _host_file_exists(host, agent_dir / "permissions_waiting"):
+        return WaitingReason.PERMISSIONS
+    if not _host_file_exists(host, agent_dir / "active"):
+        return WaitingReason.END_OF_TURN
+    return None
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose Claude-specific agent fields for listing."""
+    return ("claude", {"waiting_reason": _waiting_reason})
+
+
+@hookimpl
+def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem]] | None:
+    """Register the --adopt-session CLI option for the create command."""
+    if command_name == "create":
+        return {
+            "Behavior": [
+                OptionStackItem(
+                    param_decls=("--adopt-session",),
+                    multiple=True,
+                    help="Adopt an existing Claude Code session into this agent. "
+                    "Accepts a session ID or a path to a .jsonl file [repeatable].",
+                ),
+            ]
+        }
+    return None
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs) -> OnBeforeCreateArgs | None:
+    """Validate create args when --adopt-session is used.
+
+    When plugin_data contains "adopt_session":
+    - Validates the agent type is claude (or unset/default)
+    """
+    adopt_session = args.agent_options.plugin_data.get("adopt_session", ())
+    if not adopt_session:
+        return None
+
+    agent_type = args.agent_options.agent_type
+    if agent_type is not None and str(agent_type) != "claude":
+        raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+
+    return None
 
 
 @hookimpl

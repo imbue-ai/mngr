@@ -1,5 +1,6 @@
 import io
 import logging
+import re
 import sys
 from collections import deque
 from pathlib import Path
@@ -58,7 +59,7 @@ class LoggingConfig(FrozenModel):
     )
     event_type: NonEmptyStr = Field(
         default=NonEmptyStr(_DEFAULT_EVENT_TYPE),
-        description="Event type for JSONL log events (e.g. 'mng', 'changelings')",
+        description="Event type for JSONL log events (e.g. 'mng', 'minds')",
     )
     event_source: NonEmptyStr = Field(
         default=NonEmptyStr(_DEFAULT_EVENT_SOURCE),
@@ -179,18 +180,36 @@ def _format_user_message(record: Any) -> str:
     return "{message}\n"
 
 
+_PYINFRA_NOISE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\[@\w+\] Connected$"
+    r"|^--> Running command on "
+    r"|^--> Waiting for exit status"
+    r"|^--> Command exit status: "
+)
+"""Patterns for pyinfra messages that are purely duplicative of mng's own logging.
+
+These cover the standard command-execution flow (connect, run, wait, exit status)
+that mng already wraps in its own log_span calls. Other pyinfra messages (errors,
+warnings, upload retries, etc.) are kept so that unexpected situations are still
+visible.
+"""
+
+
 class _PyinfraToLoguruHandler(logging.Handler):
-    """Forward pyinfra log messages to loguru at TRACE level.
+    """Forward pyinfra log messages to loguru, suppressing duplicative noise.
 
     Pyinfra uses Python's standard logging module and outputs messages that mng
-    already handles (e.g., connection errors, file upload retries). This handler
-    captures all pyinfra log output and redirects it to loguru at TRACE level,
-    keeping it available for debugging while suppressing it from normal console
-    output.
+    already handles (e.g., connection status, command execution). This handler
+    silently drops the standard operational messages (matched by _PYINFRA_NOISE_RE)
+    and forwards everything else to loguru at TRACE level so that unexpected
+    pyinfra output is still visible when debugging.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
-        logger.trace("[pyinfra] {}", record.getMessage())
+        msg = record.getMessage()
+        if _PYINFRA_NOISE_RE.search(msg):
+            return
+        logger.trace("[pyinfra] {}", msg)
 
 
 def suppress_warnings() -> None:

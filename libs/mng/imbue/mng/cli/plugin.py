@@ -19,7 +19,6 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.config import ConfigScope
@@ -34,6 +33,7 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
@@ -722,7 +722,7 @@ def _emit_plugin_toggle_result(
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="plugin",
-    one_line_description="Manage available and active plugins [experimental]",
+    one_line_description="Manage available and active plugins",
     synopsis="mng [plugin|plug] <subcommand> [OPTIONS]",
     description="""Install, remove, view, enable, and disable plugins registered with mng.
 Plugins provide agent types, provider backends, CLI commands, and lifecycle hooks.""",
@@ -748,7 +748,7 @@ add_pager_help_option(plugin)
 
 CommandHelpMetadata(
     key="plugin.list",
-    one_line_description="List discovered plugins [experimental]",
+    one_line_description="List discovered plugins",
     synopsis="mng plugin list [OPTIONS]",
     description="""Shows all plugins registered with mng, including built-in plugins
 and any externally installed plugins.
@@ -771,7 +771,7 @@ add_pager_help_option(plugin_list)
 
 CommandHelpMetadata(
     key="plugin.add",
-    one_line_description="Install a plugin package [experimental]",
+    one_line_description="Install a plugin package",
     synopsis="mng plugin add [NAME] [OPTIONS]",
     description="""Provide exactly one of NAME (positional), --path, or --git. NAME is a PyPI
 package specifier (e.g., 'mng-pair' or 'mng-pair>=1.0'). --path installs
@@ -791,7 +791,7 @@ add_pager_help_option(plugin_add)
 
 CommandHelpMetadata(
     key="plugin.remove",
-    one_line_description="Uninstall a plugin package [experimental]",
+    one_line_description="Uninstall a plugin package",
     synopsis="mng plugin remove [NAME] [OPTIONS]",
     description="""Provide exactly one of NAME (positional) or --path. For local paths,
 the package name is read from pyproject.toml.""",
@@ -808,7 +808,7 @@ add_pager_help_option(plugin_remove)
 
 CommandHelpMetadata(
     key="plugin.enable",
-    one_line_description="Enable a plugin [experimental]",
+    one_line_description="Enable a plugin",
     synopsis="mng plugin enable NAME [OPTIONS]",
     description="""Sets plugins.<name>.enabled = true in the configuration file at the
 specified scope.""",
@@ -826,7 +826,7 @@ add_pager_help_option(plugin_enable)
 
 CommandHelpMetadata(
     key="plugin.disable",
-    one_line_description="Disable a plugin [experimental]",
+    one_line_description="Disable a plugin",
     synopsis="mng plugin disable NAME [OPTIONS]",
     description="""Sets plugins.<name>.enabled = false in the configuration file at the
 specified scope.""",

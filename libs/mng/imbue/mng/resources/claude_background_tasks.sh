@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Combined background tasks for Claude agents.
 #
 # This script runs continuously while the agent's tmux session is alive,

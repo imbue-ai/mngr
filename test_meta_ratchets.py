@@ -140,6 +140,39 @@ def test_prevent_old_mngr_name_in_file_paths() -> None:
     )
 
 
+def test_every_project_has_pypi_readme() -> None:
+    """Ensure each project's pyproject.toml has a readme field pointing to an existing file.
+
+    Every published package should have a README so that PyPI displays useful
+    information. This checks two things:
+    1. The [project] section contains a `readme` key
+    2. The referenced file exists on disk
+    """
+    missing_field: list[str] = []
+    missing_file: list[str] = []
+
+    for project_dir in _get_all_project_dirs():
+        pyproject_path = project_dir / "pyproject.toml"
+        pyproject = tomlkit.parse(pyproject_path.read_text())
+        project_section = pyproject.get("project", {})
+
+        readme_value = project_section.get("readme")
+        if not isinstance(readme_value, str):
+            missing_field.append(project_dir.name)
+            continue
+
+        if not (project_dir / readme_value).exists():
+            missing_file.append(f"{project_dir.name} (references {readme_value})")
+
+    errors: list[str] = []
+    if missing_field:
+        errors.append("Missing readme field in [project]: " + ", ".join(missing_field))
+    if missing_file:
+        errors.append("readme file does not exist: " + ", ".join(missing_file))
+
+    assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
 def _has_test_files(project_dir: Path) -> bool:
     """Return True if the project contains any test files."""
     for pattern in ["*_test.py", "test_*.py"]:

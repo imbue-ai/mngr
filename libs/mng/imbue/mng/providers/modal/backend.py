@@ -226,19 +226,23 @@ class ModalProviderBackend(ProviderBackendInterface):
 
         with log_span("Creating ephemeral Modal app with output capture: {} (env: {})", app_name, environment_name):
             # Enter the output capture context first
-            output_capture_context = enable_modal_output_capture(is_logging_to_loguru=True)
-            output_buffer, loguru_writer = output_capture_context.__enter__()
+            with log_span("Enabling Modal output capture"):
+                output_capture_context = enable_modal_output_capture(is_logging_to_loguru=True)
+                output_buffer, loguru_writer = output_capture_context.__enter__()
 
             if is_persistent:
-                app = _lookup_persistent_app_with_env_retry(app_name, environment_name, cg)
+                with log_span("Looking up persistent Modal app: {}", app_name):
+                    app = _lookup_persistent_app_with_env_retry(app_name, environment_name, cg)
                 run_context = None
             else:
                 # Create the Modal app
-                app = modal.App(app_name)
+                with log_span("Creating Modal app object: {}", app_name):
+                    app = modal.App(app_name)
 
                 # Enter the app.run() context manager manually so we can return the app
                 # while keeping the context active until close() is called
-                run_context = _enter_ephemeral_app_context_with_env_retry(app, environment_name, cg)
+                with log_span("Entering Modal app.run() context (env: {})", environment_name):
+                    run_context = _enter_ephemeral_app_context_with_env_retry(app, environment_name, cg)
 
             # Set app metadata on the loguru writer for structured logging
             if loguru_writer is not None:

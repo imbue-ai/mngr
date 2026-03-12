@@ -381,6 +381,21 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 
 
 # =============================================================================
+# Project Directory Encoding
+# =============================================================================
+
+
+@pure
+def encode_claude_project_dir_name(path: Path) -> str:
+    """Encode a filesystem path into Claude Code's project directory name.
+
+    Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
+    The encoding replaces '/' and '.' with '-'.
+    """
+    return str(path).replace("/", "-").replace(".", "-")
+
+
+# =============================================================================
 # Readiness Hooks Configuration
 # =============================================================================
 
@@ -443,7 +458,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'touch "$MNG_AGENT_STATE_DIR/active" && rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": """touch "$MNG_AGENT_STATE_DIR/active" && rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNG_HOST_DIR/events/mng/activity && echo '{"source": "mng/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNG_HOST_DIR/events/mng/activity/events.jsonl""",
                         },
                         {
                             "type": "command",
@@ -488,7 +503,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/active" "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": """rm -f "$MNG_AGENT_STATE_DIR/active" "$MNG_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNG_HOST_DIR/events/mng/activity && echo '{"source": "mng/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNG_HOST_DIR/events/mng/activity/events.jsonl""",
                         },
                     ],
                 }

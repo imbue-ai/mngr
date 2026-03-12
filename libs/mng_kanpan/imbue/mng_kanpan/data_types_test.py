@@ -8,8 +8,10 @@ from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSection
 from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import CheckStatus
+from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.data_types import RefreshHook
 
 
 def test_pr_state_values() -> None:
@@ -124,3 +126,43 @@ def test_board_snapshot_with_errors() -> None:
     assert len(snapshot.entries) == 0
     assert len(snapshot.errors) == 2
     assert snapshot.errors[0] == "Connection failed"
+
+
+def test_refresh_hook_construction() -> None:
+    hook = RefreshHook(name="Check review", command="my-script")
+    assert hook.name == "Check review"
+    assert hook.command == "my-script"
+    assert hook.enabled is True
+
+
+def test_refresh_hook_disabled() -> None:
+    hook = RefreshHook(name="Disabled hook", command="my-script", enabled=False)
+    assert hook.enabled is False
+
+
+def test_kanpan_config_merge_with_hooks() -> None:
+    base = KanpanPluginConfig(
+        on_before_refresh={"a": RefreshHook(name="Hook A", command="cmd-a")},
+        on_after_refresh={"x": RefreshHook(name="Hook X", command="cmd-x")},
+    )
+    override = KanpanPluginConfig(
+        on_before_refresh={"b": RefreshHook(name="Hook B", command="cmd-b")},
+        on_after_refresh={"x": RefreshHook(name="Hook X Override", command="cmd-x2")},
+    )
+    merged = base.merge_with(override)
+    assert len(merged.on_before_refresh) == 2
+    assert merged.on_before_refresh["a"].name == "Hook A"
+    assert merged.on_before_refresh["b"].name == "Hook B"
+    assert len(merged.on_after_refresh) == 1
+    assert merged.on_after_refresh["x"].name == "Hook X Override"
+
+
+def test_kanpan_config_merge_with_empty_hooks() -> None:
+    base = KanpanPluginConfig(
+        on_before_refresh={"a": RefreshHook(name="Hook A", command="cmd-a")},
+    )
+    override = KanpanPluginConfig()
+    merged = base.merge_with(override)
+    assert len(merged.on_before_refresh) == 1
+    assert merged.on_before_refresh["a"].name == "Hook A"
+    assert merged.on_after_refresh == {}

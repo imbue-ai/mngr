@@ -95,7 +95,7 @@ Create `scripts/githooks/` directory with these files:
 
 ### `scripts/githooks/install.sh`
 ```bash
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -110,7 +110,7 @@ ln -sf ../../scripts/githooks/pre-commit .git/hooks/pre-commit
 
 ### `scripts/githooks/pre-commit`
 ```bash
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This script uses uv to call pre-commit to run hooks on files about to be committed.
 #
