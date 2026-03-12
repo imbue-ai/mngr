@@ -268,3 +268,6 @@ current.tar.gz
 
 # for git worktrees from other repos
 .external_worktrees/
+
+# ignore coverage files generated within subprojects
+cov.xml
