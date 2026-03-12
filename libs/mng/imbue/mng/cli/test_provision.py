@@ -1,5 +1,4 @@
 import json
-import time
 from pathlib import Path
 
 import pluggy
@@ -23,7 +22,7 @@ def test_provision_existing_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that provisioning an existing agent succeeds."""
-    agent_name = f"test-provision-{int(time.time())}"
+    agent_name = f"test-provision-{get_short_random_string()}"
     create_test_agent(agent_name)
 
     result = cli_runner.invoke(
@@ -44,7 +43,7 @@ def test_provision_with_user_command(
     tmp_path: Path,
 ) -> None:
     """Test that provisioning with --user-command executes the command."""
-    agent_name = f"test-prov-cmd-{int(time.time())}"
+    agent_name = f"test-prov-cmd-{get_short_random_string()}"
     marker_file = tmp_path / "provision_marker.txt"
 
     create_test_agent(agent_name)
@@ -73,7 +72,7 @@ def test_provision_with_env_var(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that provisioning with --env sets environment variables."""
-    agent_name = f"test-prov-env-{int(time.time())}"
+    agent_name = f"test-prov-env-{get_short_random_string()}"
 
     create_test_agent(agent_name)
 
@@ -111,7 +110,7 @@ def test_provision_preserves_existing_env_vars(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that provisioning preserves existing environment variables."""
-    agent_name = f"test-prov-env-preserve-{int(time.time())}"
+    agent_name = f"test-prov-env-preserve-{get_short_random_string()}"
     session_name = f"{mng_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -166,7 +165,7 @@ def test_provision_with_upload_file(
     tmp_path: Path,
 ) -> None:
     """Test that provisioning with --upload-file transfers the file."""
-    agent_name = f"test-prov-upload-{int(time.time())}"
+    agent_name = f"test-prov-upload-{get_short_random_string()}"
 
     # Create a local file to upload
     local_file = tmp_path / "upload_source.txt"
@@ -212,7 +211,7 @@ def test_provision_with_agent_option(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --agent option works as an alternative to positional argument."""
-    agent_name = f"test-prov-opt-{int(time.time())}"
+    agent_name = f"test-prov-opt-{get_short_random_string()}"
 
     create_test_agent(agent_name)
 
@@ -255,7 +254,7 @@ def test_provision_json_output(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --format json produces JSON output."""
-    agent_name = f"test-prov-json-{int(time.time())}"
+    agent_name = f"test-prov-json-{get_short_random_string()}"
 
     create_test_agent(agent_name)
 
@@ -286,7 +285,7 @@ def test_provision_stopped_agent(
     need the agent process running. Previously, provisioning a stopped agent
     failed because the agent lookup required the agent to be running.
     """
-    agent_name = f"test-prov-stopped-{int(time.time())}"
+    agent_name = f"test-prov-stopped-{get_short_random_string()}"
 
     create_test_agent(agent_name)
 
@@ -323,7 +322,7 @@ def test_provision_stopped_agent_with_user_command(
     process is stopped, since provisioning operates on the host, not
     the agent process.
     """
-    agent_name = f"test-prov-stopped-cmd-{int(time.time())}"
+    agent_name = f"test-prov-stopped-cmd-{get_short_random_string()}"
     marker_file = tmp_path / "stopped_provision_marker.txt"
 
     create_test_agent(agent_name)
@@ -365,7 +364,7 @@ def test_provision_running_agent_restarts_by_default(
     The agent should be stopped before provisioning and restarted after,
     and should be running after provisioning completes.
     """
-    agent_name = f"test-prov-restart-{int(time.time())}"
+    agent_name = f"test-prov-restart-{get_short_random_string()}"
     session_name = create_test_agent(agent_name)
 
     # Verify agent is running before provisioning
@@ -392,7 +391,7 @@ def test_provision_running_agent_no_restart_keeps_running(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test that --no-restart does not stop/restart a running agent."""
-    agent_name = f"test-prov-norestart-{int(time.time())}"
+    agent_name = f"test-prov-norestart-{get_short_random_string()}"
     session_name = create_test_agent(agent_name)
 
     # Verify agent is running before provisioning
@@ -423,7 +422,7 @@ def test_provision_stopped_agent_stays_stopped_with_restart(
     When is_restart=True, only agents that were running before provisioning should
     be restarted. A stopped agent should remain stopped.
     """
-    agent_name = f"test-prov-stopped-norestart-{int(time.time())}"
+    agent_name = f"test-prov-stopped-norestart-{get_short_random_string()}"
     session_name = create_test_agent(agent_name)
 
     # Stop the agent
