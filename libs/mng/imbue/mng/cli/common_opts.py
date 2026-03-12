@@ -157,15 +157,10 @@ def _restore_sigint_handler(handler: Any) -> None:
     """Restore the original SIGINT handler.
 
     Does nothing if the handler was never installed (e.g. when not called from the main thread).
-    Silently ignores ValueError from signal.signal() if called from a non-main thread during
-    cleanup (defensive, should not happen in practice).
     """
     if handler is None:
         return
-    try:
-        signal.signal(signal.SIGINT, handler)
-    except ValueError:
-        pass
+    signal.signal(signal.SIGINT, handler)
 
 
 def _close_concurrency_group(cg: ConcurrencyGroup, original_sigint_handler: Any) -> None:
