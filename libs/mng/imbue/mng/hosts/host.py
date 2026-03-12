@@ -1340,6 +1340,8 @@ class Host(BaseHost, OnlineHostInterface):
         exclude_git: bool = False,
     ) -> None:
         """Copy a directory from source_host:source_path to self:target_path using rsync."""
+        # Ensure the target directory exists -- rsync does not create intermediate parents.
+        self.execute_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
         self._rsync_files(
             source_host,
             source_path,

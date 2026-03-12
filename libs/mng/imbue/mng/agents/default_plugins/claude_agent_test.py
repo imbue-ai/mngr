@@ -2336,10 +2336,23 @@ def test_on_after_provisioning_adopts_session_by_id(
     # Session ID should be written
     assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
 
-    # Project dir should be copied into per-agent config dir
+    # Project dir should be copied into per-agent config dir with correct content
     dest_project_dir = agent.get_claude_config_dir() / "projects" / "test-project"
-    assert (dest_project_dir / f"{target_session_id}.jsonl").exists()
-    assert (dest_project_dir / "CLAUDE.md").exists()
+    dest_session_file = dest_project_dir / f"{target_session_id}.jsonl"
+    assert dest_session_file.exists(), f"Session file not found at {dest_session_file}"
+    assert dest_session_file.read_text() == '{"type":"message"}\n'
+    dest_memory_file = dest_project_dir / "CLAUDE.md"
+    assert dest_memory_file.exists(), f"Memory file not found at {dest_memory_file}"
+    assert dest_memory_file.read_text() == "# Memory\n"
+
+    # Regression: verify the session file is discoverable the same way Claude Code
+    # finds it at runtime: `find "$CLAUDE_CONFIG_DIR" -name "$SESSION_ID"`.
+    # This was broken when rsync silently failed to copy the project directory.
+    claude_config_dir = agent.get_claude_config_dir()
+    matches = list(claude_config_dir.rglob(target_session_id + ".jsonl"))
+    assert len(matches) == 1, (
+        f"Expected exactly 1 session file under {claude_config_dir}, found {len(matches)}: {matches}"
+    )
 
 
 def test_on_after_provisioning_raises_when_session_not_found(
