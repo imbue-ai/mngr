@@ -5,7 +5,7 @@ The Docker provider creates agents in Docker containers with SSH access. Each co
 ## Usage
 
 ```bash
-mng create my-agent --in docker
+mng create my-agent@.docker
 ```
 
 ## Build Arguments
@@ -14,13 +14,13 @@ Build arguments are passed directly to `docker build`. Use `-b` (or `--build-arg
 
 ```bash
 # Build from a Dockerfile
-mng create my-agent --in docker -b --file=./Dockerfile -b .
+mng create my-agent@.docker -b --file=./Dockerfile -b .
 
 # Build with no cache
-mng create my-agent --in docker -b --file=./Dockerfile -b --no-cache -b .
+mng create my-agent@.docker -b --file=./Dockerfile -b --no-cache -b .
 
 # Build with build-time variables
-mng create my-agent --in docker -b --build-arg=MY_VAR=value -b --file=./Dockerfile -b .
+mng create my-agent@.docker -b --build-arg=MY_VAR=value -b --file=./Dockerfile -b .
 ```
 
 Run `docker build --help` for the full list of supported flags.
@@ -31,19 +31,19 @@ Start arguments are passed directly to `docker run` for container resource limit
 
 ```bash
 # Set CPU and memory limits
-mng create my-agent --in docker -s --cpus=4 -s --memory=16g
+mng create my-agent@.docker -s --cpus=4 -s --memory=16g
 
 # GPU access
-mng create my-agent --in docker -s --gpus=all
+mng create my-agent@.docker -s --gpus=all
 
 # Mount a volume
-mng create my-agent --in docker -s -v=/host/data:/container/data
+mng create my-agent@.docker -s -v=/host/data:/container/data
 
 # Attach to a network
-mng create my-agent --in docker -s --network=my-network
+mng create my-agent@.docker -s --network=my-network
 
 # Publish an additional port
-mng create my-agent --in docker -s -p=8080:80
+mng create my-agent@.docker -s -p=8080:80
 ```
 
 Run `docker run --help` for the full list of supported flags.
@@ -82,7 +82,7 @@ mng start my-agent
 Tags are stored as Docker container labels and are immutable after creation. Set tags when creating a host:
 
 ```bash
-mng create my-agent --in docker --host-label env=test --host-label team=infra
+mng create my-agent@.docker --host-label env=test --host-label team=infra
 ```
 
 Attempting to modify tags after creation will produce an error.
