@@ -268,4 +268,3 @@ current.tar.gz
 
 # for git worktrees from other repos
 .external_worktrees/
-scratch_click_repro.py
