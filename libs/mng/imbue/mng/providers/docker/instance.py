@@ -783,7 +783,7 @@ kill -TERM 1
         if is_using_default:
             logger.warning(
                 "No image or Dockerfile specified -- building from mng default Dockerfile. "
-                "Consider using your own Dockerfile (-b --file=<path>) to include "
+                "Consider using your own Dockerfile (-b --file=<path> -b .) to include "
                 "your project's dependencies for faster startup.",
             )
 

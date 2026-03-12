@@ -34,6 +34,7 @@ REQUIRED_HOST_PACKAGES: Final[tuple[RequiredHostPackage, ...]] = (
     RequiredHostPackage(package="rsync", binary="rsync"),
     RequiredHostPackage(package="git", binary="git"),
     RequiredHostPackage(package="jq", binary="jq"),
+    RequiredHostPackage(package="xxd", binary="xxd"),
 )
 
 

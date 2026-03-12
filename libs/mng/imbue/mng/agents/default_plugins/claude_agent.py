@@ -283,7 +283,7 @@ def _install_claude(host: OnlineHostInterface, version: str | None = None) -> No
         version_arg = f" -s {shlex.quote(version)}"
     else:
         version_arg = ""
-    install_command = f"""curl --version && ( curl -fsSL https://claude.ai/install.sh | bash{version_arg} ) && echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc"""
+    install_command = f"""curl --version && ( curl -fsSL https://claude.ai/install.sh | bash{version_arg} ) && echo 'export PATH="$HOME/.claude/local/bin:$PATH"' >> ~/.bashrc"""
     result = host.execute_command(install_command, timeout_seconds=300.0)
     if not result.success:
         raise PluginMngError(f"Failed to install claude. stderr: {result.stderr}")
