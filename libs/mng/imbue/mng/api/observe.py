@@ -441,6 +441,9 @@ class AgentObserver(MutableModel):
             host = new_hosts[host_id_str]
             self._start_activity_stream(host_id_str, host.host_name)
 
+    # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:
+    #  1. --local-watches-only to only observe the local host. If specified, don't bother starting an activity stream for anything besides the local host
+    #  2. --no-watches to disable the activity streams entirely and just do periodic full snapshots (which will still emit change events, just with less granularity and more latency)
     def _start_activity_stream(self, host_id_str: str, host_name: HostName) -> None:
         """Start streaming activity events from a host."""
         with self._lock:
