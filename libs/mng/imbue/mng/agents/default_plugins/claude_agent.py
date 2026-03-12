@@ -1134,7 +1134,7 @@ class ClaudeAgent(BaseAgent):
                 # settings.json is handled separately above
                 if relative_path == Path("settings.json"):
                     continue
-                host.write_text_file(config_dir / relative_path, source_path.read_text())
+                host.write_file(config_dir / relative_path, source_path.read_bytes())
 
         # 3. Always ship .claude.json
         # Resolve the work_dir on the remote host so the trust entry matches
