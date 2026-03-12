@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [create|c] [<AGENT_NAME>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--in <PROVIDER>] [--host <HOST>] [-w WINDOW_NAME=COMMAND]
+mng [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--in-place|--copy|--clone|--worktree]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
@@ -22,8 +22,9 @@ new host (or uses an existing one), runs the specified agent process, and
 connects to it by default.
 
 By default, agents run locally in a new git worktree (for git repositories)
-or a copy of the current directory. Use --in to create a new remote host,
-or --host to use an existing host.
+or a copy of the current directory. Specify a host in the agent address
+(e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
+to create a new one.
 
 The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
@@ -42,7 +43,12 @@ mng create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 ```
 ## Arguments
 
-- `NAME`: Name for the agent (auto-generated if not provided)
+- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]]` format (all parts optional):
+  - `NAME` -- agent name only, creates on local host (default)
+  - `NAME@HOST` -- agent on existing host
+  - `NAME@HOST.PROVIDER` -- agent on existing host (with provider for disambiguation)
+  - `NAME@.PROVIDER` -- agent on a new host (auto-generated host name); implies `--new-host`
+  - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
 - `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
 - `AGENT_ARGS`: Additional arguments passed to the agent
 
@@ -53,7 +59,7 @@ mng create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-t`, `--template` | text | Use a named template from create_templates config [repeatable, stacks in order] | None |
-| `-n`, `--name` | text | Agent name (alternative to positional argument) [default: auto-generated] | None |
+| `-n`, `--name` | text | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `english` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
@@ -63,15 +69,14 @@ mng create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 
 ## Host Options
 
-By default, `mng create` uses the "local" host. Use these options to change that behavior.
+By default, `mng create` uses the local host. Use the agent address to specify a different host.
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--in`, `--new-host` | text | Create a new host using provider (docker, modal, ...) | None |
-| `--host`, `--target-host` | text | Use an existing host (by name or ID) [default: local] | None |
+| `--provider` | text | Provider for the host (alternative to .PROVIDER in the address, e.g. --provider docker) | None |
+| `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider) | `False` |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
 | `--host-label` | text | Host metadata label KEY=VALUE [repeatable] | None |
-| `--host-name` | text | Name for the new host | None |
 | `--host-name-style` | choice (`astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `astronomy` |
 
 ## Behavior
@@ -271,16 +276,16 @@ Provider: ssh
 $ mng create my-agent
 ```
 
-**Create an agent in a Docker container**
+**Create an agent in a new Docker container**
 
 ```bash
-$ mng create my-agent --in docker
+$ mng create my-agent@.docker
 ```
 
-**Create an agent in a Modal sandbox**
+**Create an agent in a new Modal sandbox**
 
 ```bash
-$ mng create my-agent --in modal
+$ mng create my-agent@.modal
 ```
 
 **Create using a named template**
@@ -310,7 +315,19 @@ $ mng create my-agent -- --model opus
 **Create on an existing host**
 
 ```bash
-$ mng create my-agent --host my-dev-box
+$ mng create my-agent@my-dev-box
+```
+
+**Create on existing host with provider**
+
+```bash
+$ mng create my-agent@my-dev-box.modal
+```
+
+**Create a new named host**
+
+```bash
+$ mng create my-agent@my-host.modal --new-host
 ```
 
 **Clone from an existing agent**

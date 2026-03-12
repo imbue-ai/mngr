@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# events_demo.sh - Runs the commands necessary to demonstrate how a changeling can react to external events, eg, from a slack message
+# events_demo.sh - Runs the commands necessary to demonstrate how a mind can react to external events, eg, from a slack message
 #
 
 set -euo pipefail
@@ -8,8 +8,8 @@ set -euo pipefail
 # make a new random ID for this agent (before even starting, just for my sanity)
 export AGENT_ID=agent-`python3 -c "from uuid import uuid4; print(uuid4().hex)"`
 
-# create the changeling
-( source .env && export CLAUDE_CODE_DISABLE_FAST_MODE=1 && mkdir ~/.changelings/$AGENT_ID && cd ~/.changelings/$AGENT_ID && mkdir -p thinking/.mng && cp ~/agent_repos/elena-code/instructions.txt ./instructions.txt && cp ~/agent_repos/elena-code/thinking/.mng/settings.toml ./thinking/.mng/settings.toml && mng create selene --agent-id $AGENT_ID --no-connect --await-ready --agent-type claude-changeling --env ROLE=thinking --label changeling=true --yes --pass-env ANTHROPIC_API_KEY --in-place -- --dangerously-skip-permissions && echo " " && echo "http://127.0.0.1:8420/agents/$AGENT_ID/" && echo " " )
+# create the mind
+( source .env && export CLAUDE_CODE_DISABLE_FAST_MODE=1 && mkdir ~/.minds/$AGENT_ID && cd ~/.minds/$AGENT_ID && mkdir -p thinking/.mng && cp ~/agent_repos/elena-code/instructions.txt ./instructions.txt && cp ~/agent_repos/elena-code/thinking/.mng/settings.toml ./thinking/.mng/settings.toml && mng create selene --agent-id $AGENT_ID --no-connect --await-ready --agent-type claude-mind --env ROLE=thinking --label mind=true --yes --pass-env ANTHROPIC_API_KEY --in-place -- --dangerously-skip-permissions && echo " " && echo "http://127.0.0.1:8420/agents/$AGENT_ID/" && echo " " )
 
 # start a tmux session and attach to the chat via "mng chat"
 tmux new-session -s event_demo
@@ -19,7 +19,7 @@ mng chat
 
 # detach
 
-# then connect to the changeling's thinking terminal
+# then connect to the mind's thinking terminal
 mng connect selene
 
 # detach

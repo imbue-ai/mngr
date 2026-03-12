@@ -822,7 +822,7 @@ class ModalProviderInstance(BaseProviderInstance):
     def _list_all_host_and_agent_records(
         self, cg: ConcurrencyGroup, is_including_agents: bool = True
     ) -> tuple[list[HostRecord], dict[str, Any]]:
-        with trace_span("  _list_all_host_and_agent_records", _is_trace_span_enabled=False):
+        with log_span("Listing all host/agent records from state volume"):
             volume = self.get_state_volume()
 
             futures: list[Future[HostRecord | None]] = []
@@ -831,10 +831,12 @@ class ModalProviderInstance(BaseProviderInstance):
                 parent_cg=cg, name="modal_list_all_host_records", max_workers=32
             ) as executor:
                 # List files in the /hosts/ directory on the volume
-                try:
-                    entries = volume.listdir("/hosts/")
-                except (NotFoundError, FileNotFoundError):
-                    entries = []
+                with log_span("Listing /hosts/ directory on state volume"):
+                    try:
+                        entries = volume.listdir("/hosts/")
+                    except (NotFoundError, FileNotFoundError):
+                        entries = []
+                logger.debug("Found {} entries in /hosts/ on state volume", len(entries))
 
                 for entry in entries:
                     filename = entry.path
@@ -851,7 +853,7 @@ class ModalProviderInstance(BaseProviderInstance):
                             )
 
             result = [record for future in futures if (record := future.result()) is not None]
-            logger.trace("Listed all host records from volume")
+            logger.debug("Listed {} host record(s) from volume", len(result))
             other_result = {host_id: future.result() for host_id, future in future_by_host_id.items()}
             return result, other_result
 
@@ -2283,18 +2285,21 @@ log "=== Shutdown script completed ==="
         Lists all sandboxes for this app, then fetches tags for each sandbox
         concurrently to determine which hosts are running.
         """
-        with trace_span("  _list_running_host_ids", _is_trace_span_enabled=False):
+        with log_span("Listing running sandbox host IDs for app={}", self.app_name):
             app = self._get_modal_app()
-            sandboxes = list(modal.Sandbox.list(app_id=app.app_id))
+            with log_span("Listing sandboxes from Modal API (app_id={})", app.app_id):
+                sandboxes = list(modal.Sandbox.list(app_id=app.app_id))
+            logger.debug("Found {} sandbox(es) for app={}", len(sandboxes), self.app_name)
 
             if not sandboxes:
                 return set()
 
             # Fetch tags for all sandboxes in parallel
-            tag_futures: list[Future[dict[str, str]]] = []
-            with ConcurrencyGroupExecutor(parent_cg=cg, name="fetch_sandbox_tags", max_workers=32) as executor:
-                for sandbox in sandboxes:
-                    tag_futures.append(executor.submit(sandbox.get_tags))
+            with log_span("Fetching tags for {} sandbox(es)", len(sandboxes)):
+                tag_futures: list[Future[dict[str, str]]] = []
+                with ConcurrencyGroupExecutor(parent_cg=cg, name="fetch_sandbox_tags", max_workers=32) as executor:
+                    for sandbox in sandboxes:
+                        tag_futures.append(executor.submit(sandbox.get_tags))
 
             running_host_ids: set[HostId] = set()
             for future in tag_futures:
@@ -2305,7 +2310,7 @@ log "=== Shutdown script completed ==="
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped sandbox with invalid tags: {}", e)
 
-            logger.trace("Listed {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
+            logger.debug("Found {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
             return running_host_ids
 
     @handle_modal_auth_error
@@ -2324,18 +2329,25 @@ log "=== Shutdown script completed ==="
         2. Read all host records from the state volume
         3. Read all agent data from the state volume (for all hosts)
         """
-        with trace_span("Loading data for refs", _is_trace_span_enabled=False):
+        with log_span("Modal discover_hosts_and_agents for provider={}", self.name):
             try:
-                with ConcurrencyGroupExecutor(
-                    parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
-                ) as executor:
-                    running_ids_future = executor.submit(self._list_running_host_ids, cg)
-                    host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
+                with log_span("Parallel fetch: sandbox IDs + host/agent records"):
+                    with ConcurrencyGroupExecutor(
+                        parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
+                    ) as executor:
+                        running_ids_future = executor.submit(self._list_running_host_ids, cg)
+                        host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
 
-                running_host_ids = running_ids_future.result()
-                all_host_records, agent_data_by_host_id = host_and_agent_future.result()
+                    running_host_ids = running_ids_future.result()
+                    all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except modal.exception.AuthError as e:
                 raise ModalAuthError() from e
+            logger.debug(
+                "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
+                len(running_host_ids),
+                len(all_host_records),
+                len(agent_data_by_host_id),
+            )
 
         # Build DiscoveredHost -> [DiscoveredAgent] mapping from host records
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}

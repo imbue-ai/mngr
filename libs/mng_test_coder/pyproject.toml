@@ -1,11 +1,11 @@
 [project]
 name = "mng-test-coder"
 version = "0.1.0"
-description = "Test agent type plugin for mng - a changeling agent that uses the matched-responses model for testing without API keys"
+description = "Test agent type plugin for mng - a mind agent that uses the matched-responses model for testing without API keys"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
-    "mng-claude-changeling==0.1.0",
+    "mng-claude-mind==0.1.0",
 ]
 
 [project.entry-points.mng]
@@ -20,7 +20,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
-mng-claude-changeling = { workspace = true }
+mng-claude-mind = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

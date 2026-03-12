@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Minimal script to launch the changeling web server for local UI iteration.
+# Minimal script to launch the mind web server for local UI iteration.
 #
 # This sets up a temporary directory structure that satisfies the web server's
 # env var requirements, then runs it. The database tables are created
@@ -30,7 +30,7 @@ mkdir -p "$AGENT_STATE_DIR/events/messages"
 LLM_DATA_DIR="$WORK_DIR/llm_data"
 mkdir -p "$LLM_DATA_DIR"
 
-# Agent work directory (contains changelings.toml)
+# Agent work directory (contains minds.toml)
 AGENT_WORK_DIR="$WORK_DIR/workdir"
 mkdir -p "$AGENT_WORK_DIR"
 
@@ -56,7 +56,7 @@ stop_server() {
 }
 
 start_server() {
-    uv run python -m imbue.mng_claude_changeling.resources.web_server < /dev/null &
+    uv run python -m imbue.mng_claude_mind.resources.web_server < /dev/null &
     SERVER_PID=$!
     echo "[launch] Server started (PID $SERVER_PID)"
 }

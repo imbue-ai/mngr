@@ -13,7 +13,7 @@ def build_ttyd_server_command(ttyd_invocation: str, server_name: str) -> str:
     and wraps it with a port-watching loop that:
     1. Pipes ttyd's stderr through a line reader
     2. Detects the assigned port from the "Listening on port:" message
-    3. Writes a servers/events.jsonl record for the changelings forwarding server
+    3. Writes a servers/events.jsonl record for the minds forwarding server
     """
     return (
         ttyd_invocation + " 2>&1 | "
@@ -35,7 +35,7 @@ def build_ttyd_server_command(ttyd_invocation: str, server_name: str) -> str:
 
 # FIXME: technically, this plugin ought to have some settings to configure whether the ttyd server is writable or not, and it should figure out what shell the user actually uses, rather than hardcoding it here (I think this is done somewhere else already, likely in our tmux config)
 # Bash wrapper that starts ttyd on a random port (-p 0), watches its stderr for
-# the assigned port number, and writes a servers/events.jsonl record so the changelings
+# the assigned port number, and writes a servers/events.jsonl record so the minds
 # forwarding server can discover it. The wrapper stays alive as long as ttyd does.
 TTYD_COMMAND = build_ttyd_server_command("ttyd -p 0 -t disableLeaveAlert=true -W bash", TTYD_SERVER_NAME)
 

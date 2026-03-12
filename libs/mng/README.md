@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mng/main/scripts/install.s
 
 ```bash
 mng create           # launch claude locally (defaults: agent=claude, provider=local, project=current dir)
-mng create --in modal       # launch claude on Modal
+mng create @.modal          # launch claude on Modal (new host with auto-generated name)
 mng create my-task          # launch claude with a name
 mng create my-task codex    # launch codex instead of claude
 mng create -- --model opus  # pass any arguments through to the underlying agent
@@ -22,7 +22,7 @@ mng create -- --model opus  # pass any arguments through to the underlying agent
 mng create --no-connect --message "Speed up one of my tests and make a PR on github"
 
 # or, be super explicit about all of the arguments:
-mng create --name my-task --type claude --in modal
+mng create my-task@.modal --type claude
 
 # tons more arguments for anything you could want! Learn more via --help
 mng create --help
@@ -52,7 +52,7 @@ sys     0m0.166s
 **mng itself is free, *and* the cheapest way to run remote agents (they shut down when idle):**
 
 ```bash
-mng create --in modal --no-connect --message "just say 'hello'" --idle-timeout 60 -- --model sonnet
+mng create @.modal --no-connect --message "just say 'hello'" --idle-timeout 60 -- --model sonnet
 # costs $0.0387443 for inference (using sonnet)
 # costs $0.0013188 for compute because it shuts down 60 seconds after the agent completes
 ```
@@ -61,30 +61,30 @@ mng create --in modal --no-connect --message "just say 'hello'" --idle-timeout 6
 
 ```bash
 # by default, cannot be accessed by anyone except your modal account (uses a local unique SSH key)
-mng create example-task --in modal
+mng create example-task@.modal
 
 # you (or your agent) can do whatever bad ideas you want in that container without fear
 mng exec example-task "rm -rf /"
 
 # you can block all outgoing internet access
-mng create --in modal -b offline
+mng create @.modal -b offline
 
 # or restrict outgoing traffic to certain IPs
-mng create --in modal -b cidr-allowlist=203.0.113.0/24
+mng create @.modal -b cidr-allowlist=203.0.113.0/24
 ```
 
 **mng is powerful and composable:**
 
 ```bash
 # start multiple agents on the same host to save money and share data
-mng create agent-1 --in modal --host-name shared-host
-mng create agent-2 --host shared-host
+mng create agent-1@shared-host.modal --new-host
+mng create agent-2@shared-host
 
 # run commands directly on an agent's host
 mng exec agent-1 "git log --oneline -5"
 
 # never lose any work: snapshot and fork the entire agent states
-mng create doomed-agent --in modal
+mng create doomed-agent@.modal
 SNAPSHOT=$(mng snapshot create doomed-agent --format "{id}")
 mng message doomed-agent "try running 'rm -rf /' and see what happens"
 mng create new-agent --snapshot $SNAPSHOT
@@ -114,7 +114,7 @@ mng pair my-agent          # or sync changes continuously!
 > mng ask "How do I create a container on modal with custom packages installed by default?"
 
 Simply run:
-    mng create --in modal -b "--file path/to/Dockerfile"
+    mng create @.modal -b "--file path/to/Dockerfile"
 ```
 
 <!--
@@ -277,7 +277,7 @@ The repo also contains code for some dependencies and related projects, includin
 
 - [libs/concurrency_group](https://github.com/imbue-ai/mng/blob/main/libs/concurrency_group/README.md): a simple Python library for managing synchronous concurrent primitives (threads and processes) in a way that makes it easy to ensure that they are cleaned up.
 - [libs/imbue_common](https://github.com/imbue-ai/mng/blob/main/libs/imbue_common/README.md): core libraries that are shared across all of our projects
-- [apps/changelings](https://github.com/imbue-ai/mng/blob/main/apps/changelings/README.md): an experimental project around scheduling runs of autonomous agents
+- [apps/minds](https://github.com/imbue-ai/mng/blob/main/apps/minds/README.md): an experimental project around scheduling runs of autonomous agents
 
 
 ## Contributing

@@ -31,7 +31,6 @@ from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import get_host_from_list_by_id
-from imbue.mng.api.find import get_unique_host_from_list_by_name
 from imbue.mng.api.find import resolve_source_location
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import add_common_options
@@ -140,6 +139,37 @@ def _make_output_format_choices() -> list[str]:
     return [f.value.lower() for f in OutputFormat]
 
 
+class AgentAddress(FrozenModel):
+    """Parsed agent address from [NAME][@[HOST][.PROVIDER]] format.
+
+    Used to specify an agent and optionally its target host and provider in a single
+    positional argument. Examples:
+      - "foo" -> agent named "foo", local host
+      - "foo@myhost" -> agent "foo" on existing host "myhost"
+      - "foo@myhost.modal" -> agent "foo" on existing host "myhost" (on modal provider)
+      - "foo@.modal" -> agent "foo" on a new host with auto-generated name on modal
+      - "@myhost.modal" -> auto-named agent on existing host "myhost" (on modal provider)
+    """
+
+    agent_name: AgentName | None = None
+    host_name: HostName | None = None
+    provider_name: ProviderInstanceName | None = None
+
+    @property
+    def is_new_host_implied(self) -> bool:
+        """True when the address implies creating a new host (NAME@.PROVIDER form)."""
+        return self.provider_name is not None and self.host_name is None
+
+    @property
+    def has_host_component(self) -> bool:
+        """True when any host or provider info was specified in the address."""
+        return self.host_name is not None or self.provider_name is not None
+
+    def is_creating_new_host(self, new_host_flag: bool) -> bool:
+        """Whether this address combined with the --new-host flag means creating a new host."""
+        return new_host_flag or self.is_new_host_implied
+
+
 @click.command()
 @click.argument("positional_name", default=None, required=False)
 @click.argument("positional_agent_type", default=None, required=False)
@@ -151,7 +181,11 @@ def _make_output_format_choices() -> list[str]:
     multiple=True,
     help="Use a named template from create_templates config [repeatable, stacks in order]",
 )
-@optgroup.option("-n", "--name", help="Agent name (alternative to positional argument) [default: auto-generated]")
+@optgroup.option(
+    "-n",
+    "--name",
+    help="Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated]",
+)
 @optgroup.option("--id", help="Explicit agent ID [default: auto-generated]")
 @optgroup.option(
     "--name-style",
@@ -175,14 +209,21 @@ def _make_output_format_choices() -> list[str]:
 )
 @optgroup.option("--label", multiple=True, help="Agent label KEY=VALUE [repeatable] [experimental]")
 @optgroup.group("Host Options")
-@optgroup.option("--in", "--new-host", "new_host", help="Create a new host using provider (docker, modal, ...)")
-@optgroup.option("--host", "--target-host", help="Use an existing host (by name or ID) [default: local]")
+@optgroup.option(
+    "--provider",
+    help="Provider for the host (alternative to .PROVIDER in the address, e.g. --provider docker)",
+)
+@optgroup.option(
+    "--new-host",
+    is_flag=True,
+    default=False,
+    help="Force creating a new host (requires a provider via address or --provider)",
+)
 @optgroup.option(
     "--project",
     help="Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name]",
 )
 @optgroup.option("--host-label", multiple=True, help="Host metadata label KEY=VALUE [repeatable]")
-@optgroup.option("--host-name", help="Name for the new host")
 @optgroup.option(
     "--host-name-style",
     type=click.Choice(_make_host_name_style_choices(), case_sensitive=False),
@@ -371,6 +412,25 @@ def create(ctx: click.Context, **kwargs) -> None:
     )
     logging_config: LoggingConfig = ctx.meta["logging_config"]
 
+    # Parse agent address from the positional argument or --name flag.
+    # Both accept agent addresses; they are equivalent but mutually exclusive.
+    if opts.positional_name and opts.name:
+        raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
+    address = _parse_agent_address(opts.positional_name or opts.name or "")
+
+    # Merge --provider flag into the address (alternative to .PROVIDER in the address).
+    if opts.provider:
+        flag_provider = ProviderInstanceName(opts.provider)
+        if address.provider_name is not None and address.provider_name != flag_provider:
+            raise UserInputError(
+                f"Conflicting providers: address has '{address.provider_name}' "
+                f"but --provider is '{flag_provider}'. Use one or the other."
+            )
+        if address.provider_name is None:
+            address = address.model_copy_update(
+                to_update(address.field_ref().provider_name, flag_provider),
+            )
+
     # Apply --yes flag to auto-approve prompts (e.g., skill installation)
     if opts.yes:
         mng_ctx = mng_ctx.model_copy_update(
@@ -378,7 +438,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         )
 
     # Setup (validation, editor session, source resolution, etc.)
-    setup = _setup_create(mng_ctx, output_opts, opts, logging_config)
+    setup = _setup_create(mng_ctx, output_opts, opts, logging_config, address)
 
     # Create agent
     create_result, connection_opts = _create_agent(mng_ctx, output_opts, opts, setup)
@@ -391,6 +451,7 @@ class _CreateSetup(FrozenModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    address: AgentAddress = Field(description="Parsed agent address from the positional argument")
     initial_message: str | None = Field(
         description="Resolved initial message content (from --message or --message-file)"
     )
@@ -406,6 +467,7 @@ def _setup_create(
     output_opts: OutputOptions,
     opts: CreateCliOptions,
     logging_config: LoggingConfig,
+    address: AgentAddress,
 ) -> _CreateSetup:
     """Validate options, resolve messages, start editor session, resolve source location."""
     # Validate that both --message and --message-file are not provided
@@ -445,12 +507,13 @@ def _setup_create(
     source_location = _resolve_source_location(opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host)
 
     # figure out the project label, in case we need that
-    project_name = _parse_project_name(source_location, opts, mng_ctx)
+    project_name = _parse_project_name(source_location, opts, address, mng_ctx)
 
     # Parse host lifecycle options (these go on the host, not the agent)
     host_lifecycle = _parse_host_lifecycle_options(opts)
 
     return _CreateSetup(
+        address=address,
         initial_message=initial_message,
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
@@ -467,9 +530,12 @@ def _create_agent(
     setup: _CreateSetup,
 ) -> tuple[CreateAgentResult, ConnectionOptions]:
     """Parse opts, resolve host, create agent."""
+    address = setup.address
+
     # Parse target host (existing or new)
     target_host = _parse_target_host(
         opts=opts,
+        address=address,
         project_name=setup.project_name,
         agent_and_host_loader=setup.agent_and_host_loader,
         lifecycle=setup.host_lifecycle,
@@ -478,6 +544,7 @@ def _create_agent(
     # Parse agent options
     agent_opts, has_explicit_base = _parse_agent_opts(
         opts=opts,
+        address=address,
         initial_message=setup.initial_message,
         source_location=setup.source_location,
         mng_ctx=mng_ctx,
@@ -497,7 +564,7 @@ def _create_agent(
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
-            provider_name=ProviderInstanceName(opts.new_host) if opts.new_host else None,
+            provider_name=address.provider_name,
             target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
             mng_ctx=mng_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
@@ -662,7 +729,9 @@ def _handle_editor_message(
         logger.debug("Message sent successfully")
 
 
-def _parse_project_name(source_location: HostLocation, opts: CreateCliOptions, mng_ctx: MngContext) -> str:
+def _parse_project_name(
+    source_location: HostLocation, opts: CreateCliOptions, address: AgentAddress, mng_ctx: MngContext
+) -> str:
     if opts.project:
         return opts.project
 
@@ -678,7 +747,7 @@ def _parse_project_name(source_location: HostLocation, opts: CreateCliOptions, m
     # the local working directory. If they differ, the user must specify --project explicitly
     # to avoid silently tagging the agent with the wrong project.
     is_external_source = opts.source_agent is not None or opts.source_host is not None
-    is_creating_new_host = opts.new_host is not None
+    is_creating_new_host = address.is_creating_new_host(opts.new_host)
     if is_external_source and is_creating_new_host:
         local_git_root = find_git_worktree_root(None, mng_ctx.concurrency_group)
         local_path = local_git_root if local_git_root is not None else Path(os.getcwd())
@@ -909,16 +978,16 @@ def _split_cli_args(args: tuple[str, ...]) -> list[str]:
 
 def _parse_agent_opts(
     opts: CreateCliOptions,
+    address: AgentAddress,
     initial_message: str | None,
     source_location: HostLocation,
     mng_ctx: MngContext,
 ) -> tuple[CreateAgentOptions, bool]:
-    # Get agent name from positional argument or --name flag, otherwise auto-generate
+    # Get agent name from address (which incorporates both positional and --name),
+    # otherwise auto-generate
     parsed_agent_name: AgentName
-    if opts.positional_name:
-        parsed_agent_name = AgentName(opts.positional_name)
-    elif opts.name:
-        parsed_agent_name = AgentName(opts.name)
+    if address.agent_name is not None:
+        parsed_agent_name = address.agent_name
     else:
         parsed_name_style = AgentNameStyle(opts.name_style.upper())
         parsed_agent_name = generate_agent_name(parsed_name_style)
@@ -938,9 +1007,14 @@ def _parse_agent_opts(
         copy_mode = WorkDirCopyMode.COPY
     else:
         # No explicit flag, apply defaults based on context
-        # When creating a new remote host (--in/--new-host), always use COPY
+        # When creating a new remote host, always use COPY
         # since WORKTREE only works when source and target are on the same host
-        is_creating_remote_host = opts.new_host is not None and opts.new_host.lower() != LOCAL_PROVIDER_NAME
+        is_creating_new_host = address.is_creating_new_host(opts.new_host)
+        is_creating_remote_host = (
+            is_creating_new_host
+            and address.provider_name is not None
+            and address.provider_name.lower() != LOCAL_PROVIDER_NAME
+        )
         if is_creating_remote_host:
             copy_mode = WorkDirCopyMode.COPY
         elif source_location.host.is_local:
@@ -1104,26 +1178,25 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
 
 def _parse_target_host(
     opts: CreateCliOptions,
+    address: AgentAddress,
     project_name: str | None,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:
-    parsed_target_host: DiscoveredHost | NewHostOptions | None
-    if opts.host:
-        # Targeting an existing host
-        agents_by_host = agent_and_host_loader()
-        all_hosts = list(agents_by_host.keys())
-        try:
-            host_id = HostId(opts.host)
-            host_ref = get_host_from_list_by_id(host_id, all_hosts)
-        except ValueError:
-            host_name = HostName(opts.host)
-            host_ref = get_unique_host_from_list_by_name(host_name, all_hosts)
-        if host_ref is None:
-            raise UserInputError(f"Could not find host with ID or name: {opts.host}")
-        parsed_target_host = host_ref
-    elif opts.new_host:
-        # Creating a new host
+    if not address.has_host_component:
+        # No host specified in address, use local host
+        return None
+
+    is_new_host = address.is_creating_new_host(opts.new_host)
+
+    if is_new_host:
+        # Creating a new host - provider is required
+        if address.provider_name is None:
+            raise UserInputError(
+                "--new-host requires a provider in the agent address. "
+                "Use NAME@HOST.PROVIDER --new-host or NAME@.PROVIDER."
+            )
+
         # Parse host-level labels
         host_labels_dict: dict[str, str] = {}
         for label_string in opts.host_label:
@@ -1147,9 +1220,9 @@ def _parse_target_host(
         )
 
         parsed_host_name_style = HostNameStyle(opts.host_name_style.upper())
-        parsed_target_host = NewHostOptions(
-            provider=ProviderInstanceName(opts.new_host),
-            name=HostName(opts.host_name) if opts.host_name else None,
+        return NewHostOptions(
+            provider=address.provider_name,
+            name=address.host_name,
             name_style=parsed_host_name_style,
             tags=host_labels_dict,
             build=build_options,
@@ -1159,10 +1232,54 @@ def _parse_target_host(
             ),
             lifecycle=lifecycle,
         )
-    else:
-        # Default: local host
-        parsed_target_host = None
-    return parsed_target_host
+
+    # Targeting an existing host
+    if address.host_name is None:
+        # This shouldn't happen: has_host_component is True but host_name is None
+        # means only provider_name is set, which is_new_host_implied catches above
+        raise UserInputError("Cannot target an existing host without a host name.")
+
+    agents_by_host = agent_and_host_loader()
+    all_hosts = list(agents_by_host.keys())
+
+    host_ref = _find_existing_host(address.host_name, address.provider_name, all_hosts)
+    if host_ref is None:
+        raise UserInputError(f"Could not find host: {address.host_name}")
+
+    return host_ref
+
+
+def _find_existing_host(
+    host_name: HostName,
+    provider_name: ProviderInstanceName | None,
+    all_hosts: list[DiscoveredHost],
+) -> DiscoveredHost | None:
+    """Look up an existing host by name or ID, using provider for disambiguation."""
+    try:
+        host_id = HostId(str(host_name))
+        return get_host_from_list_by_id(host_id, all_hosts)
+    except ValueError:
+        pass
+
+    matching = [h for h in all_hosts if h.host_name == host_name]
+
+    # Use provider for disambiguation when there are multiple matches
+    if len(matching) > 1 and provider_name is not None:
+        filtered = [h for h in matching if h.provider_name == provider_name]
+        if filtered:
+            matching = filtered
+
+    match len(matching):
+        case 0:
+            return None
+        case 1:
+            return matching[0]
+        case _:
+            host_list = ", ".join(f"{h.host_name} ({h.provider_name})" for h in matching)
+            raise UserInputError(
+                f"Multiple hosts found with name '{host_name}': {host_list}. "
+                "Add .PROVIDER to the address for disambiguation (e.g., NAME@HOST.PROVIDER)."
+            )
 
 
 # === Parsing Functions ===
@@ -1190,6 +1307,55 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 
     resolved_new = new.replace("*", str(agent_name))
     return (base or None, resolved_new, bool(base))
+
+
+@pure
+def _parse_agent_address(address_str: str) -> AgentAddress:
+    """Parse an agent address string into its components.
+
+    Format: [AGENT_NAME][@[HOST_NAME][.PROVIDER_NAME]]
+
+    The host part (after @) may contain at most one dot separating the host name
+    from the provider name. Additional dots are not allowed.
+
+    Examples:
+      - "" -> everything None (auto-generate name, local host)
+      - "foo" -> agent_name="foo"
+      - "foo@myhost" -> agent_name="foo", host_name="myhost"
+      - "foo@myhost.modal" -> agent_name="foo", host_name="myhost", provider_name="modal"
+      - "foo@.modal" -> agent_name="foo", provider_name="modal" (implies new host)
+      - "@myhost.modal" -> host_name="myhost", provider_name="modal" (auto-generate name)
+    """
+    if not address_str:
+        return AgentAddress()
+
+    if "@" not in address_str:
+        # Simple agent name with no host component
+        return AgentAddress(agent_name=AgentName(address_str))
+
+    agent_part, host_part = address_str.split("@", 1)
+    agent_name = AgentName(agent_part) if agent_part else None
+
+    if not host_part:
+        # "foo@" -> just agent name, no host component
+        return AgentAddress(agent_name=agent_name)
+
+    dot_count = host_part.count(".")
+    if dot_count > 1:
+        raise UserInputError(
+            f"Invalid agent address: host part '{host_part}' contains more than one dot. "
+            "Expected format: [NAME][@[HOST][.PROVIDER]]"
+        )
+
+    if dot_count == 1:
+        host_str, provider_str = host_part.split(".", 1)
+        host_name = HostName(host_str) if host_str else None
+        provider_name = ProviderInstanceName(provider_str) if provider_str else None
+    else:
+        host_name = HostName(host_part)
+        provider_name = None
+
+    return AgentAddress(agent_name=agent_name, host_name=host_name, provider_name=provider_name)
 
 
 class ParsedSourceString(FrozenModel):
@@ -1284,7 +1450,7 @@ def _output_result(result: CreateAgentResult, opts: OutputOptions) -> None:
 _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
-    synopsis="""mng [create|c] [<AGENT_NAME>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--in <PROVIDER>] [--host <HOST>] [-w WINDOW_NAME=COMMAND]
+    synopsis="""mng [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--in-place|--copy|--clone|--worktree]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
@@ -1292,7 +1458,12 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]""",
     aliases=("c",),
-    arguments_description="""- `NAME`: Name for the agent (auto-generated if not provided)
+    arguments_description="""- `ADDRESS`: Agent address in `[NAME][@[HOST][.PROVIDER]]` format (all parts optional):
+  - `NAME` -- agent name only, creates on local host (default)
+  - `NAME@HOST` -- agent on existing host
+  - `NAME@HOST.PROVIDER` -- agent on existing host (with provider for disambiguation)
+  - `NAME@.PROVIDER` -- agent on a new host (auto-generated host name); implies `--new-host`
+  - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
 - `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
 - `AGENT_ARGS`: Additional arguments passed to the agent""",
     description="""This command sets up an agent's working directory, optionally provisions a
@@ -1300,8 +1471,9 @@ new host (or uses an existing one), runs the specified agent process, and
 connects to it by default.
 
 By default, agents run locally in a new git worktree (for git repositories)
-or a copy of the current directory. Use --in to create a new remote host,
-or --host to use an existing host.
+or a copy of the current directory. Specify a host in the agent address
+(e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
+to create a new one.
 
 The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
@@ -1312,13 +1484,15 @@ original repository, allowing efficient branch management. For remote agents,
 the working directory is copied to the remote host.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mng create my-agent"),
-        ("Create an agent in a Docker container", "mng create my-agent --in docker"),
-        ("Create an agent in a Modal sandbox", "mng create my-agent --in modal"),
+        ("Create an agent in a new Docker container", "mng create my-agent@.docker"),
+        ("Create an agent in a new Modal sandbox", "mng create my-agent@.modal"),
         ("Create using a named template", "mng create my-agent --template modal"),
         ("Stack multiple templates", "mng create my-agent -t modal -t codex"),
         ("Create a codex agent instead of claude", "mng create my-agent codex"),
         ("Pass arguments to the agent", "mng create my-agent -- --model opus"),
-        ("Create on an existing host", "mng create my-agent --host my-dev-box"),
+        ("Create on an existing host", "mng create my-agent@my-dev-box"),
+        ("Create on existing host with provider", "mng create my-agent@my-dev-box.modal"),
+        ("Create a new named host", "mng create my-agent@my-host.modal --new-host"),
         ("Clone from an existing agent", "mng create new-agent --source other-agent"),
         ("Run directly in-place (no worktree)", "mng create my-agent --in-place"),
         ("Create without connecting", "mng create my-agent --no-connect"),
@@ -1341,7 +1515,7 @@ the working directory is copied to the remote host.""",
         ),
         (
             "Host Options",
-            'By default, `mng create` uses the "local" host. Use these options to change that behavior.',
+            "By default, `mng create` uses the local host. Use the agent address to specify a different host.",
         ),
     ),
     additional_sections=(

@@ -8,8 +8,8 @@ import pytest
 
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_changeling.conftest import StubCommandResult
-from imbue.mng_claude_changeling.conftest import StubHost
+from imbue.mng_claude_mind.conftest import StubCommandResult
+from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_test_coder.plugin import TestCoderAgent
 from imbue.mng_test_coder.plugin import TestCoderConfig
 from imbue.mng_test_coder.plugin import _LLM_MATCHED_RESPONSES_LOCAL_CHECKOUT
@@ -49,13 +49,13 @@ def test_assemble_command_returns_idle_loop() -> None:
 
 
 def test_configure_model_as_default_writes_toml() -> None:
-    """_configure_model_as_default should write changelings.toml with matched-responses."""
+    """_configure_model_as_default should write minds.toml with matched-responses."""
     stub = StubHost()
     work_dir = Path("/work")
     _configure_model_as_default(cast(OnlineHostInterface, stub), work_dir)
     assert len(stub.written_text_files) == 1
     path, content = stub.written_text_files[0]
-    assert path == work_dir / "changelings.toml"
+    assert path == work_dir / "minds.toml"
     assert "matched-responses" in content
 
 

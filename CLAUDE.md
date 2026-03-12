@@ -50,7 +50,7 @@ Only after doing all of the above should you begin writing code.
 - Do NOT write code in `__init__.py`--leave them completely blank (the only exception is for a line like "hookimpl = pluggy.HookimplMarker("mng")", which should go at the very root __init__.py of a library).
 - Do NOT make constructs like module-level usage of `__all__`
 - Before finishing your response, if you have made any changes, then you must ensure that you have run ALL tests in the project(s) you modified, and that they all pass. DO NOT just run a subset of the tests! However, while iterating (e.g. fixing a failing test, developing a feature), run only the relevant tests for rapid feedback -- save the full suite for the final check.
-- To run tests for a single project: "cd libs/mng && uv run pytest" or "cd apps/changelings && uv run pytest". Each project has its own pytest and coverage configuration in its pyproject.toml.
+- To run tests for a single project: "cd libs/mng && uv run pytest" or "cd apps/minds && uv run pytest". Each project has its own pytest and coverage configuration in its pyproject.toml.
 - While you're iterating, you can pass "--no-cov --cov-fail-under=0" to disable coverge (slightly faster), but during your final check, you *MUST NOT* pass those flags (it will fail in CI anyway)
 - For faster iteration, add "-m 'not tmux and not modal and not docker and not docker_sdk and not acceptance and not release'" to skip slow infrastructure tests (~30s instead of ~95s). These still run in CI. Note that you *MUST* also pass "--no-cov --cov-fail-under=0" when doing this, otherwise it will complain about a lack of coverage.
 - Running pytest will produce files in .test_output/ (relative to the directory you ran from) for things like slow tests and coverage reports.
