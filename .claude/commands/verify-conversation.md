@@ -1,7 +1,7 @@
 ---
 argument-hint: [options...]
 description: Review the conversation transcript for behavioral issues (misleading behavior, disobeyed instructions, instructions worth saving).
-allowed-tools: Bash(bash ./scripts/export_transcript_paths.sh*), Bash(python3 scripts/filter_transcript.py *), Bash(git rev-parse HEAD), Bash(wc *), Read, Write, Agent, AskUserQuestion
+allowed-tools: Bash(bash ./scripts/export_transcript_paths.sh*), Bash(python3 *scripts/filter_transcript.py *), Bash(git rev-parse HEAD), Bash(wc *), Read, Write, Agent, AskUserQuestion
 ---
 
 # Verify Conversation
