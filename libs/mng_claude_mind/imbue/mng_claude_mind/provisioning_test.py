@@ -13,13 +13,11 @@ from imbue.mng_claude_mind.conftest import StubCommandResult
 from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.conftest import create_mind_conversations_table_in_test_db
 from imbue.mng_claude_mind.conftest import write_conversation_to_db
-from imbue.mng_claude_mind.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import load_mind_resource
 from imbue.mng_claude_mind.provisioning import provision_default_content
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
-from imbue.mng_claude_mind.provisioning import validate_talking_role_constraints
 from imbue.mng_llm.data_types import ProvisioningSettings
 from imbue.mng_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL
 from imbue.mng_llm.provisioning import _LLM_TOOL_FILES
@@ -1388,39 +1386,6 @@ def test_provision_default_content_writes_to_thinking_dir() -> None:
     written_paths = [str(path) for path, _ in host.written_text_files]
     assert any("thinking/PROMPT.md" in p for p in written_paths)
     assert any("thinking/.claude/settings.json" in p for p in written_paths)
-
-
-# -- validate_talking_role_constraints tests --
-
-
-def test_validate_talking_role_constraints_passes_when_nothing_exists() -> None:
-    """Verify validation passes when talking/ has no skills or settings."""
-    host = StubHost(
-        command_results={"test -e": StubCommandResult(success=False)},
-    )
-    validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-
-def test_validate_talking_role_constraints_raises_for_skills_directory() -> None:
-    """Verify validation raises with an actionable message when talking/skills/ exists."""
-    host = StubHost(
-        command_results={"talking/skills": StubCommandResult(success=True)},
-    )
-    with pytest.raises(TalkingRoleConstraintError, match="skills") as exc_info:
-        validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-    assert "Remove this path" in str(exc_info.value)
-
-
-def test_validate_talking_role_constraints_raises_for_settings_json() -> None:
-    """Verify validation raises when talking/settings.json exists."""
-    host = StubHost(
-        command_results={
-            "talking/skills": StubCommandResult(success=False),
-            "talking/settings.json": StubCommandResult(success=True),
-        },
-    )
-    with pytest.raises(TalkingRoleConstraintError, match="settings.json"):
-        validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
 
 # -- talking/PROMPT.md tests --

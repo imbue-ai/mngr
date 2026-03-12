@@ -27,7 +27,6 @@ from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_default_content
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
-from imbue.mng_claude_mind.provisioning import validate_talking_role_constraints
 from imbue.mng_claude_mind.settings import load_settings_from_host
 from imbue.mng_llm.plugin import set_uv_tool_env_vars
 from imbue.mng_llm.provisioning import configure_llm_user_path
@@ -67,11 +66,6 @@ class ClaudeMindConfig(ClaudeAgentConfig):
         default=True,
         description="Automatically trust the agent's working directory in ~/.claude.json. "
         "Enabled by default for minds since they run in-place in their own repo.",
-    )
-    emit_common_transcript: bool = Field(
-        default=True,
-        description="Emit a common, agent-agnostic transcript alongside the raw Claude transcript. "
-        "Enabled by default for minds so that other watchers can consume structured events.",
     )
     install_llm: bool = Field(
         default=True,
@@ -187,9 +181,8 @@ class ClaudeMindAgent(ClaudeAgent):
         """Provision a mind role agent with llm toolchain and supporting service infrastructure.
 
         Extends ClaudeAgent provisioning with:
-        0. Per-agent mng installation (via mng_recursive, before super())
-        1. Settings loading from minds.toml
-        2. Talking role constraint validation (no skills or settings allowed)
+        1. Per-agent mng installation (via mng_recursive, before super())
+        2. Settings loading from minds.toml
         3. llm + plugin installation (via mng_llm)
         4. Default content (GLOBAL.md, role prompts, role .claude/ config)
         5. Symlinks (CLAUDE.md -> GLOBAL.md, <role>/CLAUDE.local.md -> <role>/PROMPT.md)
@@ -208,8 +201,6 @@ class ClaudeMindAgent(ClaudeAgent):
 
         settings = load_settings_from_host(host, self.work_dir)
         provisioning = settings.provisioning
-
-        validate_talking_role_constraints(host, self.work_dir, provisioning)
 
         if config.install_llm:
             install_llm_toolchain(host, provisioning)

@@ -97,41 +97,6 @@ class TalkingRoleConstraintError(Exception):
     """
 
 
-# Restricted files/dirs that must not exist under the talking/ role directory.
-_TALKING_FORBIDDEN: Final[tuple[str, ...]] = ("skills", "settings.json")
-
-
-def validate_talking_role_constraints(
-    host: OnlineHostInterface,
-    work_dir: Path,
-    settings: ProvisioningSettings,
-) -> None:
-    """Raise if the talking/ role directory contains skills or settings.
-
-    The talking agent runs via the ``llm`` tool, not Claude Code, so it cannot
-    use Claude Code skills or settings. If the user has created either of these,
-    we raise ``TalkingRoleConstraintError`` to surface the misconfiguration early
-    rather than silently ignoring the files.
-    """
-    talking_dir = work_dir / "talking"
-    for name in _TALKING_FORBIDDEN:
-        target = talking_dir / name
-        check = execute_with_timing(
-            host,
-            f"test -e {shlex.quote(str(target))}",
-            hard_timeout=settings.fs_hard_timeout_seconds,
-            warn_threshold=settings.fs_warn_threshold_seconds,
-            label="talking constraint check",
-        )
-        if check.success:
-            raise TalkingRoleConstraintError(
-                f"The talking/ role directory must not contain '{name}'. "
-                f"Found: {target}. "
-                "The talking agent runs via the llm tool and cannot use Claude Code "
-                "skills or settings. Remove this path and try again."
-            )
-
-
 def provision_default_content(
     host: OnlineHostInterface,
     work_dir: Path,
