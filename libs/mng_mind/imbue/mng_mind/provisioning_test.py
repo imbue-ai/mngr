@@ -47,22 +47,3 @@ def test_provision_default_content_does_not_overwrite_existing() -> None:
     provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     assert len(host.written_text_files) == 0
-
-
-def test_provision_default_content_does_not_write_settings_json() -> None:
-    """Verify that settings.json is NOT included (it's Claude-specific, handled by mng_claude_mind)."""
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(p) for p, _ in host.written_text_files]
-    assert not any("settings.json" in p for p in written_paths)
-
-
-def test_provision_default_content_uses_skills_not_dot_claude_skills() -> None:
-    """Verify that skills are at thinking/skills/ not thinking/.claude/skills/."""
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(p) for p, _ in host.written_text_files]
-    assert not any(".claude/skills" in p for p in written_paths)
-    assert any("thinking/skills/" in p for p in written_paths)

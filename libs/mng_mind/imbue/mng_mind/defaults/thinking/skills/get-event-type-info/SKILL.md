@@ -15,8 +15,6 @@ cat "$MNG_AGENT_STATE_DIR/events/<source>/events.jsonl"
 
 Where `<source>` is one of: `messages`, `mng/agents`, `scheduled`, `stop`, `conversations`, `monitor`.
 
-For the raw Claude transcript (not an event source), use: `cat "$MNG_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"`
-
 ## Useful commands for inspecting events
 
 View the most recent events from a source:

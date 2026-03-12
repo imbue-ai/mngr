@@ -16,8 +16,8 @@ This repository defines the configuration, prompts, and skills for all roles in 
 - `(custom roles)/` - any other top-level folders define other custom roles
 
 All roles may have any of the following:
-- `<role>/PROMPT.md` - prompt for the agent role (symlinked as `CLAUDE.local.md` when this role is active).
-- `<role>/memory/` - per-role memory directory (synced into Claude's project memory via hooks).
+- `<role>/PROMPT.md` - prompt for the agent role
+- `<role>/memory/` - per-role memory directory
 - `<role>/skills/` - skills available to the role.
 - `<role>/<agent-harness-specific>` - configuration that is specific to the agent harness being used for this role (For example: `.claude` or `.pi` directories)
 

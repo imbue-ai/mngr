@@ -62,7 +62,3 @@ Conversation lifecycle events (created, model changed). These are primarily book
 Additional fields:
 - `conversation_id` - the conversation that was created or modified
 - `model` - the model being used for this conversation
-
-## claude_transcript (log source, not an event source)
-
-Your inner monologue transcript, written by Claude Code background tasks to logs/claude_transcript/events.jsonl (raw format, not in the event stream). This is a record of your own thinking and actions. You do not typically need to access these directly -- they exist so the talking agent and context tools can surface your recent thoughts to conversations.

@@ -124,3 +124,12 @@ This plugin depends on:
 - `mng` - the core agent management framework
 - `mng-ttyd` - ttyd integration for web terminal access
 - `watchdog` - filesystem event monitoring for supporting services
+
+
+## Claude integration
+
+All roles that use Claude may have any of the following:
+- `<role>/PROMPT.md` - prompt for the agent role (symlinked as `CLAUDE.local.md` when this role is active).
+- `<role>/memory/` - per-role memory directory (synced into Claude's project memory via hooks).
+- `<role>/skills/` - skills available to the role (symlinked into `.claude/skills/` when this role is active).
+- `<role>/.claude` - contains any other claude-specific settings or configuration.
