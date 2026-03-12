@@ -81,9 +81,9 @@ def _upload_deploy_files(
                     logger.debug("Skipping non-existent deploy file: {}", source)
                     continue
                 content = source.read_bytes()
-                futures.append(executor.submit(host.write_file, resolved_path=resolved_path, content=content))
+                futures.append(executor.submit(host.write_file, path=resolved_path, content=content))
             else:
-                futures.append(executor.submit(host.write_text_file, resolved_path=resolved_path, source=source))
+                futures.append(executor.submit(host.write_text_file, path=resolved_path, source=source))
 
             logger.trace("Uploaded deploy file: {} -> {}", dest_path, resolved_path)
             count += 1
