@@ -111,13 +111,12 @@ _check_stuck() {
 }
 
 if _check_stuck; then
-    log_warn "Stop hook has blocked 3 times at the same commit ($HASH)."
-    log_warn "The agent appears stuck. Allowing stop to proceed -- please investigate manually."
-    _log_to_file "WARN" "Stuck agent detected at $HASH, allowing through"
+    log_error "Stop hook has blocked 3 times at the same commit ($HASH)."
+    log_error "The agent appears stuck. Please investigate manually."
+    _log_to_file "ERROR" "Stuck agent detected at $HASH, exiting with error"
     rm -f "$STUCK_FILE"
-    rm -f "$MNG_AGENT_STATE_DIR/active"
     notify_user || echo "No notify_user function defined, skipping."
-    exit 0
+    exit 1
 fi
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)

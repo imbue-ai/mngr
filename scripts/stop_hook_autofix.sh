@@ -44,10 +44,10 @@ if [ -f "$STUCK_FILE" ]; then
     if [ "$ENTRY_COUNT" -ge 3 ]; then
         UNIQUE_COUNT=$(echo "$LAST_THREE" | sort -u | wc -l | tr -d ' ')
         if [ "$UNIQUE_COUNT" -eq 1 ]; then
-            echo "WARNING: Autofix has been unable to verify this commit after 3 attempts." >&2
-            echo "WARNING: Allowing stop to proceed. Please investigate manually." >&2
+            echo "ERROR: Autofix has been unable to verify this commit after 3 attempts." >&2
+            echo "ERROR: The agent appears stuck. Please investigate manually." >&2
             rm -f "$STUCK_FILE"
-            exit 0
+            exit 1
         fi
     fi
 fi
