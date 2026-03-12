@@ -2890,10 +2890,15 @@ log "=== Shutdown script completed ==="
         """List all mng-managed host volumes on Modal.
 
         Returns volumes whose names start with this instance's host volume prefix.
+        Returns an empty list if the Modal environment doesn't exist yet.
         """
         prefix = self._host_volume_prefix
         results: list[VolumeInfo] = []
-        for modal_vol in modal.Volume.objects.list(environment_name=self.environment_name):
+        try:
+            volume_iter = modal.Volume.objects.list(environment_name=self.environment_name)
+        except modal.exception.NotFoundError:
+            return []
+        for modal_vol in volume_iter:
             vol_name = modal_vol.name
             if vol_name is not None and vol_name.startswith(prefix):
                 host_hex = vol_name[len(prefix) :]
@@ -2917,9 +2922,13 @@ log "=== Shutdown script completed ==="
         """Delete a Modal host volume.
 
         Finds the Modal volume whose derived VolumeId matches, then deletes
-        it by its Modal name.
+        it by its Modal name. No-op if the Modal environment doesn't exist.
         """
-        for modal_vol in modal.Volume.objects.list(environment_name=self.environment_name):
+        try:
+            volume_iter = modal.Volume.objects.list(environment_name=self.environment_name)
+        except modal.exception.NotFoundError:
+            raise MngError(f"Volume {volume_id} not found") from None
+        for modal_vol in volume_iter:
             vol_name = modal_vol.name
             if vol_name is not None and self._volume_id_for_name(vol_name) == volume_id:
                 try:

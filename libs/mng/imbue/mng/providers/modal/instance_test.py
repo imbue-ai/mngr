@@ -685,6 +685,18 @@ def test_discover_hosts_and_agents_returns_empty_when_environment_missing(temp_m
     factory.assert_called_once_with(create_environment_if_missing=False)
 
 
+def test_list_volumes_returns_empty_when_environment_missing(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """list_volumes should return empty list when Modal environment doesn't exist."""
+    mock_volume_objects = MagicMock()
+    mock_volume_objects.list.side_effect = modal.exception.NotFoundError("env not found")
+    with patch.object(modal.Volume, "objects", mock_volume_objects):
+        result = modal_provider.list_volumes()
+
+    assert result == []
+
+
 # =============================================================================
 # Tests for _clear_snapshots_from_host_record
 # =============================================================================
