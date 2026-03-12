@@ -39,26 +39,6 @@ from imbue.mng_claude_mind.provisioning import resolve_work_dir_abs
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
 from imbue.mng_claude_mind.provisioning import validate_talking_role_constraints
 from imbue.mng_claude_mind.settings import load_settings_from_host
-from imbue.mng_ttyd.plugin import build_ttyd_server_command
-
-AGENT_TTYD_WINDOW_NAME: Final[str] = "agent"
-AGENT_TTYD_SERVER_NAME: Final[str] = AGENT_TTYD_WINDOW_NAME
-
-# Bash wrapper that starts ttyd attached to the role agent's own tmux session.
-# This allows users to interact with the role agent via a web browser.
-#
-# How it works:
-# 1. Gets the current tmux session name (the agent's session)
-# 2. Starts ttyd on a random port (-p 0) running `tmux attach` to that session
-#    - Unsets TMUX env var so tmux allows the nested attach from ttyd's child process
-# 3. Watches ttyd's stderr for the assigned port number (via shared helper)
-# 4. Writes a servers/events.jsonl record so the minds forwarding server can discover it
-_AGENT_TTYD_INVOCATION = (
-    "_SESSION=$(tmux display-message -p '#{session_name}') && "
-    'ttyd -p 0 -t disableLeaveAlert=true -W bash -c \'unset TMUX && exec tmux attach -t "$1":0\' -- "$_SESSION"'
-)
-
-AGENT_TTYD_COMMAND: Final[str] = build_ttyd_server_command(_AGENT_TTYD_INVOCATION, AGENT_TTYD_SERVER_NAME)
 
 # Supporting service tmux window names and commands.
 # These are run as additional tmux windows alongside the primary role agent.
@@ -75,15 +55,6 @@ TRANSCRIPT_WATCHER_COMMAND: Final[str] = "mng mindtranscript"
 # and agent list page.
 WEB_SERVER_WINDOW_NAME: Final[str] = "web_server"
 WEB_SERVER_COMMAND: Final[str] = "mng mindweb"
-
-# Chat ttyd: a ttyd with --url-arg that dispatches to chat.sh.
-# Accessed with ?arg=<conversation_id> to resume, or no arg for a new conversation.
-CHAT_TTYD_WINDOW_NAME: Final[str] = "chat"
-CHAT_TTYD_SERVER_NAME: Final[str] = CHAT_TTYD_WINDOW_NAME
-_CHAT_TTYD_INVOCATION: Final[str] = (
-    'ttyd -p 0 -a -t disableLeaveAlert=true -W bash "$MNG_AGENT_STATE_DIR/commands/chat_ttyd_handler.sh"'
-)
-CHAT_TTYD_COMMAND: Final[str] = build_ttyd_server_command(_CHAT_TTYD_INVOCATION, CHAT_TTYD_SERVER_NAME)
 
 
 class ClaudeMindConfig(ClaudeAgentConfig):
@@ -126,7 +97,7 @@ class ClaudeMindAgent(ClaudeAgent):
     - Conversation watcher (syncs llm DB to events/messages/events.jsonl)
     - Event watcher (sends new events to primary role agent via mng message)
     - Web server (main web interface with conversation selector and agent list)
-    - Chat ttyd (--url-arg ttyd for conversation terminal access)
+    - Transcript watcher (converts claude_transcript to common_transcript)
     """
 
     enter_submission_timeout_seconds: float = Field(
@@ -314,22 +285,21 @@ def inject_supporting_services(params: dict[str, Any]) -> None:
     """Inject all mind supporting service tmux windows into the create command parameters.
 
     Adds:
-    - Agent ttyd (web terminal for the primary role agent's tmux session)
     - Conversation watcher (syncs llm DB to JSONL files)
     - Event watcher (sends new events to primary role agent via mng message)
     - Web server (main web interface with conversation selector and agent list)
-    - Chat ttyd (--url-arg ttyd for conversation access)
     - Transcript watcher (converts claude_transcript to common_transcript)
+
+    Agent and chat terminal access is provided by the consolidated ttyd
+    server (from mng_ttyd) via URL-arg dispatch to commands/ttyd/*.sh scripts.
     """
     existing = params.get("extra_window", ())
     params["extra_window"] = (
         *existing,
-        f'{AGENT_TTYD_WINDOW_NAME}="{AGENT_TTYD_COMMAND}"',
         f'{CONV_WATCHER_WINDOW_NAME}="{CONV_WATCHER_COMMAND}"',
         f'{EVENT_WATCHER_WINDOW_NAME}="{EVENT_WATCHER_COMMAND}"',
         f'{WEB_SERVER_WINDOW_NAME}="{WEB_SERVER_COMMAND}"',
         f'{TRANSCRIPT_WATCHER_WINDOW_NAME}="{TRANSCRIPT_WATCHER_COMMAND}"',
-        f'{CHAT_TTYD_WINDOW_NAME}="{CHAT_TTYD_COMMAND}"',
     )
 
 
@@ -370,8 +340,8 @@ def override_command_options(
 ) -> None:
     """Add mind supporting service windows when creating claude-mind role agents (or subtypes).
 
-    Injects: agent ttyd, conversation watcher, event watcher, web server,
-    and chat ttyd as supporting services.
+    Injects: conversation watcher, event watcher, web server,
+    and transcript watcher as supporting services.
 
     Matches any agent type whose registered class is ClaudeMindAgent or
     a subclass of it (e.g. elena-code, custom mind types).

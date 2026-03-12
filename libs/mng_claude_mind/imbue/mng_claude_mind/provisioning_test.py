@@ -23,6 +23,7 @@ from imbue.mng_claude_mind.provisioning import MIND_CONVERSATIONS_TABLE_SQL
 from imbue.mng_claude_mind.provisioning import TalkingRoleConstraintError
 from imbue.mng_claude_mind.provisioning import _LLM_TOOL_FILES
 from imbue.mng_claude_mind.provisioning import _SERVICE_SCRIPT_FILES
+from imbue.mng_claude_mind.provisioning import _TTYD_DISPATCH_SCRIPTS
 from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import compute_claude_project_dir_name
 from imbue.mng_claude_mind.provisioning import configure_llm_user_path
@@ -552,11 +553,11 @@ def test_provision_default_content_writes_skills_to_thinking() -> None:
     assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
 
 
-def test_provision_supporting_services_creates_commands_dir() -> None:
+def test_provision_supporting_services_creates_commands_and_ttyd_dirs() -> None:
     host = StubHost()
     provision_supporting_services(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
 
-    assert any("mkdir" in c and "commands" in c for c in host.executed_commands)
+    assert any("mkdir" in c and "commands/ttyd" in c for c in host.executed_commands)
 
 
 def test_provision_supporting_services_writes_all_scripts() -> None:
@@ -574,6 +575,17 @@ def test_provision_supporting_services_uses_executable_mode() -> None:
 
     for path, _, mode in host.written_files:
         assert mode == "0755", f"Expected 0755 for script {path.name}, got {mode}"
+
+
+def test_provision_supporting_services_writes_ttyd_dispatch_scripts() -> None:
+    """Verify that ttyd dispatch scripts are written to commands/ttyd/."""
+    host = StubHost()
+    provision_supporting_services(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
+
+    written_names = [str(path) for path, _, _ in host.written_files]
+    for _, target_name in _TTYD_DISPATCH_SCRIPTS:
+        expected_suffix = f"commands/ttyd/{target_name}"
+        assert any(expected_suffix in name for name in written_names), f"ttyd/{target_name} not written"
 
 
 def test_provision_llm_tools_creates_tools_dir() -> None:

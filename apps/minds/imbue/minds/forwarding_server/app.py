@@ -45,6 +45,34 @@ from imbue.mng.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
+
+def _split_backend_url(backend_url: str) -> tuple[str, str]:
+    """Split a backend URL into base URL and stored query string.
+
+    Backend URLs may contain query parameters from URL-arg dispatch
+    (e.g. ``http://127.0.0.1:PORT?arg=chat``). This function separates
+    the base URL from the stored query so the proxy can correctly
+    construct the final URL by combining stored and request query parts.
+    """
+    if "?" in backend_url:
+        base, query = backend_url.split("?", 1)
+        return base, query
+    return backend_url, ""
+
+
+def _build_proxy_url(base_url: str, path: str, *query_parts: str) -> str:
+    """Build a proxy URL from base URL, path, and optional query string parts.
+
+    Combines the base URL with the path, then appends any non-empty
+    query parts joined by ``&``.
+    """
+    url = f"{base_url}/{path}"
+    non_empty = [p for p in query_parts if p]
+    if non_empty:
+        url += f"?{'&'.join(non_empty)}"
+    return url
+
+
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "transfer-encoding",
@@ -319,9 +347,8 @@ async def _forward_http_request(
     When http_client is not None, uses it instead of the app's default client. This is
     used for SSH-tunneled connections where the client is configured with UDS transport.
     """
-    proxy_url = f"{backend_url}/{path}"
-    if request.url.query:
-        proxy_url += f"?{request.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
 
     headers = dict(request.headers)
     headers.pop("host", None)
@@ -357,9 +384,8 @@ async def _forward_http_request_streaming(
     Used for SSE (Server-Sent Events) endpoints where the backend sends data
     incrementally and the client needs to receive it as it arrives.
     """
-    proxy_url = f"{backend_url}/{path}"
-    if request.url.query:
-        proxy_url += f"?{request.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
 
     headers = dict(request.headers)
     headers.pop("host", None)
@@ -547,10 +573,9 @@ async def _handle_proxy_websocket(
         await websocket.close(code=4004, reason=f"Unknown server: {agent_id}/{server_name}")
         return
 
-    ws_backend = backend_url.replace("http://", "ws://").replace("https://", "wss://")
-    ws_url = f"{ws_backend}/{path}"
-    if websocket.url.query:
-        ws_url += f"?{websocket.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    ws_backend = base_url.replace("http://", "ws://").replace("https://", "wss://")
+    ws_url = _build_proxy_url(ws_backend, path, stored_query, websocket.url.query)
 
     # Forward subprotocols from the client to the backend so that
     # protocol-specific servers (e.g. ttyd which requires "tty") work correctly.

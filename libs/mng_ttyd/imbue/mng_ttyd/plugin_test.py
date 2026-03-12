@@ -90,6 +90,11 @@ def test_ttyd_command_uses_random_port() -> None:
     assert "ttyd -p 0" in TTYD_COMMAND
 
 
+def test_ttyd_command_enables_url_arg_dispatch() -> None:
+    """Verify that the ttyd command uses -a for URL-arg dispatch."""
+    assert "ttyd -p 0 -a" in TTYD_COMMAND
+
+
 def test_ttyd_command_writes_server_log() -> None:
     """Verify that the ttyd command writes to servers/events.jsonl for forwarding server discovery."""
     assert "servers/events.jsonl" in TTYD_COMMAND
@@ -108,3 +113,15 @@ def test_ttyd_command_watches_stderr_for_port() -> None:
 def test_ttyd_command_skips_log_when_no_state_dir() -> None:
     """Verify that the command gracefully handles MNG_AGENT_STATE_DIR being unset."""
     assert 'if [ -n "$MNG_AGENT_STATE_DIR" ]' in TTYD_COMMAND
+
+
+def test_ttyd_command_dispatches_to_ttyd_scripts() -> None:
+    """Verify that the dispatch script routes to commands/ttyd/<KEY>.sh."""
+    assert "commands/ttyd/$KEY.sh" in TTYD_COMMAND
+
+
+def test_ttyd_command_scans_ttyd_scripts_for_events() -> None:
+    """Verify that the port wrapper scans commands/ttyd/*.sh and writes events for each."""
+    assert 'commands/ttyd/"*.sh' in TTYD_COMMAND
+    assert "basename" in TTYD_COMMAND
+    assert "?arg=$_K" in TTYD_COMMAND

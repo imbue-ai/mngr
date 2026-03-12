@@ -793,3 +793,64 @@ def test_http_proxy_without_tunnel_manager_works_for_local_backend(tmp_path: Pat
     response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# -- Backend URL with query string tests --
+
+
+def test_proxy_combines_stored_and_request_query_strings(tmp_path: Path) -> None:
+    """When backend URL has a query string (?arg=chat), it combines with request query params."""
+    agent_id = AgentId()
+
+    # Backend that echoes the full request URL query string
+    backend_app = FastAPI()
+
+    @backend_app.get("/")
+    def echo_root(request: FastAPIRequest) -> JSONResponse:
+        return JSONResponse({"query": str(request.url.query)})
+
+    @backend_app.get("/{path:path}")
+    def echo_path(request: FastAPIRequest, path: str) -> JSONResponse:
+        return JSONResponse({"path": path, "query": str(request.url.query)})
+
+    test_http_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=backend_app),
+        base_url="http://test-backend",
+    )
+
+    # Register backend with query string in the URL (like ttyd ?arg=chat dispatch)
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id): {"chat": "http://test-backend?arg=chat"},
+        },
+    )
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=test_http_client,
+    )
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    client.cookies.set(f"sw_installed_{agent_id}_chat", "1")
+
+    # Request with no additional query -- only stored query should arrive
+    response = client.get(f"/agents/{agent_id}/chat/")
+    assert response.status_code == 200
+    assert response.json()["query"] == "arg=chat"
+
+    # Request with additional query -- both should be combined
+    response = client.get(f"/agents/{agent_id}/chat/", params={"arg": "CONV123"})
+    assert response.status_code == 200
+    query = response.json()["query"]
+    assert "arg=chat" in query
+    assert "arg=CONV123" in query
+
+
+def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> None:
+    """Backend URLs without query strings still work correctly (regression test)."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
+
+    # Existing test: plain backend URL with request query
+    response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status", params={"foo": "bar"})
+    assert response.status_code == 200

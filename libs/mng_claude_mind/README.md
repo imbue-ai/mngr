@@ -77,8 +77,8 @@ The primary role agent is augmented with several supporting services running in 
 - **Event watcher** - monitors event streams and delivers new events to the primary role agent via `mng message`
 - **Transcript watcher** - converts raw Claude transcript to a common agent-agnostic format
 - **Web server** - serves the main web interface with conversation selector and agent list
-- **Chat ttyd** - provides web-terminal access to conversations via `llm live-chat`
-- **Agent ttyd** - provides web-terminal access to the primary role agent's tmux session
+
+Agent and chat terminal access is provided by the consolidated ttyd server (from the `mng_ttyd` plugin) via URL-arg dispatch. The plugin provisions dispatch scripts to `commands/ttyd/` (e.g., `agent.sh` for tmux attach, `chat.sh` for conversation access), which the ttyd server discovers at port-bind time and registers as virtual servers.
 
 ## Settings
 

@@ -23,9 +23,14 @@ from imbue.mng_claude_mind.data_types import ProvisioningSettings
 # Python scripts (event_watcher, conversation_watcher, transcript_watcher,
 # web_server, conversation_db) are now registered as mng CLI commands and
 # do not need to be provisioned.
-_SERVICE_SCRIPT_FILES: Final[tuple[str, ...]] = (
-    "chat.sh",
-    "chat_ttyd_handler.sh",
+_SERVICE_SCRIPT_FILES: Final[tuple[str, ...]] = ("chat.sh",)
+
+# Scripts provisioned to $MNG_AGENT_STATE_DIR/commands/ttyd/ for URL-arg dispatch.
+# Each <key>.sh is discovered by the ttyd port wrapper and registered as a virtual server.
+# Tuples of (resource filename, target filename under commands/ttyd/).
+_TTYD_DISPATCH_SCRIPTS: Final[tuple[tuple[str, str], ...]] = (
+    ("ttyd_agent.sh", "agent.sh"),
+    ("ttyd_chat.sh", "chat.sh"),
 )
 
 # Python tool files to provision to $MNG_AGENT_STATE_DIR/commands/llm_tools/
@@ -332,18 +337,23 @@ def provision_supporting_services(
 ) -> None:
     """Write supporting service shell scripts to $MNG_AGENT_STATE_DIR/commands/.
 
-    Scripts are loaded from the resources package and written with execute permission.
+    Provisions:
+    - Shared logging library (mng_log.sh)
+    - Service scripts to commands/ (e.g. chat.sh)
+    - Ttyd dispatch scripts to commands/ttyd/ (e.g. agent.sh, chat.sh)
+
     Python supporting services (event_watcher, conversation_watcher, transcript_watcher,
     web_server, conversation_db) are registered as mng CLI commands and do not need
     to be provisioned.
     """
     commands_dir = agent_state_dir / "commands"
+    ttyd_dir = commands_dir / "ttyd"
     _execute_with_timing(
         host,
-        f"mkdir -p {shlex.quote(str(commands_dir))}",
+        f"mkdir -p {shlex.quote(str(ttyd_dir))}",
         hard_timeout=settings.fs_hard_timeout_seconds,
         warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir commands",
+        label="mkdir commands/ttyd",
     )
 
     # Provision the shared logging library (from mng core resources) first,
@@ -357,6 +367,12 @@ def provision_supporting_services(
         script_content = load_mind_resource(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to host", script_name):
+            host.write_file(script_path, script_content.encode(), mode="0755")
+
+    for resource_name, target_name in _TTYD_DISPATCH_SCRIPTS:
+        script_content = load_mind_resource(resource_name)
+        script_path = ttyd_dir / target_name
+        with log_span("Writing ttyd/{} to host", target_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
 
 
