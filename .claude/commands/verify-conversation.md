@@ -57,7 +57,7 @@ This outputs a single number (total bytes).
 
 ### Step 3: Gather Progress Data
 
-Use the Read tool to read `.reviews/conversation/progress.jsonl`. This file tracks which parts of the transcript have already been reviewed. If it exists, for each session file from Step 1, compare the current line count (`wc -l`) against the line count recorded in the progress file.
+Use the Read tool to read `.reviews/conversation/progress.jsonl`. This file tracks which parts of the transcript have already been reviewed. If it exists, for each session file from Step 1, compare the current line count (`wc -l <path>`, not `wc -l < <path>`) against the line count recorded in the progress file.
 
 ### Step 4: Spawn Agent
 
