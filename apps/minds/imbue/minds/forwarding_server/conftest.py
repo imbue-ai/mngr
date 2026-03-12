@@ -27,7 +27,7 @@ def short_tmp_path() -> Iterator[Path]:
 
 
 def make_agents_json(*agent_ids: AgentId) -> str:
-    """Build a JSON string matching `mng list --json` output for the given agent IDs."""
+    """Build a JSON string matching `mng list --format json` output for the given agent IDs."""
     return json.dumps({"agents": [{"id": str(agent_id)} for agent_id in agent_ids]})
 
 
@@ -42,7 +42,7 @@ def make_resolver_with_data(
 ) -> MngCliBackendResolver:
     """Create a MngCliBackendResolver pre-populated with test data.
 
-    agents_json is a JSON string matching `mng list --json` format, used to populate
+    agents_json is a JSON string matching `mng list --format json` format, used to populate
     agent IDs and SSH info. server_logs is a mapping of agent ID string to raw
     servers/events.jsonl content, parsed to populate the server URL map for each agent.
     """

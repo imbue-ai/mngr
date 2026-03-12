@@ -265,7 +265,7 @@ def test_mng_cli_resolver_update_servers_replaces_state() -> None:
 
 
 def _make_agents_json_with_ssh(*agents: tuple[str, dict[str, object] | None]) -> str:
-    """Build mng list --json output with optional SSH info per agent."""
+    """Build mng list --format json output with optional SSH info per agent."""
     agent_list = []
     for agent_id, ssh in agents:
         agent: dict[str, object] = {"id": agent_id}

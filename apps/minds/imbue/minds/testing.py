@@ -187,7 +187,7 @@ def run_mind(*args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[
 
 
 def parse_mng_list_json(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from mng list --json stdout.
+    """Extract agent records from mng list --format json stdout.
 
     The stdout may contain non-JSON lines (e.g. SSH error tracebacks)
     mixed with the JSON. We find the first line starting with '{' and
