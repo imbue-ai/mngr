@@ -1,4 +1,9 @@
 import json
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 
 from imbue.changelings.forwarding_server.backend_resolver import MngCliBackendResolver
 from imbue.changelings.forwarding_server.backend_resolver import parse_agents_from_json
@@ -7,6 +12,18 @@ from imbue.changelings.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
+
+
+@pytest.fixture
+def short_tmp_path() -> Iterator[Path]:
+    """Temporary directory with a short path, for use with AF_UNIX sockets.
+
+    pytest's tmp_path embeds the test function name, which can push Unix socket
+    paths over the 104-char limit on macOS. This fixture uses a short prefix
+    directly in the system tmpdir instead.
+    """
+    with tempfile.TemporaryDirectory(prefix="ssh") as d:
+        yield Path(d)
 
 
 def make_agents_json(*agent_ids: AgentId) -> str:
