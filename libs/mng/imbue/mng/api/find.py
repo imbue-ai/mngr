@@ -181,6 +181,15 @@ def resolve_agent_reference(
         return matching_agents[0]
 
 
+class ResolvedSource(FrozenModel):
+    """Full resolution result from resolve_source_detailed, including agent info when available."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    location: HostLocation = Field(description="The resolved host and path")
+    agent_id: AgentId | None = Field(default=None, description="The resolved source agent ID, if any")
+
+
 @log_call
 def resolve_source_location(
     source: str | None,
@@ -191,8 +200,8 @@ def resolve_source_location(
     mng_ctx: MngContext,
     *,
     is_start_desired: bool = True,
-) -> HostLocation:
-    """Parse and resolve source location to a concrete host and path.
+) -> ResolvedSource:
+    """Parse and resolve source location to a concrete host, path, and optional agent ID.
 
     source format: [AGENT | AGENT.HOST[.PROVIDER] | AGENT.HOST[.PROVIDER]:PATH | HOST[.PROVIDER]:PATH | PATH]
 
@@ -253,9 +262,9 @@ def resolve_source_location(
         agent_work_dir_if_available=agent_work_dir,
     )
 
-    return HostLocation(
-        host=online_host,
-        path=resolved_path,
+    return ResolvedSource(
+        location=HostLocation(host=online_host, path=resolved_path),
+        agent_id=resolved_agent.agent_id if resolved_agent is not None else None,
     )
 
 

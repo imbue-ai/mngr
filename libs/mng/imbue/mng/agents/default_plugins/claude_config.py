@@ -381,6 +381,21 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 
 
 # =============================================================================
+# Project Directory Encoding
+# =============================================================================
+
+
+@pure
+def encode_claude_project_dir_name(path: Path) -> str:
+    """Encode a filesystem path into Claude Code's project directory name.
+
+    Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
+    The encoding replaces '/' and '.' with '-'.
+    """
+    return str(path).replace("/", "-").replace(".", "-")
+
+
+# =============================================================================
 # Readiness Hooks Configuration
 # =============================================================================
 

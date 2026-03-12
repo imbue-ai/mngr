@@ -13,6 +13,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
+from imbue.mng.agents.default_plugins.claude_config import encode_claude_project_dir_name
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.providers.ssh_host_setup import load_resource_script
@@ -715,15 +716,6 @@ def create_daily_conversation(
     logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)
 
 
-def compute_claude_project_dir_name(work_dir_abs: str) -> str:
-    """Compute the Claude project directory name from an absolute work_dir path.
-
-    Claude names project directories by replacing '/' and '.' with '-' in the
-    absolute path, e.g. /home/user/.minds/my-agent -> -home-user--minds-my-agent
-    """
-    return work_dir_abs.replace("/", "-").replace(".", "-")
-
-
 def resolve_work_dir_abs(
     host: OnlineHostInterface,
     work_dir: Path,
@@ -772,7 +764,7 @@ def setup_memory_directory(
     # Use .parent because Claude Code's project dir is named after the git repo
     # root (the mind dir), not the role subdirectory within it. This must
     # match the path used by build_memory_sync_hooks_config.
-    project_dir_name = compute_claude_project_dir_name(str(Path(role_dir_abs).parent))
+    project_dir_name = encode_claude_project_dir_name(Path(role_dir_abs).parent)
 
     # Create both memory directories.
     # Remove any existing symlink at the project memory path (from old provisioning)
@@ -818,8 +810,7 @@ def build_memory_sync_hooks_config(role_dir_abs: str) -> dict[str, Any]:
     - PostToolUse: ~/.claude/projects/<project>/memory/ -> <role_dir>/memory/
       (captures any memory Claude wrote back into version control)
     """
-    # note that the ".parent" is necessary here--the git repo is what is tracked on the claude side
-    project_dir_name = compute_claude_project_dir_name(str(Path(role_dir_abs).parent))
+    project_dir_name = encode_claude_project_dir_name(Path(role_dir_abs).parent)
     quoted_work_memory = shlex.quote(f"{role_dir_abs}/memory")
     quoted_project_dir_name = shlex.quote(project_dir_name)
     project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'

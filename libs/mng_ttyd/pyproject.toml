@@ -2,6 +2,7 @@
 name = "mng-ttyd"
 version = "0.1.0"
 description = "ttyd web terminal plugin for mng - automatically launches a ttyd server alongside agents"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",

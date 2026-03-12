@@ -2,6 +2,7 @@
 name = "resource-guards"
 version = "0.1.0"
 description = "Pytest resource guard infrastructure for enforcing test marks on external resource usage"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
