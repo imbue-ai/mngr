@@ -19,6 +19,14 @@ if [[ "$command" =~ ^git[[:space:]]+rebase ]]; then
     exit 2
 fi
 
+# Check if command is "git pull" with --rebase or -r flag
+if [[ "$command" =~ ^git[[:space:]]+pull ]]; then
+    if [[ "$command" == *"--rebase"* ]] || [[ "$command" =~ (^|[[:space:]])-r([[:space:]]|$) ]]; then
+        echo "Blocked: git pull --rebase commands are not allowed (use git pull --merge instead)" >&2
+        exit 2
+    fi
+fi
+
 # Check if command starts with "git commit" and contains --amend or --fixup
 if [[ "$command" =~ ^git[[:space:]]+commit ]]; then
     if [[ "$command" == *"--amend"* ]] || [[ "$command" == *"--fixup"* ]]; then
