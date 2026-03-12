@@ -121,7 +121,7 @@ def test_load_resource_script_loads_activity_watcher() -> None:
     script = load_resource_script("activity_watcher.sh")
     assert isinstance(script, str)
     assert len(script) > 0
-    assert "#!/bin/bash" in script
+    assert "#!/usr/bin/env bash" in script
     assert "activity_watcher" in script.lower() or "HOST_DATA_DIR" in script
 
 
@@ -244,7 +244,7 @@ def _create_test_script(script_path: str, host_data_dir: str, function_call: str
     individual functions without running the main loop.
     """
     lines = [
-        "#!/bin/bash",
+        "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
         f'HOST_DATA_DIR="{host_data_dir}"',

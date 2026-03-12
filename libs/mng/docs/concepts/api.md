@@ -23,8 +23,8 @@ mng calls these on your plugin at specific points during command execution. Impl
 | `override_command_options`   | Override or modify command options after CLI parsing and config defaults, but before the command options object is created |
 | `on_before_create`           | Inspect and modify create arguments before any work is done                                                    |
 | `on_before_host_create`      | React before a new host is created [experimental]                                                              |
-| `on_host_created`            | React after a new host has been created [experimental]                                                         |
-| `on_agent_created`           | React after an agent is fully created and started [experimental]                                               |
+| `on_host_created`            | React after a new host has been created                                                                        |
+| `on_agent_created`           | React after an agent is fully created and started                                                              |
 | `on_before_agent_destroy`    | React before an online agent is destroyed [experimental]                                                       |
 | `on_agent_destroyed`         | React after an online agent has been destroyed [experimental]                                                  |
 | `on_before_host_destroy`     | React before a host is destroyed [experimental]                                                                |

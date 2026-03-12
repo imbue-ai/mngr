@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Robust transcript streaming for Claude agents.
 #
 # Watches ALL Claude session JSONL files and appends new lines to

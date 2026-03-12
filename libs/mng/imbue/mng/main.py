@@ -30,6 +30,7 @@ from imbue.mng.cli.limit import limit
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.message import message
 from imbue.mng.cli.migrate import migrate
+from imbue.mng.cli.observe import observe
 from imbue.mng.cli.plugin import plugin as plugin_command
 from imbue.mng.cli.provision import provision
 from imbue.mng.cli.pull import pull
@@ -315,6 +316,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     config,
     gc,
     plugin_command,
+    observe,
 ]
 
 for cmd in BUILTIN_COMMANDS:

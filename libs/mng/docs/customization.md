@@ -62,7 +62,6 @@ You can override default values for CLI command parameters in your config files.
 
 # Override defaults for the 'create' command
 [commands.create]
-new_host = "docker"           # Create in docker by default instead of local
 connect = false               # Don't auto-connect after creation
 ensure_clean = false          # Allow dirty working trees
 name_style = "scifi"          # Use sci-fi style names by default
@@ -70,15 +69,13 @@ name_style = "scifi"          # Use sci-fi style names by default
 
 With this config:
 
-- `mng create` → Creates in docker, doesn't connect, allows dirty trees
-- `mng create --in local` → Creates locally (user override wins)
-- `mng create --connect` → Creates in docker but connects (user override wins)
+- `mng create` → Doesn't connect, allows dirty trees
+- `mng create --connect` → Connects (user override wins)
 
 **Parameter names:**
 
 - Use the parameter name as it appears in the CLI (after click's conversion)
 - Boolean flags: use `connect = true` or `connect = false` (not `--connect`/`--no-connect`)
-- For flags with multiple forms like `--in`/`--new-host`, use the full form: `new_host = "docker"`
 
 **Scope:**
 
@@ -110,19 +107,19 @@ Templates provide named presets of create command arguments that can be quickly 
 
 # Template for running agents in Modal
 [create_templates.modal]
-new_host = "modal"
+provider = "modal"
 target_path = "/root/workspace"
 idle_timeout = 3600
 
 # Template for running agents in Docker
 [create_templates.docker]
-new_host = "docker"
+provider = "docker"
 target_path = "/workspace"
 
 # Template with extra commands for development
 [create_templates.dev]
-new_host = "modal"
-add_command = ["server=npm run dev", "logs=tail -f /var/log/app.log"]
+provider = "modal"
+extra_window = ["server=npm run dev", "logs=tail -f /var/log/app.log"]
 ```
 
 **Usage:**

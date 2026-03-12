@@ -53,7 +53,7 @@ In order to improve or update existing documentation, follow these steps:
  
 ## Best Practices
 
-Always keep in mind the following best practices for user-facing documentation:
+Always remember the following best practices for user-facing documentation:
 
 - Write sentences that are clear, concise, and easy to understand.
 - Always write in Markdown format (.md files).

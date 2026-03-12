@@ -56,7 +56,7 @@ class LogEvent(EventEnvelope):
 
     Used by both Python (loguru) and bash scripts to emit structured log
     lines to logs/<source>/events.jsonl files. The type field identifies
-    the program (e.g. 'mng', 'changelings', 'event_watcher'), while source
+    the program (e.g. 'mng', 'minds', 'event_watcher'), while source
     identifies the component that produced the log.
     """
 

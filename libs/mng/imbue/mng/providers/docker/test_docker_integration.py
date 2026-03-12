@@ -15,6 +15,7 @@ from pathlib import Path
 
 import docker
 import docker.errors
+import docker.models.containers
 import pytest
 
 from imbue.mng.config.data_types import MngContext
@@ -426,6 +427,7 @@ def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) 
     container.reload()
     assert container.status in ("exited", "stopped")
     # Exit code 0 means clean shutdown via trap
+    assert container.attrs is not None
     assert container.attrs["State"]["ExitCode"] == 0
 
 

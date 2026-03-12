@@ -497,10 +497,8 @@ def test_provision_stopped_modal_agent(
     # Create agent with an env var we can check for preservation
     result = run_mng_subprocess(
         "create",
-        agent_name,
+        f"{agent_name}@.modal",
         "generic",
-        "--in",
-        "modal",
         "--no-connect",
         "--no-ensure-clean",
         "--source",

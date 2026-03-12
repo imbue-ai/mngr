@@ -206,8 +206,8 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
 
     \b
     Examples:
-      mng schedule add --command create --args "--type claude --message 'fix bugs' --in local" --schedule "0 2 * * *" --provider local
-      mng schedule add --command create --args "--type claude --message 'fix bugs' --in modal" --schedule "0 2 * * *" --provider modal
+      mng schedule add --command create --args "--type claude --message 'fix bugs'" --schedule "0 2 * * *" --provider local
+      mng schedule add --command create --args "--type claude --message 'fix bugs' --provider modal" --schedule "0 2 * * *" --provider modal
     """
     resolve_positional_name(ctx)
     # New schedules default to enabled. The shared options use None so that

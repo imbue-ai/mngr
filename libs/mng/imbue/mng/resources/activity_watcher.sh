@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Activity watcher script for mng hosts.
 # This script monitors activity files and calls shutdown.sh when the host becomes idle.
 #

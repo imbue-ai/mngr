@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Stop hook script for Claude Code
 # Prevents stopping unless all changes are committed
 

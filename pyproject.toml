@@ -60,18 +60,19 @@ addopts = [
   "--dist=worksteal",
   "--cov=imbue.mng",
   "--cov=imbue.imbue_common",
+  "--cov=imbue.resource_guards",
   "--cov=imbue.mng_opencode",
   "--cov=imbue.mng_pair",
   "--cov=imbue.mng_schedule",
   "--cov=imbue.mng_ttyd",
   "--cov=imbue.mng_tutor",
-  "--cov=imbue.mng_claude_changeling",
+  "--cov=imbue.mng_claude_mind",
   "--cov=imbue.mng_elena_code",
   "--cov=imbue.mng_kanpan",
   "--cov=imbue.mng_recursive",
-  "--cov=imbue.mng_changeling_chat",
+  "--cov=imbue.mng_mind_chat",
   "--cov=imbue.mng_test_coder",
-  "--cov=imbue.changelings",
+  "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
   "--cov-report=term-missing",
   "--cov-report=html",
@@ -150,10 +151,10 @@ omit = [
     "libs/mng/imbue/mng/providers/docker/instance.py",
     "libs/mng/imbue/mng/providers/docker/volume.py",
     "libs/mng/imbue/mng/providers/docker/testing.py",
-    # Changeling deploy modules run on Modal and require infrastructure to test
-    "apps/changelings/imbue/changelings/deploy/cron_runner.py",
-    "apps/changelings/imbue/changelings/deploy/remote_runner.py",
-    "apps/changelings/imbue/changelings/deploy/verification.py",
+    # Mind deploy modules run on Modal and require infrastructure to test
+    "apps/minds/imbue/minds/deploy/cron_runner.py",
+    "apps/minds/imbue/minds/deploy/remote_runner.py",
+    "apps/minds/imbue/minds/deploy/verification.py",
     # Schedule plugin cron runner and verification run on Modal and require infrastructure to test
     "libs/mng_schedule/imbue/mng_schedule/implementations/modal/cron_runner.py",
     "libs/mng_schedule/imbue/mng_schedule/implementations/modal/verification.py",
@@ -183,17 +184,17 @@ layers = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "changelings layers contract"
+name = "minds layers contract"
 type = "layers"
 layers = [
-    "imbue.changelings.desktop_client",
-    "imbue.changelings.cli",
-    "imbue.changelings.deployment",
-    "imbue.changelings.forwarding_server",
-    "imbue.changelings.core",
-    "imbue.changelings.interfaces",
-    "imbue.changelings.config",
-    "imbue.changelings.errors",
-    "imbue.changelings.utils",
-    "imbue.changelings.primitives",
+    "imbue.minds.desktop_client",
+    "imbue.minds.cli",
+    "imbue.minds.deployment",
+    "imbue.minds.forwarding_server",
+    "imbue.minds.core",
+    "imbue.minds.interfaces",
+    "imbue.minds.config",
+    "imbue.minds.errors",
+    "imbue.minds.utils",
+    "imbue.minds.primitives",
 ]

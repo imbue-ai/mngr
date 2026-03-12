@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 # Status line script for Claude Code
 # Outputs: [time user@host dir] branch | PR: url (status) | Issues: N

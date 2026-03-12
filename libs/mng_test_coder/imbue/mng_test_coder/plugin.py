@@ -14,8 +14,8 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_changeling.plugin import ClaudeChangelingAgent
-from imbue.mng_claude_changeling.plugin import ClaudeChangelingConfig
+from imbue.mng_claude_mind.plugin import ClaudeMindAgent
+from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 
 _MODEL_NAME = "matched-responses"
 
@@ -28,10 +28,10 @@ class TestCoderProvisioningError(MngError, RuntimeError):
     ...
 
 
-class TestCoderConfig(ClaudeChangelingConfig):
+class TestCoderConfig(ClaudeMindConfig):
     """Config for the test-coder agent type.
 
-    Extends ClaudeChangelingConfig with defaults suitable for testing:
+    Extends ClaudeMindConfig with defaults suitable for testing:
     - install_llm is True (needed for chat)
     - The command is overridden to a simple idle loop instead of Claude Code
     """
@@ -42,8 +42,8 @@ class TestCoderConfig(ClaudeChangelingConfig):
     )
 
 
-class TestCoderAgent(ClaudeChangelingAgent):
-    """A test changeling agent that uses the matched-responses model instead of real LLMs.
+class TestCoderAgent(ClaudeMindAgent):
+    """A test mind agent that uses the matched-responses model instead of real LLMs.
 
     Designed for end-to-end testing without API keys. The main agent
     process is a simple idle loop (no Claude Code), and the chat
@@ -76,11 +76,11 @@ class TestCoderAgent(ClaudeChangelingAgent):
     ) -> None:
         """Provision the test agent with the matched-responses model.
 
-        Runs the standard ClaudeChangelingAgent provisioning (which installs
+        Runs the standard ClaudeMindAgent provisioning (which installs
         llm, creates event dirs, etc.) and then installs the
         llm-matched-responses plugin so the model is available for chat.
 
-        Also writes changelings.toml with model = "matched-responses"
+        Also writes minds.toml with model = "matched-responses"
         so that chat.sh uses it by default.
         """
         super().provision(host, options, mng_ctx)
@@ -140,12 +140,12 @@ def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
 
 
 def _configure_model_as_default(host: OnlineHostInterface, work_dir: Path) -> None:
-    """Write changelings.toml with model = "matched-responses".
+    """Write minds.toml with model = "matched-responses".
 
     This ensures chat.sh uses the matched-responses model by default, so no
     API keys are needed for the chat interface.
     """
-    settings_path = work_dir / "changelings.toml"
+    settings_path = work_dir / "minds.toml"
     settings_content = '[chat]\nmodel = "{}"\n'.format(_MODEL_NAME)
     host.write_text_file(settings_path, settings_content)
     logger.info("Configured matched-responses model as default chat model")

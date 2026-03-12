@@ -2,6 +2,7 @@
 name = "slack-exporter"
 version = "0.1.0"
 description = "Export Slack channel messages to JSONL using latchkey for authentication"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-common",

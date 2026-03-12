@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 # mng_log.sh -- Shared JSONL logging library for mng bash scripts.
 #

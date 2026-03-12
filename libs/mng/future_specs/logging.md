@@ -58,7 +58,7 @@ Shared (present in both Python and bash):
 - `pid`: Process ID
 
 Optional shared:
-- `command`: CLI subcommand (present for `mng` and `changelings`)
+- `command`: CLI subcommand (present for `mng` and `minds`)
 
 Python-only (from loguru):
 - `function`, `line`, `module`, `logger_name`: Source code location

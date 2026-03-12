@@ -2,6 +2,7 @@
 name = "mng-schedule"
 version = "0.1.0"
 description = "Schedule command plugin for mng - schedule remote invocations of mng commands"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng",

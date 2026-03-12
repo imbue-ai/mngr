@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 # This is a (very long) tutorial that covers most of the features of mng with examples, as well as simple ways to do common tasks.
 # See the README.md for details on installation and higher level architecture.

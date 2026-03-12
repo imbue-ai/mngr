@@ -33,7 +33,7 @@ When a browser connects to `http://<host>/?arg=<token>`, ttyd runs:
 Location: `/usr/local/bin/mng-ttyd-wrapper`
 
 ```bash
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 EXPECTED_TOKEN=$(cat "$MNG_AGENT_STATE_DIR/plugin/default_url_for_cli_agents_via_ttyd/token")

@@ -3,11 +3,11 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.utils.cel_utils import compile_cel_filters
 from imbue.mng_kanpan.tui import run_kanpan
 

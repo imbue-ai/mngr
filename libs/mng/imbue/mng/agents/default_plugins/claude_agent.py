@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -24,6 +25,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -1172,7 +1174,7 @@ class ClaudeAgent(BaseAgent):
                 # settings.json is handled separately above
                 if relative_path == Path("settings.json"):
                     continue
-                host.write_text_file(config_dir / relative_path, source_path.read_text())
+                host.write_file(config_dir / relative_path, source_path.read_bytes())
 
         # 3. Always ship .claude.json
         # Resolve the work_dir on the remote host so the trust entry matches
@@ -1467,6 +1469,46 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
     return ("claude", ClaudeAgent, ClaudeAgentConfig)
+
+
+class WaitingReason(UpperCaseStrEnum):
+    """Why a Claude agent is in the WAITING lifecycle state."""
+
+    PERMISSIONS = auto()
+    END_OF_TURN = auto()
+
+
+def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
+    """Check if a file exists on the host without SSH overhead."""
+    try:
+        host.read_text_file(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Checks the agent state directory for marker files rather than calling
+    get_lifecycle_state() (which involves tmux/ps SSH commands).
+
+    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
+    - active file absent -> END_OF_TURN (idle, turn complete)
+    - otherwise -> None (agent is actively running)
+    """
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    if _host_file_exists(host, agent_dir / "permissions_waiting"):
+        return WaitingReason.PERMISSIONS
+    if not _host_file_exists(host, agent_dir / "active"):
+        return WaitingReason.END_OF_TURN
+    return None
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose Claude-specific agent fields for listing."""
+    return ("claude", {"waiting_reason": _waiting_reason})
 
 
 @hookimpl

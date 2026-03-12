@@ -9,11 +9,11 @@ are discovered (e.g., when running from the monorepo root).
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
-from imbue.imbue_common.resource_guards import register_resource_guard
-from imbue.mng.register_guards import register_docker_cli_guard
-from imbue.mng.register_guards import register_docker_sdk_guard
-from imbue.mng.register_guards import register_modal_guard
+from imbue.mng.register_guards_docker import register_docker_cli_guard
+from imbue.mng.register_guards_docker import register_docker_sdk_guard
+from imbue.mng.register_guards_modal import register_modal_guard
 from imbue.mng.utils.logging import suppress_warnings
+from imbue.resource_guards.resource_guards import register_resource_guard
 
 # Suppress some pointless warnings from other library's loggers
 suppress_warnings()
@@ -22,6 +22,9 @@ suppress_warnings()
 register_marker("tmux: marks tests that create real tmux sessions or mng agents")
 register_marker("rsync: marks tests that invoke rsync for file transfer")
 register_marker("unison: marks tests that start a real unison file-sync process")
+register_marker("modal: marks tests that connect to the Modal cloud service")
+register_marker("docker: marks tests that invoke the docker CLI via subprocess")
+register_marker("docker_sdk: marks tests that use the Docker Python SDK in-process")
 register_resource_guard("tmux")
 register_resource_guard("rsync")
 register_resource_guard("unison")

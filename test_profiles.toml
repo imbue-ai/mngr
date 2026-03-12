@@ -1,0 +1,56 @@
+# Test profiles for selectively running tests based on branch name.
+#
+# When the current git branch matches a profile's branch_prefixes, only tests
+# from the specified testpaths are collected, and coverage is limited to the
+# specified cov_packages. Coverage threshold is set to 0 when a profile is
+# active (thresholds only make sense when all tests run).
+#
+# Override with the MNG_TEST_PROFILE environment variable:
+#   MNG_TEST_PROFILE=mng   - force a specific profile
+#   MNG_TEST_PROFILE=all   - disable profile filtering (run all tests)
+#
+# Profiles are matched in order; the first match wins.
+# If no profile matches (e.g. on main), all tests run as usual.
+#
+# NOTE: Branch prefixes should be distinctive enough to avoid accidentally
+# matching branches that aren't intended to use scoped testing. Use explicit
+# opt-in prefixes rather than common category prefixes like "mng/" or "minds/".
+
+[profiles.mng]
+branch_prefixes = ["scope/mng/"]
+cov_packages = []
+testpaths = [
+    "test_meta_ratchets.py",
+    "libs/mng",
+    "libs/mng_pair",
+    "libs/mng_opencode",
+    "libs/mng_kanpan",
+    "libs/mng_mind_chat",
+    "libs/mng_claude_mind",
+    "libs/mng_elena_code",
+    "libs/mng_test_coder",
+    "libs/mng_schedule",
+    "libs/mng_recursive",
+    "libs/mng_ttyd",
+    "libs/mng_tutor",
+]
+
+[profiles.minds]
+branch_prefixes = ["scope/minds/"]
+cov_packages = []
+testpaths = [
+    "test_meta_ratchets.py",
+    "apps/minds",
+    "libs/mng_mind_chat",
+    "libs/mng_claude_mind",
+]
+
+[profiles.common]
+branch_prefixes = ["scope/common/"]
+cov_packages = []
+testpaths = [
+    "test_meta_ratchets.py",
+    "libs/imbue_common",
+    "libs/concurrency_group",
+    "libs/resource_guards",
+]
