@@ -353,7 +353,7 @@ def _get_agent_id(
     agent_name: AgentName,
     concurrency_group: ConcurrencyGroup,
 ) -> AgentId:
-    """Look up the mng agent ID by name using `mng list --json`."""
+    """Look up the mng agent ID by name using `mng list --format json`."""
     with log_span("Looking up agent ID for '{}'", agent_name):
         result = concurrency_group.run_process_to_completion(
             command=[
@@ -361,7 +361,8 @@ def _get_agent_id(
                 "list",
                 "--include",
                 'name == "{}"'.format(agent_name),
-                "--json",
+                "--format",
+                "json",
             ],
             is_checked_after=False,
         )

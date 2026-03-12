@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Transcript watcher for mind agents.
 #
 # Converts raw Claude Code transcript events from

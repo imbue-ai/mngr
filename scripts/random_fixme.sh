@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 ( grep --exclude-dir=htmlcov --exclude-dir=.venv --exclude-dir=.git --exclude-dir=node_modules --exclude='random_fixme.sh' -P '# FIXME0:' -r $1 || \

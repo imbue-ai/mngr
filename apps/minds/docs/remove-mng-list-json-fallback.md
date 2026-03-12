@@ -1,8 +1,8 @@
-# Design: Remove mng list --json fallback by using HOST_SSH_INFO discovery events
+# Design: Remove mng list --format json fallback by using HOST_SSH_INFO discovery events
 
 ## Context
 
-The minds forwarding server's `MngStreamManager` previously used `mng list --stream` for agent discovery but fell back to `mng list --json` to get SSH info (needed for tunneling to remote agents). The goal was to add SSH info to the discovery event system so the forwarding server can get everything from the stream alone.
+The minds forwarding server's `MngStreamManager` previously used `mng list --stream` for agent discovery but fell back to `mng list --format json` to get SSH info (needed for tunneling to remote agents). The goal was to add SSH info to the discovery event system so the forwarding server can get everything from the stream alone.
 
 ## Approach
 
@@ -18,7 +18,7 @@ SSH info is emitted as a separate `HOST_SSH_INFO` discovery event type rather th
 
 4. **`_write_unfiltered_full_snapshot`** (`libs/mng/imbue/mng/cli/list.py`): After writing the full snapshot event, emits `HOST_SSH_INFO` events for each host with SSH info.
 
-5. **`MngStreamManager`** (`apps/minds/.../backend_resolver.py`): Handles both `FullDiscoverySnapshotEvent` (for agent-to-host mapping) and `HostSSHInfoEvent` (for SSH connection details) independently. Tracks `_agent_host_map` and `_ssh_by_host_id`, combining them when updating the resolver. No longer calls `mng list --json`.
+5. **`MngStreamManager`** (`apps/minds/.../backend_resolver.py`): Handles both `FullDiscoverySnapshotEvent` (for agent-to-host mapping) and `HostSSHInfoEvent` (for SSH connection details) independently. Tracks `_agent_host_map` and `_ssh_by_host_id`, combining them when updating the resolver. No longer calls `mng list --format json`.
 
 ## Files modified
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Export raw Claude Code conversation JSONL for all sessions.
 #
 # Outputs the raw .jsonl content for every session ID in chronological order.

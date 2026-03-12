@@ -29,7 +29,7 @@ def test_adds_ttyd_command_to_create() -> None:
 
 
 def test_preserves_existing_extra_windows() -> None:
-    """Verify that the plugin preserves any existing additional commands."""
+    """Verify that the plugin preserves any existing extra windows."""
     params: dict[str, Any] = {"extra_window": ('monitor="htop"',)}
 
     override_command_options(

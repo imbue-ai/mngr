@@ -99,7 +99,7 @@ class StaticBackendResolver(BackendResolverInterface):
 
 
 class ParsedAgentsResult(FrozenModel):
-    """Result of parsing agent and SSH info from discovery events or mng list --json output."""
+    """Result of parsing agent and SSH info from discovery events or mng list --format json output."""
 
     agent_ids: tuple[AgentId, ...] = Field(default=(), description="All discovered agent IDs")
     ssh_info_by_agent_id: Mapping[str, RemoteSSHInfo] = Field(
@@ -109,7 +109,7 @@ class ParsedAgentsResult(FrozenModel):
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
-    """Parse agent IDs and SSH info from mng list --json output.
+    """Parse agent IDs and SSH info from mng list --format json output.
 
     Returns both agent IDs and a mapping of agent ID -> RemoteSSHInfo for agents
     that have SSH connection info (i.e., are running on remote hosts).
@@ -157,7 +157,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
 
 
 def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
-    """Parse agent IDs from mng list --json output, discarding SSH info."""
+    """Parse agent IDs from mng list --format json output, discarding SSH info."""
     return parse_agents_from_json(json_output).agent_ids
 
 

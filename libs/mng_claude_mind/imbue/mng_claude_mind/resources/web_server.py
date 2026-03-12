@@ -188,12 +188,12 @@ def _read_conversations() -> list[dict[str, str]]:
 
 
 def _poll_agent_list_forever() -> None:
-    """Background thread: periodically run mng list --json and cache results."""
+    """Background thread: periodically run mng list --format json and cache results."""
     global _cached_agents
     while not _is_shutting_down:
         try:
             result = subprocess.run(
-                [*get_mng_command(), "list", "--json", "--quiet"],
+                [*get_mng_command(), "list", "--format", "json", "--quiet"],
                 capture_output=True,
                 text=True,
                 timeout=60,

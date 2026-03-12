@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Handler for the chat ttyd (invoked by ttyd --url-arg).
 #
 # When accessed with ?arg=NEW, starts a new conversation.

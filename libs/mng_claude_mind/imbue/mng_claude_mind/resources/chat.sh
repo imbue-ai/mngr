@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Chat wrapper for mind conversations.
 #
 # Manages conversation threads backed by the `llm` CLI tool. Conversation

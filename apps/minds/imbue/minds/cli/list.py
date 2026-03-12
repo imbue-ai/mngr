@@ -29,7 +29,7 @@ _HEADER_LABELS: dict[str, str] = {
 
 
 def _fetch_mind_agents_json() -> list[dict[str, Any]]:
-    """Call `mng list --label mind=true --json --quiet` and return the agents list.
+    """Call `mng list --label mind=true --format json --quiet` and return the agents list.
 
     Filters to only agents with the mind=true label (set during
     mind deploy). Returns an empty list on failure.
@@ -38,7 +38,7 @@ def _fetch_mind_agents_json() -> list[dict[str, Any]]:
     try:
         with cg:
             result = cg.run_process_to_completion(
-                command=[MNG_BINARY, "list", "--label", "mind=true", "--json", "--quiet"],
+                command=[MNG_BINARY, "list", "--label", "mind=true", "--format", "json", "--quiet"],
                 is_checked_after=False,
             )
     except ConcurrencyExceptionGroup as e:

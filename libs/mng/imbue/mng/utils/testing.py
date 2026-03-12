@@ -205,7 +205,7 @@ def get_subprocess_test_env(
 
     Sets MNG_ROOT_NAME to a value that doesn't have a corresponding config directory,
     preventing subprocess tests from picking up .mng/settings.toml which might have
-    settings like add_command that would interfere with tests.
+    settings like extra_window that would interfere with tests.
 
     The root_name parameter defaults to "mng-test" but can be set to a descriptive
     name for your test category (e.g., "mng-acceptance-test", "mng-release-test").

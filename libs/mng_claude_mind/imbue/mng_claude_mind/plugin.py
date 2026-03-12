@@ -335,7 +335,7 @@ def inject_supporting_services(params: dict[str, Any]) -> None:
 
 def get_agent_type_from_params(params: dict[str, Any]) -> str | None:
     """Extract the agent type from create command parameters."""
-    return params.get("agent_type") or params.get("positional_agent_type")
+    return params.get("type") or params.get("positional_agent_type")
 
 
 @hookimpl
