@@ -50,7 +50,7 @@ _DEFAULT_PROVISIONING = ProvisioningSettings()
 def test_load_mind_resource_loads_resource() -> None:
     """Check that the load_mind_resource works at all"""
     content = load_mind_resource("chat.sh")
-    assert "#!/bin/bash" in content
+    assert "#!/usr/bin/env bash" in content
 
 
 # -- Transcript watcher conversion logic tests --
