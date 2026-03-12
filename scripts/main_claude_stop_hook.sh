@@ -193,29 +193,92 @@ if [[ "$IS_INFORMATIONAL_ONLY" == "true" ]]; then
     exit 0
 fi
 
-# Gate on autofix verification before creating PR
-_log_to_file "INFO" "Checking autofix verification..."
-"$SCRIPT_DIR/run_autofix.sh" && AUTOFIX_EXIT=0 || AUTOFIX_EXIT=$?
-if [[ $AUTOFIX_EXIT -ne 0 ]]; then
-    _log_to_file "INFO" "Autofix gate blocked (exit $AUTOFIX_EXIT)"
-    exit $AUTOFIX_EXIT
-fi
-
 # Export variables needed by child scripts
 export TMUX_SESSION SCRIPT_DIR CURRENT_BRANCH BASE_BRANCH
 export RED GREEN YELLOW NC
 
-_log_to_file "INFO" "Launching PR/CI script..."
+_log_to_file "INFO" "Launching child scripts in parallel..."
 
-"$SCRIPT_DIR/stop_hook_pr_and_ci.sh" && PR_CI_EXIT=0 || PR_CI_EXIT=$?
-_log_to_file "INFO" "PR/CI script exited with code $PR_CI_EXIT"
+# Launch both scripts in parallel
+"$SCRIPT_DIR/stop_hook_pr_and_ci.sh" &
+PR_CI_PID=$!
+_log_to_file "INFO" "Launched stop_hook_pr_and_ci.sh (pid=$PR_CI_PID)"
 
+"$SCRIPT_DIR/check_autofix_ran.sh" &
+AUTOFIX_PID=$!
+_log_to_file "INFO" "Launched check_autofix_ran.sh (pid=$AUTOFIX_PID)"
+
+# Kill a process and all its descendants (depth-first).
+_kill_tree() {
+    local pid="$1"
+    local child_pids
+    child_pids=$(pgrep -P "$pid" 2>/dev/null || true)
+    for cpid in $child_pids; do
+        _kill_tree "$cpid"
+    done
+    kill -9 "$pid" 2>/dev/null || true
+}
+
+# Poll until either process exits with code 2 (actionable failure) or both finish.
+# Exit code 2 means the agent needs to fix something, so we return immediately
+# to let it start working rather than waiting for the other hook.
+PR_CI_EXIT=""
+AUTOFIX_EXIT=""
+
+_log_to_file "INFO" "Entering poll loop (waiting for children to finish)..."
+
+while true; do
+    # Check PR/CI process
+    if [[ -z "$PR_CI_EXIT" ]] && ! kill -0 "$PR_CI_PID" 2>/dev/null; then
+        wait "$PR_CI_PID" && PR_CI_EXIT=0 || PR_CI_EXIT=$?
+        _log_to_file "INFO" "PR/CI process (pid=$PR_CI_PID) exited with code $PR_CI_EXIT"
+        if [[ $PR_CI_EXIT -eq 2 ]]; then
+            log_error "PR/CI hook failed (exit code 2)"
+            _log_to_file "INFO" "Killing autofix tree (pid=$AUTOFIX_PID) before exiting"
+            disown "$AUTOFIX_PID" 2>/dev/null || true
+            _kill_tree "$AUTOFIX_PID"
+            _log_to_file "INFO" "main_stop_hook exiting with code 2 (PR/CI failure)"
+            exit 2
+        elif [[ $PR_CI_EXIT -ne 0 ]]; then
+            log_error "PR/CI hook failed (exit code $PR_CI_EXIT)"
+        fi
+    fi
+
+    # Check autofix process
+    if [[ -z "$AUTOFIX_EXIT" ]] && ! kill -0 "$AUTOFIX_PID" 2>/dev/null; then
+        wait "$AUTOFIX_PID" && AUTOFIX_EXIT=0 || AUTOFIX_EXIT=$?
+        _log_to_file "INFO" "Autofix process (pid=$AUTOFIX_PID) exited with code $AUTOFIX_EXIT"
+        if [[ $AUTOFIX_EXIT -eq 2 ]]; then
+            log_error "Autofix hook failed (exit code 2)"
+            _log_to_file "INFO" "Killing PR/CI tree (pid=$PR_CI_PID) before exiting"
+            disown "$PR_CI_PID" 2>/dev/null || true
+            _kill_tree "$PR_CI_PID"
+            _log_to_file "INFO" "main_stop_hook exiting with code 2 (autofix failure)"
+            exit 2
+        elif [[ $AUTOFIX_EXIT -ne 0 ]]; then
+            log_error "Autofix hook failed (exit code $AUTOFIX_EXIT)"
+        fi
+    fi
+
+    # Both finished
+    if [[ -n "$PR_CI_EXIT" && -n "$AUTOFIX_EXIT" ]]; then
+        _log_to_file "INFO" "Both children finished: PR_CI_EXIT=$PR_CI_EXIT, AUTOFIX_EXIT=$AUTOFIX_EXIT"
+        break
+    fi
+
+    sleep 1
+done
+
+# If either had a non-2 failure, propagate it
 if [[ $PR_CI_EXIT -ne 0 ]]; then
-    # Detailed guidance is already printed by stop_hook_pr_and_ci.sh itself;
-    # only log the exit code here to avoid duplicating those messages.
     _log_to_file "ERROR" "main_stop_hook exiting with PR/CI exit code $PR_CI_EXIT"
     notify_user || echo "No notify_user function defined, skipping."
     exit $PR_CI_EXIT
+fi
+if [[ $AUTOFIX_EXIT -ne 0 ]]; then
+    _log_to_file "ERROR" "main_stop_hook exiting with autofix exit code $AUTOFIX_EXIT"
+    notify_user || echo "No notify_user function defined, skipping."
+    exit $AUTOFIX_EXIT
 fi
 
 # Success -- clear stuck tracking and exit
