@@ -185,7 +185,7 @@ PREVENT_DATACLASSES_IMPORT = RegexRatchetRule(
 PREVENT_NAMEDTUPLE = RegexRatchetRule(
     rule_name="namedtuple usage",
     rule_description="namedtuple is banned per style guide. Use pydantic models instead",
-    pattern_string=r"\bnamedtuple\s*\(",
+    pattern_string=r"\bnamedtuple\s*\(|\bNamedTuple\b",
 )
 
 PREVENT_YAML_USAGE = RegexRatchetRule(

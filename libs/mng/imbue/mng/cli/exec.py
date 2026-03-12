@@ -271,7 +271,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="exec",
-    one_line_description="Execute a shell command on one or more agents' hosts [experimental]",
+    one_line_description="Execute a shell command on one or more agents' hosts",
     synopsis="mng [exec|x] [AGENTS...] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"

@@ -5,10 +5,13 @@ from datetime import timedelta
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
+import pluggy
 import pytest
 from loguru import logger
 
+from imbue.mng import hookimpl
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.discovery_events import get_discovery_events_path
@@ -660,6 +663,182 @@ def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
     assert isinstance(providers, list)
     # At least the local provider should be present
     assert len(providers) > 0
+
+
+# =============================================================================
+# agent_field_generators integration tests
+# =============================================================================
+
+
+class _FieldGeneratorPlugin:
+    """Test plugin that registers field generators for agent listing."""
+
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
+        self._plugin_name = plugin_name
+        self._generators = generators
+
+    @hookimpl
+    def agent_field_generators(self) -> tuple[str, dict[str, Any]] | None:
+        return (self._plugin_name, self._generators)
+
+
+class _NoneFieldGeneratorPlugin:
+    """Test plugin that returns None from agent_field_generators."""
+
+    @hookimpl
+    def agent_field_generators(self) -> None:
+        return None
+
+
+def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
+    """Find an agent by name in a ListResult, or raise."""
+    for agent in result.agents:
+        if str(agent.name) == name:
+            return agent
+    found = [str(a.name) for a in result.agents]
+    raise AssertionError(f"Agent {name!r} not found in results: {found}")
+
+
+@pytest.mark.tmux
+def test_field_generators_populate_plugin_data(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should populate plugin data from registered field generators."""
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "status": lambda a, h: "active",
+                "score": lambda a, h: 42,
+            },
+        )
+    )
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-test"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847310"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-test")
+    assert details.plugin["test_plugin"] == {"status": "active", "score": 42}
+
+
+@pytest.mark.tmux
+def test_field_generators_omit_none_values(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should omit fields where the generator returns None."""
+    plugin_manager.register(
+        _FieldGeneratorPlugin(
+            "test_plugin",
+            {
+                "present": lambda a, h: "yes",
+                "absent": lambda a, h: None,
+            },
+        )
+    )
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-none"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847311"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-none")
+    assert details.plugin["test_plugin"] == {"present": "yes"}
+
+
+@pytest.mark.tmux
+def test_field_generators_multiple_plugins(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should collect fields from multiple plugin generators."""
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_a", {"version": lambda a, h: "1.0"}))
+    plugin_manager.register(_FieldGeneratorPlugin("plugin_b", {"count": lambda a, h: 5}))
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-multi"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847312"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-multi")
+    assert details.plugin["plugin_a"] == {"version": "1.0"}
+    assert details.plugin["plugin_b"] == {"count": 5}
+
+
+@pytest.mark.tmux
+def test_field_generators_none_plugin_is_skipped(
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+    local_host: Host,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list_agents should skip plugins that return None from agent_field_generators."""
+    plugin_manager.register(_NoneFieldGeneratorPlugin())
+    plugin_manager.register(_FieldGeneratorPlugin("real_plugin", {"value": lambda a, h: "present"}))
+
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName("field-gen-skip-none"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 847313"),
+        ),
+    )
+    local_host.start_agents([agent.id])
+
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    local_host.destroy_agent(agent)
+
+    details = _find_agent_by_name(result, "field-gen-skip-none")
+    assert details.plugin["real_plugin"] == {"value": "present"}
+    assert "none_plugin" not in details.plugin
+
+
+def test_no_field_generators_produces_empty_plugin(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """list_agents with no field generator plugins should leave plugin={} on all agents."""
+    result = list_agents(mng_ctx=temp_mng_ctx, is_streaming=False)
+    for agent in result.agents:
+        assert agent.plugin == {}
+
+
+# =============================================================================
+# discover_all_hosts_and_agents Tests
+# =============================================================================
 
 
 @pytest.mark.tmux
