@@ -2,6 +2,7 @@
 name = "mng-pair"
 version = "0.1.2"
 description = "Pair command plugin for mng - continuous file sync between agent and local directory"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.6",
