@@ -280,8 +280,9 @@ CLAUDE_INSTALL_PATH: Final[str] = "$HOME/.local/bin"
 def _install_claude(host: OnlineHostInterface, version: str | None = None) -> None:
     """Install claude on the host using the official installer.
 
-    When version is specified, passes it to the install script to install that
-    specific version (e.g., 'bash -s 2.1.50').
+    Downloads the install script to a temp file, runs it, then verifies
+    the binary exists. When version is specified, passes it to the script
+    (e.g., 'bash /tmp/install_claude.sh -s 2.1.50').
     """
     version_arg = f" -s {shlex.quote(version)}" if version else ""
     steps = [
