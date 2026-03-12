@@ -2,6 +2,7 @@
 name = "mng-llm"
 version = "0.1.0"
 description = "LLM agent plugin for mng - runs the llm CLI tool as an agent with conversation management"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
