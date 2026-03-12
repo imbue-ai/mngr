@@ -14,16 +14,15 @@ Environment variables:
 import os
 import subprocess
 import tomllib
-from dataclasses import dataclass
+import warnings
 from pathlib import Path
 from typing import Final
 
+from imbue.imbue_common.frozen_model import FrozenModel
 
-@dataclass(frozen=True)
-class TestProfile:
+
+class ScopedProfile(FrozenModel):
     """A named test profile that restricts which tests and coverage packages are active."""
-
-    __test__ = False  # prevent pytest from collecting this as a test class
 
     name: str
     branch_prefixes: tuple[str, ...]
@@ -34,7 +33,7 @@ class TestProfile:
 _CONFIG_FILENAME: Final[str] = "test_profiles.toml"
 
 
-def load_profiles(config_path: Path) -> tuple[TestProfile, ...]:
+def load_profiles(config_path: Path) -> tuple[ScopedProfile, ...]:
     """Load test profiles from a TOML config file.
 
     Returns an empty tuple if the file does not exist.
@@ -46,10 +45,10 @@ def load_profiles(config_path: Path) -> tuple[TestProfile, ...]:
     with config_path.open("rb") as f:
         config = tomllib.load(f)
 
-    profiles: list[TestProfile] = []
+    profiles: list[ScopedProfile] = []
     for name, data in config.get("profiles", {}).items():
         profiles.append(
-            TestProfile(
+            ScopedProfile(
                 name=name,
                 branch_prefixes=tuple(data["branch_prefixes"]),
                 testpaths=tuple(data["testpaths"]),
@@ -93,7 +92,7 @@ def detect_branch() -> str | None:
     return None
 
 
-def resolve_active_profile(repo_root: Path) -> TestProfile | None:
+def resolve_active_profile(repo_root: Path) -> ScopedProfile | None:
     """Determine which test profile (if any) should be active.
 
     Resolution order:
@@ -118,6 +117,12 @@ def resolve_active_profile(repo_root: Path) -> TestProfile | None:
         for profile in profiles:
             if profile.name == override:
                 return profile
+        available = ", ".join(p.name for p in profiles)
+        warnings.warn(
+            f"MNG_TEST_PROFILE='{override}' does not match any profile in {_CONFIG_FILENAME}. "
+            f"Available profiles: {available}. Running all tests.",
+            stacklevel=1,
+        )
         return None
 
     # Branch-based profile detection

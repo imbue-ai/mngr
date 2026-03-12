@@ -47,7 +47,7 @@ from uuid import uuid4
 import pytest
 from coverage.exceptions import CoverageException
 
-from imbue.imbue_common.test_profiles import TestProfile
+from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
@@ -500,7 +500,7 @@ def _pytest_collection_modifyitems(
     do not fall under any of the profile's testpaths are deselected. This runs with
     tryfirst=True so that downstream hooks (e.g. pytest-split) only see the filtered set.
     """
-    profile: TestProfile | None = getattr(config, "_test_profile", None)
+    profile: ScopedProfile | None = getattr(config, "_test_profile", None)
     if profile is None:
         return
 
@@ -509,7 +509,7 @@ def _pytest_collection_modifyitems(
     deselected: list[pytest.Item] = []
 
     for item in items:
-        item_path = Path(str(item.fspath))
+        item_path = item.path
         if any(item_path.is_relative_to(root) for root in allowed_roots):
             selected.append(item)
         else:
