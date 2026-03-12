@@ -98,7 +98,7 @@ def gather_extra_context() -> str:
     try:
         start = time.monotonic()
         result = subprocess.run(
-            [*_get_mng_command(), "list", "--json"],
+            [*_get_mng_command(), "list", "--format", "json"],
             capture_output=True,
             text=True,
             timeout=_MNG_LIST_HARD_TIMEOUT,

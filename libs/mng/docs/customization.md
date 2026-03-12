@@ -119,7 +119,7 @@ target_path = "/workspace"
 # Template with extra commands for development
 [create_templates.dev]
 provider = "modal"
-add_command = ["server=npm run dev", "logs=tail -f /var/log/app.log"]
+extra_window = ["server=npm run dev", "logs=tail -f /var/log/app.log"]
 ```
 
 **Usage:**

@@ -37,7 +37,7 @@ class _DummyCommandClass:
 @pytest.fixture()
 def mind_create_params() -> dict[str, Any]:
     """Run override_command_options for a claude-mind create and return the modified params."""
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude-mind"}
     override_command_options(
         command_name="create",
         command_class=_DummyCommandClass,
@@ -79,13 +79,13 @@ def test_adds_supporting_services_for_positional_agent_type() -> None:
 
 
 def test_does_not_modify_non_create_commands() -> None:
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude-mind"}
     override_command_options(command_name="connect", command_class=_DummyCommandClass, params=params)
     assert params["extra_window"] == ()
 
 
 def test_does_not_modify_for_other_agent_types() -> None:
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert params["extra_window"] == ()
 
@@ -106,7 +106,7 @@ def test_injects_supporting_services_for_registered_subclass() -> None:
 
     try:
         register_agent_class("test-subclass-82741", _TestSubclassAgent)
-        params: dict[str, Any] = {"extra_window": (), "agent_type": "test-subclass-82741"}
+        params: dict[str, Any] = {"extra_window": (), "type": "test-subclass-82741"}
         override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
         assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
     finally:
@@ -114,7 +114,7 @@ def test_injects_supporting_services_for_registered_subclass() -> None:
 
 
 def test_preserves_existing_extra_windows() -> None:
-    params: dict[str, Any] = {"extra_window": ('monitor="htop"',), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": ('monitor="htop"',), "type": "claude-mind"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT + 1
     assert params["extra_window"][0] == 'monitor="htop"'
@@ -161,7 +161,7 @@ def test_get_mind_config_returns_config_when_correct_type() -> None:
 
 
 def test_get_agent_type_from_params_returns_agent_type() -> None:
-    assert get_agent_type_from_params({"agent_type": "claude"}) == "claude"
+    assert get_agent_type_from_params({"type": "claude"}) == "claude"
 
 
 def test_get_agent_type_from_params_returns_positional() -> None:
@@ -169,7 +169,7 @@ def test_get_agent_type_from_params_returns_positional() -> None:
 
 
 def test_get_agent_type_from_params_prefers_agent_type() -> None:
-    params = {"agent_type": "claude", "positional_agent_type": "codex"}
+    params = {"type": "claude", "positional_agent_type": "codex"}
     assert get_agent_type_from_params(params) == "claude"
 
 

@@ -240,8 +240,8 @@ def register_cli_commands():
 def override_command_options(command_name, command_class, params):
     if command_name != "create":
         return
-    existing = params.get("add_command", ())
-    params["add_command"] = (*existing, 'my_window="my-command"')
+    existing = params.get("extra_window", ())
+    params["extra_window"] = (*existing, 'my_window="my-command"')
 ```
 
 **Chained hooks** receive the previous hook's output and return a modified copy (or `None` to pass through). Used by `on_before_create`:
