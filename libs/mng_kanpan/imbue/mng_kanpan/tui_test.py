@@ -27,6 +27,7 @@ from imbue.mng_kanpan.data_types import CustomCommand
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
+from imbue.mng_kanpan.data_types import RefreshHook
 from imbue.mng_kanpan.testing import make_pr_info
 from imbue.mng_kanpan.tui import DEFAULT_REFRESH_INTERVAL_SECONDS
 from imbue.mng_kanpan.tui import _KanpanInputHandler
@@ -44,6 +45,7 @@ from imbue.mng_kanpan.tui import _get_focused_entry
 from imbue.mng_kanpan.tui import _get_name_cell_markup
 from imbue.mng_kanpan.tui import _get_state_attr
 from imbue.mng_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mng_kanpan.tui import _load_refresh_hooks
 from imbue.mng_kanpan.tui import _load_user_commands
 from imbue.mng_kanpan.tui import _mute_focused_agent
 from imbue.mng_kanpan.tui import _on_auto_refresh_alarm
@@ -301,7 +303,9 @@ def test_build_board_widgets_none_snapshot_shows_loading() -> None:
 def test_build_board_widgets_empty_snapshot_shows_no_agents() -> None:
     walker, _ = _build_board_widgets(_make_snapshot())
     assert len(walker) == 1
-    assert "No agents found" in str(walker[0].get_text()[0])
+    widget = walker[0]
+    assert isinstance(widget, Text)
+    assert "No agents found" in str(widget.get_text()[0])
 
 
 def test_build_board_widgets_with_entries_creates_sections() -> None:
@@ -1340,3 +1344,57 @@ def test_start_local_refresh_noop_when_already_refreshing() -> None:
 
     assert state.refresh_future is existing_future
     assert len(loop.alarms) == 0
+
+
+# =============================================================================
+# _load_refresh_hooks
+# =============================================================================
+
+
+def test_load_refresh_hooks_with_refresh_hook_instances() -> None:
+    hooks_raw: dict[str, Any] = {
+        "a": RefreshHook(name="Hook A", command="cmd-a"),
+        "b": RefreshHook(name="Hook B", command="cmd-b"),
+    }
+    result = _load_refresh_hooks(hooks_raw)
+    assert len(result) == 2
+    assert result[0].name == "Hook A"
+    assert result[1].name == "Hook B"
+
+
+def test_load_refresh_hooks_with_raw_dicts() -> None:
+    hooks_raw: dict[str, Any] = {
+        "a": {"name": "Hook A", "command": "cmd-a"},
+    }
+    result = _load_refresh_hooks(hooks_raw)
+    assert len(result) == 1
+    assert result[0].name == "Hook A"
+    assert result[0].command == "cmd-a"
+    assert result[0].enabled is True
+
+
+def test_load_refresh_hooks_filters_disabled() -> None:
+    hooks_raw: dict[str, Any] = {
+        "a": RefreshHook(name="Enabled", command="cmd-a", enabled=True),
+        "b": RefreshHook(name="Disabled", command="cmd-b", enabled=False),
+        "c": {"name": "Also disabled", "command": "cmd-c", "enabled": False},
+    }
+    result = _load_refresh_hooks(hooks_raw)
+    assert len(result) == 1
+    assert result[0].name == "Enabled"
+
+
+def test_load_refresh_hooks_skips_invalid_values() -> None:
+    hooks_raw: dict[str, Any] = {
+        "a": RefreshHook(name="Valid", command="cmd-a"),
+        "b": 42,
+        "c": "not a hook",
+    }
+    result = _load_refresh_hooks(hooks_raw)
+    assert len(result) == 1
+    assert result[0].name == "Valid"
+
+
+def test_load_refresh_hooks_empty_input() -> None:
+    result = _load_refresh_hooks({})
+    assert result == []

@@ -12,7 +12,6 @@ from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.config import config
 from imbue.mng.cli.connect import ConnectCliOptions
 from imbue.mng.cli.connect import connect
-from imbue.mng.cli.create import CreateCliOptions
 from imbue.mng.cli.destroy import destroy
 from imbue.mng.cli.events import events
 from imbue.mng.cli.exec import exec_command
@@ -27,6 +26,7 @@ from imbue.mng.cli.rename import rename
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
+from imbue.mng.config.data_types import CreateCliOptions
 from imbue.mng.main import cli
 from imbue.mng.utils.testing import cleanup_tmux_session
 from imbue.mng.utils.testing import create_test_agent_via_cli

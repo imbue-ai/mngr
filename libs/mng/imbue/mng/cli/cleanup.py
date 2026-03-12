@@ -22,7 +22,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mng.api.cleanup import execute_cleanup
 from imbue.mng.api.cleanup import find_agents_for_cleanup
 from imbue.mng.api.data_types import CleanupResult
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.connect import build_status_text
@@ -36,6 +35,7 @@ from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.cli.urwid_utils import create_urwid_screen_preserving_terminal
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import CleanupAction

@@ -29,6 +29,7 @@ from imbue.mng_claude_changeling.provisioning import configure_llm_user_path
 from imbue.mng_claude_changeling.provisioning import create_changeling_symlinks
 from imbue.mng_claude_changeling.provisioning import create_daily_conversation
 from imbue.mng_claude_changeling.provisioning import create_event_log_directories
+from imbue.mng_claude_changeling.provisioning import create_slack_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import create_system_notifications_conversation
 from imbue.mng_claude_changeling.provisioning import install_llm_toolchain
 from imbue.mng_claude_changeling.provisioning import load_changeling_resource
@@ -648,7 +649,7 @@ def test_configure_llm_user_path_creates_dir() -> None:
     assert any("llm_data" in c and "mkdir" in c for c in host.executed_commands)
 
 
-# -- create_system_notifications_conversation tests --
+# -- internal conversation tests (system_notifications, slack_notifications) --
 
 
 _FAKE_INJECT_RESULT = StubCommandResult(
@@ -656,10 +657,21 @@ _FAKE_INJECT_RESULT = StubCommandResult(
 )
 
 
-def test_create_system_notifications_conversation_runs_inject_and_records_event() -> None:
+@pytest.mark.parametrize(
+    ("create_fn", "expected_tag"),
+    [
+        (create_system_notifications_conversation, "system_notifications"),
+        (create_slack_notifications_conversation, "slack_notifications"),
+    ],
+    ids=["system_notifications", "slack_notifications"],
+)
+def test_create_internal_conversation_runs_inject_and_records_event(
+    create_fn: Any,
+    expected_tag: str,
+) -> None:
     host = StubHost(command_results={"llm inject": _FAKE_INJECT_RESULT})
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+    create_fn(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     # Should run llm inject with LLM_USER_PATH prefix (no --cid, llm assigns the ID)
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
@@ -672,17 +684,23 @@ def test_create_system_notifications_conversation_runs_inject_and_records_event(
     db_commands = [c for c in host.executed_commands if "sqlite3" in c and "changeling_conversations" in c]
     assert len(db_commands) == 1
     assert "fake-conv-id-123" in db_commands[0]
-    # Should be tagged as internal
     assert "internal" in db_commands[0]
-    assert "system_notifications" in db_commands[0]
+    assert expected_tag in db_commands[0]
 
 
-def test_create_system_notifications_conversation_skips_event_on_inject_failure() -> None:
+@pytest.mark.parametrize(
+    "create_fn",
+    [create_system_notifications_conversation, create_slack_notifications_conversation],
+    ids=["system_notifications", "slack_notifications"],
+)
+def test_create_internal_conversation_skips_event_on_inject_failure(
+    create_fn: Any,
+) -> None:
     host = StubHost(
         command_results={"llm inject": StubCommandResult(success=False, stderr="llm not found")},
     )
     agent_state_dir = Path("/tmp/mng-test/agents/agent-123")
-    create_system_notifications_conversation(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
+    create_fn(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
 
     # Should have attempted llm inject
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
@@ -704,7 +722,7 @@ def test_create_daily_conversation_runs_inject_and_records_tagged_event() -> Non
     # Should run llm inject with the greeting and LLM_USER_PATH
     inject_commands = [c for c in host.executed_commands if "llm inject" in c]
     assert len(inject_commands) == 1
-    assert "Elena" in inject_commands[0]
+    assert "Selene" in inject_commands[0]
     assert "claude-opus-4.6" in inject_commands[0]
     assert "LLM_USER_PATH=" in inject_commands[0]
 

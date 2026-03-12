@@ -47,8 +47,8 @@ Called to collect files for baking into deployed images (ex: if you're scheduled
 
 | Hook                         | Description                                                                                                    |
 |------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. [experimental] |
-| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. [experimental] |
+| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. |
+| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. |
 
 ### Program lifecycle hooks
 
@@ -75,7 +75,7 @@ Called during `mng create` and `mng destroy` operations:
 | Hook                          | Description                                                                                       |
 |-------------------------------|---------------------------------------------------------------------------------------------------|
 | `on_before_host_create`       | Before creating a new host (receives host name and provider name). [experimental]                 |
-| `on_host_created`             | After a new host has been created via provider.create_host(). [experimental]                      |
+| `on_host_created`             | After a new host has been created via provider.create_host().                                     |
 | `on_before_host_destroy`      | Before destroying a host via provider.destroy_host(). [experimental]                              |
 | `on_host_destroyed`           | After a host has been destroyed. The Python object is still available for metadata. [experimental] |
 
@@ -108,7 +108,7 @@ Called during `mng create` and `mng destroy` operations:
 | `on_agent_state_dir_created`  | After the agent's state directory and data.json have been created, before provisioning. [experimental]               |
 | `on_before_provisioning`      | Before provisioning an agent (plugin hook, distinct from agent method). [experimental]                               |
 | `on_after_provisioning`       | After provisioning an agent (plugin hook, distinct from agent method). [experimental]                                |
-| `on_agent_created`            | After an agent is fully created and started. [experimental]                                                          |
+| `on_agent_created`            | After an agent is fully created and started.                                                                         |
 | `on_before_agent_destroy`     | Before an online agent is destroyed. Does not fire for offline host destruction. [experimental]                      |
 | `on_agent_destroyed`          | After an online agent has been destroyed. The Python object is still available for metadata. [experimental]          |
 
@@ -137,16 +137,16 @@ If you want to run scripts *whenever* an agent is started (not just the first ti
 
 - `$MNG_AGENT_STATE_DIR/hooks/start/`: runs after an agent is started. Does not block in any way.
 
-### Field Hooks [future]
+### Field Hooks
 
 Called when collecting data for hosts and agents. These allow plugins to compute additional attributes:
 
 | Hook                       | Description                                                                                                                                     |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`.   |
-| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies). Fields are namespaced under `plugin.<plugin_name>`.       |
+| `host_field_generators` | Return functions for computing additional fields for hosts (and their dependencies). Fields are namespaced under `host.plugin.<plugin_name>`. [future]  |
+| `agent_field_generators`   | Return functions for computing additional fields for agents (and their dependencies [future]). Fields are namespaced under `plugin.<plugin_name>`. [experimental]                 |
 
-**Dependency ordering:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B.
+**Dependency ordering [future]:** The return types for the above hooks are complex: they should return structured types that express both the way of calculating the fields, and the dependencies for those calculations. This allows plugin A's fields to depend on values computed by plugin B. Currently, field generators receive the agent and host objects directly without dependency support.
 
 ## Writing a Plugin
 
@@ -262,14 +262,16 @@ To add a new top-level command to `mng`, implement `register_cli_commands` and f
 ```python
 # cli.py
 import click
-from imbue.mng.cli.common_opts import CommonCliOptions
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 
+
 class MyCommandOptions(CommonCliOptions):
     my_arg: str | None
+
 
 @click.command()
 @click.argument("my_arg", default=None, required=False)
@@ -281,6 +283,7 @@ def my_command(ctx, **kwargs):
     )
     # opts.my_arg is now typed and available
     ...
+
 
 CommandHelpMetadata(
     key="my-command",

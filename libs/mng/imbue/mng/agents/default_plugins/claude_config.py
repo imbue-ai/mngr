@@ -443,7 +443,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'touch "$MNG_AGENT_STATE_DIR/active" && rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": """touch "$MNG_AGENT_STATE_DIR/active" && rm -f "$MNG_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNG_HOST_DIR/events/mng/activity && echo '{"source": "mng/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNG_HOST_DIR/events/mng/activity/events.jsonl""",
                         },
                         {
                             "type": "command",
@@ -488,7 +488,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": 'rm -f "$MNG_AGENT_STATE_DIR/active" "$MNG_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": """rm -f "$MNG_AGENT_STATE_DIR/active" "$MNG_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNG_HOST_DIR/events/mng/activity && echo '{"source": "mng/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNG_HOST_DIR/events/mng/activity/events.jsonl""",
                         },
                     ],
                 }

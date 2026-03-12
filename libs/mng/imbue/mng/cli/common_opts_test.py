@@ -26,6 +26,7 @@ from imbue.mng.cli.common_opts import apply_create_template
 from imbue.mng.cli.common_opts import parse_output_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.config.data_types import CommandDefaults
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import CreateTemplate
 from imbue.mng.config.data_types import CreateTemplateName
 from imbue.mng.config.data_types import MngConfig
@@ -150,37 +151,37 @@ def test_run_pre_command_scripts_includes_stderr_in_error(mng_test_prefix: str, 
 def test_apply_config_defaults_empty_string_clears_tuple_param(mng_test_prefix: str) -> None:
     """apply_config_defaults should convert empty string to empty tuple for tuple params."""
     ctx = _make_click_context(
-        params={"add_command": ("default_cmd",), "other_param": "value"},
+        params={"extra_window": ("default_cmd",), "other_param": "value"},
     )
 
     # Create config with empty string for the tuple param (simulating env var override)
     config = MngConfig(
         prefix=mng_test_prefix,
-        commands={"create": CommandDefaults(defaults={"add_command": ""})},
+        commands={"create": CommandDefaults(defaults={"extra_window": ""})},
     )
 
     result = apply_config_defaults(ctx, config, "create")
 
     # Empty string should be converted to empty tuple for tuple params
-    assert result["add_command"] == ()
+    assert result["extra_window"] == ()
 
 
 def test_apply_config_defaults_non_empty_string_replaces_tuple_param(mng_test_prefix: str) -> None:
     """apply_config_defaults should replace tuple param with config list value."""
     ctx = _make_click_context(
-        params={"add_command": (), "other_param": "value"},
+        params={"extra_window": (), "other_param": "value"},
     )
 
     # Create config with a list value for the tuple param
     config = MngConfig(
         prefix=mng_test_prefix,
-        commands={"create": CommandDefaults(defaults={"add_command": ["cmd1", "cmd2"]})},
+        commands={"create": CommandDefaults(defaults={"extra_window": ["cmd1", "cmd2"]})},
     )
 
     result = apply_config_defaults(ctx, config, "create")
 
     # List value should be used directly
-    assert result["add_command"] == ["cmd1", "cmd2"]
+    assert result["extra_window"] == ["cmd1", "cmd2"]
 
 
 def test_apply_config_defaults_empty_string_does_not_affect_non_tuple_params(mng_test_prefix: str) -> None:

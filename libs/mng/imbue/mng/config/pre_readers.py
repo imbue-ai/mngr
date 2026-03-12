@@ -3,8 +3,6 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.consts import PROFILES_DIRNAME
 from imbue.mng.config.consts import ROOT_CONFIG_FILENAME
@@ -23,10 +21,7 @@ def try_load_toml(path: Path | None) -> dict[str, Any] | None:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except FileNotFoundError:
-        return None
-    except tomllib.TOMLDecodeError as e:
-        logger.trace("Skipped malformed config file: {} ({})", path, e)
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
         return None
 
 

@@ -47,7 +47,7 @@ When updating or improving existing specs, follow an abbreviated version of the 
  
 ## Best Practices
 
-Always keep in mind the following best practices for specifications and design docs:
+Always remember the following best practices for specifications and design docs:
 
 - Write sentences that are clear, concise, and easy to understand.
 - Be explicit about requirements, constraints, interfaces, and assumptions.

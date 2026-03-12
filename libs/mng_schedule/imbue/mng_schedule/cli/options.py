@@ -1,4 +1,4 @@
-from imbue.mng.cli.common_opts import CommonCliOptions
+from imbue.mng.config.data_types import CommonCliOptions
 
 
 class ScheduleUpdateCliOptions(CommonCliOptions):

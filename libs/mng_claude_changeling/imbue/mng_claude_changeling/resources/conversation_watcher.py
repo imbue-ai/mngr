@@ -79,6 +79,8 @@ def _sync_messages(
     doubles the window and retries until it finds events already in the file
     or runs out of DB rows.
 
+    THIS FUNCTION MUST NOT LOG ANYTHING except warnings about database access issues, otherwise the logs get huge and spammy.
+
     Returns the number of new events synced.
     """
     if not db_path.is_file():
@@ -235,7 +237,9 @@ def main() -> None:
         if synced_count > 0:
             logger.info("Synced {} new message event(s) -> events/messages/events.jsonl", synced_count)
         else:
-            logger.debug("No new messages to sync")
+            # IT IS IMPERATIVE THAT WE NOT LOG inside of this part of the code--otherwise the logs get huge and spammy,
+            # logger.debug("No new messages to sync")
+            pass
 
     run_watcher_loop(
         "Conversation watcher",

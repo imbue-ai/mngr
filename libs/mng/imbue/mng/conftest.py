@@ -6,7 +6,6 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Generator
-from typing import cast
 from uuid import uuid4
 
 import docker
@@ -484,7 +483,7 @@ def local_host(local_provider: LocalProviderInstance) -> Host:
     (the concrete OnlineHostInterface implementation).
     """
     host = local_provider.create_host(HostName("localhost"))
-    return cast(Host, host)
+    return host
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]

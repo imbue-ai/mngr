@@ -16,6 +16,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from uuid import uuid4
 
 from loguru import logger
 from paramiko import SSHException
@@ -1324,6 +1325,23 @@ class Host(BaseHost, OnlineHostInterface):
             finally:
                 files_from_path.unlink(missing_ok=True)
 
+    def copy_directory(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        extra_args: str | None = None,
+        exclude_git: bool = False,
+    ) -> None:
+        """Copy a directory from source_host:source_path to self:target_path using rsync."""
+        self._rsync_files(
+            source_host,
+            source_path,
+            target_path,
+            extra_args=extra_args,
+            exclude_git=exclude_git,
+        )
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -1442,17 +1460,17 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mng/worktrees/<agent-id>/ by default.
+        Worktrees are placed at ~/.mng/worktrees/<name>-<uuid>/ by default.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
 
-        agent_id = AgentId.generate()
-
         if options.target_path is not None:
             work_dir_path = options.target_path
         else:
-            work_dir_path = self.host_dir / "worktrees" / str(agent_id)
+            agent_name = options.name or AgentName("agent")
+            work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
+            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
         # Worktree mode always requires a new branch (enforced at CLI)
         if not options.git or not options.git.new_branch_name:

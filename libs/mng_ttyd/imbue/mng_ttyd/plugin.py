@@ -50,5 +50,5 @@ def override_command_options(
     if command_name != "create":
         return
 
-    existing = params.get("add_command", ())
-    params["add_command"] = (*existing, f'{TTYD_WINDOW_NAME}="{TTYD_COMMAND}"')
+    existing = params.get("extra_window", ())
+    params["extra_window"] = (*existing, f'{TTYD_WINDOW_NAME}="{TTYD_COMMAND}"')

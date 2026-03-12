@@ -37,7 +37,7 @@ class _DummyCommandClass:
 @pytest.fixture()
 def changeling_create_params() -> dict[str, Any]:
     """Run override_command_options for a claude-changeling create and return the modified params."""
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-changeling"}
+    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-changeling"}
     override_command_options(
         command_name="create",
         command_class=_DummyCommandClass,
@@ -51,49 +51,49 @@ def changeling_create_params() -> dict[str, Any]:
 
 def test_adds_all_supporting_services(changeling_create_params: dict[str, Any]) -> None:
     """Verify that the plugin adds all supporting services."""
-    assert len(changeling_create_params["add_command"]) == _SUPPORTING_SERVICE_COUNT
+    assert len(changeling_create_params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
 
 
 def test_adds_conv_watcher_service(changeling_create_params: dict[str, Any]) -> None:
-    entries = [c for c in changeling_create_params["add_command"] if CONV_WATCHER_WINDOW_NAME in c]
+    entries = [c for c in changeling_create_params["extra_window"] if CONV_WATCHER_WINDOW_NAME in c]
     assert len(entries) == 1
     assert CONV_WATCHER_COMMAND in entries[0]
 
 
 def test_adds_event_watcher_service(changeling_create_params: dict[str, Any]) -> None:
     prefix = f'{EVENT_WATCHER_WINDOW_NAME}="'
-    entries = [c for c in changeling_create_params["add_command"] if c.startswith(prefix)]
+    entries = [c for c in changeling_create_params["extra_window"] if c.startswith(prefix)]
     assert len(entries) == 1
     assert EVENT_WATCHER_COMMAND in entries[0]
 
 
 def test_adds_web_server_service(changeling_create_params: dict[str, Any]) -> None:
-    entries = [c for c in changeling_create_params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
+    entries = [c for c in changeling_create_params["extra_window"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(entries) == 1
 
 
 def test_adds_supporting_services_for_positional_agent_type() -> None:
-    params: dict[str, Any] = {"add_command": (), "positional_agent_type": "claude-changeling"}
+    params: dict[str, Any] = {"extra_window": (), "positional_agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
+    assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
 
 
 def test_does_not_modify_non_create_commands() -> None:
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude-changeling"}
+    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-changeling"}
     override_command_options(command_name="connect", command_class=_DummyCommandClass, params=params)
-    assert params["add_command"] == ()
+    assert params["extra_window"] == ()
 
 
 def test_does_not_modify_for_other_agent_types() -> None:
-    params: dict[str, Any] = {"add_command": (), "agent_type": "claude"}
+    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert params["add_command"] == ()
+    assert params["extra_window"] == ()
 
 
 def test_does_not_modify_when_no_agent_type() -> None:
-    params: dict[str, Any] = {"add_command": ()}
+    params: dict[str, Any] = {"extra_window": ()}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert params["add_command"] == ()
+    assert params["extra_window"] == ()
 
 
 def test_injects_supporting_services_for_registered_subclass() -> None:
@@ -106,18 +106,18 @@ def test_injects_supporting_services_for_registered_subclass() -> None:
 
     try:
         register_agent_class("test-subclass-82741", _TestSubclassAgent)
-        params: dict[str, Any] = {"add_command": (), "agent_type": "test-subclass-82741"}
+        params: dict[str, Any] = {"extra_window": (), "agent_type": "test-subclass-82741"}
         override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-        assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
+        assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
     finally:
         reset_agent_class_registry()
 
 
-def test_preserves_existing_add_commands() -> None:
-    params: dict[str, Any] = {"add_command": ('monitor="htop"',), "agent_type": "claude-changeling"}
+def test_preserves_existing_extra_windows() -> None:
+    params: dict[str, Any] = {"extra_window": ('monitor="htop"',), "agent_type": "claude-changeling"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
-    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT + 1
-    assert params["add_command"][0] == 'monitor="htop"'
+    assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT + 1
+    assert params["extra_window"][0] == 'monitor="htop"'
 
 
 # -- inject_supporting_services tests --
@@ -127,14 +127,14 @@ def test_inject_supporting_services_adds_all() -> None:
     """Verify that inject_supporting_services adds all expected services."""
     params: dict[str, Any] = {}
     inject_supporting_services(params)
-    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT
+    assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
 
 
 def test_inject_supporting_services_preserves_existing() -> None:
-    params: dict[str, Any] = {"add_command": ('foo="bar"',)}
+    params: dict[str, Any] = {"extra_window": ('foo="bar"',)}
     inject_supporting_services(params)
-    assert len(params["add_command"]) == _SUPPORTING_SERVICE_COUNT + 1
-    assert params["add_command"][0] == 'foo="bar"'
+    assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT + 1
+    assert params["extra_window"][0] == 'foo="bar"'
 
 
 # -- ClaudeChangelingAgent._get_changeling_config tests --
@@ -184,7 +184,7 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
     """Verify the web server command is parseable as a NamedCommand."""
     params: dict[str, Any] = {}
     inject_supporting_services(params)
-    web_entries = [c for c in params["add_command"] if WEB_SERVER_WINDOW_NAME in c]
+    web_entries = [c for c in params["extra_window"] if WEB_SERVER_WINDOW_NAME in c]
     assert len(web_entries) == 1
     named_cmd = NamedCommand.from_string(web_entries[0])
     assert named_cmd.window_name == WEB_SERVER_WINDOW_NAME
@@ -194,7 +194,7 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
 
 
 def test_adds_chat_ttyd_service(changeling_create_params: dict[str, Any]) -> None:
-    entries = [c for c in changeling_create_params["add_command"] if CHAT_TTYD_WINDOW_NAME in c]
+    entries = [c for c in changeling_create_params["extra_window"] if CHAT_TTYD_WINDOW_NAME in c]
     assert len(entries) == 1
 
 

@@ -606,28 +606,30 @@ def _inject_conversation(
     return None
 
 
-def create_system_notifications_conversation(
+def _create_internal_conversation(
     host: OnlineHostInterface,
     agent_state_dir: Path,
     settings: ProvisioningSettings,
+    *,
+    internal_tag: str,
+    display_name: str,
+    prompt: str,
 ) -> None:
-    """Create the system_notifications conversation for delivery failure alerts.
+    """Create an internal conversation with the matched-responses model.
 
     Uses ``llm inject`` to create a new conversation, then inserts a record
-    into the ``changeling_conversations`` table in the llm database with
-    ``tags={"internal": "system_notifications"}``. The event watcher finds
-    this conversation by querying for the ``internal`` tag.
+    into the ``changeling_conversations`` table with
+    ``tags={"internal": "<internal_tag>", "name": "<display_name>"}``.
+    Services can find conversations by querying for the ``internal`` tag value.
     """
-    model = "matched-responses"
-
     llm_data_dir = agent_state_dir / "llm_data"
     conversation_id = _inject_conversation(
         host,
         settings,
-        model=model,
-        prompt="This channel is for system notifications, warnings, and errors.",
+        model="matched-responses",
+        prompt=prompt,
         response="Confirmed.",
-        label="system_notifications",
+        label=internal_tag,
         llm_user_path=llm_data_dir,
         env_vars=dict(LLM_MATCHED_RESPONSE=""),
     )
@@ -639,9 +641,41 @@ def create_system_notifications_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        tags={"internal": "system_notifications", "name": "System Notifications"},
+        tags={"internal": internal_tag, "name": display_name},
     )
-    logger.info("Created system_notifications conversation: conversation_id={}", conversation_id)
+    logger.info("Created {} conversation: conversation_id={}", internal_tag, conversation_id)
+
+
+def create_system_notifications_conversation(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    settings: ProvisioningSettings,
+) -> None:
+    """Create the system_notifications conversation for delivery failure alerts."""
+    _create_internal_conversation(
+        host,
+        agent_state_dir,
+        settings,
+        internal_tag="system_notifications",
+        display_name="System Notifications",
+        prompt="This channel is for system notifications, warnings, and errors.",
+    )
+
+
+def create_slack_notifications_conversation(
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    settings: ProvisioningSettings,
+) -> None:
+    """Create the slack_notifications conversation for Slack integration alerts."""
+    _create_internal_conversation(
+        host,
+        agent_state_dir,
+        settings,
+        internal_tag="slack_notifications",
+        display_name="Slack Notifications",
+        prompt="This channel is for Slack notifications and messages.",
+    )
 
 
 def create_daily_conversation(
@@ -664,7 +698,7 @@ def create_daily_conversation(
         settings,
         model=chat_model,
         prompt="",
-        response="Hi, I'm Elena! How can I help?",
+        response="Hi, I'm Selene! How can I help?",
         label="daily",
         llm_user_path=llm_data_dir,
     )

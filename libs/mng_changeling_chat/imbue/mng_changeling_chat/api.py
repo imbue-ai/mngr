@@ -11,7 +11,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mng.api.connect import build_ssh_base_args
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import MngError
-from imbue.mng.errors import NestedTmuxError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
@@ -135,8 +134,6 @@ try:
         except json.JSONDecodeError as e:
             sys.stderr.write(f'WARNING: malformed tags JSON for {conversation_id}: {e}\\n')
             tags = {}
-        if 'internal' in tags:
-            continue
         conversations[conversation_id] = {
             'conversation_id': conversation_id,
             'model': model or '?',
@@ -227,12 +224,6 @@ def run_chat_on_agent(  # pragma: no cover
         _load_env_file_into_dict(host_env_path, env)
         _load_env_file_into_dict(agent_env_path, env)
         env.update(_build_chat_env_vars(agent, host))
-
-        # Handle nested tmux (chat.sh may call llm live-chat which is interactive)
-        if os.environ.get("TMUX"):
-            if not mng_ctx.config.is_nested_tmux_allowed:
-                raise NestedTmuxError(f"{mng_ctx.config.prefix}{agent.name}")
-            env.pop("TMUX", None)
 
         argv = [chat_script] + chat_args
         os.execvpe(chat_script, argv, env)

@@ -9,7 +9,6 @@ from imbue.mng.api.pull import pull_git
 from imbue.mng.cli.agent_utils import find_agent_for_command
 from imbue.mng.cli.agent_utils import parse_agent_spec
 from imbue.mng.cli.agent_utils import stop_agent_after_sync
-from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -17,6 +16,7 @@ from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import output_sync_files_result
 from imbue.mng.cli.output_helpers import output_sync_git_result
+from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.errors import UserInputError
 from imbue.mng.primitives import UncommittedChangesMode
 
