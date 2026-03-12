@@ -205,13 +205,11 @@ def find_agents_by_addresses(
 
         # Check if this match's name or ID has associated address constraints
         addresses_for_match = name_to_addresses.get(agent_name_str) or name_to_addresses.get(agent_id_str)
-        if addresses_for_match is None:
-            # No host constraint for this agent, include unconditionally
+        # Include if there are no constraints, or if at least one constraint is satisfied
+        if addresses_for_match is None or any(
+            _address_matches_agent_match(addr, match) for addr in addresses_for_match
+        ):
             filtered.append(match)
-        else:
-            # Include only if the match satisfies at least one address constraint
-            if any(_address_matches_agent_match(addr, match) for addr in addresses_for_match):
-                filtered.append(match)
 
     # Check that all constrained identifiers have at least one match
     for raw, (ident, addr) in zip(raw_identifiers, parsed, strict=False):
