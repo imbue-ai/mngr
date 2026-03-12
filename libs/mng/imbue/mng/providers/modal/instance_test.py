@@ -566,6 +566,126 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
 
 
 # =============================================================================
+# Lazy initialization tests (_ensure_modal_app, close, get_captured_output)
+# =============================================================================
+
+
+def _make_modal_provider_with_factory(
+    mng_ctx: MngContext,
+    app_name: str,
+    factory: MagicMock,
+) -> ModalProviderInstance:
+    """Create a ModalProviderInstance with modal_app=None and a custom factory.
+
+    This exercises the lazy initialization path where _ensure_modal_app() must
+    call the factory to create the app context.
+    """
+    config = ModalProviderConfig(
+        app_name=app_name,
+        host_dir=Path("/mng"),
+        default_sandbox_timeout=300,
+        default_cpu=0.5,
+        default_memory=0.5,
+        is_persistent=False,
+        is_snapshotted_after_create=False,
+    )
+    return ModalProviderInstance.model_construct(
+        name=ProviderInstanceName("modal-test"),
+        host_dir=Path("/mng"),
+        mng_ctx=mng_ctx,
+        config=config,
+        modal_app_name=app_name,
+        modal_environment_name=f"test-env-{app_name}",
+        modal_app_factory=factory,
+        modal_app=None,
+    )
+
+
+def test_ensure_modal_app_calls_factory_when_app_is_none(temp_mng_ctx: MngContext) -> None:
+    """_ensure_modal_app should call the factory when modal_app is None."""
+    mock_modal_app = MagicMock(spec=ModalProviderApp)
+    factory = MagicMock(return_value=mock_modal_app)
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    result = provider._ensure_modal_app()
+
+    assert result is mock_modal_app
+    assert provider.modal_app is mock_modal_app
+    factory.assert_called_once_with(create_environment_if_missing=True)
+
+
+def test_ensure_modal_app_skips_factory_when_app_is_set(modal_provider: ModalProviderInstance) -> None:
+    """_ensure_modal_app should return existing app without calling factory."""
+    assert modal_provider.modal_app is not None
+    result = modal_provider._ensure_modal_app()
+    assert result is modal_provider.modal_app
+
+
+def test_ensure_modal_app_passes_create_env_false_to_factory(temp_mng_ctx: MngContext) -> None:
+    """_ensure_modal_app(create_environment_if_missing=False) passes the flag to the factory."""
+    mock_modal_app = MagicMock(spec=ModalProviderApp)
+    factory = MagicMock(return_value=mock_modal_app)
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    result = provider._ensure_modal_app(create_environment_if_missing=False)
+
+    assert result is mock_modal_app
+    factory.assert_called_once_with(create_environment_if_missing=False)
+
+
+def test_ensure_modal_app_propagates_not_found_error(temp_mng_ctx: MngContext) -> None:
+    """_ensure_modal_app should propagate NotFoundError from the factory."""
+    factory = MagicMock(side_effect=modal.exception.NotFoundError("env not found"))
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    with pytest.raises(modal.exception.NotFoundError):
+        provider._ensure_modal_app(create_environment_if_missing=False)
+
+    assert provider.modal_app is None
+
+
+def test_close_is_noop_when_modal_app_is_none(temp_mng_ctx: MngContext) -> None:
+    """close() should be a no-op when the app was never initialized."""
+    factory = MagicMock()
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    # Should not raise
+    provider.close()
+    factory.assert_not_called()
+
+
+def test_get_captured_output_returns_empty_when_modal_app_is_none(temp_mng_ctx: MngContext) -> None:
+    """get_captured_output should return empty string when app was never initialized."""
+    factory = MagicMock()
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    assert provider.get_captured_output() == ""
+    factory.assert_not_called()
+
+
+def test_discover_hosts_returns_empty_when_environment_missing(temp_mng_ctx: MngContext) -> None:
+    """discover_hosts should return empty list when Modal environment doesn't exist."""
+    factory = MagicMock(side_effect=modal.exception.NotFoundError("env not found"))
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    result = provider.discover_hosts(cg=temp_mng_ctx.concurrency_group)
+
+    assert result == []
+    factory.assert_called_once_with(create_environment_if_missing=False)
+
+
+def test_discover_hosts_and_agents_returns_empty_when_environment_missing(temp_mng_ctx: MngContext) -> None:
+    """discover_hosts_and_agents should return empty dict when Modal environment doesn't exist."""
+    factory = MagicMock(side_effect=modal.exception.NotFoundError("env not found"))
+    provider = _make_modal_provider_with_factory(temp_mng_ctx, "test-app", factory)
+
+    result = provider.discover_hosts_and_agents(cg=temp_mng_ctx.concurrency_group)
+
+    assert result == {}
+    factory.assert_called_once_with(create_environment_if_missing=False)
+
+
+# =============================================================================
 # Tests for _clear_snapshots_from_host_record
 # =============================================================================
 

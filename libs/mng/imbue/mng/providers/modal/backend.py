@@ -199,10 +199,14 @@ class ModalAppFactory(FrozenModel):
     is_persistent: bool
     concurrency_group: ConcurrencyGroup
 
-    def __call__(self) -> ModalProviderApp:
+    def __call__(self, *, create_environment_if_missing: bool = True) -> ModalProviderApp:
         try:
             app, context_handle = ModalProviderBackend._get_or_create_app(
-                self.app_name, self.environment_name, self.is_persistent, self.concurrency_group
+                self.app_name,
+                self.environment_name,
+                self.is_persistent,
+                self.concurrency_group,
+                create_environment_if_missing=create_environment_if_missing,
             )
             volume = ModalProviderBackend.get_volume_for_app(self.app_name)
 
@@ -240,7 +244,12 @@ class ModalProviderBackend(ProviderBackendInterface):
 
     @classmethod
     def _get_or_create_app(
-        cls, app_name: str, environment_name: str, is_persistent: bool, cg: ConcurrencyGroup
+        cls,
+        app_name: str,
+        environment_name: str,
+        is_persistent: bool,
+        cg: ConcurrencyGroup,
+        create_environment_if_missing: bool = True,
     ) -> tuple[modal.App, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
@@ -259,6 +268,10 @@ class ModalProviderBackend(ProviderBackendInterface):
         sandboxes) to a specific user, enabling isolation between different mng
         installations sharing the same Modal account.
 
+        When create_environment_if_missing is False, raises modal.exception.NotFoundError
+        if the environment does not exist, instead of creating it. This is used by
+        read-only operations like listing to avoid creating environments as a side effect.
+
         Raises modal.exception.AuthError if Modal credentials are not configured.
         """
         if app_name in cls._app_registry:
@@ -270,19 +283,34 @@ class ModalProviderBackend(ProviderBackendInterface):
                 output_capture_context = enable_modal_output_capture(is_logging_to_loguru=True)
                 output_buffer, loguru_writer = output_capture_context.__enter__()
 
-            if is_persistent:
-                with log_span("Looking up persistent Modal app: {}", app_name):
-                    app = _lookup_persistent_app_with_env_retry(app_name, environment_name, cg)
-                run_context = None
-            else:
-                # Create the Modal app
-                with log_span("Creating Modal app object: {}", app_name):
-                    app = modal.App(app_name)
+            app_created = False
+            try:
+                if is_persistent:
+                    with log_span("Looking up persistent Modal app: {}", app_name):
+                        if create_environment_if_missing:
+                            app = _lookup_persistent_app_with_env_retry(app_name, environment_name, cg)
+                        else:
+                            app = modal.App.lookup(app_name, create_if_missing=True, environment_name=environment_name)
+                    run_context = None
+                else:
+                    # Create the Modal app
+                    with log_span("Creating Modal app object: {}", app_name):
+                        app = modal.App(app_name)
 
-                # Enter the app.run() context manager manually so we can return the app
-                # while keeping the context active until close() is called
-                with log_span("Entering Modal app.run() context (env: {})", environment_name):
-                    run_context = _enter_ephemeral_app_context_with_env_retry(app, environment_name, cg)
+                    # Enter the app.run() context manager manually so we can return the app
+                    # while keeping the context active until close() is called
+                    with log_span("Entering Modal app.run() context (env: {})", environment_name):
+                        if create_environment_if_missing:
+                            run_context = _enter_ephemeral_app_context_with_env_retry(app, environment_name, cg)
+                        else:
+                            run_context = app.run(environment_name=environment_name)
+                            run_context.__enter__()
+                app_created = True
+            finally:
+                if not app_created:
+                    # Clean up output capture if app creation failed
+                    with contextlib.suppress(OSError, RuntimeError):
+                        output_capture_context.__exit__(None, None, None)
 
             # Set app metadata on the loguru writer for structured logging
             if loguru_writer is not None:

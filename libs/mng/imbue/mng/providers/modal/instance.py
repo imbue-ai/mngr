@@ -553,7 +553,7 @@ class ModalProviderInstance(BaseProviderInstance):
     config: ModalProviderConfig = Field(frozen=True, description="Modal provider configuration")
     modal_app_name: str = Field(frozen=True, description="The Modal app name for this instance")
     modal_environment_name: str = Field(frozen=True, description="The Modal environment name for user isolation")
-    modal_app_factory: Callable[[], ModalProviderApp] = Field(
+    modal_app_factory: Callable[..., ModalProviderApp] = Field(
         frozen=True,
         description="Factory that lazily creates the Modal app context and volume",
     )
@@ -575,12 +575,16 @@ class ModalProviderInstance(BaseProviderInstance):
     def supports_mutable_tags(self) -> bool:
         return True
 
-    def _ensure_modal_app(self) -> ModalProviderApp:
+    def _ensure_modal_app(self, *, create_environment_if_missing: bool = True) -> ModalProviderApp:
         """Lazily create the Modal app context and volume.
 
         Called on first access when a Modal app is actually needed (e.g., creating
         hosts, listing sandboxes). This avoids creating Modal environments as a side
         effect of read-only operations like listing when no environment exists yet.
+
+        When create_environment_if_missing is False, raises modal.exception.NotFoundError
+        if the Modal environment does not exist, instead of creating it. This is used
+        by discovery operations to avoid creating environments as a side effect.
 
         Uses the modal_app_factory callback provided by the backend to create
         the app context, avoiding circular imports between instance.py and backend.py.
@@ -588,7 +592,7 @@ class ModalProviderInstance(BaseProviderInstance):
         if self.modal_app is not None:
             return self.modal_app
 
-        self.modal_app = self.modal_app_factory()
+        self.modal_app = self.modal_app_factory(create_environment_if_missing=create_environment_if_missing)
         return self.modal_app
 
     @property
@@ -2207,6 +2211,14 @@ log "=== Shutdown script completed ==="
         sandboxes and host records, which is safer for concurrent operations.
         """
 
+        # Initialize the app context without creating the environment if it's missing.
+        # This prevents `mng list` from creating Modal environments as a side effect.
+        try:
+            self._ensure_modal_app(create_environment_if_missing=False)
+        except modal.exception.NotFoundError:
+            logger.trace("Modal environment {} not found, returning empty results", self.environment_name)
+            return []
+
         hosts: list[HostInterface] = []
         processed_host_ids: set[HostId] = set()
 
@@ -2357,6 +2369,14 @@ log "=== Shutdown script completed ==="
         no agents have ever been created on this provider).
         """
         with log_span("Modal discover_hosts_and_agents for provider={}", self.name):
+            # Initialize the app context without creating the environment if it's missing.
+            # This prevents `mng list` from creating Modal environments as a side effect.
+            try:
+                self._ensure_modal_app(create_environment_if_missing=False)
+            except modal.exception.NotFoundError:
+                logger.trace("Modal environment {} not found, returning empty results", self.environment_name)
+                return {}
+
             try:
                 with log_span("Parallel fetch: sandbox IDs + host/agent records"):
                     with ConcurrencyGroupExecutor(
@@ -2369,10 +2389,6 @@ log "=== Shutdown script completed ==="
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except modal.exception.AuthError as e:
                 raise ModalAuthError() from e
-            except modal.exception.NotFoundError:
-                # Environment doesn't exist yet -- no agents have been created on this provider
-                logger.trace("Modal environment {} not found, returning empty results", self.environment_name)
-                return {}
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),
