@@ -464,6 +464,25 @@ class OnlineHostInterface(HostInterface, ABC):
         ...
 
     @abstractmethod
+    def copy_directory(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        extra_args: str | None = None,
+        exclude_git: bool = False,
+    ) -> None:
+        """Copy a directory from source_host:source_path to self:target_path using rsync.
+
+        Handles all combinations of local/remote source and target:
+        - Local to local
+        - Local to remote (push via SSH)
+        - Remote to local (pull via SSH)
+        - Remote to remote (via local temp directory as intermediary)
+        """
+        ...
+
+    @abstractmethod
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:
         """Persist agent data to external storage.
 

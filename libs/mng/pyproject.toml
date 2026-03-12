@@ -18,13 +18,15 @@ classifiers = [
 ]
 dependencies = [
     "imbue-common==0.1.6",
+    "resource-guards==0.1.0",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
     "concurrency-group==0.1.6",
     "coolname>=3.0.0",
     "cryptography>=42.0",
-    # pinning docker and modal because register_guards.py monkeypatches their
+    # pinning docker and modal because the guard registration modules
+    # (register_guards_modal.py, register_guards_docker.py) monkeypatch their
     # internal methods for test resource guards; new versions may move or rename them.
     # modal is also pinned because more recent versions break how we gather build logs.
     # See here for an attempt to fix, but it is not confirmed working: https://github.com/imbue-ai/mng/pull/325
@@ -63,6 +65,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/utils/testing.py", "*
 [tool.uv.sources]
 imbue-common = { workspace = true }
 concurrency-group = { workspace = true }
+resource-guards = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

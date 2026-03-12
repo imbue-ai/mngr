@@ -52,6 +52,9 @@ jobs:
             uv run scripts/verify_publish.py
           fi
 
+      - name: Build resource-guards
+        run: pyproject-build libs/resource_guards -o dist/
+
       - name: Build imbue-common
         run: pyproject-build libs/imbue_common -o dist/
 

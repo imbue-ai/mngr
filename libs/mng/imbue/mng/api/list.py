@@ -130,6 +130,9 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
+        default_factory=dict,
+    )
 
 
 @log_call
@@ -164,12 +167,20 @@ def list_agents(
 
     try:
         results_lock = Lock()
+
+        field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
+        for hook_result in mng_ctx.pm.hook.agent_field_generators():
+            if hook_result is not None:
+                plugin_name, generators = hook_result
+                field_generators[plugin_name] = generators
+
         params = _ListAgentsParams(
             compiled_include_filters=compiled_include_filters,
             compiled_exclude_filters=compiled_exclude_filters,
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            field_generators=field_generators,
         )
 
         if is_streaming:
@@ -447,6 +458,7 @@ def _build_agent_details_from_online_agent(
     host_details: HostDetails,
     host: OnlineHostInterface,
     ssh_activity: datetime | None,
+    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
 ) -> AgentDetails:
     """Build AgentDetails from a live agent on an online host."""
     # Get activity config from host
@@ -465,6 +477,17 @@ def _build_agent_details_from_online_agent(
 
     # idle_seconds: include host-level ssh_activity; 0.0 if no activity yet
     idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
+
+    # Compute plugin-specific fields from field generators
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, generator in generators.items():
+            value = generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
 
     return AgentDetails(
         id=agent.id,
@@ -487,7 +510,7 @@ def _build_agent_details_from_online_agent(
         activity_sources=tuple(s.value for s in activity_config.activity_sources),
         labels=agent.get_labels(),
         host=host_details,
-        plugin={},
+        plugin=plugin_data,
     )
 
 
@@ -581,7 +604,9 @@ def _collect_and_emit_details_for_host(
                         params.on_error(error_info)
                     continue
 
-                agent_details = _build_agent_details_from_online_agent(agent, host_details, host, ssh_activity)
+                agent_details = _build_agent_details_from_online_agent(
+                    agent, host_details, host, ssh_activity, params.field_generators
+                )
 
             # if this host is offline, or if we failed to get the online host (ex: because it went offline)
             if agents is None or agent_details is None:

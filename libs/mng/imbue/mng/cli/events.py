@@ -207,7 +207,7 @@ def _emit_event_content(
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="events",
-    one_line_description="View events from an agent or host [experimental]",
+    one_line_description="View events from an agent or host",
     synopsis="mng events TARGET [EVENT_FILE] [--filter CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host name/ID whose events to view\n"

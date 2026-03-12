@@ -126,7 +126,7 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "output_format",
         default="human",
         show_default=True,
-        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided [experimental], fields use standard python templating like 'name: {agent.name}' See below for available fields.",
+        help="Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields.",
     )(command)
     # Start the "Common" option group - applied last since decorators run in reverse order
     command = optgroup.group(COMMON_OPTIONS_GROUP_NAME)(command)
