@@ -767,9 +767,8 @@ class CreateCliOptions(CommonCliOptions):
     env: tuple[str, ...]
     env_file: tuple[str, ...]
     pass_env: tuple[str, ...]
-    host: str | None
-    new_host: str | None
-    host_name: str | None
+    provider: str | None
+    new_host: bool
     host_name_style: str
     host_label: tuple[str, ...]
     label: tuple[str, ...]

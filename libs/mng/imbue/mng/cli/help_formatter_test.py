@@ -228,8 +228,7 @@ def test_create_command_help_contains_common_options() -> None:
 
     # Check for some key options
     assert "--connect" in help_output or "--no-connect" in help_output
-    assert "--in" in help_output or "--new-host" in help_output
-    assert "--host" in help_output
+    assert "--new-host" in help_output
     assert "--name" in help_output
     assert "--type" in help_output
 
@@ -246,7 +245,7 @@ def test_create_command_help_contains_examples() -> None:
 
     # Check for example patterns
     assert "mng create" in help_output
-    assert "--in docker" in help_output or "--in modal" in help_output
+    assert "@.docker" in help_output or "@.modal" in help_output
 
 
 def test_run_pager_writes_to_stdout_when_not_interactive(capsys: pytest.CaptureFixture[str]) -> None:

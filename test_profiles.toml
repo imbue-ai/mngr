@@ -17,14 +17,11 @@
 # opt-in prefixes rather than common category prefixes like "mng/" or "minds/".
 
 [profiles.mng]
-branch_prefixes = ["mng-only/", "scope/mng/"]
+branch_prefixes = ["scope/mng/"]
+cov_packages = []
 testpaths = [
     "test_meta_ratchets.py",
     "libs/mng",
-    "libs/imbue_common",
-    "libs/concurrency_group",
-    "libs/resource_guards",
-    "libs/flexmux",
     "libs/mng_pair",
     "libs/mng_opencode",
     "libs/mng_kanpan",
@@ -37,32 +34,23 @@ testpaths = [
     "libs/mng_ttyd",
     "libs/mng_tutor",
 ]
-cov_packages = [
-    "imbue.mng",
-    "imbue.imbue_common",
-    "imbue.concurrency_group",
-    "imbue.resource_guards",
-    "imbue.mng_opencode",
-    "imbue.mng_pair",
-    "imbue.mng_schedule",
-    "imbue.mng_ttyd",
-    "imbue.mng_tutor",
-    "imbue.mng_claude_mind",
-    "imbue.mng_elena_code",
-    "imbue.mng_kanpan",
-    "imbue.mng_recursive",
-    "imbue.mng_mind_chat",
-    "imbue.mng_test_coder",
-]
 
 [profiles.minds]
-branch_prefixes = ["minds-only/", "scope/minds/"]
+branch_prefixes = ["scope/minds/"]
+cov_packages = []
 testpaths = [
     "test_meta_ratchets.py",
     "apps/minds",
-    "libs/imbue_common",
+    "libs/mng_mind_chat",
+    "libs/mng_claude_mind",
 ]
-cov_packages = [
-    "imbue.minds",
-    "imbue.imbue_common",
+
+[profiles.common]
+branch_prefixes = ["scope/common/"]
+cov_packages = []
+testpaths = [
+    "test_meta_ratchets.py",
+    "libs/imbue_common",
+    "libs/concurrency_group",
+    "libs/resource_guards",
 ]

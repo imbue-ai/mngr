@@ -5,7 +5,7 @@ The Modal provider creates agents in [Modal](https://modal.com) sandboxes. Each 
 ## Usage
 
 ```bash
-mng create my-agent --in modal
+mng create my-agent@.modal
 ```
 
 ## Build Arguments
@@ -14,10 +14,10 @@ Build arguments configure the Modal sandbox. Pass them using `-b` (or `--build-a
 
 ```bash
 # Key-value format (recommended)
-mng create my-agent --in modal -b gpu=h100 -b cpu=2 -b memory=8
+mng create my-agent@.modal -b gpu=h100 -b cpu=2 -b memory=8
 
 # Flag format (also supported)
-mng create my-agent --in modal -b --gpu=h100 -b --cpu=2
+mng create my-agent@.modal -b --gpu=h100 -b --cpu=2
 ```
 
 ### Available Build Arguments
@@ -42,19 +42,19 @@ mng create my-agent --in modal -b --gpu=h100 -b --cpu=2
 
 ```bash
 # Create with an H100 GPU
-mng create my-agent --in modal -b gpu=h100
+mng create my-agent@.modal -b gpu=h100
 
 # Create with more resources
-mng create my-agent --in modal -b cpu=4 -b memory=16
+mng create my-agent@.modal -b cpu=4 -b memory=16
 
 # Create with custom image and longer timeout
-mng create my-agent --in modal -b image=python:3.11-slim -b timeout=3600
+mng create my-agent@.modal -b image=python:3.11-slim -b timeout=3600
 
 # Create with network restricted to specific CIDR ranges
-mng create my-agent --in modal -b cidr-allowlist=203.0.113.0/24 -b cidr-allowlist=10.0.0.0/8
+mng create my-agent@.modal -b cidr-allowlist=203.0.113.0/24 -b cidr-allowlist=10.0.0.0/8
 
 # Create with no outbound network access
-mng create my-agent --in modal -b offline
+mng create my-agent@.modal -b offline
 ```
 
 ### Restricting Network Access
@@ -77,7 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 Then use it with:
 
 ```bash
-mng create my-agent --in modal -b file=./Dockerfile -b offline
+mng create my-agent@.modal -b file=./Dockerfile -b offline
 ```
 
 ### Using Secrets During Image Build
@@ -86,10 +86,10 @@ The `secret` build argument allows passing environment variables as secrets to t
 
 ```bash
 # Pass a single secret
-mng create my-agent --in modal -b file=./Dockerfile -b secret=NPM_TOKEN
+mng create my-agent@.modal -b file=./Dockerfile -b secret=NPM_TOKEN
 
 # Pass multiple secrets
-mng create my-agent --in modal -b file=./Dockerfile -b secret=NPM_TOKEN -b secret=GH_TOKEN
+mng create my-agent@.modal -b file=./Dockerfile -b secret=NPM_TOKEN -b secret=GH_TOKEN
 ```
 
 In your Dockerfile, access the secret using `--mount=type=secret`:
@@ -113,10 +113,10 @@ The `volume` build argument mounts a persistent [Modal Volume](https://modal.com
 
 ```bash
 # Mount a single volume
-mng create my-agent --in modal -b volume=my-data:/data
+mng create my-agent@.modal -b volume=my-data:/data
 
 # Mount multiple volumes
-mng create my-agent --in modal -b volume=cache:/cache -b volume=results:/results
+mng create my-agent@.modal -b volume=cache:/cache -b volume=results:/results
 ```
 
 The volume is created automatically if it does not already exist. Data written to the mount path is persisted on the volume and available the next time a sandbox mounts the same volume.
