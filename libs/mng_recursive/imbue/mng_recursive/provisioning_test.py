@@ -162,20 +162,6 @@ def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
     ctx.concurrency_group.run_process_to_completion.assert_not_called()
 
 
-def test_upload_deploy_files_skips_project_relative_files() -> None:
-    """Project-relative deploy files should not be rsynced (no work dir at provisioning time)."""
-    host = _make_mock_host()
-    ctx = _make_mock_mng_ctx()
-    deploy_files: dict[Path, Path | str] = {
-        Path(".mng/settings.local.toml"): "project content",
-    }
-
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
-
-    assert count == 1
-    ctx.concurrency_group.run_process_to_completion.assert_not_called()
-
-
 def test_upload_deploy_files_rsyncs_home_subdir(tmp_path: Path) -> None:
     """Rsync should operate on the home/ subdirectory, not the staging root."""
     host = _make_mock_host()

@@ -70,6 +70,10 @@ def _upload_deploy_files(
     Constructs the desired directory structure in a local temp directory,
     then rsyncs it to the remote host's home directory in a single operation.
 
+    The caller is expected to pass only home-destined files (tilde paths).
+    Project-relative files should be excluded at collection time via
+    include_project_settings=False.
+
     Returns the number of files uploaded.
     """
     with tempfile.TemporaryDirectory(prefix="mng-deploy-") as tmpdir:
@@ -79,15 +83,7 @@ def _upload_deploy_files(
         if count == 0:
             return 0
 
-        project_dir = staging_dir / "project"
-        if any(project_dir.iterdir()):
-            logger.warning(
-                "Skipping project-relative deploy files: no working directory exists at host provisioning time"
-            )
-
-        home_dir = staging_dir / "home"
-        if any(home_dir.iterdir()):
-            _rsync_staging_dir_to_remote(host, home_dir, remote_home, mng_ctx)
+        _rsync_staging_dir_to_remote(host, staging_dir / "home", remote_home, mng_ctx)
 
     return count
 
@@ -357,7 +353,7 @@ def provision_mng_on_host(
                         mng_ctx=mng_ctx,
                         repo_root=repo_root,
                         include_user_settings=True,
-                        include_project_settings=True,
+                        include_project_settings=False,
                     )
                 except Exception as e:
                     raise MngError(f"Failed to collect deploy files: {e}") from e
