@@ -782,7 +782,7 @@ def test_template_applies_values_from_config(
     settings_file = mng_dir / "settings.toml"
     settings_file.write_text("""
 [create_templates.mytemplate]
-no_ensure_clean = true
+ensure_clean = false
 """)
 
     with tmux_session_cleanup(session_name):
@@ -837,7 +837,7 @@ def test_template_cli_args_take_precedence(
     settings_file.write_text("""
 [create_templates.mytemplate]
 message = "template-message"
-no_ensure_clean = true
+ensure_clean = false
 """)
 
     with tmux_session_cleanup(session_name):
@@ -896,7 +896,7 @@ def test_template_unknown_template_raises_error(
     settings_file = mng_dir / "settings.toml"
     settings_file.write_text("""
 [create_templates.existing]
-no_ensure_clean = true
+ensure_clean = false
 """)
 
     result = cli_runner.invoke(

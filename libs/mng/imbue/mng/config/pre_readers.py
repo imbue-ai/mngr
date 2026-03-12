@@ -21,7 +21,7 @@ def try_load_toml(path: Path | None) -> dict[str, Any] | None:
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
         return None
 
 
