@@ -24,13 +24,13 @@ repos:
         name: "Assemble verify skill files from source parts"
         entry: bash -c 'uv run python scripts/generate_verify_skills.py assemble && git diff --quiet .claude/skills/autofix/verify-and-fix.md .claude/skills/verify-conversation/categories.md'
         language: system
-        files: 'scripts/generate_verify_skills\.py$|scripts/verify-and-fix-preamble\.md$|scripts/branch-categories\.md$|scripts/conversation-categories\.md$|\.claude/skills/autofix/verify-and-fix\.md$|\.claude/skills/verify-conversation/categories\.md$'
+        files: 'scripts/generate_verify_skills\.py$|scripts/verify_skill_sources/.*\.md$|\.claude/skills/autofix/verify-and-fix\.md$|\.claude/skills/verify-conversation/categories\.md$'
         pass_filenames: false
     -   id: check-vet-generated-skills
         name: "Check vet-generated skill sources against vet"
         entry: bash -c 'uv run python scripts/generate_verify_skills.py from-vet --check'
         language: system
-        files: 'scripts/branch-categories\.md$|scripts/conversation-categories\.md$'
+        files: 'scripts/verify_skill_sources/(branch|conversation)-categories\.md$'
         pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command

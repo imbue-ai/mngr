@@ -3,15 +3,15 @@
 Two modes:
 
   assemble    Combine local source files into final skill files (no external deps).
-              Sources: scripts/verify-and-fix-preamble.md, scripts/branch-categories.md,
-                       scripts/conversation-categories.md
+              Sources: scripts/verify_skill_sources/{verify-and-fix-preamble,
+                       branch-categories,conversation-categories}.md
               Output:  .claude/skills/autofix/verify-and-fix.md
                        .claude/skills/verify-conversation/categories.md
 
   from-vet    Regenerate vet-sourced intermediate files from a checkout of imbue-ai/vet.
               Requires --vet-repo or VET_REPO env var.
-              Output:  scripts/branch-categories.md
-                       scripts/conversation-categories.md
+              Output:  scripts/verify_skill_sources/{branch-categories,
+                       conversation-categories}.md
 
 Both modes support --check to verify on-disk files are up to date without writing.
 
@@ -34,9 +34,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
 # Source files (checked in, hand-edited or vet-generated)
-PREAMBLE_PATH = SCRIPT_DIR / "verify-and-fix-preamble.md"
-BRANCH_CATEGORIES_PATH = SCRIPT_DIR / "branch-categories.md"
-CONVERSATION_CATEGORIES_PATH = SCRIPT_DIR / "conversation-categories.md"
+SOURCES_DIR = SCRIPT_DIR / "verify_skill_sources"
+PREAMBLE_PATH = SOURCES_DIR / "verify-and-fix-preamble.md"
+BRANCH_CATEGORIES_PATH = SOURCES_DIR / "branch-categories.md"
+CONVERSATION_CATEGORIES_PATH = SOURCES_DIR / "conversation-categories.md"
 
 # Final skill files (assembled from source files above)
 VERIFY_AND_FIX_PATH = REPO_ROOT / ".claude" / "skills" / "autofix" / "verify-and-fix.md"
@@ -237,9 +238,9 @@ def cmd_from_vet(args: argparse.Namespace) -> None:
         print(
             "error: vet repo not found.\n"
             "\n"
-            "You modified a vet-generated file (scripts/branch-categories.md or\n"
-            "scripts/conversation-categories.md). To validate against vet, set VET_REPO\n"
-            "or regenerate with:\n"
+            "You modified a vet-generated file (scripts/verify_skill_sources/branch-categories.md\n"
+            "or conversation-categories.md). To validate against vet, set VET_REPO or regenerate\n"
+            "with:\n"
             "\n"
             "    uv run python scripts/generate_verify_skills.py from-vet --vet-repo /path/to/vet\n",
             file=sys.stderr,
