@@ -47,8 +47,8 @@ Called to collect files for baking into deployed images (ex: if you're scheduled
 
 | Hook                         | Description                                                                                                    |
 |------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. [experimental] |
-| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. [experimental] |
+| `get_files_for_deploy`       | Return files to include in deployment images (e.g., config files, settings). Paths starting with `~` go to the user's home directory; relative paths go to the project working directory. |
+| `modify_env_vars_for_deploy` | Mutate the environment variables dict for deployment. Plugins can add, update, or remove env vars in place. Called after env vars are assembled from `--pass-env` and `--env-file` sources. |
 
 ### Program lifecycle hooks
 
@@ -75,7 +75,7 @@ Called during `mng create` and `mng destroy` operations:
 | Hook                          | Description                                                                                       |
 |-------------------------------|---------------------------------------------------------------------------------------------------|
 | `on_before_host_create`       | Before creating a new host (receives host name and provider name). [experimental]                 |
-| `on_host_created`             | After a new host has been created via provider.create_host(). [experimental]                      |
+| `on_host_created`             | After a new host has been created via provider.create_host().                                     |
 | `on_before_host_destroy`      | Before destroying a host via provider.destroy_host(). [experimental]                              |
 | `on_host_destroyed`           | After a host has been destroyed. The Python object is still available for metadata. [experimental] |
 
@@ -108,7 +108,7 @@ Called during `mng create` and `mng destroy` operations:
 | `on_agent_state_dir_created`  | After the agent's state directory and data.json have been created, before provisioning. [experimental]               |
 | `on_before_provisioning`      | Before provisioning an agent (plugin hook, distinct from agent method). [experimental]                               |
 | `on_after_provisioning`       | After provisioning an agent (plugin hook, distinct from agent method). [experimental]                                |
-| `on_agent_created`            | After an agent is fully created and started. [experimental]                                                          |
+| `on_agent_created`            | After an agent is fully created and started.                                                                         |
 | `on_before_agent_destroy`     | Before an online agent is destroyed. Does not fire for offline host destruction. [experimental]                      |
 | `on_agent_destroyed`          | After an online agent has been destroyed. The Python object is still available for metadata. [experimental]          |
 

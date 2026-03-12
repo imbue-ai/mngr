@@ -81,7 +81,7 @@ Use a [plugin](./plugins.md) when you need to:
 Agent types come from installed plugins and your config:
 
 ```bash
-mng plugin list    # Shows installed plugins [experimental] (listing agent types per plugin [future])
+mng plugin list    # Shows installed plugins (listing agent types per plugin [future])
 ```
 
 Built-in plugins provide `claude` and `codex` by default.

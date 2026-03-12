@@ -68,7 +68,7 @@ def on_before_host_create(name: HostName, provider_name: ProviderInstanceName) -
 
 @hookspec
 def on_host_created(host: HostInterface, mng_ctx: MngContext) -> None:
-    """[experimental] Called after a new host has been created.
+    """Called after a new host has been created.
 
     This hook fires after provider.create_host() completes during `mng create`
     when a new host was created. It does not fire when an existing host is reused.
@@ -148,7 +148,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng_
 
 @hookspec
 def on_agent_created(agent: AgentInterface, host: OnlineHostInterface) -> None:
-    """[experimental] Called after an agent has been fully created and started.
+    """Called after an agent has been fully created and started.
 
     This hook fires at the end of create(), after the agent is started.
     Plugins can use this to perform actions like logging, notifications,
@@ -373,7 +373,7 @@ def get_files_for_deploy(
     include_project_settings: bool,
     repo_root: Path,
 ) -> dict[Path, Path | str]:
-    """[experimental] Return files to include when deploying scheduled commands.
+    """Return files to include when deploying scheduled commands.
 
     Called during schedule deployment to collect files that should be baked
     into the deployment image. Each plugin can contribute files needed for
@@ -406,7 +406,7 @@ def modify_env_vars_for_deploy(
     mng_ctx: MngContext,
     env_vars: dict[str, str],
 ) -> None:
-    """[experimental] Mutate the env vars dict for scheduled command deployment.
+    """Mutate the env vars dict for scheduled command deployment.
 
     Called during schedule deployment after the initial environment variables
     have been assembled from --pass-env and --env-file sources. Each plugin
