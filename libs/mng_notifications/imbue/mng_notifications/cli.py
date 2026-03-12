@@ -1,6 +1,13 @@
+import sys
+from contextlib import contextmanager
+from typing import Iterator
+
 import click
 from loguru import logger
 
+from imbue.mng.api.observe import ObserveLockError
+from imbue.mng.api.observe import acquire_observe_lock
+from imbue.mng.api.observe import release_observe_lock
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -23,6 +30,34 @@ def _get_plugin_config(mng_ctx: MngContext) -> NotificationsPluginConfig:
     if config is not None and isinstance(config, NotificationsPluginConfig):
         return config
     return NotificationsPluginConfig()
+
+
+def _is_observe_running(mng_ctx: MngContext) -> bool:
+    """Check if mng observe is already running by trying to acquire its lock."""
+    try:
+        fd = acquire_observe_lock(mng_ctx.config)
+        release_observe_lock(fd)
+        return False
+    except ObserveLockError:
+        return True
+
+
+@contextmanager
+def _ensure_observe(mng_ctx: MngContext) -> Iterator[None]:
+    """Start mng observe in the background if not already running. Stop it on exit."""
+    if _is_observe_running(mng_ctx):
+        write_human_line("Using existing mng observe process")
+        yield
+        return
+
+    write_human_line("Starting mng observe in background...")
+    process = mng_ctx.concurrency_group.run_process_in_background(
+        [sys.executable, "-m", "imbue.mng.main", "observe", "--quiet"],
+    )
+    try:
+        yield
+    finally:
+        process.terminate()
 
 
 @click.command()
@@ -54,16 +89,16 @@ def watch(ctx: click.Context, **kwargs: object) -> None:
         return
 
     write_human_line("Watching for agents transitioning to WAITING... (Ctrl+C to stop)")
-    write_human_line("Requires `mng observe` to be running in another terminal.")
 
-    try:
-        watch_for_waiting_agents(
-            mng_ctx=mng_ctx,
-            plugin_config=plugin_config,
-            notifier=notifier,
-        )
-    except KeyboardInterrupt:
-        logger.debug("Received keyboard interrupt")
+    with _ensure_observe(mng_ctx):
+        try:
+            watch_for_waiting_agents(
+                mng_ctx=mng_ctx,
+                plugin_config=plugin_config,
+                notifier=notifier,
+            )
+        except KeyboardInterrupt:
+            logger.debug("Received keyboard interrupt")
 
     write_human_line("Stopped watching")
 
@@ -72,10 +107,9 @@ CommandHelpMetadata(
     key="watch",
     one_line_description="Watch agents and notify when they transition to WAITING",
     synopsis="mng watch",
-    description="""Watches the agent state change event stream (written by `mng observe`)
-and sends a desktop notification when any agent transitions from RUNNING to WAITING.
+    description="""Sends a desktop notification when any agent transitions from RUNNING to WAITING.
 
-Requires `mng observe` to be running in another terminal (or as a background process).
+Automatically starts `mng observe` in the background if it is not already running.
 
 On macOS, notifications are sent via terminal-notifier (install with:
 brew install terminal-notifier). On Linux, via notify-send (libnotify).

@@ -6,18 +6,18 @@ A plugin for [mng](https://github.com/imbue-ai/mng) that adds the `mng watch` co
 
 ## Requirements
 
-- `mng observe` running in another terminal (or as a background process)
 - macOS: `brew install terminal-notifier`
 - Linux: `notify-send` (usually part of `libnotify`)
 
 ## Usage
 
 ```bash
-# Start watching (requires mng observe running separately)
 mng watch
 ```
 
 When an agent finishes working and waits for input, you get a notification. On macOS, clicking the notification opens a terminal tab connected to that agent.
+
+If `mng observe` is not already running, `mng watch` starts it automatically in the background and stops it on exit.
 
 ## Configuration
 
