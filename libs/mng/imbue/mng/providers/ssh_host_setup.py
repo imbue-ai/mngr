@@ -71,7 +71,7 @@ def build_check_and_install_packages_command(
     """Build a single shell command that checks for and installs required packages.
 
     This command:
-    1. Checks for each required package (sshd, tmux, curl, rsync, git, jq)
+    1. Checks for each required package (sshd, tmux, curl, rsync, git, jq, xxd)
     2. Echoes a prefixed warning for each missing package
     3. Installs all missing packages in a single apt-get call
     4. Creates the sshd run directory (/run/sshd)
