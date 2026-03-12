@@ -264,10 +264,10 @@ def get_ratchet_failures(
     pattern: RegexPattern,
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[RatchetMatchChunk, ...]:
-    """Find all regex matches in git-tracked files and return them sorted by file path and line number.
+    """Find all regex matches in non-gitignored files on disk and return them sorted by file path and line number.
 
     If extension is provided, only files matching that extension are searched.
-    If extension is None, all tracked files are searched.
+    If extension is None, all non-ignored files are searched.
 
     Blame dates are not computed here; they are resolved on demand via _resolve_blame_dates()
     when a failure message needs to be formatted.
