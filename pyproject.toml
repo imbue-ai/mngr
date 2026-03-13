@@ -191,7 +191,6 @@ type = "layers"
 layers = [
     "imbue.minds.desktop_client",
     "imbue.minds.cli",
-    "imbue.minds.deployment",
     "imbue.minds.forwarding_server",
     "imbue.minds.core",
     "imbue.minds.interfaces",
