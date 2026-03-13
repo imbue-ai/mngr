@@ -2,6 +2,7 @@
 
 import io
 import json
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -931,22 +932,7 @@ def test_get_file_retries_on_socket_closed_and_returns_result(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithRetrySFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _SocketClosingThenSucceedingSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithRetrySFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
-
+    host = _create_host_with_custom_sftp(local_provider, _SocketClosingThenSucceedingSFTP)
     result = host._get_file("/remote/file.txt", io.BytesIO())
 
     assert result is True
@@ -965,21 +951,7 @@ def test_get_file_raises_file_not_found_immediately_without_retry(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithNotFoundSFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _NotFoundSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithNotFoundSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _NotFoundSFTP)
 
     with pytest.raises(FileNotFoundError, match="File not found"):
         host._get_file("/missing.txt", io.BytesIO())
@@ -1001,22 +973,7 @@ def test_put_file_retries_on_socket_closed_and_returns_result(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithRetrySFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _SocketClosingThenSucceedingSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithRetrySFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
-
+    host = _create_host_with_custom_sftp(local_provider, _SocketClosingThenSucceedingSFTP)
     result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
 
     assert result is True
@@ -1035,21 +992,7 @@ def test_put_file_propagates_non_socket_closed_os_error(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithErrorSFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _PermissionDeniedSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithErrorSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _PermissionDeniedSFTP)
 
     with pytest.raises(OSError, match="Permission denied"):
         host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
@@ -1100,21 +1043,7 @@ def test_get_file_via_paramiko_downloads_successfully(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithFakeSFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _FakeSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithFakeSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _FakeSFTP)
     output = io.BytesIO()
     result = host._get_file_via_paramiko("/remote/file.txt", output)
 
@@ -1134,21 +1063,7 @@ def test_get_file_via_paramiko_raises_file_not_found(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithFakeSFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _FakeSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithFakeSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _FakeSFTP)
 
     with pytest.raises(FileNotFoundError, match="File not found"):
         host._get_file_via_paramiko("/remote/missing.txt", io.BytesIO())
@@ -1163,6 +1078,12 @@ def test_put_file_raises_for_remote_host_without_ssh_client(
 
     with pytest.raises(HostConnectionError):
         host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+
+class _FakeTransport:
+    """Fake paramiko transport for testing."""
+
+    pass
 
 
 class _FakeSSHClient:
@@ -1193,6 +1114,30 @@ class _FakeHostWithSSH(_FakePyinfraHost):
     ) -> None:
         super().__init__(get_file_results=get_file_results, put_file_results=put_file_results)
         self.connector = _FakeSSHConnector(client=ssh_client)
+
+
+def _create_host_with_custom_sftp(
+    local_provider: LocalProviderInstance,
+    sftp_factory: Callable[[], object],
+) -> Host:
+    """Create a Host that uses a custom SFTP client factory for testing paramiko paths.
+
+    The sftp_factory callable is invoked each time _create_sftp_client is called,
+    allowing tests to inject fake SFTP behavior without monkeypatching.
+    """
+
+    class _HostWithCustomSFTP(Host):
+        def _create_sftp_client(self, transport: object) -> Any:
+            return sftp_factory()
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    return _HostWithCustomSFTP(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mng_ctx=local_provider.mng_ctx,
+    )
 
 
 def test_get_paramiko_transport_succeeds_for_ssh_host(
@@ -1256,23 +1201,7 @@ def test_put_file_via_paramiko_uploads_via_fresh_sftp_channel(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithFakeSFTP(Host):
-        """Host subclass that returns a fake SFTP client for testing."""
-
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _FakeSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithFakeSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _FakeSFTP)
     result = host._put_file_via_paramiko(io.BytesIO(b"hello world"), "/tmp/test.txt")
 
     assert result is True
@@ -1291,21 +1220,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
         def close(self) -> None:
             pass
 
-    class _FakeTransport:
-        pass
-
-    class _HostWithSSHExceptionSFTP(Host):
-        def _create_sftp_client(self, transport: object) -> Any:
-            return _SSHExceptionSFTP()
-
-    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
-    connector = PyinfraConnector(cast(PyinfraHost, fake))
-    host = _HostWithSSHExceptionSFTP(
-        id=HostId.generate(),
-        connector=connector,
-        provider_instance=local_provider,
-        mng_ctx=local_provider.mng_ctx,
-    )
+    host = _create_host_with_custom_sftp(local_provider, _SSHExceptionSFTP)
 
     with pytest.raises(HostConnectionError, match="Could not read file"):
         host._get_file("/remote/file.txt", io.BytesIO())
