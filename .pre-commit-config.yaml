@@ -24,7 +24,7 @@ repos:
         name: "Check vet-generated skill categories against vet"
         entry: bash -c 'uv run python scripts/generate_verify_skills.py --check'
         language: system
-        files: 'scripts/generate_verify_skills\.py$|\.claude/skills/autofix/branch-categories\.md$|\.claude/skills/verify-conversation/categories\.md$'
+        files: 'scripts/generate_verify_skills\.py$|\.claude/agents/categories/code-issue-categories\.md$|\.claude/agents/categories/conversation-issue-categories\.md$'
         pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command

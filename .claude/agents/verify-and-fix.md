@@ -12,7 +12,7 @@ git diff <base_branch>...HEAD
 
 2. Read any relevant instruction files (CLAUDE.md, style_guide.md) that apply to the changed code.
 3. Understand the existing codebase patterns around the changed files.
-4. Read the issue categories from `.claude/skills/autofix/branch-categories.md`.
+4. Read the issue categories from `.claude/agents/categories/code-issue-categories.md`.
 
 If the diff is empty (no changes on the branch), stop immediately -- there is nothing to verify or fix.
 

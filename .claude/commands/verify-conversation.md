@@ -65,8 +65,8 @@ Get the current HEAD hash: `git rev-parse HEAD`
 
 Spawn an Agent (`subagent_type: "general-purpose"`) and tell it to:
 
-1. Read and follow `.claude/skills/verify-conversation/review.md`
-2. Read the issue categories from `.claude/skills/verify-conversation/categories.md`
+1. Read and follow `.claude/agents/review-conversation.md`
+2. Read the issue categories from `.claude/agents/categories/conversation-issue-categories.md`
 3. Read the instruction files: `CLAUDE.md` at the repo root, plus any other instruction files (`AGENTS.md`, `.claude.md`, etc.) that exist at the repo root
 
 Also provide the agent with:

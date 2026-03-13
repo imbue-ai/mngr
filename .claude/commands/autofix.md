@@ -28,7 +28,7 @@ Write a brief description of what the branch is trying to do. This helps the dif
 
 ### Phase 2: Validate the Diff
 
-Spawn an Agent (`subagent_type: "general-purpose"`) and tell it to read `.claude/skills/autofix/validate-diff.md` and follow its instructions. Provide the base branch name and the problem description.
+Spawn an Agent (`subagent_type: "general-purpose"`) and tell it to read `.claude/agents/validate-diff.md` and follow its instructions. Provide the base branch name and the problem description.
 
 Based on the agent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
@@ -40,7 +40,7 @@ Based on the agent's response:
 Repeat up to 10 times:
 
 1. Record the current HEAD as `pre_iteration_head`.
-2. Spawn a single Agent (`subagent_type: "general-purpose"`) and tell it the base branch (`{base_branch}`), the current HEAD hash (`{pre_iteration_head}`), and to read and follow `.claude/skills/autofix/verify-and-fix.md`.
+2. Spawn a single Agent (`subagent_type: "general-purpose"`) and tell it the base branch (`{base_branch}`), the current HEAD hash (`{pre_iteration_head}`), and to read and follow `.claude/agents/verify-and-fix.md`.
 3. Check if HEAD moved: compare `git rev-parse HEAD` to `pre_iteration_head`.
 4. If HEAD did not move, no fixes were made. The branch is clean (or remaining issues are unfixable). Stop looping.
 5. If HEAD moved, continue to the next iteration.

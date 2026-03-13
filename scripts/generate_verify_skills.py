@@ -3,8 +3,8 @@
 Requires --vet-repo or VET_REPO env var.
 
 Output:
-  .claude/skills/autofix/branch-categories.md
-  .claude/skills/verify-conversation/categories.md
+  .claude/agents/categories/code-issue-categories.md
+  .claude/agents/categories/conversation-issue-categories.md
 
 Usage:
     uv run python scripts/generate_verify_skills.py --vet-repo /path/to/vet
@@ -24,8 +24,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
 # Output paths (vet-generated, checked in)
-BRANCH_CATEGORIES_PATH = REPO_ROOT / ".claude" / "skills" / "autofix" / "branch-categories.md"
-CONVERSATION_CATEGORIES_PATH = REPO_ROOT / ".claude" / "skills" / "verify-conversation" / "categories.md"
+BRANCH_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "code-issue-categories.md"
+CONVERSATION_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "conversation-issue-categories.md"
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +212,8 @@ def main() -> None:
         print(
             "error: vet repo not found.\n"
             "\n"
-            "You modified a vet-generated file (.claude/skills/autofix/branch-categories.md\n"
-            "or .claude/skills/verify-conversation/categories.md). To validate against vet,\n"
+            "You modified a vet-generated file (.claude/agents/categories/code-issue-categories.md\n"
+            "or conversation-issue-categories.md). To validate against vet,\n"
             "set VET_REPO or regenerate with:\n"
             "\n"
             "    uv run python scripts/generate_verify_skills.py --vet-repo /path/to/vet\n",
