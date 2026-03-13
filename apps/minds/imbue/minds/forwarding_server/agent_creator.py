@@ -30,6 +30,7 @@ from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngCommandError
 from imbue.minds.forwarding_server.auth import FileAuthStore
+from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import OneTimeCode
 from imbue.mng.primitives import AgentId
@@ -108,7 +109,10 @@ def resolve_agent_type(repo_dir: Path) -> str:
     settings_path = repo_dir / SETTINGS_FILENAME
     try:
         settings = load_settings_from_path(settings_path)
-    except (tomllib.TOMLDecodeError, ValidationError, FileNotFoundError, OSError):
+    except FileNotFoundError:
+        return DEFAULT_AGENT_TYPE
+    except (tomllib.TOMLDecodeError, ValidationError, OSError) as e:
+        logger.warning("Failed to parse {}, using default agent type: {}", settings_path, e)
         return DEFAULT_AGENT_TYPE
     if settings.agent_type is not None:
         return settings.agent_type
@@ -117,7 +121,7 @@ def resolve_agent_type(repo_dir: Path) -> str:
 
 def run_mng_create(
     mind_dir: Path,
-    agent_name: str,
+    agent_name: AgentName,
     agent_id: AgentId,
     agent_type: str,
     pass_env: tuple[str, ...],
@@ -251,7 +255,7 @@ class AgentCreator(MutableModel):
                 clone_git_repo(GitUrl(git_url), mind_dir)
 
                 agent_type = resolve_agent_type(mind_dir)
-                agent_name = extract_repo_name(git_url)
+                agent_name = AgentName(extract_repo_name(git_url))
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.CREATING

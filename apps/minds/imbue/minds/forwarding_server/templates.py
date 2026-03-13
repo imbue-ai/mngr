@@ -135,14 +135,15 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
         const data = await resp.json();
         const el = document.getElementById('status');
         if (data.status === 'DONE') {
-          el.innerHTML = 'Done! Redirecting...';
+          el.textContent = 'Done! Redirecting...';
           window.location.href = data.login_url;
           return;
         } else if (data.status === 'FAILED') {
-          el.innerHTML = '<span class="error">Failed: ' + data.error + '</span>';
+          el.textContent = 'Failed: ' + data.error;
+          el.classList.add('error');
           return;
         } else if (data.status === 'CREATING') {
-          el.innerHTML = '<span class="spinner"></span> Creating agent...';
+          el.textContent = 'Creating agent...';
         }
       } catch (e) { /* keep polling */ }
       setTimeout(pollStatus, 2000);

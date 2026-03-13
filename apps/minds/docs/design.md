@@ -58,13 +58,13 @@ When a user visits the forwarding server and no agents exist, they are shown a c
 3. Runs `mng create --type <type> --id <id> --in-place --label mind=true` to start the agent
 4. Generates a one-time auth code and redirects the user through the login flow
 
-Agent creation also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.
+Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.
 
 # Command line interface
 
 - `mind forward` (starts the local forwarding server for accessing and creating minds)
 
-[future] Additional commands for managing deployed minds (stop, start, destroy, logs, etc.)
+[future] Additional commands for managing minds (stop, start, destroy, logs, etc.)
 
 # Deferred items
 

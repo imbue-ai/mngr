@@ -77,6 +77,7 @@ def _create_test_forwarding_server(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
+    agent_creator: AgentCreator | None = None,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a forwarding server with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -86,6 +87,7 @@ def _create_test_forwarding_server(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=http_client,
+        agent_creator=agent_creator,
     )
     client = TestClient(app)
 
@@ -907,22 +909,8 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/status returns 404 for unknown creation."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-    agent_creator = AgentCreator(
-        paths=MindPaths(data_dir=tmp_path / "minds"),
-        forwarding_server_port=8420,
-    )
-    app = create_forwarding_server(
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-        http_client=None,
-        agent_creator=agent_creator,
-    )
-    client = TestClient(app)
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    # Use a valid AgentId format that hasn't been registered for creation
     unknown_id = AgentId()
     response = client.get("/api/create-agent/{}/status".format(unknown_id))
     assert response.status_code == 404
@@ -997,19 +985,17 @@ def _create_test_server_with_agent_creator(
 ) -> tuple[TestClient, FileAuthStore, AgentCreator]:
     """Create a forwarding server with an agent creator for testing."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
     agent_creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
         forwarding_server_port=8420,
     )
-    app = create_forwarding_server(
-        auth_store=auth_store,
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
         agent_creator=agent_creator,
     )
-    return TestClient(app), auth_store, agent_creator
+    return client, auth_store, agent_creator
 
 
 def test_create_form_submit_redirects_to_creating_page(tmp_path: Path) -> None:
@@ -1050,6 +1036,19 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
 
     response = client.post("/api/create-agent", json={"git_url": ""})
     assert response.status_code == 400
+
+
+def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
+    """POST /api/create-agent with invalid JSON returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        content=b"not json",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "Invalid JSON" in response.text
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:

@@ -775,7 +775,14 @@ async def _handle_create_agent_api(request: Request) -> Response:
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid JSON body"}',
+            media_type="application/json",
+        )
     git_url = str(body.get("git_url", "")).strip()
     if not git_url:
         return Response(
