@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from imbue.minds.config.data_types import MindPaths
+from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
@@ -75,6 +77,7 @@ def _create_test_forwarding_server(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
+    agent_creator: AgentCreator | None = None,
 ) -> tuple[TestClient, FileAuthStore]:
     """Create a forwarding server with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -84,6 +87,7 @@ def _create_test_forwarding_server(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=http_client,
+        agent_creator=agent_creator,
     )
     client = TestClient(app)
 
@@ -219,13 +223,14 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     assert second_response.status_code == 403
 
 
-def test_landing_page_shows_agent_after_authentication(tmp_path: Path) -> None:
+def test_landing_page_redirects_when_single_authenticated_agent(tmp_path: Path) -> None:
+    """When exactly one agent is authenticated, the landing page redirects to it."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
 
-    response = client.get("/")
-    assert response.status_code == 200
-    assert str(agent_id) in response.text
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/agents/{}/".format(agent_id)
 
 
 # -- Agent default redirect tests --
@@ -659,8 +664,8 @@ def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> N
     assert response.status_code == 502
 
 
-def test_mng_cli_resolver_landing_page_shows_discovered_agents(tmp_path: Path) -> None:
-    """The landing page should list agents discovered via mng list."""
+def test_mng_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
+    """When a single agent is discovered and authenticated, the landing page redirects to it."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
@@ -676,9 +681,9 @@ def test_mng_cli_resolver_landing_page_shows_discovered_agents(tmp_path: Path) -
 
     _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
 
-    response = client.get("/")
-    assert response.status_code == 200
-    assert str(agent_id) in response.text
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/agents/{}/".format(agent_id)
 
 
 def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None:
@@ -854,3 +859,257 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
     # Existing test: plain backend URL with request query
     response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status", params={"foo": "bar"})
     assert response.status_code == 200
+
+
+# -- Landing page agent creation tests --
+
+
+def test_landing_page_shows_create_form_when_no_agents_exist(tmp_path: Path) -> None:
+    """When no agents exist at all, the landing page shows the agent creation form."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Create a Mind" in response.text
+    assert "git_url" in response.text
+
+
+def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
+    """The create form pre-fills the git URL from a query parameter."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/", params={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 200
+    assert "https://github.com/test/repo" in response.text
+
+
+def test_create_page_shows_form(tmp_path: Path) -> None:
+    """GET /create shows the agent creation form."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert "Create a Mind" in response.text
+
+
+def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
+    """GET /api/create-agent/{id}/status returns 404 for unknown creation."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    unknown_id = AgentId()
+    response = client.get("/api/create-agent/{}/status".format(unknown_id))
+    assert response.status_code == 404
+
+
+def test_landing_page_lists_agents_when_multiple_authenticated(tmp_path: Path) -> None:
+    """When multiple agents are authenticated, the landing page lists them all."""
+    agent_id_1 = AgentId()
+    agent_id_2 = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id_1): {"web": "http://test:9100"},
+            str(agent_id_2): {"web": "http://test:9200"},
+        },
+    )
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_1)
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_2)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert str(agent_id_1) in response.text
+    assert str(agent_id_2) in response.text
+
+
+def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) -> None:
+    """POST /create returns 501 when no agent_creator is configured."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post("/create", data={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 501
+
+
+def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> None:
+    """POST /api/create-agent returns 501 when no agent_creator is configured."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 501
+
+
+def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
+    """GET /creating/{id} returns 501 when no agent_creator is configured."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    agent_id = AgentId()
+    response = client.get("/creating/{}".format(agent_id))
+    assert response.status_code == 501
+
+
+def _create_test_server_with_agent_creator(
+    tmp_path: Path,
+) -> tuple[TestClient, FileAuthStore, AgentCreator]:
+    """Create a forwarding server with an agent creator for testing."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    agent_creator = AgentCreator(
+        paths=MindPaths(data_dir=tmp_path / "minds"),
+        forwarding_server_port=8420,
+    )
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        agent_creator=agent_creator,
+    )
+    return client, auth_store, agent_creator
+
+
+def test_create_form_submit_redirects_to_creating_page(tmp_path: Path) -> None:
+    """POST /create with valid git_url redirects to /creating/{agent_id}."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "https://github.com/test/repo"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/creating/")
+
+
+def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
+    """POST /create with empty git_url returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post("/create", data={"git_url": ""})
+    assert response.status_code == 400
+
+
+def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
+    """POST /api/create-agent returns JSON with agent_id and status."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "agent_id" in data
+    assert data["status"] == "CLONING"
+
+
+def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
+    """POST /api/create-agent with empty git_url returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post("/api/create-agent", json={"git_url": ""})
+    assert response.status_code == 400
+
+
+def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
+    """POST /api/create-agent with invalid JSON returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        content=b"not json",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "Invalid JSON" in response.text
+
+
+def test_creating_page_shows_status(tmp_path: Path) -> None:
+    """GET /creating/{agent_id} shows the creating progress page."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    agent_id = agent_creator.start_creation("https://github.com/test/repo")
+
+    response = client.get("/creating/{}".format(agent_id))
+    assert response.status_code == 200
+    assert "Creating your mind" in response.text
+
+
+def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
+    """GET /creating/{agent_id} returns 404 for unknown agent creation."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/creating/{}".format(AgentId()))
+    assert response.status_code == 404
+
+
+def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) -> None:
+    """GET /api/create-agent/{id}/status returns a valid status for a tracked creation."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    agent_id = agent_creator.start_creation("https://github.com/test/repo")
+
+    response = client.get("/api/create-agent/{}/status".format(agent_id))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent_id"] == str(agent_id)
+    assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
+
+
+def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
+    """GET /create?git_url=... pre-fills the form."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create", params={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 200
+    assert "https://github.com/test/repo" in response.text
+
+
+def test_landing_page_shows_create_link_when_authenticated_with_agents(tmp_path: Path) -> None:
+    """When authenticated with multiple agents, landing page shows 'Create another mind' link."""
+    agent_id_1 = AgentId()
+    agent_id_2 = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_server={
+            str(agent_id_1): {"web": "http://test:9100"},
+            str(agent_id_2): {"web": "http://test:9200"},
+        },
+    )
+    client, auth_store = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_1)
+    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_2)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Create another mind" in response.text

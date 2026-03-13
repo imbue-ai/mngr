@@ -12,12 +12,6 @@ class MindError(click.ClickException):
     ...
 
 
-class AgentAlreadyExistsError(MindError):
-    """Raised when attempting to deploy a mind with a name that already exists."""
-
-    ...
-
-
 class SigningKeyError(MindError):
     """Raised when the cookie signing key cannot be loaded or created."""
 
@@ -26,24 +20,6 @@ class SigningKeyError(MindError):
 
 class GitCloneError(MindError):
     """Raised when git clone fails."""
-
-    ...
-
-
-class GitInitError(MindError):
-    """Raised when git init fails."""
-
-    ...
-
-
-class GitCommitError(MindError):
-    """Raised when git add/commit fails."""
-
-    ...
-
-
-class MissingAgentTypeError(MindError):
-    """Raised when no agent type is specified via CLI or minds.toml."""
 
     ...
 

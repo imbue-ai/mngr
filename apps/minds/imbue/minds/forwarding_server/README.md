@@ -12,7 +12,7 @@ This forwarding server is a separate component from any individual mind's web se
 The forwarding server uses `itsdangerous` for cookie signing. Auth works as follows:
 
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
-- **One-time codes**: generated during `mind deploy` and stored in `{data_directory}/one_time_codes.json`. Each code is associated with an agent ID and can only be used once. When a code is consumed, it is marked as "USED" in the JSON file.
+- **One-time codes**: generated during agent creation and stored in `{data_directory}/one_time_codes.json`. Each code is associated with an agent ID and can only be used once. When a code is consumed, it is marked as "USED" in the JSON file.
 - **Cookies**: after successful authentication, the server sets a signed cookie for the specific mind. The cookie value contains the agent ID, signed with the signing key.
 
 ## Local forwarding server routes
@@ -29,8 +29,24 @@ The forwarding server uses `itsdangerous` for cookie signing. Auth works as foll
 
 `/` route is special:
     looks at the cookies you have -- for each valid mind cookie, that mind is listed
-    if you have 0 valid cookies, it shows a placeholder telling you to log in
-    if you have 1 or more valid cookies, those minds are shown as links to their individual pages
+    if you have exactly 1 valid cookie, redirects directly to that mind
+    if you have 2+ valid cookies, those minds are shown as links to their individual pages
+    if you have 0 valid cookies and no agents exist, shows the agent creation form
+    if you have 0 valid cookies but agents exist, shows a placeholder telling you to log in
+
+`/create` route (GET shows creation form, POST creates an agent):
+    GET: shows a form to enter a git URL for creating a new mind
+    POST: accepts form data with git_url, starts agent creation, redirects to /creating/{agent_id}
+
+`/api/create-agent` route (POST, JSON API):
+    accepts JSON body with git_url, starts agent creation, returns agent_id and status
+
+`/api/create-agent/{agent_id}/status` route (GET, JSON API):
+    returns current creation status (CLONING, CREATING, DONE, FAILED) and login_url when done
+
+`/creating/{agent_id}` route:
+    shows a progress page that polls /api/create-agent/{agent_id}/status
+    auto-redirects to the login URL when creation completes
 
 `/agents/{agent_id}/` route lists all servers for a mind:
     requires a valid auth cookie for that mind
@@ -42,7 +58,7 @@ The forwarding server uses `itsdangerous` for cookie signing. Auth works as foll
     proxies any request from the user to the specific server's backend URL
     uses Service Workers for transparent path rewriting so the server's app works correctly under the `/agents/{agent_id}/{server_name}/` prefix
 
-All pages except "/", "/login" and "/authenticate" require the auth cookie to be set for the relevant mind.
+All agent-specific pages require the auth cookie. The creation routes (/create, /api/create-agent, /creating/{id}) do not require auth since the server runs on localhost.
 
 ## Proxying design
 

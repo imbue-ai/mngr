@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import socket as socket_module
 from collections.abc import AsyncGenerator
@@ -23,6 +24,8 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
+from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.auth import AuthStoreInterface
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
 from imbue.minds.forwarding_server.cookie_manager import create_signed_cookie_value
@@ -37,6 +40,8 @@ from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.forwarding_server.ssh_tunnel import parse_url_host_port
 from imbue.minds.forwarding_server.templates import render_agent_servers_page
 from imbue.minds.forwarding_server.templates import render_auth_error_page
+from imbue.minds.forwarding_server.templates import render_create_form
+from imbue.minds.forwarding_server.templates import render_creating_page
 from imbue.minds.forwarding_server.templates import render_landing_page
 from imbue.minds.forwarding_server.templates import render_login_redirect_page
 from imbue.minds.primitives import OneTimeCode
@@ -299,7 +304,24 @@ def _handle_landing_page(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
     )
-    html = render_landing_page(accessible_agent_ids=authenticated_ids)
+
+    # If exactly one authenticated agent, redirect directly to it
+    if len(authenticated_ids) == 1:
+        return Response(status_code=307, headers={"Location": "/agents/{}/".format(authenticated_ids[0])})
+
+    if authenticated_ids:
+        html = render_landing_page(accessible_agent_ids=authenticated_ids)
+        return HTMLResponse(content=html)
+
+    # Not authenticated for any agents -- check if any agents exist at all
+    all_known_ids = backend_resolver.list_known_agent_ids()
+    if len(all_known_ids) == 0:
+        # No agents exist: show the create form
+        git_url = request.query_params.get("git_url", "")
+        html = render_create_form(git_url=git_url)
+        return HTMLResponse(content=html)
+
+    html = render_landing_page(accessible_agent_ids=[])
     return HTMLResponse(content=html)
 
 
@@ -712,6 +734,120 @@ def _get_tunnel_http_client(
     return clients[key]
 
 
+# -- Agent creation route handlers --
+
+
+async def _handle_create_form_submit(request: Request) -> Response:
+    """Handle form submission to create a new agent.
+
+    Reads git_url from form data, starts background creation,
+    and redirects to the creating progress page.
+    """
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    form = await request.form()
+    git_url = str(form.get("git_url", "")).strip()
+    if not git_url:
+        html = render_create_form(git_url="")
+        return HTMLResponse(content=html, status_code=400)
+
+    agent_id = agent_creator.start_creation(git_url)
+    return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
+
+
+def _handle_create_page(
+    request: Request,
+) -> Response:
+    """Show the create form page (GET /create)."""
+    git_url = request.query_params.get("git_url", "")
+    html = render_create_form(git_url=git_url)
+    return HTMLResponse(content=html)
+
+
+async def _handle_create_agent_api(request: Request) -> Response:
+    """API endpoint for creating an agent (POST /api/create-agent).
+
+    Accepts JSON body with git_url. Returns JSON with agent_id and status.
+    """
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid JSON body"}',
+            media_type="application/json",
+        )
+    git_url = str(body.get("git_url", "")).strip()
+    if not git_url:
+        return Response(
+            status_code=400,
+            content='{"error": "git_url is required"}',
+            media_type="application/json",
+        )
+
+    agent_id = agent_creator.start_creation(git_url)
+    return Response(
+        content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
+        media_type="application/json",
+    )
+
+
+def _handle_creation_status_api(
+    agent_id: str,
+    request: Request,
+) -> Response:
+    """API endpoint for checking agent creation status (GET /api/create-agent/{agent_id}/status)."""
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_creation_info(parsed_id)
+    if info is None:
+        return Response(
+            status_code=404,
+            content='{"error": "Unknown agent creation"}',
+            media_type="application/json",
+        )
+
+    result = {"agent_id": str(info.agent_id), "status": str(info.status)}
+    if info.login_url is not None:
+        result["login_url"] = info.login_url
+    if info.error is not None:
+        result["error"] = info.error
+    return Response(content=json.dumps(result), media_type="application/json")
+
+
+def _handle_creating_page(
+    agent_id: str,
+    request: Request,
+) -> Response:
+    """Show the creating progress page (GET /creating/{agent_id}).
+
+    Polls /api/create-agent/{agent_id}/status and redirects when done.
+    """
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_creation_info(parsed_id)
+    if info is None:
+        return Response(status_code=404, content="Unknown agent creation")
+
+    if info.status == AgentCreationStatus.DONE and info.login_url is not None:
+        return Response(status_code=307, headers={"Location": info.login_url})
+
+    html = render_creating_page(agent_id=parsed_id, info=info)
+    return HTMLResponse(content=html)
+
+
 # -- App factory --
 
 
@@ -720,11 +856,15 @@ def create_forwarding_server(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
+    agent_creator: AgentCreator | None = None,
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
     When tunnel_manager is provided, the server can proxy traffic to remote agents
     by tunneling through SSH. Without it, only local agents are reachable.
+
+    When agent_creator is provided, the server can create new agents from git URLs
+    via the /create form and /api/create-agent API.
     """
     is_externally_managed_client = http_client is not None
 
@@ -738,6 +878,7 @@ def create_forwarding_server(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
+    app.state.agent_creator = agent_creator
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -745,6 +886,13 @@ def create_forwarding_server(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
+
+    # Agent creation routes
+    app.get("/create")(_handle_create_page)
+    app.post("/create")(_handle_create_form_submit)
+    app.post("/api/create-agent")(_handle_create_agent_api)
+    app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
+    app.get("/creating/{agent_id}")(_handle_creating_page)
 
     # Agent default page: redirect to web server
     app.get("/agents/{agent_id}/")(_handle_agent_default_redirect)

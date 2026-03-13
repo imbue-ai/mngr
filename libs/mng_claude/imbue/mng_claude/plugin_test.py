@@ -2204,24 +2204,34 @@ def test_provision_raises_on_version_mismatch(
 
 
 def test_install_claude_passes_version_to_command() -> None:
-    """_install_claude should pass the version to the install script via bash -s."""
+    """_install_claude should pass the version as a positional arg to the install script."""
     host, executed_commands = _make_command_tracking_host()
 
     _install_claude(host, version="2.1.50")
 
     assert len(executed_commands) == 1
-    assert "bash -s 2.1.50" in executed_commands[0]
+    assert "install_claude.sh 2.1.50" in executed_commands[0]
 
 
 def test_install_claude_without_version() -> None:
-    """_install_claude should not pass -s flag when no version is specified."""
+    """_install_claude should not pass version arg when no version is specified."""
     host, executed_commands = _make_command_tracking_host()
 
     _install_claude(host, version=None)
 
     assert len(executed_commands) == 1
-    assert "bash -s" not in executed_commands[0]
-    assert "install.sh | bash" in executed_commands[0]
+    # The bash invocation should have no version arg after the script name
+    assert "bash /tmp/install_claude.sh &&" in executed_commands[0]
+
+
+def test_install_claude_verifies_binary_exists() -> None:
+    """_install_claude should verify the binary is executable after install."""
+    host, executed_commands = _make_command_tracking_host()
+
+    _install_claude(host, version=None)
+
+    assert len(executed_commands) == 1
+    assert "test -x $HOME/.local/bin/claude" in executed_commands[0]
 
 
 # =============================================================================
