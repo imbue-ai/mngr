@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from imbue.mng.agents.agent_registry import list_registered_agent_types
+from imbue.mng.agents.default_plugins.codex_agent import CodexAgentConfig
 from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.agent_config_registry import ResolvedAgentType
 from imbue.mng.config.agent_config_registry import get_agent_config_class
@@ -39,8 +40,6 @@ def test_get_agent_class_returns_claude_agent_for_claude_type() -> None:
 
 def test_claude_agent_config_merge_with_wrong_type_raises_error() -> None:
     """ClaudeAgentConfig.merge_with should raise ConfigParseError for wrong type."""
-    from imbue.mng.agents.default_plugins.codex_agent import CodexAgentConfig
-
     base = ClaudeAgentConfig()
     override = CodexAgentConfig()
 
