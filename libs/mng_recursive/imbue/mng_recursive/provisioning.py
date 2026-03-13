@@ -56,7 +56,8 @@ def _upload_deploy_files(
 
     Returns the number of files uploaded.
     """
-    # Batch all parent directory creation into a single mkdir -p call
+    # do this in parallel, since there can sometimes be a bunch of things to transfer
+    # first, figure out all directories and do a single mkdir -p that captures all of them:
     remote_paths: list[str] = []
     for dest_path in deploy_files:
         resolved_path = _resolve_remote_path(dest_path, remote_home)
@@ -65,6 +66,8 @@ def _upload_deploy_files(
     if not mkdir_result.success:
         raise MngError(f"Failed to create directories: {mkdir_result.stderr}")
 
+    # then upload them all in parallel
+    futures: list[Future[None]] = []
     count = 0
     futures: list[Future[None]] = []
     with ConcurrencyGroupExecutor(
@@ -83,8 +86,12 @@ def _upload_deploy_files(
             else:
                 futures.append(executor.submit(host.write_text_file, path=resolved_path, content=source))
 
-        logger.trace("Uploaded deploy file: {} -> {}", dest_path, resolved_path)
-        count += 1
+            logger.trace("Uploaded deploy file: {} -> {}", dest_path, resolved_path)
+            count += 1
+
+    # Re-raise any thread exceptions (e.g. abort-mode errors)
+    for future in futures:
+        future.result()
 
     return count
 

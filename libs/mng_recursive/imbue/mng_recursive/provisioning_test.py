@@ -89,6 +89,7 @@ def test_resolve_remote_path_relative() -> None:
 def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
     """Files with Path sources should be read and uploaded."""
     host = _make_mock_host()
+    ctx = _make_mock_mng_ctx()
     source_file = tmp_path / "config.toml"
     source_file.write_text("key = 'value'")
 
@@ -96,7 +97,7 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
         Path("~/.mng/config.toml"): source_file,
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.execute_command.assert_called()
@@ -109,11 +110,12 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
 def test_upload_deploy_files_with_string_source() -> None:
     """Files with string sources should be uploaded directly."""
     host = _make_mock_host()
+    ctx = _make_mock_mng_ctx()
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): 'key = "value"',
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.write_text_file.assert_called_once_with(
@@ -125,11 +127,12 @@ def test_upload_deploy_files_with_string_source() -> None:
 def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
     """Missing Path source files should be skipped."""
     host = _make_mock_host()
+    ctx = _make_mock_mng_ctx()
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): tmp_path / "nonexistent.toml",
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 0
     host.write_file.assert_not_called()
@@ -139,11 +142,12 @@ def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
 def test_upload_deploy_files_creates_parent_dirs() -> None:
     """Parent directories should be created before uploading."""
     host = _make_mock_host()
+    ctx = _make_mock_mng_ctx()
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/profiles/abc/settings.toml"): "content",
     }
 
-    _upload_deploy_files(host, deploy_files, "/home/testuser")
+    _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     # Check that mkdir -p was called for the parent directory
     mkdir_calls = [call for call in host.execute_command.call_args_list if "mkdir -p" in str(call)]
@@ -515,11 +519,12 @@ def test_upload_deploy_files_raises_on_mkdir_failure() -> None:
     """_upload_deploy_files should raise when mkdir -p fails."""
     host = _make_mock_host()
     host.execute_command.return_value = _make_command_result(False, stderr="permission denied")
+    ctx = _make_mock_mng_ctx()
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): "content",
     }
     with pytest.raises(MngError, match="Failed to create director"):
-        _upload_deploy_files(host, deploy_files, "/home/testuser")
+        _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
 
 def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:
