@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -26,25 +26,6 @@ from imbue.mng.utils.polling import poll_until
 
 _TAIL_POLL_INTERVAL: float = 0.05
 _TAIL_POLL_TIMEOUT: float = 300.0
-
-
-class _FileMtimeTracker(MutableModel):
-    """Tracks a file's mtime and size to detect changes without polling content."""
-
-    path: Path
-    last_mtime: float = 0
-    last_size: int = 0
-
-    def has_changed(self) -> bool:
-        try:
-            st = os.stat(self.path)
-        except OSError:
-            return False
-        if st.st_mtime != self.last_mtime or st.st_size != self.last_size:
-            self.last_mtime = st.st_mtime
-            self.last_size = st.st_size
-            return True
-        return False
 
 
 @pure
@@ -102,6 +83,74 @@ def _yield_text_deltas_from_lines(lines: list[str]) -> Iterator[str]:
         text = extract_text_delta(stripped)
         if text is not None:
             yield text
+
+
+class _StreamTailState(MutableModel):
+    """Encapsulates mutable state for tailing a file via the host interface.
+
+    Separated from HeadlessClaude to avoid lambda-in-loop closure issues (B023)
+    when polling for file changes.
+    """
+
+    stdout_path: Path
+    host: OnlineHostInterface
+    is_finished: Callable[[], bool]
+    last_mtime: datetime | None = None
+    bytes_consumed: int = 0
+    line_buffer: str = ""
+
+    def _has_new_data_or_finished(self) -> bool:
+        current_mtime = self.host.get_file_mtime(self.stdout_path)
+        if current_mtime is not None and current_mtime != self.last_mtime:
+            return True
+        return self.is_finished()
+
+    def tail_until_done(self) -> Iterator[str]:
+        got_result = False
+        while not got_result and not self.is_finished():
+            poll_until(
+                self._has_new_data_or_finished,
+                timeout=_TAIL_POLL_TIMEOUT,
+                poll_interval=_TAIL_POLL_INTERVAL,
+            )
+            self.last_mtime = self.host.get_file_mtime(self.stdout_path)
+
+            try:
+                content = self.host.read_text_file(self.stdout_path)
+            except FileNotFoundError:
+                continue
+
+            raw = content[self.bytes_consumed :]
+            self.bytes_consumed = len(content)
+
+            if raw:
+                combined = self.line_buffer + raw
+                self.line_buffer = ""
+
+                lines = combined.split("\n")
+                if not combined.endswith("\n"):
+                    self.line_buffer = lines.pop()
+
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if _is_result_event(stripped):
+                        got_result = True
+                        break
+                    text = extract_text_delta(stripped)
+                    if text is not None:
+                        yield text
+
+        if not got_result:
+            # Final drain after agent exits
+            try:
+                content = self.host.read_text_file(self.stdout_path)
+            except FileNotFoundError:
+                return
+            remaining = self.line_buffer + content[self.bytes_consumed :]
+            if remaining:
+                yield from _yield_text_deltas_from_lines(remaining.split("\n"))
 
 
 class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
@@ -193,17 +242,21 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         state = self.get_lifecycle_state()
         return state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE)
 
+    def _file_exists_on_host(self, path: Path) -> bool:
+        """Check if a file exists on the agent's host (works for both local and remote)."""
+        return self.host.get_file_mtime(path) is not None
+
     def _wait_for_stdout_file(self, stdout_path: Path) -> bool:
         """Wait for the stdout file to be created or the agent to exit.
 
         Returns True if the file exists, False if the agent exited without creating it.
         """
         poll_until(
-            lambda: stdout_path.exists() or self._is_agent_finished(),
+            lambda: self._file_exists_on_host(stdout_path) or self._is_agent_finished(),
             timeout=_TAIL_POLL_TIMEOUT,
             poll_interval=_TAIL_POLL_INTERVAL,
         )
-        return stdout_path.exists()
+        return self._file_exists_on_host(stdout_path)
 
     def output(self) -> str:
         """Wait for the agent to finish and return its complete output."""
@@ -212,9 +265,10 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     def stream_output(self) -> Iterator[str]:
         """Stream text output as it becomes available.
 
-        Tails $MNG_AGENT_STATE_DIR/stdout.jsonl using a file handle kept open
-        at the current read position. Uses mtime/size checks (via poll_until)
-        to detect new data instead of busy-polling with time.sleep.
+        Tails $MNG_AGENT_STATE_DIR/stdout.jsonl via the host interface so it
+        works for both local and remote hosts. Uses mtime checks via
+        host.get_file_mtime() (through poll_until) to detect new data instead
+        of busy-polling with time.sleep.
 
         Yields text delta chunks parsed from stream-json events. Completes when
         the agent process exits and the file is fully consumed.
@@ -224,38 +278,12 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         if not self._wait_for_stdout_file(stdout_path):
             return
 
-        tracker = _FileMtimeTracker(path=stdout_path)
-        line_buffer = ""
-        got_result = False
-
-        with open(stdout_path) as fh:
-            while not got_result and not self._is_agent_finished():
-                poll_until(tracker.has_changed, timeout=_TAIL_POLL_TIMEOUT, poll_interval=_TAIL_POLL_INTERVAL)
-                raw = fh.read()
-                if raw:
-                    combined = line_buffer + raw
-                    line_buffer = ""
-
-                    lines = combined.split("\n")
-                    if not combined.endswith("\n"):
-                        line_buffer = lines.pop()
-
-                    for line in lines:
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-                        if _is_result_event(stripped):
-                            got_result = True
-                            break
-                        text = extract_text_delta(stripped)
-                        if text is not None:
-                            yield text
-
-            if not got_result:
-                # Final drain after agent exits
-                remaining = line_buffer + fh.read()
-                if remaining:
-                    yield from _yield_text_deltas_from_lines(remaining.split("\n"))
+        state = _StreamTailState(
+            stdout_path=stdout_path,
+            host=self.host,
+            is_finished=self._is_agent_finished,
+        )
+        yield from state.tail_until_done()
 
 
 @hookimpl

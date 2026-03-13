@@ -259,6 +259,9 @@ def _headless_claude_output(
     Creates a temporary directory as the work path (no git branch creation),
     and passes claude args for headless operation (--system-prompt, --output-format
     stream-json, --tools "", --no-session-persistence).
+
+    All filesystem operations go through the host interface so this works
+    for both local and remote hosts.
     """
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
     host_interface = provider.get_host(HostName("localhost"))
@@ -267,12 +270,13 @@ def _headless_claude_output(
     host = host_interface
 
     with tempfile.TemporaryDirectory(prefix="mng-ask-") as tmp_dir:
-        # Write prompt and system prompt to files in the work dir so the
-        # shell command can read them via $(cat ...).  Passing them inline
-        # as agent_args would exceed tmux's command length limit.
         work_path = Path(tmp_dir)
-        (work_path / ".mng-system-prompt").write_text(system_prompt)
-        (work_path / ".mng-prompt").write_text(prompt)
+
+        # Write prompt and system prompt to files via the host interface so
+        # the shell command can read them via $(cat ...).  Passing them inline
+        # as agent_args would exceed tmux's command length limit.
+        host.write_text_file(work_path / ".mng-system-prompt", system_prompt)
+        host.write_text_file(work_path / ".mng-prompt", prompt)
 
         agent_args = (
             "--system-prompt",
