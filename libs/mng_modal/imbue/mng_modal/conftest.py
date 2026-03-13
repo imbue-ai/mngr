@@ -293,3 +293,12 @@ def modal_subprocess_env(
     )
     env["MNG_USER_ID"] = modal_test_session_user_id
     yield ModalSubprocessTestEnv(env=env, prefix=prefix, host_dir=host_dir)
+
+
+@pytest.fixture
+def temp_source_dir(tmp_path: Path) -> Path:
+    """Create a temporary source directory for Modal tests."""
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "test.txt").write_text("test content")
+    return source_dir

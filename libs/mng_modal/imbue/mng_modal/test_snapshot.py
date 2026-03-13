@@ -68,15 +68,6 @@ def _destroy_modal_agent(
     )
 
 
-@pytest.fixture
-def temp_source_dir(tmp_path: Path) -> Path:
-    """Create a temporary source directory for Modal tests."""
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    (source_dir / "test.txt").write_text("test content")
-    return source_dir
-
-
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(400)
