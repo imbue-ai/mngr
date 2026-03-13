@@ -539,15 +539,11 @@ def parse_config(
         _parse_create_templates(raw.pop("create_templates", {})) if "create_templates" in raw else {}
     )
     kwargs["logging"] = _parse_logging_config(raw.pop("logging", {}), strict=strict) if "logging" in raw else None
-    kwargs["is_nested_tmux_allowed"] = (
-        raw.pop("is_nested_tmux_allowed", None) if "is_nested_tmux_allowed" in raw else None
-    )
-    kwargs["headless"] = raw.pop("headless", None) if "headless" in raw else None
-    kwargs["is_error_reporting_enabled"] = (
-        raw.pop("is_error_reporting_enabled", None) if "is_error_reporting_enabled" in raw else None
-    )
-    kwargs["is_allowed_in_pytest"] = raw.pop("is_allowed_in_pytest", {}) if "is_allowed_in_pytest" in raw else None
-    kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", {}) if "pre_command_scripts" in raw else None
+    kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
+    kwargs["headless"] = raw.pop("headless", None)
+    kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)
+    kwargs["is_allowed_in_pytest"] = raw.pop("is_allowed_in_pytest", None)
+    kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
 
     if len(raw) > 0:
