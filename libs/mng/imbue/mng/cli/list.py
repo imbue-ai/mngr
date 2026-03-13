@@ -22,6 +22,7 @@ from tabulate import tabulate
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mng.agents.agent_registry import list_registered_agent_types
 from imbue.mng.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import ErrorInfo
@@ -235,9 +236,6 @@ def list_command(ctx: click.Context, **kwargs) -> None:
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
 
-    if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
-        write_cli_completions_cache(ctx.parent.command)
-
 
 def _list_impl(ctx: click.Context, **kwargs) -> None:
     """Implementation of list command (extracted for exception handling)."""
@@ -247,6 +245,23 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         command_class=ListCliOptions,
         is_format_template_supported=True,
     )
+
+    # Write the tab completion cache in the background so it doesn't block
+    # the list output. The cache includes both static CLI structure and
+    # dynamic values from the runtime context (agent types, templates, etc.).
+    if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
+        cli_group = ctx.parent.command
+        registered_agent_types = list_registered_agent_types()
+        mng_ctx.concurrency_group.start_new_thread(
+            target=write_cli_completions_cache,
+            kwargs={
+                "cli_group": cli_group,
+                "mng_ctx": mng_ctx,
+                "registered_agent_types": registered_agent_types,
+            },
+            name="completion-cache-writer",
+            is_checked=False,
+        )
 
     # Format template is now resolved by the common option parsing infrastructure
     # (via --format with a template string, e.g. --format '{name}\t{state}')

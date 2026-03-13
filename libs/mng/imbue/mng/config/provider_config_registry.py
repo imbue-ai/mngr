@@ -29,6 +29,11 @@ def get_provider_config_class(backend_name: str) -> type[ProviderInstanceConfig]
     return _provider_config_registry[key]
 
 
+def list_registered_provider_backend_names() -> list[str]:
+    """List all registered provider backend names."""
+    return sorted(str(k) for k in _provider_config_registry.keys())
+
+
 def reset_provider_config_registry() -> None:
     """Reset the registry. Used for test isolation."""
     _provider_config_registry.clear()
