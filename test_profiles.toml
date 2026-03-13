@@ -22,6 +22,7 @@ cov_packages = []
 testpaths = [
     "test_meta_ratchets.py",
     "libs/mng",
+    "libs/mng_claude",
     "libs/mng_pair",
     "libs/mng_opencode",
     "libs/mng_kanpan",

@@ -16,6 +16,7 @@ from imbue.mng.api.list import ListResult
 from imbue.mng.cli.list import _StreamingHumanRenderer
 from imbue.mng.cli.list import _StreamingTemplateEmitter
 from imbue.mng.cli.list import _compute_column_widths
+from imbue.mng.cli.list import _emit_human_output
 from imbue.mng.cli.list import _emit_template_output
 from imbue.mng.cli.list import _format_streaming_agent_row
 from imbue.mng.cli.list import _format_streaming_header_row
@@ -1595,3 +1596,42 @@ def test_headless_flag_is_accepted_by_list_command(
         catch_exceptions=False,
     )
     assert result.exit_code == 0
+
+
+def test_list_command_json_format_no_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list --format json with no agents should output empty agents array."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    data = json.loads(result.output.strip())
+    assert data["agents"] == []
+
+
+def test_list_command_format_template_no_agents(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list --format with a template string and no agents should produce empty output."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--format", "{name}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    # Template mode produces no output for zero agents
+    assert result.output.strip() == ""
+
+
+def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_human_output with empty agents list should produce no output."""
+    _emit_human_output([], fields=["name", "state"])
+    captured = capsys.readouterr()
+    assert captured.out == ""

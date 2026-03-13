@@ -8,9 +8,12 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mng.cli.issue_reporting import ExistingIssue
 from imbue.mng.cli.issue_reporting import GITHUB_BASE_URL
+from imbue.mng.cli.issue_reporting import UNEXPECTED_ERROR_TITLE_PREFIX
 from imbue.mng.cli.issue_reporting import build_issue_body
 from imbue.mng.cli.issue_reporting import build_issue_title
 from imbue.mng.cli.issue_reporting import build_new_issue_url
+from imbue.mng.cli.issue_reporting import build_unexpected_error_issue_body
+from imbue.mng.cli.issue_reporting import build_unexpected_error_issue_title
 from imbue.mng.cli.issue_reporting import handle_not_implemented_error
 from imbue.mng.cli.issue_reporting import handle_unexpected_error
 from imbue.mng.cli.issue_reporting import search_for_existing_issue
@@ -327,3 +330,36 @@ def test_handle_unexpected_error_is_interactive_false_exits_without_prompting() 
 def test_existing_issue_is_frozen() -> None:
     issue = ExistingIssue(number=1, title="test", url="https://example.com")
     assert issue.model_config.get("frozen") is True
+
+
+# =============================================================================
+# Tests for build_unexpected_error_issue_title and build_unexpected_error_issue_body
+# =============================================================================
+
+
+def test_build_unexpected_error_issue_title_includes_error_type_and_message() -> None:
+    """build_unexpected_error_issue_title should include the error type and first line of message."""
+    error = ValueError("Something went wrong\nSecond line details")
+    title = build_unexpected_error_issue_title(error)
+    assert title.startswith(UNEXPECTED_ERROR_TITLE_PREFIX)
+    assert "ValueError" in title
+    assert "Something went wrong" in title
+    assert "Second line details" not in title
+
+
+def test_build_unexpected_error_issue_title_handles_empty_message() -> None:
+    """build_unexpected_error_issue_title should handle errors with no message."""
+    error = RuntimeError()
+    title = build_unexpected_error_issue_title(error)
+    assert "RuntimeError" in title
+    assert "No message" in title
+
+
+def test_build_unexpected_error_issue_body_includes_traceback() -> None:
+    """build_unexpected_error_issue_body should include the error type and traceback."""
+    error = KeyError("missing_key")
+    body = build_unexpected_error_issue_body(error, "Traceback (most recent call last):\n  ...")
+    assert "KeyError" in body
+    assert "missing_key" in body
+    assert "Traceback" in body
+    assert "Bug Report" in body

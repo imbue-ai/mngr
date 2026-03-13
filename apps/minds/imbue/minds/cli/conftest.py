@@ -21,7 +21,7 @@ def isolate_mind_tests(
     """
     test_id = uuid4().hex
     host_dir = tmp_path / ".mng"
-    host_dir.mkdir()
+    host_dir.mkdir(exist_ok=True)
 
     isolate_home(tmp_path, monkeypatch)
     monkeypatch.setenv("MNG_HOST_DIR", str(host_dir))

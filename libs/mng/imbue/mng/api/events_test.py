@@ -13,13 +13,17 @@ from imbue.mng.api.events import EventSourceInfo
 from imbue.mng.api.events import EventsTarget
 from imbue.mng.api.events import _AllEventsStreamState
 from imbue.mng.api.events import _FollowState
+from imbue.mng.api.events import _build_event_sources_from_grouped_files
 from imbue.mng.api.events import _build_tail_args
 from imbue.mng.api.events import _check_for_new_archived_events
 from imbue.mng.api.events import _check_for_new_content
 from imbue.mng.api.events import _discover_event_sources_via_volume
+from imbue.mng.api.events import _emit_historical_events
 from imbue.mng.api.events import _extract_filename
+from imbue.mng.api.events import _group_volume_files_into_sources
 from imbue.mng.api.events import _handle_online_offline_transition
 from imbue.mng.api.events import _parse_discovered_files
+from imbue.mng.api.events import _pygtail_offset_file_path
 from imbue.mng.api.events import _sort_rotated_files_oldest_first
 from imbue.mng.api.events import _start_tail_thread
 from imbue.mng.api.events import _tail_source_thread_local
@@ -1262,3 +1266,263 @@ def test_handle_online_offline_transition_no_change_when_same_state(tmp_path: Pa
     assert state.is_online is False
     assert target_holder[0] is target
     assert len(tail_threads) == 0
+
+
+# =============================================================================
+# _emit_historical_events tests
+# =============================================================================
+
+
+def _make_event(event_id: str, timestamp: str, source: str = "test") -> EventRecord:
+    """Create a minimal EventRecord for testing."""
+    return EventRecord(
+        raw_line=f'{{"event_id": "{event_id}", "timestamp": "{timestamp}"}}',
+        timestamp=timestamp,
+        event_id=event_id,
+        source=source,
+        data={"event_id": event_id, "timestamp": timestamp},
+    )
+
+
+def test_emit_historical_events_deduplicates_by_event_id() -> None:
+    """Already emitted event_ids should be skipped."""
+    state = _AllEventsStreamState()
+    state.emitted_event_ids.add("evt-1")
+
+    events = [
+        _make_event("evt-1", "2025-01-01T00:00:00Z"),
+        _make_event("evt-2", "2025-01-01T00:00:01Z"),
+    ]
+    emitted: list[EventRecord] = []
+    _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=None)
+
+    assert len(emitted) == 1
+    assert emitted[0].event_id == "evt-2"
+
+
+def test_emit_historical_events_applies_head_count() -> None:
+    """head_count should limit the events to the first N."""
+    state = _AllEventsStreamState()
+    events = [_make_event(f"evt-{i}", f"2025-01-01T00:00:{i:02d}Z") for i in range(5)]
+    emitted: list[EventRecord] = []
+    _emit_historical_events(events, state, emitted.append, head_count=2, tail_count=None)
+
+    assert len(emitted) == 2
+    assert emitted[0].event_id == "evt-0"
+    assert emitted[1].event_id == "evt-1"
+
+
+def test_emit_historical_events_applies_tail_count() -> None:
+    """tail_count should limit the events to the last N."""
+    state = _AllEventsStreamState()
+    events = [_make_event(f"evt-{i}", f"2025-01-01T00:00:{i:02d}Z") for i in range(5)]
+    emitted: list[EventRecord] = []
+    _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=2)
+
+    assert len(emitted) == 2
+    assert emitted[0].event_id == "evt-3"
+    assert emitted[1].event_id == "evt-4"
+
+
+def test_emit_historical_events_emits_all_when_no_limits() -> None:
+    """Without head/tail, all events should be emitted."""
+    state = _AllEventsStreamState()
+    events = [_make_event(f"evt-{i}", f"2025-01-01T00:00:{i:02d}Z") for i in range(3)]
+    emitted: list[EventRecord] = []
+    _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=None)
+
+    assert len(emitted) == 3
+
+
+# =============================================================================
+# _build_event_sources_from_grouped_files tests
+# =============================================================================
+
+
+def test_build_event_sources_from_grouped_files_multiple_dirs() -> None:
+    """Multiple directories should produce multiple EventSourceInfo objects."""
+    files_by_dir = {
+        "messages": ["events.jsonl", "events.jsonl.1", "events.jsonl.2"],
+        "logs": ["events.jsonl"],
+    }
+    sources = _build_event_sources_from_grouped_files(files_by_dir)
+
+    assert len(sources) == 2
+    # Results should be sorted by directory path
+    assert sources[0].source_path == "logs"
+    assert sources[0].is_current_file_present is True
+    assert sources[0].rotated_files == ()
+
+    assert sources[1].source_path == "messages"
+    assert sources[1].is_current_file_present is True
+    assert len(sources[1].rotated_files) == 2
+    # Rotated files should be oldest first (highest number first)
+    assert sources[1].rotated_files == ("events.jsonl.2", "events.jsonl.1")
+
+
+def test_build_event_sources_from_grouped_files_only_rotated() -> None:
+    """A directory with only rotated files should have is_current_file_present=False."""
+    files_by_dir = {
+        "messages": ["events.jsonl.1"],
+    }
+    sources = _build_event_sources_from_grouped_files(files_by_dir)
+
+    assert len(sources) == 1
+    assert sources[0].is_current_file_present is False
+    assert sources[0].rotated_files == ("events.jsonl.1",)
+
+
+def test_build_event_sources_from_grouped_files_empty() -> None:
+    """Empty input should produce empty output."""
+    assert _build_event_sources_from_grouped_files({}) == []
+
+
+# =============================================================================
+# _group_volume_files_into_sources tests
+# =============================================================================
+
+
+def test_group_volume_files_into_sources_groups_correctly() -> None:
+    """Files should be grouped by directory."""
+    files = [
+        ("messages", "events.jsonl"),
+        ("messages", "events.jsonl.1"),
+        ("logs", "events.jsonl"),
+    ]
+    sources = _group_volume_files_into_sources(files)
+
+    assert len(sources) == 2
+    source_paths = {s.source_path for s in sources}
+    assert source_paths == {"messages", "logs"}
+
+
+def test_group_volume_files_into_sources_empty() -> None:
+    """Empty input should produce empty output."""
+    assert _group_volume_files_into_sources([]) == []
+
+
+# =============================================================================
+# _pygtail_offset_file_path tests
+# =============================================================================
+
+
+def test_pygtail_offset_file_path_with_source_path() -> None:
+    """Source path with slashes should have slashes replaced by underscores."""
+    result = _pygtail_offset_file_path("logs/mng", Path("/tmp/offsets"))
+    assert result == "/tmp/offsets/logs_mng.offset"
+
+
+def test_pygtail_offset_file_path_with_empty_source_path() -> None:
+    """Empty source path should use 'root' as filename."""
+    result = _pygtail_offset_file_path("", Path("/tmp/offsets"))
+    assert result == "/tmp/offsets/root.offset"
+
+
+def test_pygtail_offset_file_path_with_simple_source_path() -> None:
+    """Simple source path without slashes should be used as-is."""
+    result = _pygtail_offset_file_path("messages", Path("/tmp/offsets"))
+    assert result == "/tmp/offsets/messages.offset"
+
+
+# =============================================================================
+# EventsTarget validator tests
+# =============================================================================
+
+
+def test_events_target_rejects_online_host_without_events_path(
+    local_provider,
+) -> None:
+    """EventsTarget should reject online_host set without events_path."""
+    host = local_provider.get_host(HostName("localhost"))
+    with pytest.raises(MngError, match="online_host and events_path must both be set"):
+        EventsTarget(online_host=host, events_path=None, display_name="bad-target")
+
+
+# =============================================================================
+# parse_event_line edge cases
+# =============================================================================
+
+
+def test_parse_event_line_non_dict_json_returns_none() -> None:
+    """JSON arrays should be rejected (only dicts are valid events)."""
+    result = parse_event_line("[1, 2, 3]", "test")
+    assert result is None
+
+
+def test_parse_event_line_backfills_source_into_data() -> None:
+    """When 'source' is missing from JSON, it should be backfilled into data."""
+    line = '{"timestamp": "2025-01-01T00:00:00Z", "event_id": "evt-1"}'
+    result = parse_event_line(line, "my-source")
+    assert result is not None
+    assert result.source == "my-source"
+    assert result.data["source"] == "my-source"
+
+
+def test_parse_event_line_preserves_existing_source() -> None:
+    """When 'source' is present in JSON, it should be used as-is."""
+    line = '{"timestamp": "2025-01-01T00:00:00Z", "event_id": "evt-1", "source": "original"}'
+    result = parse_event_line(line, "fallback")
+    assert result is not None
+    assert result.source == "original"
+
+
+# =============================================================================
+# _sort_rotated_files_oldest_first edge cases
+# =============================================================================
+
+
+def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
+    """Non-matching filenames should be ignored."""
+    result = _sort_rotated_files_oldest_first(
+        ["events.jsonl.3", "not-a-rotated-file.txt", "events.jsonl.1", "events.jsonl.2"]
+    )
+    assert result == ["events.jsonl.3", "events.jsonl.2", "events.jsonl.1"]
+
+
+# =============================================================================
+# _parse_discovered_files edge cases
+# =============================================================================
+
+
+def test_parse_discovered_files_skips_paths_not_under_base() -> None:
+    """Files outside the base path should be ignored."""
+    find_output = "/other/path/events.jsonl\n/base/path/messages/events.jsonl\n"
+    result = _parse_discovered_files(find_output, "/base/path")
+    assert len(result) == 1
+    assert result[0].source_path == "messages"
+
+
+def test_parse_discovered_files_root_level_events_file() -> None:
+    """events.jsonl at root level should have empty source_path."""
+    find_output = "/base/path/events.jsonl\n"
+    result = _parse_discovered_files(find_output, "/base/path")
+    assert len(result) == 1
+    assert result[0].source_path == ""
+    assert result[0].is_current_file_present is True
+
+
+def test_parse_discovered_files_ignores_unrelated_files() -> None:
+    """Files that are not events.jsonl or rotated variants should be ignored."""
+    find_output = "/base/path/messages/events.jsonl\n/base/path/messages/other.log\n"
+    result = _parse_discovered_files(find_output, "/base/path")
+    assert len(result) == 1
+    assert result[0].source_path == "messages"
+
+
+# =============================================================================
+# refresh_events_target tests
+# =============================================================================
+
+
+def test_refresh_events_target_returns_same_when_no_host_id() -> None:
+    """refresh_events_target returns same target when host_id is None."""
+    target = EventsTarget(display_name="test", host_id=None)
+    result = refresh_events_target(target)
+    assert result is target
+
+
+def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
+    """refresh_events_target returns same target when events_subpath is None."""
+    target = EventsTarget(display_name="test", events_subpath=None)
+    result = refresh_events_target(target)
+    assert result is target

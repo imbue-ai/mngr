@@ -1,17 +1,17 @@
 [project]
-name = "mng-elena-code"
+name = "mng-claude"
 version = "0.1.0"
-description = "Elena Code agent plugin for mng - a conversational AI mind powered by Claude Code"
+description = "Claude agent type plugin for mng"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.7",
-    "mng-claude==0.1.0",
-    "mng-claude-mind==0.1.0",
 ]
 
 [project.entry-points.mng]
-elena_code = "imbue.mng_elena_code.plugin"
+claude = "imbue.mng_claude.plugin"
+code_guardian = "imbue.mng_claude.code_guardian_agent"
+fixme_fairy = "imbue.mng_claude.fixme_fairy_agent"
 
 [build-system]
 requires = ["hatchling"]
@@ -22,8 +22,6 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
-mng-claude = { workspace = true }
-mng-claude-mind = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:
@@ -37,7 +35,7 @@ testpaths = ["."]
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.mng_elena_code",
+  "--cov=imbue.mng_claude",
   "--cov-report=term-missing",
   "--cov-report=html",
   "--cov-report=xml",

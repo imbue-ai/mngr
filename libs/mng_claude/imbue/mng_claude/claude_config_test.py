@@ -5,19 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
-from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
-from imbue.mng.agents.default_plugins.claude_config import add_claude_trust_for_path
-from imbue.mng.agents.default_plugins.claude_config import check_claude_dialogs_dismissed
-from imbue.mng.agents.default_plugins.claude_config import check_effort_callout_dismissed
-from imbue.mng.agents.default_plugins.claude_config import check_source_directory_trusted
-from imbue.mng.agents.default_plugins.claude_config import dismiss_effort_callout
-from imbue.mng.agents.default_plugins.claude_config import ensure_claude_dialogs_dismissed
-from imbue.mng.agents.default_plugins.claude_config import find_project_config
-from imbue.mng.agents.default_plugins.claude_config import get_claude_config_backup_path
-from imbue.mng.agents.default_plugins.claude_config import get_claude_config_path
-from imbue.mng.agents.default_plugins.claude_config import is_source_directory_trusted
-from imbue.mng.agents.default_plugins.claude_config import remove_claude_trust_for_path
+from imbue.mng_claude.claude_config import ClaudeDirectoryNotTrustedError
+from imbue.mng_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mng_claude.claude_config import add_claude_trust_for_path
+from imbue.mng_claude.claude_config import check_claude_dialogs_dismissed
+from imbue.mng_claude.claude_config import check_effort_callout_dismissed
+from imbue.mng_claude.claude_config import check_source_directory_trusted
+from imbue.mng_claude.claude_config import dismiss_effort_callout
+from imbue.mng_claude.claude_config import ensure_claude_dialogs_dismissed
+from imbue.mng_claude.claude_config import find_project_config
+from imbue.mng_claude.claude_config import get_claude_config_backup_path
+from imbue.mng_claude.claude_config import get_claude_config_path
+from imbue.mng_claude.claude_config import is_source_directory_trusted
+from imbue.mng_claude.claude_config import remove_claude_trust_for_path
 
 
 def test_get_claude_config_path_returns_home_dot_claude_json() -> None:

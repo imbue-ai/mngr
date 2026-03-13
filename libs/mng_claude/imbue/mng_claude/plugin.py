@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import getpass
 import hashlib
+import importlib.resources
 import json
 import os
 import random
@@ -29,25 +30,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mng import hookimpl
 from imbue.mng.agents.base_agent import BaseAgent
-from imbue.mng.agents.default_plugins.claude_config import ClaudeDirectoryNotTrustedError
-from imbue.mng.agents.default_plugins.claude_config import ClaudeEffortCalloutNotDismissedError
-from imbue.mng.agents.default_plugins.claude_config import ClaudeOnboardingNotCompletedError
-from imbue.mng.agents.default_plugins.claude_config import add_claude_trust_for_path
-from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
-from imbue.mng.agents.default_plugins.claude_config import check_claude_dialogs_dismissed
-from imbue.mng.agents.default_plugins.claude_config import complete_onboarding
-from imbue.mng.agents.default_plugins.claude_config import dismiss_effort_callout
-from imbue.mng.agents.default_plugins.claude_config import ensure_claude_dialogs_dismissed
-from imbue.mng.agents.default_plugins.claude_config import find_project_config
-from imbue.mng.agents.default_plugins.claude_config import get_claude_config_path
-from imbue.mng.agents.default_plugins.claude_config import is_effort_callout_dismissed
-from imbue.mng.agents.default_plugins.claude_config import is_onboarding_completed
-from imbue.mng.agents.default_plugins.claude_config import is_source_directory_trusted
-from imbue.mng.agents.default_plugins.claude_config import merge_hooks_config
-from imbue.mng.agents.default_plugins.claude_config import read_claude_config
-from imbue.mng.agents.default_plugins.claude_config import remove_claude_trust_for_path
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentStartError
@@ -66,9 +49,28 @@ from imbue.mng.plugins.hookspecs import OptionStackItem
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng.providers.ssh_host_setup import load_resource_script
+from imbue.mng.providers.ssh_host_setup import load_resource_script as _load_mng_resource_script
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.polling import poll_until
+from imbue.mng_claude import hookimpl
+from imbue.mng_claude import resources as _claude_resources
+from imbue.mng_claude.claude_config import ClaudeDirectoryNotTrustedError
+from imbue.mng_claude.claude_config import ClaudeEffortCalloutNotDismissedError
+from imbue.mng_claude.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mng_claude.claude_config import add_claude_trust_for_path
+from imbue.mng_claude.claude_config import build_readiness_hooks_config
+from imbue.mng_claude.claude_config import check_claude_dialogs_dismissed
+from imbue.mng_claude.claude_config import complete_onboarding
+from imbue.mng_claude.claude_config import dismiss_effort_callout
+from imbue.mng_claude.claude_config import ensure_claude_dialogs_dismissed
+from imbue.mng_claude.claude_config import find_project_config
+from imbue.mng_claude.claude_config import get_claude_config_path
+from imbue.mng_claude.claude_config import is_effort_callout_dismissed
+from imbue.mng_claude.claude_config import is_onboarding_completed
+from imbue.mng_claude.claude_config import is_source_directory_trusted
+from imbue.mng_claude.claude_config import merge_hooks_config
+from imbue.mng_claude.claude_config import read_claude_config
+from imbue.mng_claude.claude_config import remove_claude_trust_for_path
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -597,6 +599,13 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
             host.execute_command(f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
 
 
+def _load_claude_resource_script(filename: str) -> str:
+    """Load a shell script from the mng_claude resources package."""
+    resource_files = importlib.resources.files(_claude_resources)
+    script_path = resource_files.joinpath(filename)
+    return script_path.read_text()
+
+
 def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
     """Write the background task scripts to $MNG_AGENT_STATE_DIR/commands/.
 
@@ -606,8 +615,14 @@ def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Pa
     commands_dir = agent_state_dir / "commands"
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
-    for script_name in ("mng_log.sh", "stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
-        script_content = load_resource_script(script_name)
+    # mng_log.sh is a shared script from the core mng package
+    mng_log_content = _load_mng_resource_script("mng_log.sh")
+    with log_span("Writing mng_log.sh to agent state dir"):
+        host.write_file(commands_dir / "mng_log.sh", mng_log_content.encode(), mode="0755")
+
+    # Claude-specific scripts from this plugin's resources
+    for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
+        script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
             host.write_file(script_path, script_content.encode(), mode="0755")
@@ -702,6 +717,16 @@ class TrustDialogIndicator(DialogIndicator):
         return "trust dialog"
 
 
+class CustomApiKeyDialogIndicator(DialogIndicator):
+    """Detects the Claude Code dialog asking about whether to use an API defined in an env var."""
+
+    def get_match_string(self) -> str:
+        return "Detected a custom API key in your environment"
+
+    def get_description(self) -> str:
+        return "API key dialog"
+
+
 class ThemeSelectionIndicator(DialogIndicator):
     """Detects the Claude Code theme selection prompt shown during onboarding."""
 
@@ -789,6 +814,7 @@ class ClaudeAgent(BaseAgent):
 
     _DIALOG_INDICATORS: tuple[DialogIndicator, ...] = (
         TrustDialogIndicator(),
+        CustomApiKeyDialogIndicator(),
         ThemeSelectionIndicator(),
         EffortCalloutIndicator(),
     )
@@ -1602,7 +1628,7 @@ def get_files_for_deploy(
     api_key = user_claude_json_data.get("primaryApiKey", os.environ.get("ANTHROPIC_API_KEY", ""))
     if api_key:
         approved_keys = claude_json_data.setdefault("customApiKeyResponses", {})
-        approved_keys["approved"] = [api_key[-20:]]
+        approved_keys["approved"] = approved_keys.get("approved", []) + [api_key[-20:]]
         approved_keys["rejected"] = []
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 

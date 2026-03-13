@@ -88,4 +88,4 @@ To implement provisioning for a custom agent type:
    - `on_after_provisioning()` for finalization
 3. Register the agent type using the `register_agent_type` hook
 
-See `ClaudeAgent` in `agents/default_plugins/claude_agent.py` for a complete example.
+See `ClaudeAgent` in `libs/mng_claude/imbue/mng_claude/plugin.py` for a complete example.

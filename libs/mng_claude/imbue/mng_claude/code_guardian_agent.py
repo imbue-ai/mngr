@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Final
 
-from imbue.mng import hookimpl
-from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgent
-from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgentConfig
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.interfaces.agent import AgentInterface
+from imbue.mng_claude import hookimpl
+from imbue.mng_claude.skill_agent import SkillProvisionedAgent
+from imbue.mng_claude.skill_agent import SkillProvisionedAgentConfig
 
 _SKILL_NAME: Final[str] = "code-guardian"
 

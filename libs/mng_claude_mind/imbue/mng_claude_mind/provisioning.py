@@ -18,8 +18,8 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mng.agents.default_plugins.claude_config import encode_claude_project_dir_name
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_llm.data_types import ProvisioningSettings
 from imbue.mng_llm.provisioning import execute_with_timing
 

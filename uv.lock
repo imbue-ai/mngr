@@ -16,6 +16,7 @@ members = [
     "imbue-common",
     "minds",
     "mng",
+    "mng-claude",
     "mng-claude-mind",
     "mng-elena-code",
     "mng-kanpan",
@@ -1865,11 +1866,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "mng-claude"
+version = "0.1.0"
+source = { editable = "libs/mng_claude" }
+dependencies = [
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mng", editable = "libs/mng" }]
+
+[[package]]
 name = "mng-claude-mind"
 version = "0.1.0"
 source = { editable = "libs/mng_claude_mind" }
 dependencies = [
     { name = "mng" },
+    { name = "mng-claude" },
     { name = "mng-llm" },
     { name = "mng-mind" },
     { name = "mng-recursive" },
@@ -1880,6 +1893,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mng", editable = "libs/mng" },
+    { name = "mng-claude", editable = "libs/mng_claude" },
     { name = "mng-llm", editable = "libs/mng_llm" },
     { name = "mng-mind", editable = "libs/mng_mind" },
     { name = "mng-recursive", editable = "libs/mng_recursive" },
@@ -1893,12 +1907,14 @@ version = "0.1.0"
 source = { editable = "libs/mng_elena_code" }
 dependencies = [
     { name = "mng" },
+    { name = "mng-claude" },
     { name = "mng-claude-mind" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mng", editable = "libs/mng" },
+    { name = "mng-claude", editable = "libs/mng_claude" },
     { name = "mng-claude-mind", editable = "libs/mng_claude_mind" },
 ]
 
