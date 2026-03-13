@@ -294,19 +294,27 @@ _BACKEND_WAITING_TEMPLATE: Final[str] = (
   <h1>Starting up...</h1>
   <p class="status" id="status"><span class="spinner"></span> Waiting for agent to become available...</p>
   <script>
+    const agentId = '{{ agent_id }}';
+    const serverName = '{{ server_name }}';
     const timeoutMs = {{ timeout_seconds }} * 1000;
-    const params = new URLSearchParams(location.search);
-    const startTime = parseInt(params.get('_wait_start') || '0', 10) || Date.now();
-    function checkBackend() {
+    const startTime = Date.now();
+    async function pollBackend() {
       if (Date.now() - startTime > timeoutMs) {
         document.getElementById('status').textContent = 'Agent is not available. It may still be starting up -- try refreshing the page.';
         document.getElementById('status').classList.add('error');
         return;
       }
-      params.set('_wait_start', String(startTime));
-      location.search = params.toString();
+      try {
+        const resp = await fetch('/api/backend-ready/' + agentId + '/' + serverName);
+        const data = await resp.json();
+        if (data.ready) {
+          window.location.href = '/agents/' + agentId + '/' + serverName + '/';
+          return;
+        }
+      } catch (e) { /* keep polling */ }
+      setTimeout(pollBackend, 3000);
     }
-    setTimeout(checkBackend, 3000);
+    setTimeout(pollBackend, 3000);
   </script>
 </body>
 </html>"""
@@ -321,9 +329,9 @@ def render_backend_waiting_page(
 ) -> str:
     """Render a waiting page shown when the backend is not yet available.
 
-    The page auto-reloads every 3 seconds. If the backend becomes available,
-    the normal proxy flow takes over. If the timeout expires, it shows an
-    error message.
+    Polls /api/backend-ready/{agent_id}/{server_name} every 3 seconds.
+    When the backend becomes available, redirects to the agent page.
+    If the timeout expires, shows an error message.
     """
     template = _JINJA_ENV.from_string(_BACKEND_WAITING_TEMPLATE)
     return template.render(

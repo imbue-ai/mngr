@@ -466,11 +466,9 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        # Serve a waiting page that auto-refreshes until the backend is ready,
-        # instead of immediately returning 502. This handles the case where
-        # the user is redirected to an agent that is still starting up.
-        # The page uses JavaScript to reload periodically and gives up after
-        # _BACKEND_WAIT_TIMEOUT_SECONDS.
+        # Serve a waiting page that polls /api/backend-ready/{agent_id}/{server_name}
+        # until the backend is available, then redirects. This handles the case
+        # where the user is redirected to an agent that is still starting up.
         html = render_backend_waiting_page(
             agent_id=parsed_id,
             server_name=parsed_server,
@@ -812,6 +810,31 @@ def _handle_creating_page(
     return HTMLResponse(content=html)
 
 
+def _handle_backend_ready(
+    agent_id: str,
+    server_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Check whether a backend is available for the given agent and server.
+
+    Returns JSON with {"ready": true/false}. Used by the waiting page
+    to poll for backend availability without reloading the page.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    parsed_id = AgentId(agent_id)
+    parsed_server = ServerName(server_name)
+    backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+    ready = backend_url is not None
+    return Response(
+        content=json.dumps({"ready": ready}),
+        media_type="application/json",
+    )
+
+
 # -- App factory --
 
 
@@ -857,6 +880,9 @@ def create_forwarding_server(
     app.post("/api/create-agent")(_handle_create_agent_api)
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/creating/{agent_id}")(_handle_creating_page)
+
+    # Backend readiness check (used by the waiting page)
+    app.get("/api/backend-ready/{agent_id}/{server_name}")(_handle_backend_ready)
 
     # Agent default page: redirect to web server
     app.get("/agents/{agent_id}/")(_handle_agent_default_redirect)
