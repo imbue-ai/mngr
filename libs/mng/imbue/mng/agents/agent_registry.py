@@ -41,8 +41,8 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     set_default_agent_class(BaseAgent)
 
     # Register built-in agent type classes (each has a hookimpl static method)
-    # claude, code_guardian, fixme_fairy, and headless_claude are registered
-    # via entry points from the mng_claude plugin
+    # Claude-based agent types are registered via entry points from the
+    # mng_claude plugin
     pm.register(codex_agent, name="codex")
 
     # Call the hook to get all agent type registrations
