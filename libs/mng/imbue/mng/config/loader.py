@@ -520,14 +520,9 @@ def parse_config(
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
     kwargs["default_host_dir"] = raw.pop("default_host_dir", None)
-    # List fields: only include when present so pydantic's default applies when absent
-    # (model_construct stores explicit None, but merge_with concatenates lists and can't handle None)
-    if "unset_vars" in raw:
-        kwargs["unset_vars"] = raw.pop("unset_vars")
-    if "enabled_backends" in raw:
-        kwargs["enabled_backends"] = raw.pop("enabled_backends")
-    # Scalar fields: None signals "not set" (merge_with checks `is not None`)
+    kwargs["unset_vars"] = raw.pop("unset_vars", None) if "unset_vars" in raw else None
     kwargs["pager"] = raw.pop("pager", None) if "pager" in raw else None
+    kwargs["enabled_backends"] = raw.pop("enabled_backends", None) if "enabled_backends" in raw else None
     kwargs["connect_command"] = raw.pop("connect_command", None) if "connect_command" in raw else None
     kwargs["is_remote_agent_installation_allowed"] = (
         raw.pop("is_remote_agent_installation_allowed", None)
