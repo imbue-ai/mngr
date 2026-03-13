@@ -1089,7 +1089,14 @@ class ModalProviderInstance(BaseProviderInstance):
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
             # stdout/stderr are suppressed so Modal doesn't track them for performance/stability reasons.
             sandbox.exec(
-                "/usr/sbin/sshd", "-D", "-E", sshd_log_path, stdout=StreamType.DEVNULL, stderr=StreamType.DEVNULL
+                "/usr/sbin/sshd",
+                "-D",
+                "-o",
+                "MaxSessions=100",
+                "-E",
+                sshd_log_path,
+                stdout=StreamType.DEVNULL,
+                stderr=StreamType.DEVNULL,
             )
 
     def _get_ssh_info_from_sandbox(self, sandbox: modal.Sandbox) -> tuple[str, int]:
