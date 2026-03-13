@@ -317,9 +317,9 @@ def test_agent_state_change_event_serializes_to_valid_json() -> None:
 # === AgentObserver Tests ===
 
 
-def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _handle_full_snapshot correctly populates known hosts from host records."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     host1 = make_test_discovered_host()
     host2 = make_test_discovered_host()
     agent1 = make_test_discovered_agent()
@@ -334,9 +334,9 @@ def test_agent_observer_handle_full_snapshot_tracks_hosts(temp_mng_ctx: MngConte
         assert observer._known_hosts[str(host1.host_id)].host_name == host1.host_name
 
 
-def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that hosts from a prior snapshot are removed when not in a new snapshot."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     host_a = make_test_discovered_host()
     host_b = make_test_discovered_host()
 
@@ -351,32 +351,32 @@ def test_agent_observer_handle_full_snapshot_removes_stale_hosts(temp_mng_ctx: M
         assert str(host_b.host_id) in observer._known_hosts
 
 
-def test_agent_observer_on_activity_event_queues_host(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_on_activity_event_queues_host(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _on_activity_event adds the host to the activity queue."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     observer._on_activity_event('{"type":"SOME_EVENT"}', is_stdout=True, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 1
     assert observer._activity_queue.get_nowait() == "host-123"
 
 
-def test_agent_observer_on_activity_event_ignores_stderr(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_on_activity_event_ignores_stderr(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that stderr output is ignored."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     observer._on_activity_event("some stderr", is_stdout=False, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 0
 
 
-def test_agent_observer_on_activity_event_ignores_empty_lines(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_on_activity_event_ignores_empty_lines(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that empty/whitespace lines are ignored."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     observer._on_activity_event("", is_stdout=True, host_id_str="host-123")
     observer._on_activity_event("   \n", is_stdout=True, host_id_str="host-123")
     assert observer._activity_queue.qsize() == 0
 
 
-def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _emit_agent_state writes an AGENT_STATE event to the events file."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(name="observed-agent")
 
     observer._emit_agent_state(agent)
@@ -390,9 +390,9 @@ def test_agent_observer_emit_agent_state_writes_event_to_file(temp_mng_ctx: MngC
     assert data["agent"]["name"] == "observed-agent"
 
 
-def test_agent_observer_emit_agent_state_updates_tracking(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_agent_state_updates_tracking(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _emit_agent_state updates the last known state tracking."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details()
 
     observer._emit_agent_state(agent)
@@ -400,9 +400,11 @@ def test_agent_observer_emit_agent_state_updates_tracking(temp_mng_ctx: MngConte
     assert str(agent.id) in observer._last_agent_state_by_id
 
 
-def test_agent_observer_emit_agent_state_emits_state_change_for_new_agent(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_agent_state_emits_state_change_for_new_agent(
+    temp_mng_ctx: MngContext, noop_binary: str
+) -> None:
     """Verify that _emit_agent_state emits a state change event for a newly seen agent."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(name="new-agent", state=AgentLifecycleState.RUNNING)
 
     observer._emit_agent_state(agent)
@@ -418,9 +420,11 @@ def test_agent_observer_emit_agent_state_emits_state_change_for_new_agent(temp_m
     assert data["agent_name"] == "new-agent"
 
 
-def test_agent_observer_emit_agent_state_no_state_change_when_same_state(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_agent_state_no_state_change_when_same_state(
+    temp_mng_ctx: MngContext, noop_binary: str
+) -> None:
     """Verify that no state change event is emitted when the lifecycle state field is the same."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(state=AgentLifecycleState.RUNNING)
 
     # First emit triggers state change (None -> RUNNING)
@@ -434,9 +438,9 @@ def test_agent_observer_emit_agent_state_no_state_change_when_same_state(temp_mn
     assert len(lines) == 1
 
 
-def test_agent_observer_emit_agent_state_detects_state_transition(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_agent_state_detects_state_transition(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _emit_agent_state emits a state change when state transitions from a known value."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent_running = make_test_agent_details(name="transitioning", state=AgentLifecycleState.RUNNING)
 
     # First emit: None -> RUNNING
@@ -459,31 +463,31 @@ def test_agent_observer_emit_agent_state_detects_state_transition(temp_mng_ctx: 
     assert data["agent_name"] == "transitioning"
 
 
-def test_agent_observer_stop_sets_stop_event(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_stop_sets_stop_event(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that stop() signals the observer to halt."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     assert not observer._stop_event.is_set()
     observer.stop()
     assert observer._stop_event.is_set()
 
 
-def test_agent_observer_on_list_stream_output_ignores_non_stdout(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_on_list_stream_output_ignores_non_stdout(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that stderr output from list --stream is ignored."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     observer._on_list_stream_output("some error message", is_stdout=False)
     assert len(observer._known_hosts) == 0
 
 
-def test_agent_observer_on_list_stream_output_ignores_invalid_json(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_on_list_stream_output_ignores_invalid_json(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that invalid JSON lines from list --stream are gracefully ignored."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     observer._on_list_stream_output("not valid json at all", is_stdout=True)
     assert len(observer._known_hosts) == 0
 
 
-def test_agent_observer_do_full_state_snapshot_writes_event(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_do_full_state_snapshot_writes_event(temp_mng_ctx: MngContext, noop_binary: str) -> None:
     """Verify that _do_full_state_snapshot writes an AGENTS_FULL_STATE event."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
 
     observer._do_full_state_snapshot()
 
@@ -495,9 +499,11 @@ def test_agent_observer_do_full_state_snapshot_writes_event(temp_mng_ctx: MngCon
     assert data["type"] == "AGENTS_FULL_STATE"
 
 
-def test_agent_observer_process_snapshot_agents_emits_state_changes(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_process_snapshot_agents_emits_state_changes(
+    temp_mng_ctx: MngContext, noop_binary: str
+) -> None:
     """Verify that _process_snapshot_agents detects state field changes and emits to agent_states."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(name="snapshot-agent", state=AgentLifecycleState.STOPPED)
 
     # Pre-populate with a different state to simulate a transition
@@ -523,9 +529,11 @@ def test_agent_observer_process_snapshot_agents_emits_state_changes(temp_mng_ctx
     assert data["agent_name"] == "snapshot-agent"
 
 
-def test_agent_observer_process_snapshot_agents_no_change_when_same_state(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_process_snapshot_agents_no_change_when_same_state(
+    temp_mng_ctx: MngContext, noop_binary: str
+) -> None:
     """Verify that _process_snapshot_agents does not emit a state change when state is unchanged."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(name="stable-agent", state=AgentLifecycleState.RUNNING)
 
     # Pre-populate with the same state
@@ -543,9 +551,11 @@ def test_agent_observer_process_snapshot_agents_no_change_when_same_state(temp_m
     assert not states_path.exists()
 
 
-def test_agent_observer_emit_state_change_writes_to_agent_states_stream(temp_mng_ctx: MngContext) -> None:
+def test_agent_observer_emit_state_change_writes_to_agent_states_stream(
+    temp_mng_ctx: MngContext, noop_binary: str
+) -> None:
     """Verify that _emit_state_change writes an AGENT_STATE_CHANGE event to the agent_states file."""
-    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary="/bin/true")
+    observer = AgentObserver(mng_ctx=temp_mng_ctx, mng_binary=noop_binary)
     agent = make_test_agent_details(name="transitioning-agent", state=AgentLifecycleState.STOPPED)
 
     observer._emit_state_change(agent, "RUNNING")
