@@ -30,11 +30,9 @@ def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
     html = render_login_redirect_page(
-        agent_id=_AGENT_A,
         one_time_code=OneTimeCode("abc123-secret-82341"),
     )
     assert "window.location.href" in html
-    assert f"agent_id={_AGENT_A}" in html
     assert "one_time_code=abc123-secret-82341" in html
 
 

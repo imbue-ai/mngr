@@ -20,7 +20,7 @@ from imbue.minds.forwarding_server.conftest import DEFAULT_SERVER_NAME
 from imbue.minds.forwarding_server.conftest import make_agents_json
 from imbue.minds.forwarding_server.conftest import make_resolver_with_data
 from imbue.minds.forwarding_server.conftest import make_server_log
-from imbue.minds.forwarding_server.cookie_manager import get_cookie_name_for_agent
+from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.forwarding_server.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelError
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
@@ -122,35 +122,34 @@ def _setup_test_server(
 def _authenticate_client(
     client: TestClient,
     auth_store: FileAuthStore,
-    agent_id: AgentId,
 ) -> None:
-    """Authenticate a test client for an agent by adding a code and consuming it."""
-    code = OneTimeCode(f"auth-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
+    """Authenticate a test client by adding a one-time code and consuming it."""
+    code = OneTimeCode("auth-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
     client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
 
-def test_landing_page_shows_empty_state_without_cookies(tmp_path: Path) -> None:
+def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "No minds are accessible" in response.text
+    assert "Login" in response.text
 
 
 def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    code = OneTimeCode(f"login-code-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    code = OneTimeCode("login-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
 
     response = client.get(
         "/login",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
@@ -160,42 +159,41 @@ def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
 
 
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    code = OneTimeCode(f"auth-code-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    code = OneTimeCode("auth-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
 
     response = client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
     assert response.status_code == 307
-    cookie_name = get_cookie_name_for_agent(agent_id)
-    assert cookie_name in response.cookies
+    assert SESSION_COOKIE_NAME in response.cookies
 
 
-def test_authenticate_redirects_to_agent_default_page(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    code = OneTimeCode(f"auth-code-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
+def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    code = OneTimeCode("auth-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
 
     response = client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
     assert response.status_code == 307
-    assert response.headers["location"] == f"/agents/{agent_id}/"
+    assert response.headers["location"] == "/"
 
 
 def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
-    client, _, agent_id = _setup_test_server(tmp_path)
+    client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": "bogus-code-82734"},
+        params={"one_time_code": "bogus-code-82734"},
         follow_redirects=False,
     )
 
@@ -204,29 +202,29 @@ def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
 
 
 def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    code = OneTimeCode(f"once-only-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    code = OneTimeCode("once-only-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
 
     first_response = client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
     assert first_response.status_code == 307
 
     second_response = client.get(
         "/authenticate",
-        params={"agent_id": str(agent_id), "one_time_code": str(code)},
+        params={"one_time_code": str(code)},
         follow_redirects=False,
     )
     assert second_response.status_code == 403
 
 
-def test_landing_page_redirects_when_single_authenticated_agent(tmp_path: Path) -> None:
-    """When exactly one agent is authenticated, the landing page redirects to it."""
+def test_landing_page_redirects_when_single_agent_known(tmp_path: Path) -> None:
+    """When authenticated and exactly one agent is known, the landing page redirects to it."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/", follow_redirects=False)
     assert response.status_code == 307
@@ -248,7 +246,7 @@ def test_agent_default_page_redirects_to_web_server(tmp_path: Path) -> None:
         backend_resolver=backend_resolver,
         http_client=None,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/agents/{agent_id}/", follow_redirects=False)
     assert response.status_code == 307
@@ -285,7 +283,7 @@ def test_agent_servers_page_lists_available_servers(tmp_path: Path) -> None:
         backend_resolver=backend_resolver,
         http_client=None,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
@@ -303,7 +301,7 @@ def test_agent_servers_page_shows_empty_state_when_no_servers(tmp_path: Path) ->
         backend_resolver=backend_resolver,
         http_client=None,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
@@ -337,7 +335,7 @@ def test_agent_proxy_rejects_unauthenticated_requests(tmp_path: Path) -> None:
 
 def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(
         f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/",
@@ -350,7 +348,7 @@ def test_agent_proxy_serves_bootstrap_on_first_navigation(tmp_path: Path) -> Non
 
 def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/__sw.js")
     assert response.status_code == 200
@@ -360,7 +358,7 @@ def test_agent_proxy_serves_service_worker_js(tmp_path: Path) -> None:
 
 def test_agent_proxy_forwards_get_request_to_backend(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
@@ -371,7 +369,7 @@ def test_agent_proxy_forwards_get_request_to_backend(tmp_path: Path) -> None:
 
 def test_agent_proxy_forwards_post_request_to_backend(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
@@ -385,7 +383,7 @@ def test_agent_proxy_forwards_post_request_to_backend(tmp_path: Path) -> None:
 
 def test_agent_proxy_injects_websocket_shim_into_html_responses(tmp_path: Path) -> None:
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
@@ -408,7 +406,7 @@ def _setup_test_server_without_backend(
         http_client=None,
     )
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     return client, auth_store, agent_id
 
@@ -423,15 +421,15 @@ def test_agent_proxy_returns_502_for_unknown_backend(tmp_path: Path) -> None:
 
 
 def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
 
-    new_code = OneTimeCode(f"second-code-{AgentId()}")
-    auth_store.add_one_time_code(agent_id=agent_id, code=new_code)
+    new_code = OneTimeCode("second-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=new_code)
 
     response = client.get(
         "/login",
-        params={"agent_id": str(agent_id), "one_time_code": str(new_code)},
+        params={"one_time_code": str(new_code)},
         follow_redirects=False,
     )
     assert response.status_code == 307
@@ -494,7 +492,7 @@ def test_proxy_routes_to_correct_server_for_multi_server_agent(tmp_path: Path) -
         http_client=test_http_client,
     )
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
 
@@ -537,8 +535,8 @@ def test_agent_auth_covers_all_servers(tmp_path: Path) -> None:
     response_api = client.get(f"/agents/{agent_id}/api/")
     assert response_api.status_code == 403
 
-    # Authenticate once (per-agent)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    # Authenticate once (global session)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
@@ -579,7 +577,7 @@ def test_mng_cli_resolver_proxies_to_backend_discovered_via_mng_cli(tmp_path: Pa
     assert backend_resolver.get_backend_url(agent_id, ServerName("web")) == "http://test-backend"
     assert agent_id in backend_resolver.list_known_agent_ids()
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
     response = client.get(f"/agents/{agent_id}/web/api/status")
@@ -631,7 +629,7 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     assert ServerName("web") in servers
     assert ServerName("api") in servers
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
     client.cookies.set(f"sw_installed_{agent_id}_api", "1")
 
@@ -657,7 +655,7 @@ def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> N
         http_client=None,
     )
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
     response = client.get(f"/agents/{agent_id}/web/")
@@ -679,7 +677,7 @@ def test_mng_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_pat
         http_client=None,
     )
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/", follow_redirects=False)
     assert response.status_code == 307
@@ -703,7 +701,7 @@ def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None
         http_client=None,
     )
 
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get(f"/agents/{agent_id}/servers/")
     assert response.status_code == 200
@@ -764,7 +762,7 @@ def _setup_failing_tunnel_server(
         tunnel_manager=_FailingTunnelManager(),
     )
     client = TestClient(app)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_id
 
 
@@ -792,7 +790,7 @@ def test_websocket_proxy_closes_with_1011_when_ssh_tunnel_fails(tmp_path: Path) 
 def test_http_proxy_without_tunnel_manager_works_for_local_backend(tmp_path: Path) -> None:
     """When no tunnel_manager is provided, local backends work normally."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/api/status")
@@ -834,7 +832,7 @@ def test_proxy_combines_stored_and_request_query_strings(tmp_path: Path) -> None
         backend_resolver=backend_resolver,
         http_client=test_http_client,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_chat", "1")
 
     # Request with no additional query -- only stored query should arrive
@@ -853,7 +851,7 @@ def test_proxy_combines_stored_and_request_query_strings(tmp_path: Path) -> None
 def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> None:
     """Backend URLs without query strings still work correctly (regression test)."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id)
+    _authenticate_client(client=client, auth_store=auth_store)
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     # Existing test: plain backend URL with request query
@@ -865,13 +863,14 @@ def test_proxy_works_with_backend_url_without_query_string(tmp_path: Path) -> No
 
 
 def test_landing_page_shows_create_form_when_no_agents_exist(tmp_path: Path) -> None:
-    """When no agents exist at all, the landing page shows the agent creation form."""
+    """When authenticated and no agents exist, the landing page shows the agent creation form."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/")
     assert response.status_code == 200
@@ -882,11 +881,12 @@ def test_landing_page_shows_create_form_when_no_agents_exist(tmp_path: Path) -> 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
     """The create form pre-fills the git URL from a query parameter."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/", params={"git_url": "https://github.com/test/repo"})
     assert response.status_code == 200
@@ -896,11 +896,12 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
 def test_create_page_shows_form(tmp_path: Path) -> None:
     """GET /create shows the agent creation form."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/create")
     assert response.status_code == 200
@@ -916,8 +917,8 @@ def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_landing_page_lists_agents_when_multiple_authenticated(tmp_path: Path) -> None:
-    """When multiple agents are authenticated, the landing page lists them all."""
+def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
+    """When authenticated and multiple agents are known, the landing page lists them all."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -931,8 +932,7 @@ def test_landing_page_lists_agents_when_multiple_authenticated(tmp_path: Path) -
         backend_resolver=backend_resolver,
         http_client=None,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_1)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_2)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/")
     assert response.status_code == 200
@@ -943,11 +943,12 @@ def test_landing_page_lists_agents_when_multiple_authenticated(tmp_path: Path) -
 def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """POST /create returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.post("/create", data={"git_url": "https://github.com/test/repo"})
     assert response.status_code == 501
@@ -956,11 +957,12 @@ def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) ->
 def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """POST /api/create-agent returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
     assert response.status_code == 501
@@ -969,11 +971,12 @@ def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> N
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
-    client, _ = _create_test_forwarding_server(
+    client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
         http_client=None,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
 
     agent_id = AgentId()
     response = client.get("/creating/{}".format(agent_id))
@@ -983,11 +986,13 @@ def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None
 def _create_test_server_with_agent_creator(
     tmp_path: Path,
 ) -> tuple[TestClient, FileAuthStore, AgentCreator]:
-    """Create a forwarding server with an agent creator for testing."""
+    """Create a forwarding server with an agent creator for testing.
+
+    The returned client is already authenticated with a global session.
+    """
     backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
     agent_creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
-        forwarding_server_port=8420,
     )
     client, auth_store = _create_test_forwarding_server(
         tmp_path=tmp_path,
@@ -995,6 +1000,7 @@ def _create_test_server_with_agent_creator(
         http_client=None,
         agent_creator=agent_creator,
     )
+    _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_creator
 
 
@@ -1092,8 +1098,8 @@ def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
     assert "https://github.com/test/repo" in response.text
 
 
-def test_landing_page_shows_create_link_when_authenticated_with_agents(tmp_path: Path) -> None:
-    """When authenticated with multiple agents, landing page shows 'Create another mind' link."""
+def test_landing_page_shows_create_link_when_multiple_agents_known(tmp_path: Path) -> None:
+    """When authenticated with multiple agents known, landing page shows 'Create another mind' link."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -1107,9 +1113,60 @@ def test_landing_page_shows_create_link_when_authenticated_with_agents(tmp_path:
         backend_resolver=backend_resolver,
         http_client=None,
     )
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_1)
-    _authenticate_client(client=client, auth_store=auth_store, agent_id=agent_id_2)
+    _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/")
     assert response.status_code == 200
     assert "Create another mind" in response.text
+
+
+def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
+    """GET /create returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/create")
+    assert response.status_code == 403
+
+
+def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
+    """POST /create returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post("/create", data={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 403
+
+
+def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
+    """POST /api/create-agent returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post("/api/create-agent", json={"git_url": "https://github.com/test/repo"})
+    assert response.status_code == 403
+
+
+def test_creation_status_api_rejects_unauthenticated(tmp_path: Path) -> None:
+    """GET /api/create-agent/{id}/status returns 403 without authentication."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_server={})
+    client, _ = _create_test_forwarding_server(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.get("/api/create-agent/{}/status".format(AgentId()))
+    assert response.status_code == 403

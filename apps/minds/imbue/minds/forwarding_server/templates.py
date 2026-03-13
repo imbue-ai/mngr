@@ -136,7 +136,7 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
         const el = document.getElementById('status');
         if (data.status === 'DONE') {
           el.textContent = 'Done! Redirecting...';
-          window.location.href = data.login_url;
+          window.location.href = data.redirect_url;
           return;
         } else if (data.status === 'FAILED') {
           el.textContent = 'Failed: ' + data.error;
@@ -154,13 +154,34 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
 </html>"""
 )
 
+_LOGIN_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Login - Minds</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .login-message { color: gray; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Minds</h1>
+  <p class="login-message">
+    Please use the login URL printed in the terminal where the server is running.
+  </p>
+</body>
+</html>"""
+)
+
 _LOGIN_REDIRECT_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <html>
 <head><title>Authenticating...</title></head>
 <body>
 <p>Authenticating...</p>
 <script>
-window.location.href = '/authenticate?agent_id={{ agent_id }}&one_time_code={{ one_time_code }}';
+window.location.href = '/authenticate?one_time_code={{ one_time_code }}';
 </script>
 </body>
 </html>"""
@@ -222,13 +243,19 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
 
 
 @pure
+def render_login_page() -> str:
+    """Render the login prompt page for unauthenticated users."""
+    template = _JINJA_ENV.from_string(_LOGIN_PAGE_TEMPLATE)
+    return template.render()
+
+
+@pure
 def render_login_redirect_page(
-    agent_id: AgentId,
     one_time_code: OneTimeCode,
 ) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
     template = _JINJA_ENV.from_string(_LOGIN_REDIRECT_TEMPLATE)
-    return template.render(agent_id=agent_id, one_time_code=one_time_code)
+    return template.render(one_time_code=one_time_code)
 
 
 @pure

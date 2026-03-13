@@ -28,9 +28,9 @@ from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.auth import AuthStoreInterface
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.cookie_manager import create_signed_cookie_value
-from imbue.minds.forwarding_server.cookie_manager import get_cookie_name_for_agent
-from imbue.minds.forwarding_server.cookie_manager import verify_signed_cookie_value
+from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
+from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
 from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
 from imbue.minds.forwarding_server.proxy import generate_service_worker_js
 from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
@@ -43,6 +43,7 @@ from imbue.minds.forwarding_server.templates import render_auth_error_page
 from imbue.minds.forwarding_server.templates import render_create_form
 from imbue.minds.forwarding_server.templates import render_creating_page
 from imbue.minds.forwarding_server.templates import render_landing_page
+from imbue.minds.forwarding_server.templates import render_login_page
 from imbue.minds.forwarding_server.templates import render_login_redirect_page
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -105,57 +106,21 @@ BackendResolverDep = Annotated[BackendResolverInterface, Depends(_get_backend_re
 # -- Auth helpers --
 
 
-def _check_auth_cookie(
+def _is_authenticated(
     cookies: Mapping[str, str],
-    agent_id: AgentId,
     auth_store: AuthStoreInterface,
 ) -> bool:
-    """Check whether the given cookies contain a valid auth cookie for the agent."""
-    # mostly just for debugging convenience
+    """Check whether the user has a valid global session cookie."""
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
     signing_key = auth_store.get_signing_key()
-    cookie_name = get_cookie_name_for_agent(agent_id)
-    cookie_value = cookies.get(cookie_name)
+    cookie_value = cookies.get(SESSION_COOKIE_NAME)
     if cookie_value is None:
         return False
-    verified = verify_signed_cookie_value(
+    return verify_session_cookie(
         cookie_value=cookie_value,
         signing_key=signing_key,
     )
-    return verified == agent_id
-
-
-def _get_authenticated_agent_ids(
-    cookies: Mapping[str, str],
-    auth_store: AuthStoreInterface,
-    backend_resolver: BackendResolverInterface,
-) -> list[AgentId]:
-    """Extract agent IDs from valid auth cookies."""
-    signing_key = auth_store.get_signing_key()
-    known_ids = auth_store.list_agent_ids_with_valid_codes()
-    resolver_ids = backend_resolver.list_known_agent_ids()
-
-    all_candidate_ids: set[str] = set()
-    for agent_id in known_ids:
-        all_candidate_ids.add(str(agent_id))
-    for agent_id in resolver_ids:
-        all_candidate_ids.add(str(agent_id))
-
-    authenticated: list[AgentId] = []
-    for candidate_id_str in sorted(all_candidate_ids):
-        candidate_id = AgentId(candidate_id_str)
-        cookie_name = get_cookie_name_for_agent(candidate_id)
-        cookie_value = cookies.get(cookie_name)
-        if cookie_value is not None:
-            verified = verify_signed_cookie_value(
-                cookie_value=cookie_value,
-                signing_key=signing_key,
-            )
-            if verified == candidate_id:
-                authenticated.append(candidate_id)
-
-    return authenticated
 
 
 # -- WebSocket forwarding helpers --
@@ -247,45 +212,40 @@ async def _managed_lifespan(
 
 
 def _handle_login(
-    agent_id: str,
     one_time_code: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    parsed_id = AgentId(agent_id)
     code = OneTimeCode(one_time_code)
 
-    # If user already has a valid cookie, redirect to landing page
-    if _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
+    # If user already has a valid session, redirect to landing page
+    if _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=307, headers={"Location": "/"})
 
     # Render JS redirect to /authenticate (prevents prefetch consumption)
-    html = render_login_redirect_page(agent_id=parsed_id, one_time_code=code)
+    html = render_login_redirect_page(one_time_code=code)
     return HTMLResponse(content=html)
 
 
 def _handle_authenticate(
-    agent_id: str,
     one_time_code: str,
     auth_store: AuthStoreDep,
 ) -> Response:
-    parsed_id = AgentId(agent_id)
     code = OneTimeCode(one_time_code)
 
-    is_valid = auth_store.validate_and_consume_code(agent_id=parsed_id, code=code)
+    is_valid = auth_store.validate_and_consume_code(code=code)
 
     if not is_valid:
         html = render_auth_error_page(message="This login code is invalid or has already been used.")
         return HTMLResponse(content=html, status_code=403)
 
-    # Set signed cookie
+    # Set global session cookie
     signing_key = auth_store.get_signing_key()
-    cookie_value = create_signed_cookie_value(agent_id=parsed_id, signing_key=signing_key)
-    cookie_name = get_cookie_name_for_agent(parsed_id)
+    cookie_value = create_session_cookie(signing_key=signing_key)
 
-    response = Response(status_code=307, headers={"Location": f"/agents/{parsed_id}/"})
+    response = Response(status_code=307, headers={"Location": "/"})
     response.set_cookie(
-        key=cookie_name,
+        key=SESSION_COOKIE_NAME,
         value=cookie_value,
         path="/",
         httponly=True,
@@ -299,29 +259,23 @@ def _handle_landing_page(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    authenticated_ids = _get_authenticated_agent_ids(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-    )
-
-    # If exactly one authenticated agent, redirect directly to it
-    if len(authenticated_ids) == 1:
-        return Response(status_code=307, headers={"Location": "/agents/{}/".format(authenticated_ids[0])})
-
-    if authenticated_ids:
-        html = render_landing_page(accessible_agent_ids=authenticated_ids)
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        html = render_login_page()
         return HTMLResponse(content=html)
 
-    # Not authenticated for any agents -- check if any agents exist at all
-    all_known_ids = backend_resolver.list_known_agent_ids()
-    if len(all_known_ids) == 0:
-        # No agents exist: show the create form
-        git_url = request.query_params.get("git_url", "")
-        html = render_create_form(git_url=git_url)
+    all_agent_ids = backend_resolver.list_known_agent_ids()
+
+    # If exactly one agent, redirect directly to it
+    if len(all_agent_ids) == 1:
+        return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
+
+    if all_agent_ids:
+        html = render_landing_page(accessible_agent_ids=all_agent_ids)
         return HTMLResponse(content=html)
 
-    html = render_landing_page(accessible_agent_ids=[])
+    # No agents exist: show the create form
+    git_url = request.query_params.get("git_url", "")
+    html = render_create_form(git_url=git_url)
     return HTMLResponse(content=html)
 
 
@@ -331,10 +285,8 @@ def _handle_agent_default_redirect(
     auth_store: AuthStoreDep,
 ) -> Response:
     """Redirect to the agent's web server by default."""
-    parsed_id = AgentId(agent_id)
-
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     return Response(status_code=307, headers={"Location": f"/agents/{agent_id}/web/"})
 
@@ -348,8 +300,8 @@ def _handle_agent_servers_page(
     """Show a listing of all available servers for a given agent."""
     parsed_id = AgentId(agent_id)
 
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     server_names = backend_resolver.list_servers_for_agent(parsed_id)
     html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names)
@@ -499,9 +451,8 @@ async def _handle_proxy_http(
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
 
-    # Check auth (per-agent, not per-server)
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     # Serve the service worker script
     if path == "__sw.js":
@@ -539,7 +490,6 @@ async def _handle_proxy_http(
     # If Accept includes text/event-stream, use streaming proxy to avoid
     # buffering the entire response before forwarding.
     accept_header = request.headers.get("accept", "")
-    # FIXME: we should double check if this special handling for "api/chat/send" is actually needed anymore...
     is_likely_sse = "text/event-stream" in accept_header or (request.method == "POST" and "api/chat/send" in path)
 
     if is_likely_sse:
@@ -585,8 +535,7 @@ async def _handle_proxy_websocket(
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
 
-    # Check auth (per-agent)
-    if not _check_auth_cookie(cookies=websocket.cookies, agent_id=parsed_id, auth_store=auth_store):
+    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
@@ -688,10 +637,7 @@ def _get_tunnel_socket_path(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend, or None for local.
-
-    Returns None if the agent is local (no SSH info) or no tunnel manager is configured.
-    """
+    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
     if tunnel_manager is None:
         return None
 
@@ -713,10 +659,7 @@ def _get_tunnel_http_client(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection.
-
-    Caches httpx clients per Unix socket path for reuse across requests.
-    """
+    """Get an httpx client configured for SSH tunneling, or None for direct connection."""
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
     if socket_path is None:
@@ -737,12 +680,11 @@ def _get_tunnel_http_client(
 # -- Agent creation route handlers --
 
 
-async def _handle_create_form_submit(request: Request) -> Response:
-    """Handle form submission to create a new agent.
+async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
+    """Handle form submission to create a new agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
-    Reads git_url from form data, starts background creation,
-    and redirects to the creating progress page.
-    """
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
@@ -759,18 +701,25 @@ async def _handle_create_form_submit(request: Request) -> Response:
 
 def _handle_create_page(
     request: Request,
+    auth_store: AuthStoreDep,
 ) -> Response:
     """Show the create form page (GET /create)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
     git_url = request.query_params.get("git_url", "")
     html = render_create_form(git_url=git_url)
     return HTMLResponse(content=html)
 
 
-async def _handle_create_agent_api(request: Request) -> Response:
+async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -> Response:
     """API endpoint for creating an agent (POST /api/create-agent).
 
     Accepts JSON body with git_url. Returns JSON with agent_id and status.
     """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
@@ -801,8 +750,12 @@ async def _handle_create_agent_api(request: Request) -> Response:
 def _handle_creation_status_api(
     agent_id: str,
     request: Request,
+    auth_store: AuthStoreDep,
 ) -> Response:
-    """API endpoint for checking agent creation status (GET /api/create-agent/{agent_id}/status)."""
+    """API endpoint for checking agent creation status."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
@@ -817,8 +770,8 @@ def _handle_creation_status_api(
         )
 
     result = {"agent_id": str(info.agent_id), "status": str(info.status)}
-    if info.login_url is not None:
-        result["login_url"] = info.login_url
+    if info.redirect_url is not None:
+        result["redirect_url"] = info.redirect_url
     if info.error is not None:
         result["error"] = info.error
     return Response(content=json.dumps(result), media_type="application/json")
@@ -827,11 +780,12 @@ def _handle_creation_status_api(
 def _handle_creating_page(
     agent_id: str,
     request: Request,
+    auth_store: AuthStoreDep,
 ) -> Response:
-    """Show the creating progress page (GET /creating/{agent_id}).
+    """Show the creating progress page (GET /creating/{agent_id})."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
-    Polls /api/create-agent/{agent_id}/status and redirects when done.
-    """
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
@@ -841,8 +795,8 @@ def _handle_creating_page(
     if info is None:
         return Response(status_code=404, content="Unknown agent creation")
 
-    if info.status == AgentCreationStatus.DONE and info.login_url is not None:
-        return Response(status_code=307, headers={"Location": info.login_url})
+    if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
+        return Response(status_code=307, headers={"Location": info.redirect_url})
 
     html = render_creating_page(agent_id=parsed_id, info=info)
     return HTMLResponse(content=html)

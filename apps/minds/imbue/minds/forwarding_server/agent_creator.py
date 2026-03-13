@@ -1,13 +1,12 @@
 """Agent creation for the forwarding server.
 
 Creates mng agents from git repositories. Handles cloning, agent type
-resolution, mng create invocation, and auth code generation.
+resolution, and mng create invocation.
 
 Agent creation runs in background threads so the server remains responsive.
 Callers can poll creation status via get_creation_info().
 """
 
-import secrets
 import shutil
 import threading
 import tomllib
@@ -29,17 +28,13 @@ from imbue.minds.config.data_types import MNG_BINARY
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngCommandError
-from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitUrl
-from imbue.minds.primitives import OneTimeCode
 from imbue.mng.primitives import AgentId
 from imbue.mng_claude_mind.settings import SETTINGS_FILENAME
 from imbue.mng_claude_mind.settings import load_settings_from_path
 
 DEFAULT_AGENT_TYPE: Final[str] = "claude-mind"
-
-_ONE_TIME_CODE_LENGTH: Final[int] = 32
 
 _DEFAULT_PASS_ENV: Final[tuple[str, ...]] = ("ANTHROPIC_API_KEY",)
 
@@ -58,7 +53,7 @@ class AgentCreationInfo(FrozenModel):
 
     agent_id: AgentId = Field(description="ID of the agent being created")
     status: AgentCreationStatus = Field(description="Current creation status")
-    login_url: str | None = Field(default=None, description="Login URL, set when status is DONE")
+    redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
 
@@ -175,22 +170,6 @@ def run_mng_create(
         )
 
 
-def generate_login_url(
-    paths: MindPaths,
-    agent_id: AgentId,
-    forwarding_server_port: int,
-) -> str:
-    """Generate a one-time auth code for an agent and return the login URL."""
-    auth_store = FileAuthStore(data_directory=paths.auth_dir)
-    code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
-    auth_store.add_one_time_code(agent_id=agent_id, code=code)
-    return "http://127.0.0.1:{}/login?agent_id={}&one_time_code={}".format(
-        forwarding_server_port,
-        agent_id,
-        code,
-    )
-
-
 class AgentCreator(MutableModel):
     """Creates mng agents in the background from git repositories.
 
@@ -201,7 +180,6 @@ class AgentCreator(MutableModel):
     """
 
     paths: MindPaths = Field(frozen=True, description="Filesystem paths for minds data")
-    forwarding_server_port: int = Field(frozen=True, description="Port the forwarding server listens on")
     pass_env: tuple[str, ...] = Field(
         default=_DEFAULT_PASS_ENV,
         frozen=True,
@@ -209,7 +187,7 @@ class AgentCreator(MutableModel):
     )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
-    _login_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+    _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -240,7 +218,7 @@ class AgentCreator(MutableModel):
             return AgentCreationInfo(
                 agent_id=agent_id,
                 status=status,
-                login_url=self._login_urls.get(str(agent_id)),
+                redirect_url=self._redirect_urls.get(str(agent_id)),
                 error=self._errors.get(str(agent_id)),
             )
 
@@ -268,15 +246,9 @@ class AgentCreator(MutableModel):
                     pass_env=self.pass_env,
                 )
 
-                login_url = generate_login_url(
-                    paths=self.paths,
-                    agent_id=agent_id,
-                    forwarding_server_port=self.forwarding_server_port,
-                )
-
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
-                    self._login_urls[aid] = login_url
+                    self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
         except (GitCloneError, MngCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
