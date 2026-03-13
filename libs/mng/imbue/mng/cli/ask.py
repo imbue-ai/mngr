@@ -1,7 +1,6 @@
 import shlex
 import subprocess
 import sys
-import tempfile
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
@@ -250,28 +249,46 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
             logger.debug("Failed to destroy ask agent {}", agent.name)
 
 
-@contextmanager
-def _headless_claude_output(
-    mng_ctx: MngContext, prompt: str, system_prompt: str
-) -> Iterator[StreamingHeadlessAgentMixin]:
-    """Create a HeadlessClaude agent, yield it, and destroy it on exit.
-
-    Creates a temporary directory as the work path (no git branch creation),
-    and passes claude args for headless operation (--system-prompt, --output-format
-    stream-json, --tools "", --no-session-persistence).
-
-    All filesystem operations go through the host interface so this works
-    for both local and remote hosts.
-    """
+def _get_local_host(mng_ctx: MngContext) -> OnlineHostInterface:
+    """Resolve the local host as an OnlineHostInterface."""
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
     host_interface = provider.get_host(HostName("localhost"))
     if not isinstance(host_interface, OnlineHostInterface):
         raise MngError("Local host is not online")
-    host = host_interface
+    return host_interface
 
-    with tempfile.TemporaryDirectory(prefix="mng-ask-") as tmp_dir:
-        work_path = Path(tmp_dir)
 
+def _create_work_dir_on_host(host: OnlineHostInterface) -> Path:
+    """Create a temporary work directory on the host and return its path."""
+    result = host.execute_command("mktemp -d /tmp/mng-ask-XXXXXXXXXX")
+    if not result.success:
+        raise MngError(f"Failed to create temp directory on host: {result.stderr}")
+    return Path(result.stdout.strip())
+
+
+def _remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
+    """Remove a work directory on the host, suppressing errors."""
+    try:
+        host.execute_command(f"rm -rf '{work_path}'")
+    except (OSError, BaseMngError):
+        logger.debug("Failed to remove ask work dir {}", work_path)
+
+
+@contextmanager
+def _headless_claude_output(
+    host: OnlineHostInterface, mng_ctx: MngContext, prompt: str, system_prompt: str
+) -> Iterator[StreamingHeadlessAgentMixin]:
+    """Create a HeadlessClaude agent, yield it, and destroy it on exit.
+
+    Creates a temporary directory on the host as the work path (no git branch
+    creation), and passes claude args for headless operation (--system-prompt,
+    --output-format stream-json, --tools "", --no-session-persistence).
+
+    All filesystem operations go through the host interface so this works
+    for both local and remote hosts.
+    """
+    work_path = _create_work_dir_on_host(host)
+    try:
         # Write prompt and system prompt to files via the host interface so
         # the shell command can read them via $(cat ...).  Passing them inline
         # as agent_args would exceed tmux's command length limit.
@@ -313,15 +330,18 @@ def _headless_claude_output(
             if not isinstance(agent, StreamingHeadlessAgentMixin):
                 raise MngError(f"Expected streaming headless agent, got {type(agent).__name__}")
             yield agent
+    finally:
+        _remove_work_dir_on_host(host, work_path)
 
 
 class HeadlessClaudeBackend(ClaudeBackendInterface):
     """Runs claude via a HeadlessClaude agent for proper agent lifecycle management."""
 
+    host: OnlineHostInterface
     mng_ctx: MngContext
 
     def query(self, prompt: str, system_prompt: str) -> Iterator[str]:
-        with _headless_claude_output(self.mng_ctx, prompt, system_prompt) as agent:
+        with _headless_claude_output(self.host, self.mng_ctx, prompt, system_prompt) as agent:
             yield from agent.stream_output()
 
 
@@ -424,7 +444,8 @@ def _ask_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info("Thinking...", output_opts.output_format)
 
-    backend = HeadlessClaudeBackend(mng_ctx=mng_ctx)
+    host = _get_local_host(mng_ctx)
+    backend = HeadlessClaudeBackend(host=host, mng_ctx=mng_ctx)
     system_prompt = _build_ask_context()
     chunks = backend.query(prompt=query_string, system_prompt=system_prompt)
 
