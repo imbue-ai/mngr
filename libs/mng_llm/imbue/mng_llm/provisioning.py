@@ -354,7 +354,7 @@ def _inject_conversation(
     return None
 
 
-def _create_internal_conversation(
+def ensure_named_conversation(
     host: OnlineHostInterface,
     agent_state_dir: Path,
     settings: ProvisioningSettings,
@@ -394,7 +394,7 @@ def create_system_notifications_conversation(
     settings: ProvisioningSettings,
 ) -> None:
     """Create the system_notifications conversation for delivery failure alerts."""
-    _create_internal_conversation(
+    ensure_named_conversation(
         host,
         agent_state_dir,
         settings,
@@ -410,7 +410,7 @@ def create_slack_notifications_conversation(
     settings: ProvisioningSettings,
 ) -> None:
     """Create the slack_notifications conversation for Slack integration alerts."""
-    _create_internal_conversation(
+    ensure_named_conversation(
         host,
         agent_state_dir,
         settings,

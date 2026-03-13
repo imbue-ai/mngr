@@ -1,7 +1,7 @@
 """Conftest for minds package-level tests (e.g. end-to-end release tests).
 
-The deployed_test_coder fixture is module-scoped so that multiple tests
-sharing it reuse a single deployed agent, avoiding redundant deploy cycles.
+The created_test_coder fixture is module-scoped so that multiple tests
+sharing it reuse a single agent, avoiding redundant creation cycles.
 """
 
 import shutil
@@ -13,48 +13,63 @@ import pytest
 from loguru import logger
 
 from imbue.minds.testing import find_agent
-from imbue.minds.testing import run_mind
+from imbue.minds.testing import init_and_commit_git_repo
 from imbue.minds.testing import run_mng
 from imbue.mng.utils.polling import wait_for
 
 
 @pytest.fixture(scope="module")
-def deployed_test_coder() -> Generator[dict[str, object], None, None]:
-    """Deploy a test-coder mind and yield its agent record.
+def created_test_coder() -> Generator[dict[str, object], None, None]:
+    """Create a test-coder mind agent and yield its agent record.
 
-    Module-scoped so all tests in the module share a single deployed agent,
-    avoiding redundant deploy cycles (~30s each). Handles deployment and
-    cleanup so individual tests only need to exercise the deployed agent.
+    Module-scoped so all tests in the module share a single agent,
+    avoiding redundant creation cycles (~30s each). Handles creation and
+    cleanup so individual tests only need to exercise the created agent.
 
     Waits for provisioning to complete (mng create backgrounds provisioning
     when called with --no-connect) before yielding.
     """
-    agent_name = f"e2e-test-{uuid4().hex}"
+    agent_name = "e2e-test-{}".format(uuid4().hex)
+    agent_id = "agent-{}".format(uuid4().hex)
 
-    deploy_result = run_mind(
-        "deploy",
-        "--agent-type",
-        "test-coder",
-        "--name",
+    # Create a minimal mind directory with a git repo
+    mind_dir = Path.home() / ".minds" / agent_id
+    mind_dir.mkdir(parents=True, exist_ok=True)
+
+    init_result = run_mng("--version")
+    assert init_result.returncode == 0, "mng not available: {}".format(init_result.stderr)
+
+    # Initialize git repo in mind dir
+    init_and_commit_git_repo(mind_dir, mind_dir.parent, allow_empty=True)
+
+    # Create the agent directly via mng create (cwd must be mind_dir for --in-place)
+    create_result = run_mng(
+        "create",
         agent_name,
-        "--provider",
-        "local",
-        "--no-self-deploy",
+        "--id",
+        agent_id,
+        "--no-connect",
+        "--type",
+        "test-coder",
+        "--label",
+        "mind=true",
+        "--yes",
+        "--in-place",
+        cwd=mind_dir,
     )
-    assert deploy_result.returncode == 0, (
-        f"Deploy failed:\nstdout: {deploy_result.stdout}\nstderr: {deploy_result.stderr}"
+    assert create_result.returncode == 0, "mng create failed:\nstdout: {}\nstderr: {}".format(
+        create_result.stdout, create_result.stderr
     )
 
     agent = find_agent(agent_name)
-    assert agent is not None, f"Agent {agent_name} not found in mng list"
+    assert agent is not None, "Agent {} not found in mng list".format(agent_name)
 
-    agent_id = str(agent["id"])
     settings_path = Path(str(agent["work_dir"])) / "minds.toml"
     wait_for(
         condition=settings_path.exists,
         timeout=60.0,
         poll_interval=1.0,
-        error_message=f"Provisioning did not complete within 60s (waiting for {settings_path})",
+        error_message="Provisioning did not complete within 60s (waiting for {})".format(settings_path),
     )
 
     try:

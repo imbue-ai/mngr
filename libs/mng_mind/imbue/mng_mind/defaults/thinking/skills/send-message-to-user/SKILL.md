@@ -5,17 +5,24 @@ description: Send a message to the user in a conversation thread. Use to reply i
 
 # Sending messages to the user
 
-You communicate with users through conversation threads. Each thread has a unique `conversation_id`.
+You communicate with users through conversation threads. Each thread has a unique `conversation_id` and a human-readable name.
 
 ## Starting a new conversation
 
-When you want to proactively reach out (e.g. to notify the user about completed work, ask a question, or share an update), create a new conversation:
+When you want to proactively reach out (e.g. to notify the user about completed work, ask a question, or share an update), create a new conversation by choosing an appropriate, descriptive name:
 
 ```bash
-$MNG_HOST_DIR/commands/chat.sh --new --as-agent "Your message here"
+$MNG_AGENT_STATE_DIR/commands/chat.sh --new --name "<descriptive name>" --as-agent "Your message here"
 ```
 
-This generates a new conversation ID, logs a `conversation_created` event, and injects your message. The command prints the new conversation ID to stdout.
+Choose a name that clearly describes the topic or purpose of the conversation. For example:
+- "Build failure in auth module" for a bug report
+- "PR #42 ready for review" for a completed task
+- "Question about database migration" for a question
+
+If a conversation with the given name already exists, your message will be added to that thread. Otherwise a new conversation is created.
+
+This command prints the conversation ID to stdout.
 
 ## Injecting a message into an existing conversation
 
@@ -30,8 +37,9 @@ You can find the `conversation_id` from the event you are responding to (it is i
 ## Choosing which approach to use
 
 - If you are responding to a user message, use `llm inject` with the same `conversation_id` from the event so your reply appears in the same thread.
-- If you are proactively notifying the user about something new (completed work, a question, an update), start a new conversation with `--new --as-agent`.
-- If you are unsure, default to starting a new conversation. Short, focused threads are easier for users to follow than long, multi-topic ones.
+- If you are proactively notifying the user about something new (completed work, a question, an update), use `chat.sh --new --name "<name>" --as-agent` with a descriptive name.
+- If you want to continue an existing topic, reuse the same name to add to the existing thread.
+- If you are unsure, default to starting a new conversation with a descriptive name. Short, focused threads are easier for users to follow than long, multi-topic ones.
 
 ## Guidelines
 

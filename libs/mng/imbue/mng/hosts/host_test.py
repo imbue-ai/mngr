@@ -14,19 +14,30 @@ from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.config.data_types import AgentTypeConfig
+from imbue.mng.config.data_types import EnvVar
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentError
 from imbue.mng.errors import HostConnectionError
+from imbue.mng.errors import HostDataSchemaError
+from imbue.mng.errors import InvalidActivityTypeError
+from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.host import ONBOARDING_TEXT
 from imbue.mng.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mng.hosts.host import _build_start_agent_shell_command
+from imbue.mng.hosts.host import _format_env_file
 from imbue.mng.hosts.host import _is_socket_closed_os_error
 from imbue.mng.hosts.host import _parse_boot_time_output
 from imbue.mng.hosts.host import _parse_uptime_output
 from imbue.mng.interfaces.data_types import PyinfraConnector
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import AgentLabelOptions
+from imbue.mng.interfaces.host import AgentProvisioningOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.interfaces.host import FileModificationSpec
 from imbue.mng.interfaces.host import NamedCommand
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
@@ -138,12 +149,10 @@ def test_discover_agents_returns_refs_with_certified_data(
 
 
 def test_discover_agents_returns_empty_when_no_agents_dir(
-    local_provider: LocalProviderInstance,
+    local_host: Host,
 ) -> None:
     """Test that discover_agents returns empty list when no agents directory exists."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
+    host = local_host
     # Don't create agents directory
     refs = host.discover_agents()
 
@@ -382,14 +391,12 @@ def test_get_created_branch_name_returns_none_when_absent(
 
 
 def test_create_agent_state_stores_created_branch_name(
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
     """Test that create_agent_state stores created_branch_name in data.json."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
+    host = local_host
     options = CreateAgentOptions(
         name=AgentName("test-branch-store"),
         agent_type=AgentTypeName("generic"),
@@ -402,14 +409,12 @@ def test_create_agent_state_stores_created_branch_name(
 
 
 def test_create_agent_state_uses_explicit_agent_id(
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
     """Test that create_agent_state uses the provided agent_id instead of generating one."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
+    host = local_host
     explicit_id = AgentId()
     options = CreateAgentOptions(
         agent_id=explicit_id,
@@ -424,14 +429,12 @@ def test_create_agent_state_uses_explicit_agent_id(
 
 
 def test_create_agent_state_generates_id_when_not_provided(
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
     """Test that create_agent_state auto-generates an agent ID when none is provided."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
+    host = local_host
     options = CreateAgentOptions(
         name=AgentName("test-auto-id"),
         agent_type=AgentTypeName("generic"),
@@ -445,14 +448,12 @@ def test_create_agent_state_generates_id_when_not_provided(
 
 
 def test_create_agent_state_stores_none_created_branch_name(
-    local_provider: LocalProviderInstance,
+    local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
     """Test that create_agent_state stores null created_branch_name when not provided."""
-    host = local_provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
-
+    host = local_host
     options = CreateAgentOptions(
         name=AgentName("test-no-branch"),
         agent_type=AgentTypeName("generic"),
@@ -1085,3 +1086,916 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="Could not read file"):
         host._get_file("/remote/file.txt", io.BytesIO())
+
+
+# =========================================================================
+# Tests for _format_env_file
+# =========================================================================
+
+
+def test_format_env_file_simple_values() -> None:
+    """Simple values without special characters should be unquoted."""
+    result = _format_env_file({"KEY": "value", "FOO": "bar"})
+    assert "KEY=value" in result
+    assert "FOO=bar" in result
+    assert result.endswith("\n")
+
+
+def test_format_env_file_quotes_values_with_spaces() -> None:
+    """Values with spaces should be double-quoted."""
+    result = _format_env_file({"MSG": "hello world"})
+    assert 'MSG="hello world"' in result
+
+
+def test_format_env_file_escapes_double_quotes() -> None:
+    """Values containing double quotes should have them escaped."""
+    result = _format_env_file({"MSG": 'say "hello"'})
+    assert r'MSG="say \"hello\""' in result
+
+
+def test_format_env_file_quotes_values_with_single_quotes() -> None:
+    """Values with single quotes should be double-quoted."""
+    result = _format_env_file({"MSG": "it's fine"})
+    assert """MSG="it's fine\"""" in result
+
+
+def test_format_env_file_quotes_values_with_newlines() -> None:
+    """Values with newlines should be double-quoted."""
+    result = _format_env_file({"MSG": "line1\nline2"})
+    assert 'MSG="line1\nline2"' in result
+
+
+def test_format_env_file_empty_dict() -> None:
+    """Empty dict should produce just a newline."""
+    result = _format_env_file({})
+    assert result == "\n"
+
+
+# =========================================================================
+# Tests for Host environment methods (local host)
+# =========================================================================
+
+
+def test_host_get_env_vars_returns_empty_when_not_set(
+    local_host: Host,
+) -> None:
+    """get_env_vars should return {} when no env file exists."""
+    host = local_host
+    assert host.get_env_vars() == {}
+
+
+def test_host_set_and_get_env_vars(
+    local_host: Host,
+) -> None:
+    """set_env_vars and get_env_vars should round-trip correctly."""
+    host = local_host
+    env = {"API_KEY": "secret", "DEBUG": "true"}
+    host.set_env_vars(env)
+
+    result = host.get_env_vars()
+    assert result == env
+
+
+def test_host_get_env_var_returns_value(
+    local_host: Host,
+) -> None:
+    """get_env_var should return a specific env variable."""
+    host = local_host
+    host.set_env_vars({"FOO": "bar", "BAZ": "qux"})
+    assert host.get_env_var("FOO") == "bar"
+    assert host.get_env_var("NONEXISTENT") is None
+
+
+def test_host_set_env_var_adds_to_existing(
+    local_host: Host,
+) -> None:
+    """set_env_var should add a variable without clobbering existing ones."""
+    host = local_host
+    host.set_env_vars({"EXISTING": "value"})
+    host.set_env_var("NEW_KEY", "new_value")
+
+    assert host.get_env_var("EXISTING") == "value"
+    assert host.get_env_var("NEW_KEY") == "new_value"
+
+
+# =========================================================================
+# Tests for Host activity methods
+# =========================================================================
+
+
+def test_host_record_and_get_boot_activity(
+    local_host: Host,
+) -> None:
+    """record_activity BOOT should write a file and get_reported_activity_time should read its mtime."""
+    host = local_host
+    # create_host already records BOOT activity, so it should be present
+    result = host.get_reported_activity_time(ActivitySource.BOOT)
+    assert result is not None
+
+    # Record again and verify the timestamp is still present
+    host.record_activity(ActivitySource.BOOT)
+    new_result = host.get_reported_activity_time(ActivitySource.BOOT)
+    assert new_result is not None
+
+
+def test_host_record_activity_rejects_non_boot(
+    local_host: Host,
+) -> None:
+    """record_activity should reject non-BOOT activity types on a host."""
+    host = local_host
+    with pytest.raises(InvalidActivityTypeError, match="Only BOOT"):
+        host.record_activity(ActivitySource.USER)
+
+
+def test_host_get_reported_activity_content_returns_json(
+    local_host: Host,
+) -> None:
+    """get_reported_activity_content should return JSON string with expected fields."""
+    host = local_host
+    host.record_activity(ActivitySource.BOOT)
+    content = host.get_reported_activity_content(ActivitySource.BOOT)
+    assert content is not None
+    data = json.loads(content)
+    assert "time" in data
+    assert "host_id" in data
+
+
+def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
+    local_host: Host,
+) -> None:
+    """get_reported_activity_content should return None for activity types not yet recorded."""
+    host = local_host
+    # SSH activity is not recorded by create_host, so it should be None
+    assert host.get_reported_activity_content(ActivitySource.SSH) is None
+
+
+# =========================================================================
+# Tests for Host certified data methods
+# =========================================================================
+
+
+def test_host_get_certified_data_returns_defaults_when_no_file(
+    local_host: Host,
+) -> None:
+    """get_certified_data should return defaults when data.json doesn't exist."""
+    host = local_host
+    data = host.get_certified_data()
+    assert data.host_id == str(host.id)
+    assert data.host_name == str(host.get_name())
+
+
+def test_host_set_and_get_certified_data(
+    local_host: Host,
+) -> None:
+    """set_certified_data and get_certified_data should round-trip correctly."""
+    host = local_host
+    initial_data = host.get_certified_data()
+    host.set_certified_data(initial_data)
+
+    result = host.get_certified_data()
+    assert result.host_id == initial_data.host_id
+    assert result.host_name == initial_data.host_name
+
+
+# =========================================================================
+# Tests for Host plugin data methods
+# =========================================================================
+
+
+def test_host_set_and_get_plugin_data(
+    local_host: Host,
+) -> None:
+    """set_plugin_data and get_plugin_data should round-trip via certified data."""
+    host = local_host
+    plugin_data = {"key1": "value1", "nested": {"a": 1}}
+    host.set_plugin_data("my-plugin", plugin_data)
+
+    # Plugin data is stored in certified_data.plugin
+    certified = host.get_certified_data()
+    assert "my-plugin" in certified.plugin
+    assert certified.plugin["my-plugin"] == plugin_data
+
+
+# =========================================================================
+# Tests for Host reported plugin state files
+# =========================================================================
+
+
+def test_host_set_and_get_reported_plugin_state_file(
+    local_host: Host,
+) -> None:
+    """set_reported_plugin_state_file_data and get should round-trip."""
+    host = local_host
+    host.set_reported_plugin_state_file_data("test-plugin", "config.json", '{"hello": "world"}')
+    result = host.get_reported_plugin_state_file_data("test-plugin", "config.json")
+    assert result == '{"hello": "world"}'
+
+
+def test_host_get_reported_plugin_state_files_returns_empty_when_no_dir(
+    local_host: Host,
+) -> None:
+    """get_reported_plugin_state_files should return [] when no plugin dir exists."""
+    host = local_host
+    assert host.get_reported_plugin_state_files("nonexistent-plugin") == []
+
+
+def test_host_get_reported_plugin_state_files_lists_files(
+    local_host: Host,
+) -> None:
+    """get_reported_plugin_state_files should list all files for a plugin."""
+    host = local_host
+    host.set_reported_plugin_state_file_data("test-plugin", "file1.txt", "content1")
+    host.set_reported_plugin_state_file_data("test-plugin", "file2.json", "content2")
+
+    result = sorted(host.get_reported_plugin_state_files("test-plugin"))
+    assert result == ["file1.txt", "file2.json"]
+
+
+# =========================================================================
+# Tests for Host generated work dir tracking
+# =========================================================================
+
+
+def test_host_add_and_check_generated_work_dir(
+    local_host: Host,
+) -> None:
+    """_add_generated_work_dir and _is_generated_work_dir should track correctly."""
+    host = local_host
+    work_dir = Path("/tmp/test-workdir")
+    assert host._is_generated_work_dir(work_dir) is False
+
+    host._add_generated_work_dir(work_dir)
+    assert host._is_generated_work_dir(work_dir) is True
+
+
+def test_host_remove_generated_work_dir(
+    local_host: Host,
+) -> None:
+    """_remove_generated_work_dir should remove the tracked directory."""
+    host = local_host
+    work_dir = Path("/tmp/test-workdir")
+    host._add_generated_work_dir(work_dir)
+    assert host._is_generated_work_dir(work_dir) is True
+
+    host._remove_generated_work_dir(work_dir)
+    assert host._is_generated_work_dir(work_dir) is False
+
+
+# =========================================================================
+# Tests for Host lock methods
+# =========================================================================
+
+
+def test_host_is_lock_held_returns_false_when_no_lock_file(
+    local_host: Host,
+) -> None:
+    """is_lock_held should return False when no lock file exists."""
+    host = local_host
+    assert host.is_lock_held() is False
+
+
+def test_host_lock_cooperatively_acquires_and_releases(
+    local_host: Host,
+) -> None:
+    """lock_cooperatively should acquire and release the lock."""
+    host = local_host
+    with host.lock_cooperatively(timeout_seconds=5.0):
+        assert host.is_lock_held() is True
+
+    # After exiting the context, the lock should be released
+    assert host.is_lock_held() is False
+
+
+def test_host_get_reported_lock_time_returns_none_when_no_lock(
+    local_host: Host,
+) -> None:
+    """get_reported_lock_time should return None when no lock file."""
+    host = local_host
+    assert host.get_reported_lock_time() is None
+
+
+def test_host_get_reported_lock_time_returns_time_when_locked(
+    local_host: Host,
+) -> None:
+    """get_reported_lock_time should return a datetime when lock file exists."""
+    host = local_host
+    with host.lock_cooperatively(timeout_seconds=5.0):
+        result = host.get_reported_lock_time()
+        assert result is not None
+
+
+# =========================================================================
+# Tests for Host create_agent_state with various options
+# =========================================================================
+
+
+def test_host_create_agent_state_with_initial_message(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """create_agent_state should store initial_message in data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("msg-test-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        initial_message="Hello from test",
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    assert agent.get_initial_message() == "Hello from test"
+
+
+def test_host_create_agent_state_with_labels(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """create_agent_state should store labels in data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("label-test-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"env": "test", "team": "backend"}),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    labels = agent.get_labels()
+    assert labels == {"env": "test", "team": "backend"}
+
+
+def test_host_create_agent_state_with_resume_message(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """create_agent_state should store resume_message in data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("resume-msg-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        resume_message="Resume this!",
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    assert agent.get_resume_message() == "Resume this!"
+
+
+def test_host_create_agent_state_with_ready_timeout(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """create_agent_state should store ready_timeout_seconds in data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("timeout-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        ready_timeout_seconds=30.0,
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    assert agent.get_ready_timeout_seconds() == 30.0
+
+
+def test_host_create_agent_state_with_additional_commands(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """create_agent_state should store additional_commands in data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("extra-cmd-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        additional_commands=(NamedCommand(command=CommandString("tail -f /var/log/syslog"), window_name="logs"),),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    # Verify the data.json has the additional commands
+    agent_dir = temp_host_dir / "agents" / str(agent.id)
+    data = json.loads((agent_dir / "data.json").read_text())
+    assert len(data["additional_commands"]) == 1
+    assert data["additional_commands"][0]["command"] == "tail -f /var/log/syslog"
+    assert data["additional_commands"][0]["window_name"] == "logs"
+
+
+# =========================================================================
+# Tests for Host.get_agents
+# =========================================================================
+
+
+def test_host_get_agents_returns_agents(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """get_agents should return all agents on the host."""
+    host = local_host
+    # Create two agents
+    options1 = CreateAgentOptions(
+        name=AgentName("agent-one"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    options2 = CreateAgentOptions(
+        name=AgentName("agent-two"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 2"),
+    )
+    host.create_agent_state(temp_work_dir, options1)
+    host.create_agent_state(temp_work_dir, options2)
+
+    agents = host.get_agents()
+    agent_names = {str(a.name) for a in agents}
+    assert "agent-one" in agent_names
+    assert "agent-two" in agent_names
+
+
+# =========================================================================
+# Tests for Host.provision_agent
+# =========================================================================
+
+
+def test_host_provision_agent_basic(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+) -> None:
+    """provision_agent should run through basic provisioning without errors."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("provision-test-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    host.provision_agent(agent, options, temp_mng_ctx)
+
+    # Verify env file was created with MNG-specific variables
+    env_path = temp_host_dir / "agents" / str(agent.id) / "env"
+    assert env_path.exists()
+    env_content = env_path.read_text()
+    assert "MNG_AGENT_ID" in env_content
+    assert "MNG_AGENT_NAME" in env_content
+    assert "MNG_AGENT_WORK_DIR" in env_content
+    assert "MNG_HOST_DIR" in env_content
+
+
+def test_host_provision_agent_with_env_vars(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+) -> None:
+    """provision_agent should include env_vars from options."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("env-provision-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        environment=AgentEnvironmentOptions(
+            env_vars=(
+                EnvVar(key="CUSTOM_KEY", value="custom_value"),
+                EnvVar(key="DEBUG", value="true"),
+            ),
+        ),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    host.provision_agent(agent, options, temp_mng_ctx)
+
+    # Verify custom env vars are in the env file
+    env_path = temp_host_dir / "agents" / str(agent.id) / "env"
+    env_content = env_path.read_text()
+    assert "CUSTOM_KEY=custom_value" in env_content
+    assert "DEBUG=true" in env_content
+
+
+def test_host_provision_agent_with_user_commands(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+) -> None:
+    """provision_agent should run user commands."""
+    host = local_host
+    # Create a marker file via user command to verify execution
+    marker_file = temp_work_dir / "provision_marker.txt"
+
+    options = CreateAgentOptions(
+        name=AgentName("cmd-provision-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        provisioning=AgentProvisioningOptions(
+            user_commands=(f"echo 'provisioned' > {marker_file}",),
+        ),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    host.provision_agent(agent, options, temp_mng_ctx)
+
+    assert marker_file.exists()
+    assert "provisioned" in marker_file.read_text()
+
+
+def test_host_provision_agent_with_append_to_file(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+) -> None:
+    """provision_agent should append text to files."""
+    host = local_host
+    target_file = temp_work_dir / "bashrc"
+    target_file.write_text("existing content\n")
+
+    options = CreateAgentOptions(
+        name=AgentName("append-provision-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        provisioning=AgentProvisioningOptions(
+            append_to_files=(FileModificationSpec(remote_path=target_file, text="appended line\n"),),
+        ),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    host.provision_agent(agent, options, temp_mng_ctx)
+
+    assert target_file.read_text() == "existing content\nappended line\n"
+
+
+def test_host_provision_agent_with_create_directories(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_mng_ctx: MngContext,
+) -> None:
+    """provision_agent should create directories."""
+    host = local_host
+    new_dir = temp_work_dir / "created_dir"
+
+    options = CreateAgentOptions(
+        name=AgentName("dir-provision-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        provisioning=AgentProvisioningOptions(
+            create_directories=(new_dir,),
+        ),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options)
+    host.provision_agent(agent, options, temp_mng_ctx)
+
+    assert new_dir.is_dir()
+
+
+# =========================================================================
+# Tests for Host._get_agent_command
+# =========================================================================
+
+
+def test_host_get_agent_command_returns_command(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_command should return the command from data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("cmd-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 42"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    result = host._get_agent_command(agent)
+    assert result == "sleep 42"
+
+
+def test_host_get_agent_command_raises_when_no_data_file(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_command should raise when data.json is missing."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("no-data-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    # Remove the data.json file
+    data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
+    data_path.unlink()
+
+    with pytest.raises(NoCommandDefinedError):
+        host._get_agent_command(agent)
+
+
+# =========================================================================
+# Tests for Host._get_agent_additional_commands
+# =========================================================================
+
+
+def test_host_get_agent_additional_commands_returns_commands(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_additional_commands should parse commands from data.json."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("addl-cmd-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        additional_commands=(
+            NamedCommand(command=CommandString("tail -f /var/log/syslog"), window_name="logs"),
+            NamedCommand(command=CommandString("htop"), window_name=None),
+        ),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    result = host._get_agent_additional_commands(agent)
+    assert len(result) == 2
+    assert result[0].command == "tail -f /var/log/syslog"
+    assert result[0].window_name == "logs"
+    assert result[1].command == "htop"
+    assert result[1].window_name is None
+
+
+def test_host_get_agent_additional_commands_returns_empty_when_none(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_additional_commands should return empty list when no additional commands."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("no-addl-cmd-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    result = host._get_agent_additional_commands(agent)
+    assert result == []
+
+
+def test_host_get_agent_additional_commands_handles_old_format(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_additional_commands should handle the old string format."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("old-format-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    # Manually write old-format additional_commands (list of strings)
+    data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
+    data = json.loads(data_path.read_text())
+    data["additional_commands"] = ["tail -f /var/log/syslog", "htop"]
+    data_path.write_text(json.dumps(data, indent=2))
+
+    result = host._get_agent_additional_commands(agent)
+    assert len(result) == 2
+    assert result[0].command == "tail -f /var/log/syslog"
+    assert result[0].window_name is None
+
+
+def test_host_get_agent_additional_commands_returns_empty_when_no_file(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_additional_commands should return empty when data.json is missing."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("missing-file-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    # Remove the data.json file
+    data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
+    data_path.unlink()
+
+    result = host._get_agent_additional_commands(agent)
+    assert result == []
+
+
+# =========================================================================
+# Tests for Host._get_agent_by_id
+# =========================================================================
+
+
+def test_host_get_agent_by_id_returns_agent(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_get_agent_by_id should return the agent when it exists."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("id-lookup-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    result = host._get_agent_by_id(agent.id)
+    assert result is not None
+    assert result.id == agent.id
+
+
+def test_host_get_agent_by_id_returns_none_when_not_found(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """_get_agent_by_id should return None when agent doesn't exist."""
+    host = local_host
+    result = host._get_agent_by_id(AgentId.generate())
+    assert result is None
+
+
+# =========================================================================
+# Tests for Host._create_host_tmux_config
+# =========================================================================
+
+
+def test_host_create_host_tmux_config_creates_file(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """_create_host_tmux_config should create a tmux config file with keybindings."""
+    host = local_host
+    config_path = host._create_host_tmux_config()
+    assert config_path.exists()
+
+    content = config_path.read_text()
+    assert "source-file" in content
+    assert "C-q" in content
+    assert "C-t" in content
+
+
+# =========================================================================
+# Tests for Host._build_env_shell_command
+# =========================================================================
+
+
+def test_host_build_env_shell_command_returns_bash_command(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_build_env_shell_command should return a bash -c command that sources env files."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("env-cmd-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    result = host._build_env_shell_command(agent)
+    assert result.startswith("bash -c ")
+    assert "MNG_SAVED_DEFAULT_TMUX_COMMAND" in result
+
+
+# =========================================================================
+# Tests for Host._collect_agent_env_vars
+# =========================================================================
+
+
+def test_host_collect_agent_env_vars_includes_mng_variables(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_collect_agent_env_vars should include MNG-specific variables."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("env-collect-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env = host._collect_agent_env_vars(agent, options)
+    assert env["MNG_HOST_DIR"] == str(temp_host_dir)
+    assert env["MNG_AGENT_ID"] == str(agent.id)
+    assert env["MNG_AGENT_NAME"] == str(agent.name)
+    assert env["MNG_AGENT_WORK_DIR"] == str(temp_work_dir)
+    assert "MNG_AGENT_STATE_DIR" in env
+    assert "LLM_USER_PATH" in env
+    assert "GIT_BASE_BRANCH" in env
+
+
+def test_host_collect_agent_env_vars_with_env_file(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """_collect_agent_env_vars should load env vars from env_files."""
+    host = local_host
+    # Create an env file
+    env_file = tmp_path / "test.env"
+    env_file.write_text("FROM_FILE=file_value\n")
+
+    options = CreateAgentOptions(
+        name=AgentName("env-file-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        environment=AgentEnvironmentOptions(
+            env_files=(env_file,),
+        ),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env = host._collect_agent_env_vars(agent, options)
+    assert env["FROM_FILE"] == "file_value"
+
+
+# =========================================================================
+# Tests for Host._write_agent_env_file
+# =========================================================================
+
+
+def test_host_write_agent_env_file_creates_env_file(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_write_agent_env_file should create the env file."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("write-env-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env_vars = {"KEY1": "value1", "KEY2": "value2"}
+    host._write_agent_env_file(agent, env_vars)
+
+    env_path = host.get_agent_env_path(agent)
+    assert env_path.exists()
+    content = env_path.read_text()
+    assert "KEY1=value1" in content
+    assert "KEY2=value2" in content
+
+
+def test_host_write_agent_env_file_skips_when_empty(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """_write_agent_env_file should not create a file for empty env vars."""
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("empty-env-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    host._write_agent_env_file(agent, {})
+
+    env_path = host.get_agent_env_path(agent)
+    assert not env_path.exists()
+
+
+# =========================================================================
+# Tests for Host.get_certified_data schema error
+# =========================================================================
+
+
+def test_host_get_certified_data_raises_on_invalid_json(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """get_certified_data should raise HostDataSchemaError for invalid data.json."""
+    host = local_host
+    # Write invalid data.json (missing required fields)
+    data_path = temp_host_dir / "data.json"
+    data_path.write_text('{"invalid_field": "oops", "created_at": "not-a-datetime"}')
+
+    with pytest.raises(HostDataSchemaError):
+        host.get_certified_data()

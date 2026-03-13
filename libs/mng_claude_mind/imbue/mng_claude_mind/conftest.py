@@ -113,7 +113,8 @@ class ChatScriptEnv:
         self.env["LLM_USER_PATH"] = str(self.llm_data_dir)
 
     def set_default_model(self, model: str) -> None:
-        """Write the chat model to minds.toml in the work dir."""
+        """Set the chat model via MNG_LLM_MODEL env var (and minds.toml for backward compat)."""
+        self.env["MNG_LLM_MODEL"] = model
         (self.work_dir / "minds.toml").write_text(f'[chat]\nmodel = "{model}"\n')
 
     def run(self, *args: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:

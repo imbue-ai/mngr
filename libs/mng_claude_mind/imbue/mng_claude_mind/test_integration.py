@@ -26,12 +26,12 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mng.agents.default_plugins.claude_config import encode_claude_project_dir_name
 from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 from imbue.mng.utils.testing import wait_for_agent_session
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
 from imbue.mng_claude_mind.conftest import StubCommandResult
@@ -412,7 +412,7 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
     """Verify that conversation records written by chat.sh are stored in the database."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "test-conv", "--as-agent")
 
     assert result.returncode == 0, f"chat.sh failed: stdout={result.stdout!r} stderr={result.stderr!r}"
 
@@ -428,8 +428,8 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
     chat_env.set_default_model("claude-sonnet-4-6")
 
     conversation_ids = []
-    for _ in range(3):
-        result = chat_env.run("--new", "--as-agent")
+    for i in range(3):
+        result = chat_env.run("--new", "--name", f"test-conv-{i}", "--as-agent")
         assert result.returncode == 0
         conversation_ids.append(result.stdout.strip())
 
@@ -440,21 +440,21 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
 
 
 @pytest.mark.timeout(30)
-def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh reads the model from settings.toml."""
-    chat_env.set_default_model("claude-haiku-4-5")
+def test_chat_model_read_from_env_var(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh reads the model from MNG_LLM_MODEL env var."""
+    chat_env.env["MNG_LLM_MODEL"] = "claude-haiku-4-5"
 
     # Ensure log directory exists so we can check the log for the model
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "model-test", "--as-agent")
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
     assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
-    # Verify the model from settings.toml was used (visible in log output)
+    # Verify the model from env var was used (visible in log output)
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists()
     log_content = log_file.read_text()
@@ -464,18 +464,18 @@ def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
 @pytest.mark.timeout(30)
 def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh creates a log file with operation records."""
-    chat_env.set_default_model("claude-sonnet-4-6")
+    chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
 
     # The log dir is at $MNG_AGENT_STATE_DIR/events/logs/
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    chat_env.run("--new", "--as-agent")
+    chat_env.run("--new", "--name", "log-test", "--as-agent")
 
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists(), "events/logs/chat/events.jsonl should be created"
     log_content = log_file.read_text()
-    assert "Creating new conversation" in log_content
+    assert "No existing conversation" in log_content
 
 
 # -- Event watcher offset tracking tests --
@@ -693,15 +693,15 @@ def test_conversation_watcher_sync_is_idempotent(
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh falls back to the hardcoded default model when settings.toml is absent."""
-    # Do NOT call set_default_model -- no settings.toml exists
+def test_chat_script_uses_hardcoded_default_when_no_env_var(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh falls back to the hardcoded default model when MNG_LLM_MODEL is not set."""
+    # Do NOT set MNG_LLM_MODEL -- rely on hardcoded default
 
     # Ensure log directory exists so we can check the log for the default model
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "default-model-test", "--as-agent")
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
@@ -760,12 +760,12 @@ def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
     written to the DB regardless, since insert_conversation_record runs
     before the llm inject call.
     """
-    chat_env.set_default_model("claude-sonnet-4-6")
+    chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
 
     # This will fail at the `llm inject` call since llm is not installed,
     # but the conversation record should already be inserted because
     # insert_conversation_record runs before the llm inject call.
-    chat_env.run("--new", "--as-agent", "hello from test")
+    chat_env.run("--new", "--name", "msg-test", "--as-agent", "hello from test")
 
     # At least one conversation should exist (the one just created)
     with sqlite3.connect(str(chat_env.llm_db_path)) as conn:

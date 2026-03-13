@@ -66,6 +66,7 @@ def load_config(
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
+    strict: bool | None = None,
 ) -> MngContext:
     """Load and merge configuration from all sources.
 
@@ -110,10 +111,11 @@ def load_config(
         commands={"create": CommandDefaults(defaults={"pass_host_env": ["EDITOR"]})},
     )
 
-    # When MNG_ALLOW_UNKNOWN_CONFIG is set, unknown fields in config files produce
-    # warnings instead of errors.  This is useful during development when a branch
-    # adds a new config field but other branches don't know about it yet.
-    allow_unknown = parse_bool_env(os.environ.get("MNG_ALLOW_UNKNOWN_CONFIG", ""))
+    if strict is None:
+        # When MNG_ALLOW_UNKNOWN_CONFIG is set, unknown fields in config files produce
+        # warnings instead of errors.  This is useful during development when a branch
+        # adds a new config field but other branches don't know about it yet.
+        strict = not parse_bool_env(os.environ.get("MNG_ALLOW_UNKNOWN_CONFIG", ""))
 
     # Load and merge config files in precedence order (user, project, local)
     for raw in (
@@ -122,9 +124,7 @@ def load_config(
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            config = config.merge_with(
-                parse_config(raw, disabled_plugins=config_disabled_plugins, strict=not allow_unknown)
-            )
+            config = config.merge_with(parse_config(raw, disabled_plugins=config_disabled_plugins, strict=strict))
 
     # Apply environment variable overrides
     prefix = os.environ.get("MNG_PREFIX")
@@ -315,7 +315,11 @@ def _parse_providers(
                     f' the plugin or add `plugin = "<plugin-name>"` to this provider'
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
-            raise ConfigParseError(msg) from e
+            if strict:
+                raise ConfigParseError(msg) from e
+            else:
+                logger.warning(msg)
+                continue
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict)
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 

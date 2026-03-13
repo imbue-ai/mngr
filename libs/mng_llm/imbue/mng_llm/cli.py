@@ -82,6 +82,16 @@ def max_rowid(db_path: str) -> None:
     max_rowid(db_path)
 
 
+@llmdb.command("lookup-by-name")
+@click.argument("db_path")
+@click.argument("name")
+def lookup_by_name(db_path: str, name: str) -> None:
+    """Look up a conversation ID by its name tag."""
+    from imbue.mng_llm.resources.conversation_db import lookup_by_name
+
+    lookup_by_name(db_path, name)
+
+
 @llmdb.command("poll-new")
 @click.argument("db_path")
 @click.argument("after_rowid")

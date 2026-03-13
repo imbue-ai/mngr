@@ -264,17 +264,13 @@ def main() -> None:
     _write_line(f"Data directory: {data_dir}")
     _write_line("")
 
-    # Generate one-time codes and display login URLs
-    for label, agent_id, port, _ in backend_configs:
-        code = OneTimeCode(secrets.token_urlsafe(32))
-        auth_store.add_one_time_code(
-            agent_id=agent_id,
-            code=code,
-        )
-        login_url = f"http://127.0.0.1:{forwarding_port}/login?agent_id={agent_id}&one_time_code={code}"
-        _write_line(f"Login URL for {label} ({agent_id}, port {port}):")
-        _write_line(f"  {login_url}")
-        _write_line("")
+    # Generate a single login code for global session auth
+    code = OneTimeCode(secrets.token_urlsafe(32))
+    auth_store.add_one_time_code(code=code)
+    login_url = f"http://127.0.0.1:{forwarding_port}/login?one_time_code={code}"
+    _write_line("Login URL (one-time use):")
+    _write_line(f"  {login_url}")
+    _write_line("")
 
     _write_line(f"Landing page: http://127.0.0.1:{forwarding_port}/")
     _write_line("")

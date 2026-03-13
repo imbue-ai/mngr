@@ -8,8 +8,10 @@ and supporting service infrastructure (chat, web UI, conversation watcher).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import click
+from loguru import logger
 from pydantic import Field
 
 from imbue.mng import hookimpl
@@ -26,6 +28,9 @@ from imbue.mng_llm.provisioning import install_llm_toolchain
 from imbue.mng_llm.provisioning import provision_llm_tools
 from imbue.mng_llm.provisioning import provision_supporting_services
 from imbue.mng_llm.settings import load_settings_from_host
+from imbue.mng_recursive.provisioning import provision_mng_for_agent
+
+_DEFAULT_LLM_MODEL = "claude-opus-4.6"
 
 
 def set_uv_tool_env_vars(env_vars: dict[str, str]) -> None:
@@ -40,6 +45,25 @@ def set_uv_tool_env_vars(env_vars: dict[str, str]) -> None:
     if agent_state_dir:
         env_vars["UV_TOOL_DIR"] = f"{agent_state_dir}/tools"
         env_vars["UV_TOOL_BIN_DIR"] = f"{agent_state_dir}/bin"
+
+
+def set_llm_model_env_var(
+    host: OnlineHostInterface,
+    work_dir: Path,
+    env_vars: dict[str, str],
+) -> None:
+    """Set MNG_LLM_MODEL from minds.toml settings or hardcoded default.
+
+    Reads the ``[chat] model`` setting from the agent's work directory.
+    Falls back to the hardcoded default when the file is missing or
+    does not specify a model.
+
+    Shared by LlmAgent and ClaudeMindAgent so that chat.sh can read
+    the model from the environment rather than parsing settings itself.
+    """
+    settings = load_settings_from_host(host, work_dir)
+    model = settings.chat.model or _DEFAULT_LLM_MODEL
+    env_vars["MNG_LLM_MODEL"] = model
 
 
 class LlmAgentConfig(AgentTypeConfig):
@@ -87,6 +111,27 @@ class LlmAgent(BaseAgent):
     - Provisions chat scripts and llm tool functions
     """
 
+    def assemble_command(
+        self,
+        host: OnlineHostInterface,
+        agent_args: tuple[str, ...],
+        command_override: CommandString | None,
+    ) -> CommandString:
+        if command_override is not None:
+            raise NotImplementedError("Command overrides are not supported for LlmAgent.")
+        if self.agent_config.command != CommandString("llm"):
+            raise NotImplementedError("Custom commands are not supported for LlmAgent.")
+
+        parts = ["$MNG_AGENT_STATE_DIR/commands/chat.sh", "--new", "--name", '"Inner Monologue"']
+        if self.agent_config.cli_args:
+            parts.extend(self.agent_config.cli_args)
+        if agent_args:
+            parts.extend(agent_args)
+
+        command = CommandString(" ".join(parts))
+        logger.trace("Assembled command: {}", command)
+        return command
+
     def _get_llm_config(self) -> LlmAgentConfig:
         """Get the llm-specific config from this agent.
 
@@ -105,8 +150,9 @@ class LlmAgent(BaseAgent):
         host: OnlineHostInterface,
         env_vars: dict[str, str],
     ) -> None:
-        """Set UV_TOOL_DIR and UV_TOOL_BIN_DIR for per-agent tool isolation."""
+        """Set UV tool dirs and MNG_LLM_MODEL for per-agent tool isolation and chat."""
         set_uv_tool_env_vars(env_vars)
+        set_llm_model_env_var(host, self.work_dir, env_vars)
 
     def provision(
         self,
@@ -124,8 +170,6 @@ class LlmAgent(BaseAgent):
         5. Supporting service scripts (chat, ttyd dispatch)
         6. LLM tool functions (context gathering for conversations)
         """
-        from imbue.mng_recursive.provisioning import provision_mng_for_agent
-
         provision_mng_for_agent(agent=self, host=host, mng_ctx=mng_ctx)
 
         settings = load_settings_from_host(host, self.work_dir)

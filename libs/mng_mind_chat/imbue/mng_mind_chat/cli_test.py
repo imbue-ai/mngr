@@ -25,6 +25,7 @@ def test_chat_command_help_shows_all_options() -> None:
     assert "--new" in result.output
     assert "--last" in result.output
     assert "--conversation" in result.output
+    assert "--name" in result.output
     assert "--allow-unknown-host" in result.output
     assert "--start" in result.output
     assert "AGENT" in result.output
@@ -37,6 +38,7 @@ def test_chat_cli_options_has_all_required_fields() -> None:
     assert annotations["new"] is bool
     assert annotations["last"] is bool
     assert annotations["conversation"] == (str | None)
+    assert annotations["name"] == (str | None)
     assert annotations["start"] is bool
     assert annotations["allow_unknown_host"] is bool
 
@@ -50,6 +52,7 @@ def _make_opts(
     new: bool = False,
     last: bool = False,
     conversation: str | None = None,
+    name: str | None = None,
 ) -> ChatCliOptions:
     """Create a ChatCliOptions with the given chat-specific flags."""
     return ChatCliOptions(
@@ -57,6 +60,7 @@ def _make_opts(
         new=new,
         last=last,
         conversation=conversation,
+        name=name,
         start=True,
         allow_unknown_host=False,
         headless=False,
@@ -81,7 +85,18 @@ def test_resolve_chat_args_new_flag(
 
     result = resolve_chat_args(opts, agent, host, is_interactive=False)
 
-    assert result == ["--new"]
+    assert result == ["--new", "--name", "new conversation"]
+
+
+def test_resolve_chat_args_new_flag_with_name(
+    local_host_and_agent: tuple[Host, TestAgent],
+) -> None:
+    host, agent = local_host_and_agent
+    opts = _make_opts(new=True, name="Bug triage")
+
+    result = resolve_chat_args(opts, agent, host, is_interactive=False)
+
+    assert result == ["--new", "--name", "Bug triage"]
 
 
 def test_resolve_chat_args_conversation_flag(
@@ -128,7 +143,7 @@ def test_resolve_chat_args_last_flag_without_conversations(
 
     result = resolve_chat_args(opts, agent, host, is_interactive=False)
 
-    assert result == ["--new"]
+    assert result == ["--new", "--name", "new conversation"]
 
 
 def test_resolve_chat_args_non_interactive_defaults_to_latest(
@@ -164,7 +179,7 @@ def test_resolve_chat_args_non_interactive_falls_back_to_new(
 
     result = resolve_chat_args(opts, agent, host, is_interactive=False)
 
-    assert result == ["--new"]
+    assert result == ["--new", "--name", "new conversation"]
 
 
 def test_resolve_chat_args_rejects_mutually_exclusive_new_and_last(
@@ -199,7 +214,7 @@ def test_resolve_latest_conversation_args_returns_new_when_no_conversations(
 
     result = _resolve_latest_conversation_args(agent, host)
 
-    assert result == ["--new"]
+    assert result == ["--new", "--name", "new conversation"]
 
 
 def test_resolve_latest_conversation_args_resumes_latest(

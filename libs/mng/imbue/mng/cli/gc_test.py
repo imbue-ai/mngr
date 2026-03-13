@@ -129,6 +129,17 @@ def test_format_destroyed_message_machine() -> None:
     assert msg_dry_run == "Would destroy machine: my-machine (docker)"
 
 
+def test_format_destroyed_message_machine_record() -> None:
+    """_format_destroyed_message should format machine record messages."""
+    host = _create_discovered_host(name="stale-host")
+
+    msg_destroy = _format_destroyed_message("machine_record", host, dry_run=False)
+    assert msg_destroy == "Destroyed machine record: stale-host (docker)"
+
+    msg_dry_run = _format_destroyed_message("machine_record", host, dry_run=True)
+    assert msg_dry_run == "Would destroy machine record: stale-host (docker)"
+
+
 def test_format_destroyed_message_snapshot() -> None:
     """_format_destroyed_message should format snapshot messages."""
     snapshot = _create_snapshot_info(name="snap-2024")
@@ -574,3 +585,39 @@ def test_gc_no_resource_types_jsonl_format(
     assert result.exit_code != 0
     output = json.loads(result.output.strip())
     assert output["event"] == "error"
+
+
+def test_gc_all_agent_resources_dry_run(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """gc with --all-agent-resources --dry-run should succeed and emit info messages."""
+    result = cli_runner.invoke(
+        gc,
+        ["--all-agent-resources", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code == 0
+    # Should contain cleanup progress messages
+    assert "Cleaning" in result.output or "Garbage Collection" in result.output
+
+
+def test_gc_individual_resource_types_dry_run(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """gc with individual resource types should succeed and emit messages for each type."""
+    result = cli_runner.invoke(
+        gc,
+        ["--machines", "--snapshots", "--volumes", "--logs", "--build-cache", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code == 0
+    # Each resource type should trigger a cleaning message
+    assert "Cleaning machines" in result.output
+    assert "Cleaning snapshots" in result.output
+    assert "Cleaning volumes" in result.output
+    assert "Cleaning logs" in result.output
+    assert "Cleaning build cache" in result.output

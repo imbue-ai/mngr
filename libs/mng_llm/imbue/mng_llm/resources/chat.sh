@@ -6,17 +6,17 @@
 # table in the llm sqlite database at $LLM_USER_PATH/logs.db.
 #
 # Usage:
-#   chat --new [message]              Create a new conversation (user-initiated)
-#   chat --new --as-agent [message]   Create a new conversation (agent-initiated)
-#   chat --resume <conversation-id>  Resume an existing conversation
-#   chat --list                      List all conversations
-#   chat --help                      Show usage information
-#   chat                             List conversations and show help hint
+#   chat --new --name <name>                        Create or resume a named conversation (user-initiated)
+#   chat --new --name <name> --as-agent <message>   Create or resume a named conversation (agent-initiated)
+#   chat --resume <conversation-id>                 Resume an existing conversation by ID
+#   chat --list                                     List all conversations
+#   chat --help                                     Show usage information
+#   chat                                            List conversations and show help hint
 #
 # Environment:
-#   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
 #   MNG_AGENT_STATE_DIR  - agent state directory (contains events/, commands/)
 #   MNG_AGENT_WORK_DIR   - agent work directory (contains talking/PROMPT.md)
+#   MNG_LLM_MODEL        - model to use for llm commands (default: claude-opus-4.6)
 #   LLM_USER_PATH        - llm data directory (contains logs.db)
 
 set -euo pipefail
@@ -54,29 +54,9 @@ log() {
     log_info "$*"
 }
 
-get_default_model() {
-    local _stderr_file
-    _stderr_file=$(mktemp)
-    local _model
-    _model=$(python3 -c "
-import tomllib, pathlib, sys
-p = pathlib.Path('${MNG_AGENT_WORK_DIR:-}/minds.toml')
-if p.exists():
-    try:
-        s = tomllib.loads(p.read_text())
-        model = s.get('chat', {}).get('model')
-        if model:
-            print(model)
-            sys.exit(0)
-    except Exception as e:
-        print(f'WARNING: failed to load settings from {p}: {e}', file=sys.stderr)
-print('claude-opus-4.6')
-" 2>"$_stderr_file") || true
-    if [ -s "$_stderr_file" ]; then
-        log_error "Failed to load settings: $(cat "$_stderr_file")"
-    fi
-    rm -f "$_stderr_file"
-    echo "${_model:-claude-opus-4.6}"
+# Get the model from MNG_LLM_MODEL env var, falling back to hardcoded default.
+get_model() {
+    echo "${MNG_LLM_MODEL:-claude-opus-4.6}"
 }
 
 generate_conversation_id() {
@@ -108,61 +88,135 @@ build_tool_args() {
     echo "$args"
 }
 
-# Build the system prompt from talking/PROMPT.md (and GLOBAL.md if present).
-# Returns the prompt text, or empty string if no prompt file is found.
-build_system_prompt() {
-    local prompt=""
+# Build the llm template YAML file from GLOBAL.md and talking/PROMPT.md.
+# The template is written atomically (write to tmp, then move) so it is
+# safe to call concurrently.  Returns the template path if a system prompt
+# was found, or empty string if no prompt files exist.
+build_template() {
+    local template_dir="$MNG_AGENT_STATE_DIR/plugin/llm"
+    local template_path="$template_dir/template.yml"
+    local tmp_path="$template_dir/template.yml.tmp"
+
+    mkdir -p "$template_dir"
+
+    local system_prompt=""
     local global_md="${MNG_AGENT_WORK_DIR:-}/GLOBAL.md"
 
     if [ -n "${MNG_AGENT_WORK_DIR:-}" ] && [ -f "$global_md" ]; then
-        prompt="$(cat "$global_md")"
-        log "Loaded GLOBAL.md system prompt (${#prompt} chars)"
+        system_prompt="$(cat "$global_md")"
+        log "Loaded GLOBAL.md for template (${#system_prompt} chars)"
     fi
 
     if [ -n "${MNG_AGENT_WORK_DIR:-}" ] && [ -f "$TALKING_PROMPT" ]; then
-        if [ -n "$prompt" ]; then
-            prompt="$prompt"$'\n\n'"$(cat "$TALKING_PROMPT")"
+        if [ -n "$system_prompt" ]; then
+            system_prompt="$system_prompt"$'\n\n'"$(cat "$TALKING_PROMPT")"
         else
-            prompt="$(cat "$TALKING_PROMPT")"
+            system_prompt="$(cat "$TALKING_PROMPT")"
         fi
-        log "Loaded talking/PROMPT.md system prompt (total ${#prompt} chars)"
-    else
-        log "No talking prompt found at $TALKING_PROMPT"
+        log "Loaded talking/PROMPT.md for template (total ${#system_prompt} chars)"
     fi
 
-    echo "$prompt"
+    if [ -n "$system_prompt" ]; then
+        {
+            echo "system: |"
+            echo "$system_prompt" | sed 's/^/  /'
+        } > "$tmp_path"
+        mv "$tmp_path" "$template_path"
+        log "Built template at $template_path"
+        echo "$template_path"
+    else
+        log "No system prompt files found, no template built"
+        # Clean up any stale template
+        rm -f "$template_path" "$tmp_path"
+        echo ""
+    fi
+}
+
+# Build a JSON tags object with the given name.
+build_tags_json() {
+    local name="$1"
+    python3 -c "import json, sys; print(json.dumps({'name': sys.argv[1]}))" "$name"
+}
+
+# Look up an existing conversation by name. Prints the conversation_id
+# if found, or nothing if not found.
+lookup_conversation_by_name() {
+    local name="$1"
+    if [ -f "$_LLM_DB" ]; then
+        mng llmdb lookup-by-name "$_LLM_DB" "$name"
+    fi
 }
 
 new_conversation() {
     local as_agent=false
     local message=""
+    local name=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --as-agent) as_agent=true; shift ;;
-            *) message="$1"; shift ;;
+            --as-agent)
+                as_agent=true
+                shift
+                if [[ $# -gt 0 && "$1" != --* ]]; then
+                    message="$1"
+                    shift
+                fi
+                ;;
+            --name)
+                shift
+                if [[ $# -gt 0 ]]; then
+                    name="$1"
+                    shift
+                fi
+                ;;
+            *)
+                echo "Unknown option for --new: $1" >&2
+                exit 1
+                ;;
         esac
     done
 
-    local model
-    model=$(get_default_model)
-    local conversation_id
-    conversation_id=$(generate_conversation_id)
-
-    log "Creating new conversation: conversation_id=$conversation_id model=$model as_agent=$as_agent message_len=${#message}"
-
-    # Build system prompt args for llm live-chat only (llm inject does not support -s).
-    local system_prompt
-    system_prompt=$(build_system_prompt)
-    local sys_args=()
-    if [ -n "$system_prompt" ]; then
-        sys_args=(-s "$system_prompt")
+    if [ -z "$name" ]; then
+        echo "ERROR: --name is required with --new" >&2
+        exit 1
     fi
 
+    local model
+    model=$(get_model)
+
+    log "new_conversation: name=$name model=$model as_agent=$as_agent message_len=${#message}"
+
+    # Check if a conversation with this name already exists
+    local existing_id
+    existing_id=$(lookup_conversation_by_name "$name")
+
+    if [ -n "$existing_id" ]; then
+        log "Found existing conversation for name=$name: $existing_id"
+        if [ "$as_agent" = true ]; then
+            if [ -n "$message" ]; then
+                log "Injecting agent message into existing conversation $existing_id"
+                llm inject --cid "$existing_id" -m "$model" "$message"
+                log "Agent message injected successfully"
+            fi
+            echo "$existing_id"
+        else
+            resume_conversation "$existing_id"
+        fi
+        return
+    fi
+
+    # No existing conversation -- create a new one
+    log "No existing conversation for name=$name, creating new"
+
+    local tags
+    tags=$(build_tags_json "$name")
+
     if [ "$as_agent" = true ]; then
-        insert_conversation_record "$conversation_id" '{"name":"(new chat)"}'
+        local conversation_id
+        conversation_id=$(generate_conversation_id)
+        insert_conversation_record "$conversation_id" "$tags"
         if [ -n "$message" ]; then
-            log "Injecting agent message into conversation $conversation_id"
+            log "Injecting agent message into new conversation $conversation_id"
             llm inject --cid "$conversation_id" -m "$model" "$message"
             log "Agent message injected successfully"
         fi
@@ -170,6 +224,14 @@ new_conversation() {
     else
         local tool_args
         tool_args=$(build_tool_args)
+
+        local template_path
+        template_path=$(build_template)
+        local template_args=()
+        if [ -n "$template_path" ]; then
+            template_args=(-t "$template_path")
+        fi
+
         log "Starting live-chat session: model=$model tool_args='$tool_args'"
 
         # llm live-chat creates a conversation in the llm database. We need
@@ -178,7 +240,7 @@ new_conversation() {
         local _max_rowid
         _max_rowid=0
         if [ -f "$_LLM_DB" ]; then
-            _max_rowid=$(mng llmdb max-rowid "$_LLM_DB")
+            _max_rowid=$(mng llmdb max-rowid "$_LLM_DB" 2>/dev/null)
         fi
 
         (
@@ -188,7 +250,7 @@ new_conversation() {
                 if [ -f "$_LLM_DB" ]; then
                     _new_conversation_id=$(mng llmdb poll-new "$_LLM_DB" "$_max_rowid")
                     if [ -n "$_new_conversation_id" ]; then
-                        insert_conversation_record "$_new_conversation_id" '{"name":"(new chat)"}'
+                        insert_conversation_record "$_new_conversation_id" "$tags"
                         log "Recorded conversation for new conversation_id=$_new_conversation_id (rowid > $_max_rowid)"
                         break
                     fi
@@ -197,17 +259,13 @@ new_conversation() {
         ) &
 
         # shellcheck disable=SC2086
-        if [ -n "$message" ]; then
-            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args "$message"
-        else
-            exec llm live-chat -m "$model" "${sys_args[@]}" $tool_args
-        fi
+        exec llm live-chat -m "$model" "${template_args[@]}" $tool_args
     fi
 }
 
 resume_conversation() {
     local conversation_id="$1"
-    shift
+    shift || true
 
     log "Resuming conversation: conversation_id=$conversation_id"
 
@@ -215,22 +273,24 @@ resume_conversation() {
     local model
     model=$(mng llmdb lookup-model "$_LLM_DB" "$conversation_id")
     if [ -z "$model" ]; then
-        model=$(get_default_model)
+        model=$(get_model)
     fi
 
     log "Resolved model for conversation $conversation_id: $model"
 
     local tool_args
     tool_args=$(build_tool_args)
-    local system_prompt
-    system_prompt=$(build_system_prompt)
-    local sys_args=()
-    if [ -n "$system_prompt" ]; then
-        sys_args=(-s "$system_prompt")
+
+    local template_path
+    template_path=$(build_template)
+    local template_args=()
+    if [ -n "$template_path" ]; then
+        template_args=(-t "$template_path")
     fi
+
     log "Starting live-chat session (resume): conversation_id=$conversation_id model=$model tool_args='$tool_args'"
     # shellcheck disable=SC2086
-    exec llm live-chat --show-history -c --cid "$conversation_id" -m "$model" "${sys_args[@]}" $tool_args
+    exec llm live-chat --show-history -c --cid "$conversation_id" -m "$model" "${template_args[@]}" $tool_args
 }
 
 list_conversations() {
@@ -319,12 +379,15 @@ show_help() {
     echo "chat - manage mind conversations"
     echo ""
     echo "Usage:"
-    echo "  chat --new [--as-agent] [message]   Create a new conversation"
-    echo "  chat --resume <conversation-id>     Resume an existing conversation"
-    echo "  chat --list                         List all conversations"
-    echo "  chat --help                         Show this help message"
+    echo "  chat --new --name <name> [--as-agent <msg>]  Create or resume a named conversation"
+    echo "  chat --resume <conversation-id>              Resume an existing conversation"
+    echo "  chat --list                                  List all conversations"
+    echo "  chat --help                                  Show this help message"
     echo ""
     echo "With no arguments, lists conversations (same as --list)."
+    echo ""
+    echo "Environment:"
+    echo "  MNG_LLM_MODEL   Model for llm commands (default: claude-opus-4.6)"
 }
 
 log "Invoked with args: $*"

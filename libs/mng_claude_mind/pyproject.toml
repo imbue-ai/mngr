@@ -5,7 +5,8 @@ description = "Claude mind agent plugin for mng - base class for mind agents bui
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mng==0.1.4",
+    "mng==0.1.7",
+    "mng-claude==0.1.0",
     "mng-llm==0.1.0",
     "mng-mind==0.1.0",
     "mng-recursive==0.1.0",
@@ -25,6 +26,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
+mng-claude = { workspace = true }
 mng-llm = { workspace = true }
 mng-mind = { workspace = true }
 mng-recursive = { workspace = true }

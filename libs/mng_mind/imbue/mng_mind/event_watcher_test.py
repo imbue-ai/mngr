@@ -379,16 +379,16 @@ def test_format_delivery_message_with_rate_warning() -> None:
 
 
 def test_send_message_returns_true_on_success(mock_subprocess_success: EventWatcherSubprocessCapture) -> None:
-    assert _send_message("my-agent", "hello") is True
+    assert _send_message("agent-00000000000000000000000000000001", "hello") is True
     assert len(mock_subprocess_success.calls) == 1
     cmd = mock_subprocess_success.calls[0][0]
     assert any("mng" in c for c in cmd)
     assert "message" in cmd
-    assert "my-agent" in cmd
+    assert "agent-00000000000000000000000000000001" in cmd
 
 
 def test_send_message_returns_false_on_failure(mock_subprocess_failure: EventWatcherSubprocessCapture) -> None:
-    assert _send_message("my-agent", "hello") is False
+    assert _send_message("agent-00000000000000000000000000000001", "hello") is False
 
 
 def test_send_message_returns_false_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,7 +397,7 @@ def test_send_message_returns_false_on_timeout(monkeypatch: pytest.MonkeyPatch) 
 
     mock_sp = types.SimpleNamespace(run=timeout_run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
-    assert _send_message("my-agent", "hello") is False
+    assert _send_message("agent-00000000000000000000000000000001", "hello") is False
 
 
 def test_send_message_returns_false_on_os_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,7 +406,7 @@ def test_send_message_returns_false_on_os_error(monkeypatch: pytest.MonkeyPatch)
 
     mock_sp = types.SimpleNamespace(run=os_error_run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
-    assert _send_message("my-agent", "hello") is False
+    assert _send_message("agent-00000000000000000000000000000001", "hello") is False
 
 
 # -- _deliver_batch tests --
@@ -428,7 +428,7 @@ def test_deliver_batch_updates_state_on_success(
     success = _deliver_batch(
         deliverable_lines=[event_line],
         last_parsed=last_parsed,
-        agent_name="test-agent",
+        agent_id="test-agent",
         delivery_state=delivery_state,
         state_file=state_file,
         rate_tracker=rate_tracker,
@@ -471,7 +471,7 @@ def test_deliver_batch_puts_events_back_on_failure(
     success = _deliver_batch(
         deliverable_lines=event_lines,
         last_parsed={"event_id": "evt-2"},
-        agent_name="test-agent",
+        agent_id="test-agent",
         delivery_state=delivery_state,
         state_file=state_file,
         rate_tracker=rate_tracker,

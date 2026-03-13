@@ -118,14 +118,16 @@ $ mng plugin list --format '{name}\t{enabled}'
 
 Install a plugin package.
 
-Provide exactly one of NAME (positional), --path, or --git. NAME is a PyPI
-package specifier (e.g., 'mng-pair' or 'mng-pair>=1.0'). --path installs
-from a local directory in editable mode. --git installs from a git URL.
+All source types are repeatable and can be freely mixed in one command.
+NAME is a PyPI package specifier (e.g., 'mng-pair' or 'mng-pair>=1.0').
+--path installs from a local directory in editable mode.
+--git installs from a git URL.
+All plugins are installed in a single operation for speed.
 
 **Usage:**
 
 ```text
-mng plugin add [OPTIONS] [NAME]
+mng plugin add [OPTIONS] [NAMES]...
 ```
 **Options:**
 
@@ -150,8 +152,8 @@ mng plugin add [OPTIONS] [NAME]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--path` | text | Install from a local path (editable mode) | None |
-| `--git` | text | Install from a git URL | None |
+| `--path` | text | Install from a local path (editable mode) [repeatable] | None |
+| `--git` | text | Install from a git URL [repeatable] | None |
 
 
 ## Examples
@@ -174,23 +176,36 @@ $ mng plugin add mng-pair>=1.0
 $ mng plugin add --path ./my-plugin
 ```
 
+**Install multiple local plugins**
+
+```bash
+$ mng plugin add --path ./plugin-a --path ./plugin-b
+```
+
 **Install from a git URL**
 
 ```bash
 $ mng plugin add --git https://github.com/user/mng-plugin.git
 ```
 
+**Mix all source types**
+
+```bash
+$ mng plugin add pkg-a --path ./local-b --git https://example.com/c.git
+```
+
 ## mng plugin remove
 
 Uninstall a plugin package.
 
-Provide exactly one of NAME (positional) or --path. For local paths,
-the package name is read from pyproject.toml.
+Both source types are repeatable and can be freely mixed in one command.
+For local paths, the package name is read from pyproject.toml.
+All plugins are removed in a single operation.
 
 **Usage:**
 
 ```text
-mng plugin remove [OPTIONS] [NAME]
+mng plugin remove [OPTIONS] [NAMES]...
 ```
 **Options:**
 
@@ -215,7 +230,7 @@ mng plugin remove [OPTIONS] [NAME]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--path` | text | Remove by local path (reads package name from pyproject.toml) | None |
+| `--path` | text | Remove by local path (reads package name from pyproject.toml) [repeatable] | None |
 
 
 ## Examples
@@ -226,10 +241,22 @@ mng plugin remove [OPTIONS] [NAME]
 $ mng plugin remove mng-pair
 ```
 
+**Remove multiple by name**
+
+```bash
+$ mng plugin remove mng-pair mng-opencode
+```
+
 **Remove by local path**
 
 ```bash
 $ mng plugin remove --path ./my-plugin
+```
+
+**Mix names and paths**
+
+```bash
+$ mng plugin remove mng-pair --path ./my-plugin
 ```
 
 ## mng plugin enable
@@ -390,10 +417,10 @@ $ mng plugin add mng-pair
 $ mng plugin add --path ./my-plugin
 ```
 
-**Install a plugin from git**
+**Install multiple plugins at once**
 
 ```bash
-$ mng plugin add --git https://github.com/user/mng-plugin.git
+$ mng plugin add pkg-a --path ./local-b --git https://example.com/c.git
 ```
 
 **Remove a plugin**

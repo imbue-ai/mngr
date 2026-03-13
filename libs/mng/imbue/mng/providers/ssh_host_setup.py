@@ -28,12 +28,18 @@ class RequiredHostPackage(FrozenModel):
 # check in build_check_and_install_packages_command will still install any
 # that are missing (with a warning).
 REQUIRED_HOST_PACKAGES: Final[tuple[RequiredHostPackage, ...]] = (
+    RequiredHostPackage(
+        package="ca-certificates",
+        binary="update-ca-certificates",
+        check_cmd="test -f /etc/ssl/certs/ca-certificates.crt",
+    ),
     RequiredHostPackage(package="openssh-server", binary="sshd", check_cmd="test -x /usr/sbin/sshd"),
     RequiredHostPackage(package="tmux", binary="tmux"),
     RequiredHostPackage(package="curl", binary="curl"),
     RequiredHostPackage(package="rsync", binary="rsync"),
     RequiredHostPackage(package="git", binary="git"),
     RequiredHostPackage(package="jq", binary="jq"),
+    RequiredHostPackage(package="xxd", binary="xxd"),
 )
 
 
@@ -70,7 +76,7 @@ def build_check_and_install_packages_command(
     """Build a single shell command that checks for and installs required packages.
 
     This command:
-    1. Checks for each required package (sshd, tmux, curl, rsync, git, jq)
+    1. Checks for each required package (ca-certificates, sshd, tmux, curl, rsync, git, jq, xxd)
     2. Echoes a prefixed warning for each missing package
     3. Installs all missing packages in a single apt-get call
     4. Creates the sshd run directory (/run/sshd)

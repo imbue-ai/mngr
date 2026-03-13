@@ -7,7 +7,6 @@ from imbue.mng.errors import UnknownBackendError
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.providers.docker.config import DockerProviderConfig
 from imbue.mng.providers.local.config import LocalProviderConfig
-from imbue.mng.providers.modal.config import ModalProviderConfig
 from imbue.mng.providers.registry import get_config_class
 
 # =============================================================================
@@ -80,33 +79,4 @@ def test_docker_provider_config_merge_with_raises_for_different_type() -> None:
     base = DockerProviderConfig()
     override = LocalProviderConfig()
     with pytest.raises(ConfigParseError, match="Cannot merge DockerProviderConfig"):
-        base.merge_with(override)
-
-
-# =============================================================================
-# Tests for ModalProviderConfig
-# =============================================================================
-
-
-def test_modal_provider_config_default_values() -> None:
-    """ModalProviderConfig should have correct default values."""
-    config = ModalProviderConfig()
-    assert config.backend == ProviderBackendName("modal")
-    assert config.environment == "main"
-
-
-def test_modal_provider_config_merge_with_overrides_environment() -> None:
-    """ModalProviderConfig.merge_with should override environment."""
-    base = ModalProviderConfig(environment="base")
-    override = ModalProviderConfig(environment="override")
-    merged = base.merge_with(override)
-    assert isinstance(merged, ModalProviderConfig)
-    assert merged.environment == "override"
-
-
-def test_modal_provider_config_merge_with_raises_for_different_type() -> None:
-    """ModalProviderConfig.merge_with should raise for different config type."""
-    base = ModalProviderConfig()
-    override = LocalProviderConfig()
-    with pytest.raises(ConfigParseError, match="Cannot merge ModalProviderConfig"):
         base.merge_with(override)

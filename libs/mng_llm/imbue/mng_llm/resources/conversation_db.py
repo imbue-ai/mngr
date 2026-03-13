@@ -15,6 +15,7 @@ does not, the insert subcommand creates it as a safety net.
 Usage:
     mng mind-conversation-db insert <db_path> <conversation_id> <tags_json> <created_at>
     mng mind-conversation-db lookup-model <db_path> <conversation_id>
+    mng mind-conversation-db lookup-by-name <db_path> <name>
     mng mind-conversation-db count <db_path>
     mng mind-conversation-db max-rowid <db_path>
     mng mind-conversation-db poll-new <db_path> <max_rowid>
@@ -101,6 +102,30 @@ def max_rowid(db_path: str) -> None:
         _write_stdout(0)
 
 
+def lookup_by_name(db_path: str, name: str) -> None:
+    """Look up a conversation ID by its name tag.
+
+    Searches the mind_conversations table for a conversation whose tags
+    JSON contains a ``name`` key matching the given value. Returns the
+    most recently created match (by created_at descending).
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT conversation_id FROM mind_conversations "
+                "WHERE json_extract(tags, '$.name') = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+            if row:
+                _write_stdout(row[0])
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        _warn(f"lookup-by-name failed: {e}")
+
+
 def poll_new(db_path: str, max_rowid: str) -> None:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -130,6 +155,8 @@ def main() -> None:
             insert(db_path, sys.argv[3], sys.argv[4], sys.argv[5])
         case "lookup-model":
             lookup_model(db_path, sys.argv[3])
+        case "lookup-by-name":
+            lookup_by_name(db_path, sys.argv[3])
         case "count":
             count(db_path)
         case "max-rowid":

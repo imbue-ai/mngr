@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import CommandDefaults
 from imbue.mng.config.data_types import CreateTemplate
@@ -20,6 +21,7 @@ from imbue.mng.config.data_types import merge_cli_args
 from imbue.mng.config.data_types import merge_dict_fields
 from imbue.mng.config.data_types import merge_list_fields
 from imbue.mng.config.data_types import split_cli_args_string
+from imbue.mng.errors import ConfigParseError
 from imbue.mng.errors import ParseSpecError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
@@ -979,3 +981,49 @@ def test_mng_context_get_profile_user_id(temp_mng_ctx: MngContext) -> None:
     """MngContext.get_profile_user_id should return a non-empty user ID."""
     user_id = temp_mng_ctx.get_profile_user_id()
     assert len(user_id) == 32
+
+
+# =============================================================================
+# MngContext.get_plugin_config tests
+# =============================================================================
+
+
+def test_get_plugin_config_returns_default_when_absent(temp_mng_ctx: MngContext) -> None:
+    """get_plugin_config should return a default instance when the plugin is not configured."""
+    result = temp_mng_ctx.get_plugin_config("nonexistent-plugin", PluginConfig)
+    assert isinstance(result, PluginConfig)
+    assert result.enabled is True
+
+
+def test_get_plugin_config_raises_on_wrong_type(temp_mng_ctx: MngContext) -> None:
+    """get_plugin_config should raise ConfigParseError when plugin config has wrong type."""
+
+    # Register a PluginConfig for a plugin, then try to retrieve it as a different subclass
+    class CustomPluginConfig(PluginConfig):
+        custom_field: str = "default"
+
+    updated_config = temp_mng_ctx.config.model_copy_update(
+        to_update(temp_mng_ctx.config.field_ref().plugins, {PluginName("typed-plugin"): PluginConfig(enabled=True)}),
+    )
+    ctx = temp_mng_ctx.model_copy_update(
+        to_update(temp_mng_ctx.field_ref().config, updated_config),
+    )
+
+    # Requesting as CustomPluginConfig when it's stored as PluginConfig should raise
+    with pytest.raises(ConfigParseError, match="expected CustomPluginConfig"):
+        ctx.get_plugin_config("typed-plugin", CustomPluginConfig)
+
+
+def test_get_plugin_config_returns_configured_value(temp_mng_ctx: MngContext) -> None:
+    """get_plugin_config should return the configured PluginConfig when present."""
+    plugin_config = PluginConfig(enabled=False)
+    updated_config = temp_mng_ctx.config.model_copy_update(
+        to_update(temp_mng_ctx.config.field_ref().plugins, {PluginName("test-plugin"): plugin_config}),
+    )
+    ctx = temp_mng_ctx.model_copy_update(
+        to_update(temp_mng_ctx.field_ref().config, updated_config),
+    )
+
+    result = ctx.get_plugin_config("test-plugin", PluginConfig)
+    assert isinstance(result, PluginConfig)
+    assert result.enabled is False

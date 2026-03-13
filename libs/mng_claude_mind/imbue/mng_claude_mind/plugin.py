@@ -9,10 +9,6 @@ from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng import hookimpl
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
-from imbue.mng.agents.default_plugins.claude_config import build_readiness_hooks_config
-from imbue.mng.agents.default_plugins.claude_config import merge_hooks_config
 from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngContext
@@ -21,11 +17,16 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
+from imbue.mng_claude.claude_config import build_readiness_hooks_config
+from imbue.mng_claude.claude_config import merge_hooks_config
+from imbue.mng_claude.plugin import ClaudeAgent
+from imbue.mng_claude.plugin import ClaudeAgentConfig
 from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_claude_settings
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
 from imbue.mng_claude_mind.settings import load_settings_from_host
+from imbue.mng_llm.plugin import set_llm_model_env_var
 from imbue.mng_llm.plugin import set_uv_tool_env_vars
 from imbue.mng_llm.provisioning import configure_llm_user_path
 from imbue.mng_llm.provisioning import create_daily_conversation
@@ -158,9 +159,10 @@ class ClaudeMindAgent(ClaudeAgent):
         host: OnlineHostInterface,
         env_vars: dict[str, str],
     ) -> None:
-        """Set UV_TOOL_DIR and UV_TOOL_BIN_DIR for per-agent tool isolation."""
+        """Set UV tool dirs and MNG_LLM_MODEL for per-agent tool isolation and chat."""
         super().modify_env_vars(host, env_vars)
         set_uv_tool_env_vars(env_vars)
+        set_llm_model_env_var(host, self.work_dir, env_vars)
 
     def assemble_command(
         self,

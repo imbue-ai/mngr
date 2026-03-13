@@ -436,39 +436,57 @@ def _follow_event_file_via_host(
 
     logger.debug("Following event file via host: {}", " ".join(cmd))
 
-    process = popen_interactive_subprocess(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert process.stdout is not None
-        assert process.stderr is not None
-
-        # Drain stderr in a background thread to prevent pipe buffer deadlock
-        stderr_chunks: list[bytes] = []
-        stderr_thread = threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_chunks), daemon=True)
-        stderr_thread.start()
-
-        # Stream stdout line by line
-        for raw_line in iter(process.stdout.readline, b""):
-            on_new_content(raw_line.decode("utf-8", errors="replace"))
-
-        # The stdout loop ended because the process exited; check for errors
-        process.wait()
-        stderr_thread.join(timeout=5)
-        if process.returncode != 0:
-            stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-            raise MngError(f"Failed to follow event file (exit code {process.returncode}): {stderr_output.strip()}")
-    except KeyboardInterrupt:
-        raise
-    finally:
-        process.terminate()
+    # Retry loop: if the file doesn't exist yet, wait and try again.
+    # This handles the race where we start following before the file is created.
+    _RETRY_DELAY_SECONDS = 2.0
+    has_logged = False
+    attempt = 0
+    while attempt < float("inf"):
+        attempt += 1
+        process = popen_interactive_subprocess(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            assert process.stdout is not None
+            assert process.stderr is not None
+
+            # Drain stderr in a background thread to prevent pipe buffer deadlock
+            stderr_chunks: list[bytes] = []
+            stderr_thread = threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_chunks), daemon=True)
+            stderr_thread.start()
+
+            # Stream stdout line by line
+            for raw_line in iter(process.stdout.readline, b""):
+                on_new_content(raw_line.decode("utf-8", errors="replace"))
+
+            # The stdout loop ended because the process exited; check for errors
             process.wait()
+            stderr_thread.join(timeout=5)
+            if process.returncode != 0:
+                stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+                if "No such file or directory" in stderr_output:
+                    if not has_logged:
+                        logger.info("Event file not found yet, retrying in {}s", _RETRY_DELAY_SECONDS)
+                        has_logged = True
+                    # FIXME: remove this--this is effectively a sleep.  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
+                    #  Instead, here we should just be using tenacity to continually retry this type of error, log when it happens once, etc
+                    threading.Event().wait(timeout=_RETRY_DELAY_SECONDS)
+                    continue
+                raise MngError(
+                    f"Failed to follow event file (exit code {process.returncode}): {stderr_output.strip()}"
+                )
+            return
+        except KeyboardInterrupt:
+            raise
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def _drain_pipe(pipe: IO[bytes], chunks: list[bytes]) -> None:

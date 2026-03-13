@@ -44,6 +44,7 @@ class ChatCliOptions(CommonCliOptions):
     new: bool
     last: bool
     conversation: str | None
+    name: str | None
     start: bool
     allow_unknown_host: bool
 
@@ -232,7 +233,8 @@ def resolve_chat_args(
         raise UserInputError("Only one of --new, --last, or --conversation can be specified")
 
     if opts.new:
-        return ["--new"]
+        name = opts.name or "new conversation"
+        return ["--new", "--name", name]
     elif opts.last:
         return _resolve_latest_conversation_args(agent, host)
     elif opts.conversation is not None:
@@ -253,7 +255,11 @@ def _resolve_interactive_chat_args(  # pragma: no cover
     """
     conversation_id, is_new_requested = _select_conversation_interactively(agent, host)
     if is_new_requested:
-        return ["--new"]
+        try:
+            name = input("Conversation name [new conversation]: ").strip() or "new conversation"
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return ["--new", "--name", name]
     elif conversation_id is not None:
         return ["--resume", conversation_id]
     else:
@@ -272,7 +278,7 @@ def _resolve_latest_conversation_args(
         latest_conversation_id = None
     if latest_conversation_id is None:
         logger.info("No existing conversations found. Starting a new one.")
-        return ["--new"]
+        return ["--new", "--name", "new conversation"]
     else:
         logger.info("Resuming latest conversation: {}", latest_conversation_id)
         return ["--resume", latest_conversation_id]
@@ -310,6 +316,10 @@ def _is_mind(labels: dict[str, str]) -> bool:
 @optgroup.option(
     "--conversation",
     help="Resume a specific conversation by ID",
+)
+@optgroup.option(
+    "--name",
+    help="Name for the conversation (used with --new)",
 )
 @optgroup.group("SSH Options")
 @optgroup.option(
@@ -390,7 +400,7 @@ The agent can be specified as a positional argument or via --agent:
   mng chat my-agent
   mng chat --agent my-agent""",
     examples=(
-        ("Start a new conversation with an agent", "mng chat my-agent --new"),
+        ("Start a new named conversation", 'mng chat my-agent --new --name "Bug triage"'),
         ("Resume the most recent conversation", "mng chat my-agent --last"),
         ("Resume a specific conversation", "mng chat my-agent --conversation conv-1234567890-abcdef"),
         ("Show interactive agent selector", "mng chat"),

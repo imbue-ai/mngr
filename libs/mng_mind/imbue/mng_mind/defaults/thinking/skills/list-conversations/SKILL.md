@@ -18,15 +18,17 @@ This skill lists all active conversation threads managed by this mind.
 Run the chat script with `--list`:
 
 ```bash
-$MNG_HOST_DIR/commands/chat.sh --list
+$MNG_AGENT_STATE_DIR/commands/chat.sh --list
 ```
 
 This reads the `mind_conversations` table from the llm database and displays each conversation with:
 - Conversation ID
+- Name
 - Creation timestamp
 - Model being used
 
 ## Working with the results
 
 - Use a conversation ID with `chat.sh --resume <id>` to continue an existing conversation
+- Use `chat.sh --new --name "<name>"` to create or resume a conversation by name
 - Conversations are append-only; there is no explicit "close" operation
