@@ -17,7 +17,7 @@ Usage: mng mind-event-watcher
 Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
   MNG_AGENT_WORK_DIR   - agent working directory (contains minds.toml)
-  MNG_AGENT_NAME       - name of the primary agent to send messages to
+  MNG_AGENT_ID         - ID of the primary agent to send messages to
 """
 
 from __future__ import annotations
@@ -274,24 +274,24 @@ def _format_delivery_message(
 # -- Message sending --
 
 
-def _send_message(agent_name: str, message: str) -> bool:
+def _send_message(agent_id: str, message: str) -> bool:
     """Send a message to the agent via mng message. Returns True on success."""
     try:
         result = subprocess.run(
-            [*get_mng_command(), "message", agent_name, "--provider", "local", "-m", message],
+            [*get_mng_command(), "message", agent_id, "--provider", "local", "-m", message],
             capture_output=True,
             text=True,
             timeout=_MESSAGE_SEND_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        logger.error("Timed out sending message to {}", agent_name)
+        logger.error("Timed out sending message to {}", agent_id)
         return False
     except (OSError, MngNotInstalledError) as exc:
         logger.error("Failed to invoke mng message subprocess: {}", exc)
         return False
 
     if result.returncode != 0:
-        logger.error("mng message returned non-zero for {}: {}", agent_name, result.stderr)
+        logger.error("mng message returned non-zero for {}: {}", agent_id, result.stderr)
         return False
 
     return True
@@ -424,9 +424,9 @@ def _compute_backoff_seconds(consecutive_failures: int) -> float:
 # -- Subprocess management --
 
 
-def _start_events_subprocess(agent_name: str, cel_filter: str) -> subprocess.Popen[str]:
-    """Start ``mng events <agent_name> --follow --filter <cel_filter>`` as a subprocess."""
-    cmd = [*get_mng_command(), "events", agent_name, "--follow"]
+def _start_events_subprocess(agent_id: str, cel_filter: str) -> subprocess.Popen[str]:
+    """Start ``mng events <agent_id> --follow --filter <cel_filter>`` as a subprocess."""
+    cmd = [*get_mng_command(), "events", agent_id, "--follow"]
     if cel_filter:
         cmd.extend(["--filter", cel_filter])
     logger.info("Starting events subprocess: {}", " ".join(cmd))
@@ -619,7 +619,7 @@ def _compute_rate_warning(
 def _deliver_batch(
     deliverable_lines: list[str],
     last_parsed: dict[str, Any],
-    agent_name: str,
+    agent_id: str,
     delivery_state: _DeliveryState,
     state_file: Path,
     rate_tracker: _SendRateTracker,
@@ -634,9 +634,9 @@ def _deliver_batch(
     The caller is responsible for backoff and notification logic.
     """
     message = _format_delivery_message(deliverable_lines, time_since_last, rate_warning)
-    logger.info("Sending {} event(s) to '{}'", len(deliverable_lines), agent_name)
+    logger.info("Sending {} event(s) to '{}'", len(deliverable_lines), agent_id)
 
-    if _send_message(agent_name, message):
+    if _send_message(agent_id, message):
         rate_tracker.record_send()
         delivery_state.last_event_id = last_parsed.get("event_id", "")
         delivery_state.last_timestamp = last_parsed.get("timestamp", "")
@@ -656,7 +656,7 @@ def _deliver_batch(
 
 def _run_delivery_loop(
     settings: _EventWatcherSettings,
-    agent_name: str,
+    agent_id: str,
     state_file: Path,
     events_dir: Path,
     event_buffer: list[str],
@@ -772,7 +772,7 @@ def _run_delivery_loop(
         success = _deliver_batch(
             deliverable_lines=deliverable_lines,
             last_parsed=last_parsed,
-            agent_name=agent_name,
+            agent_id=agent_id,
             delivery_state=delivery_state,
             state_file=state_file,
             rate_tracker=rate_tracker,
@@ -786,7 +786,7 @@ def _run_delivery_loop(
             if has_notified_user:
                 _notify_user(
                     events_dir,
-                    f"Event delivery to agent '{agent_name}' has recovered "
+                    f"Event delivery to agent '{agent_id}' has recovered "
                     f"after {consecutive_failures} consecutive failures.",
                     level="INFO",
                 )
@@ -798,12 +798,12 @@ def _run_delivery_loop(
             logger.warning(
                 "Delivery failure {} for agent '{}'",
                 consecutive_failures,
-                agent_name,
+                agent_id,
             )
             if consecutive_failures >= settings.max_delivery_retries and not has_notified_user:
                 _notify_user(
                     events_dir,
-                    f"Event delivery to agent '{agent_name}' has failed "
+                    f"Event delivery to agent '{agent_id}' has failed "
                     f"{consecutive_failures} consecutive times. "
                     "Events are being buffered and will be retried.",
                     level="ERROR",
@@ -821,7 +821,7 @@ def _run_delivery_loop(
 def main() -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
-    agent_name = require_env("MNG_AGENT_NAME")
+    agent_id = require_env("MNG_AGENT_ID")
 
     setup_watcher_logging("event_watcher", agent_state_dir / "events" / "logs")
 
@@ -836,7 +836,7 @@ def main() -> None:
     events_dir = agent_state_dir / "events"
 
     logger.info("Event watcher started")
-    logger.info("  Agent name: {}", agent_name)
+    logger.info("  Agent ID: {}", agent_id)
     logger.info("  CEL filter: {}", settings.cel_filter)
     logger.info("  Burst size: {}", settings.burst_size)
     logger.info("  Max messages/min: {}", settings.max_messages_per_minute)
@@ -852,14 +852,14 @@ def main() -> None:
     # Start the long-lived delivery thread
     delivery_thread = threading.Thread(
         target=_run_delivery_loop,
-        args=(settings, agent_name, state_file, events_dir, event_buffer, buffer_lock, stop_event),
+        args=(settings, agent_id, state_file, events_dir, event_buffer, buffer_lock, stop_event),
         daemon=True,
     )
     delivery_thread.start()
 
     try:
         while not stop_event.is_set():
-            active_process = _start_events_subprocess(agent_name, settings.cel_filter)
+            active_process = _start_events_subprocess(agent_id, settings.cel_filter)
 
             # Reader thread feeds subprocess stdout into the shared buffer
             reader_thread = threading.Thread(

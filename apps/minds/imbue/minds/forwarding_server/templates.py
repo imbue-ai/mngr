@@ -94,7 +94,7 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     <div class="form-group">
       <label for="git_url">Git repository URL</label>
       <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
-             placeholder="https://github.com/user/repo.git" required>
+             placeholder="https://github.com/imbue-ai/simple_mind.git" required>
       <p class="help-text">The repository will be cloned and used as the agent's working directory.</p>
     </div>
     <button type="submit" class="btn">Create</button>
@@ -214,14 +214,19 @@ def render_landing_page(
     return template.render(agent_ids=accessible_agent_ids)
 
 
+_DEFAULT_GIT_URL: Final[str] = "https://github.com/imbue-ai/simple_mind.git"
+
+
 @pure
 def render_create_form(git_url: str = "") -> str:
     """Render the agent creation form page.
 
     When git_url is provided, the form field is pre-filled with that value.
+    Defaults to the simple_mind repository URL when empty.
     """
+    effective_url = git_url if git_url else _DEFAULT_GIT_URL
     template = _JINJA_ENV.from_string(_CREATE_FORM_TEMPLATE)
-    return template.render(git_url=git_url)
+    return template.render(git_url=effective_url)
 
 
 @pure
@@ -263,6 +268,67 @@ def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
     template = _JINJA_ENV.from_string(_AUTH_ERROR_TEMPLATE)
     return template.render(message=message)
+
+
+_BACKEND_WAITING_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Starting up...</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .status { margin-top: 16px; font-size: 16px; color: rgb(60, 60, 80); }
+    .spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 3px solid rgb(200, 200, 210); border-top: 3px solid rgb(26, 26, 46);
+      border-radius: 50%; animation: spin 1s linear infinite;
+      vertical-align: middle; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { color: darkred; }
+  </style>
+</head>
+<body>
+  <h1>Starting up...</h1>
+  <p class="status" id="status"><span class="spinner"></span> Waiting for agent to become available...</p>
+  <script>
+    const startTime = Date.now();
+    const timeoutMs = {{ timeout_seconds }} * 1000;
+    async function checkBackend() {
+      if (Date.now() - startTime > timeoutMs) {
+        document.getElementById('status').textContent = 'Agent is not available. It may still be starting up -- try refreshing the page.';
+        document.getElementById('status').classList.add('error');
+        return;
+      }
+      location.reload();
+    }
+    setTimeout(checkBackend, 3000);
+  </script>
+</body>
+</html>"""
+)
+
+
+@pure
+def render_backend_waiting_page(
+    agent_id: AgentId,
+    server_name: ServerName,
+    timeout_seconds: int,
+) -> str:
+    """Render a waiting page shown when the backend is not yet available.
+
+    The page auto-reloads every 3 seconds. If the backend becomes available,
+    the normal proxy flow takes over. If the timeout expires, it shows an
+    error message.
+    """
+    template = _JINJA_ENV.from_string(_BACKEND_WAITING_TEMPLATE)
+    return template.render(
+        agent_id=agent_id,
+        server_name=server_name,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 _AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>

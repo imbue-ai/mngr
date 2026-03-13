@@ -417,7 +417,8 @@ def test_agent_proxy_returns_502_for_unknown_backend(tmp_path: Path) -> None:
     client.cookies.set(f"sw_installed_{agent_id}_{DEFAULT_SERVER_NAME}", "1")
 
     response = client.get(f"/agents/{agent_id}/{DEFAULT_SERVER_NAME}/")
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert "Starting up" in response.text
 
 
 def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
@@ -643,8 +644,8 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     assert api_response.json() == {"source": "api"}
 
 
-def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> None:
-    """When mng events fails (agent has no servers/events.jsonl), the proxy returns 502."""
+def test_mng_cli_resolver_shows_waiting_page_when_backend_unavailable(tmp_path: Path) -> None:
+    """When backend is not yet available, the proxy shows a waiting page instead of 502."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
@@ -659,7 +660,8 @@ def test_mng_cli_resolver_returns_502_when_mng_events_fails(tmp_path: Path) -> N
     client.cookies.set(f"sw_installed_{agent_id}_web", "1")
 
     response = client.get(f"/agents/{agent_id}/web/")
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert "Starting up" in response.text
 
 
 def test_mng_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:

@@ -40,6 +40,7 @@ from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.forwarding_server.ssh_tunnel import parse_url_host_port
 from imbue.minds.forwarding_server.templates import render_agent_servers_page
 from imbue.minds.forwarding_server.templates import render_auth_error_page
+from imbue.minds.forwarding_server.templates import render_backend_waiting_page
 from imbue.minds.forwarding_server.templates import render_create_form
 from imbue.minds.forwarding_server.templates import render_creating_page
 from imbue.minds.forwarding_server.templates import render_landing_page
@@ -50,6 +51,8 @@ from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+_BACKEND_WAIT_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -463,10 +466,17 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        return Response(
-            status_code=502,
-            content=f"Backend unavailable for agent {agent_id}, server {server_name}",
+        # Serve a waiting page that auto-refreshes until the backend is ready,
+        # instead of immediately returning 502. This handles the case where
+        # the user is redirected to an agent that is still starting up.
+        # The page uses JavaScript to reload periodically and gives up after
+        # _BACKEND_WAIT_TIMEOUT_SECONDS.
+        html = render_backend_waiting_page(
+            agent_id=parsed_id,
+            server_name=parsed_server,
+            timeout_seconds=int(_BACKEND_WAIT_TIMEOUT_SECONDS),
         )
+        return HTMLResponse(content=html)
 
     # Check if SW is installed via cookie (scoped per server)
     sw_cookie = request.cookies.get(f"sw_installed_{agent_id}_{server_name}")
