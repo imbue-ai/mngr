@@ -101,7 +101,10 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
 
     assert count == 1
     host.execute_command.assert_called()
-    host.write_file.assert_called_once()
+    host.write_file.assert_called_once_with(
+        path=Path("/home/testuser/.mng/config.toml"),
+        content=source_file.read_bytes(),
+    )
 
 
 def test_upload_deploy_files_with_string_source() -> None:
@@ -115,7 +118,10 @@ def test_upload_deploy_files_with_string_source() -> None:
     count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
-    host.write_text_file.assert_called_once()
+    host.write_text_file.assert_called_once_with(
+        path=Path("/home/testuser/.mng/config.toml"),
+        content='key = "value"',
+    )
 
 
 def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
