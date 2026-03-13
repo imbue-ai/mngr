@@ -439,9 +439,10 @@ def _follow_event_file_via_host(
     # Retry loop: if the file doesn't exist yet, wait and try again.
     # This handles the race where we start following before the file is created.
     _RETRY_DELAY_SECONDS = 2.0
-    _MAX_RETRIES = 60
-
-    for attempt in range(_MAX_RETRIES):
+    has_logged = False
+    attempt = 0
+    while attempt < float("inf"):
+        attempt += 1
         process = popen_interactive_subprocess(
             cmd,
             stdout=subprocess.PIPE,
@@ -465,13 +466,12 @@ def _follow_event_file_via_host(
             stderr_thread.join(timeout=5)
             if process.returncode != 0:
                 stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-                if "No such file or directory" in stderr_output and attempt < _MAX_RETRIES - 1:
-                    logger.debug(
-                        "Event file not found yet, retrying in {}s (attempt {}/{})",
-                        _RETRY_DELAY_SECONDS,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                    )
+                if "No such file or directory" in stderr_output:
+                    if not has_logged:
+                        logger.info("Event file not found yet, retrying in {}s", _RETRY_DELAY_SECONDS)
+                        has_logged = True
+                    # FIXME: remove this--this is effectively a time.sleep().  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
+                    #  Instead, here we should just be using tenacity to continually retry this type of error, log when it happens once, etc
                     threading.Event().wait(timeout=_RETRY_DELAY_SECONDS)
                     continue
                 raise MngError(
