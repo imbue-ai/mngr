@@ -294,15 +294,17 @@ _BACKEND_WAITING_TEMPLATE: Final[str] = (
   <h1>Starting up...</h1>
   <p class="status" id="status"><span class="spinner"></span> Waiting for agent to become available...</p>
   <script>
-    const startTime = Date.now();
     const timeoutMs = {{ timeout_seconds }} * 1000;
-    async function checkBackend() {
+    const params = new URLSearchParams(location.search);
+    const startTime = parseInt(params.get('_wait_start') || '0', 10) || Date.now();
+    function checkBackend() {
       if (Date.now() - startTime > timeoutMs) {
         document.getElementById('status').textContent = 'Agent is not available. It may still be starting up -- try refreshing the page.';
         document.getElementById('status').classList.add('error');
         return;
       }
-      location.reload();
+      params.set('_wait_start', String(startTime));
+      location.search = params.toString();
     }
     setTimeout(checkBackend, 3000);
   </script>
