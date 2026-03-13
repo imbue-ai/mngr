@@ -26,20 +26,13 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import UserId
 from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mng.providers.docker.volume import LABEL_PROVIDER
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
-from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import assert_home_is_temp_directory
 from imbue.mng.utils.testing import cleanup_tmux_session
-from imbue.mng.utils.testing import delete_modal_apps_in_environment
-from imbue.mng.utils.testing import delete_modal_environment
-from imbue.mng.utils.testing import delete_modal_volumes_in_environment
-from imbue.mng.utils.testing import generate_test_environment_name
-from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
 from imbue.mng.utils.testing import isolate_tmux_server
@@ -329,17 +322,6 @@ def setup_test_mng_env(
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
     """
-    # Load modal token from real home before overriding HOME
-    import toml
-
-    modal_toml_path = Path(os.path.expanduser("~/.modal.toml"))
-    if modal_toml_path.exists():
-        for value in toml.load(modal_toml_path).values():
-            if value.get("active", ""):
-                monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
-                monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
-                break
-
     isolate_home(tmp_home_dir, monkeypatch)
     monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
     monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
@@ -485,61 +467,6 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     imbue.mng.main.reset_plugin_manager()
     reset_backend_registry()
     reset_agent_registry()
-
-
-# =============================================================================
-# Modal subprocess test fixtures
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_env_name() -> str:
-    return generate_test_environment_name()
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_host_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    host_dir = tmp_path_factory.mktemp("modal_session") / "mng"
-    host_dir.mkdir(parents=True, exist_ok=True)
-    return host_dir
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_user_id() -> UserId:
-    return UserId(uuid4().hex)
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_cleanup(
-    modal_test_session_env_name: str,
-    modal_test_session_user_id: UserId,
-) -> Generator[None, None, None]:
-    yield
-    prefix = f"{modal_test_session_env_name}-"
-    environment_name = f"{prefix}{modal_test_session_user_id}"
-    if len(environment_name) > 64:
-        environment_name = environment_name[:64]
-    delete_modal_apps_in_environment(environment_name)
-    delete_modal_volumes_in_environment(environment_name)
-    delete_modal_environment(environment_name)
-
-
-@pytest.fixture
-def modal_subprocess_env(
-    modal_test_session_env_name: str,
-    modal_test_session_host_dir: Path,
-    modal_test_session_cleanup: None,
-    modal_test_session_user_id: UserId,
-) -> Generator[ModalSubprocessTestEnv, None, None]:
-    prefix = f"{modal_test_session_env_name}-"
-    host_dir = modal_test_session_host_dir
-    env = get_subprocess_test_env(
-        root_name="mng-acceptance-test",
-        prefix=prefix,
-        host_dir=host_dir,
-    )
-    env["MNG_USER_ID"] = modal_test_session_user_id
-    yield ModalSubprocessTestEnv(env=env, prefix=prefix, host_dir=host_dir)
 
 
 # =============================================================================
