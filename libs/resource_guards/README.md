@@ -19,7 +19,7 @@ Both mechanisms use per-test tracking files so the `makereport` hook can detect 
 
 ## Built-in guards
 
-mng provides Modal and Docker guards out of the box (in `imbue.mng.register_guards_modal` and `imbue.mng.register_guards_docker`). These are registered automatically in mng's conftest.py.
+mng provides Docker guards out of the box (in `imbue.mng.register_guards_docker`), and the mng_modal plugin provides Modal guards (in `imbue.mng_modal.register_guards`). These are registered automatically in each project's conftest.py.
 
 ## Setup
 
