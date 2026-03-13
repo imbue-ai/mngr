@@ -26,9 +26,10 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(d)
 
 
-def make_agents_json(*agent_ids: AgentId) -> str:
+def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
     """Build a JSON string matching `mng list --format json` output for the given agent IDs."""
-    return json.dumps({"agents": [{"id": str(agent_id)} for agent_id in agent_ids]})
+    effective_labels = labels if labels is not None else {"mind": "true"}
+    return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 
 def make_server_log(server: str, url: str) -> str:

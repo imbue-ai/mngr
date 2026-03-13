@@ -268,7 +268,7 @@ def _handle_landing_page(
         html = render_login_page()
         return HTMLResponse(content=html)
 
-    all_agent_ids = backend_resolver.list_known_agent_ids()
+    all_agent_ids = backend_resolver.list_known_mind_ids()
 
     # If exactly one agent, redirect directly to it
     if len(all_agent_ids) == 1:
