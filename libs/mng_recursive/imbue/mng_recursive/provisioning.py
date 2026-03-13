@@ -70,12 +70,16 @@ def _upload_deploy_files(
     Constructs the desired directory structure in a local temp directory,
     then rsyncs it to the remote host's home directory in a single operation.
 
-    The caller is expected to pass only home-destined files (tilde paths).
-    Project-relative files should be excluded at collection time via
+    Only home-destined files (tilde paths) are supported. Project-relative
+    files should be excluded at collection time via
     include_project_settings=False.
 
     Returns the number of files uploaded.
     """
+    for dest_path in deploy_files:
+        if not str(dest_path).startswith("~"):
+            raise MngError(f"_upload_deploy_files only supports home-destined (tilde) paths, got: {dest_path}")
+
     with tempfile.TemporaryDirectory(prefix="mng-deploy-") as tmpdir:
         staging_dir = Path(tmpdir)
         count = stage_deploy_files(staging_dir, deploy_files)
