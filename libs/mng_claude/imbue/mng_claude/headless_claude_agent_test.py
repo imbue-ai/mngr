@@ -6,9 +6,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.agents.agent_registry import list_registered_agent_types
-from imbue.mng.agents.default_plugins.headless_claude_agent import HeadlessClaude
-from imbue.mng.agents.default_plugins.headless_claude_agent import HeadlessClaudeAgentConfig
-from imbue.mng.agents.default_plugins.headless_claude_agent import extract_text_delta
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import SendMessageError
@@ -20,6 +17,9 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.providers.local.instance import LocalProviderInstance
+from imbue.mng_claude.headless_claude_agent import HeadlessClaude
+from imbue.mng_claude.headless_claude_agent import HeadlessClaudeAgentConfig
+from imbue.mng_claude.headless_claude_agent import extract_text_delta
 
 
 def _make_headless_agent(

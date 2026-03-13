@@ -13,6 +13,7 @@ dependencies = [
 claude = "imbue.mng_claude.plugin"
 code_guardian = "imbue.mng_claude.code_guardian_agent"
 fixme_fairy = "imbue.mng_claude.fixme_fairy_agent"
+headless_claude = "imbue.mng_claude.headless_claude_agent"
 
 [build-system]
 requires = ["hatchling"]

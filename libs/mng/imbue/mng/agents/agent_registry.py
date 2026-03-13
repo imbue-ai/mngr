@@ -4,7 +4,6 @@ import pluggy
 
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.agents.default_plugins import codex_agent
-from imbue.mng.agents.default_plugins import headless_claude_agent
 from imbue.mng.config.agent_class_registry import list_registered_agent_class_types
 from imbue.mng.config.agent_class_registry import register_agent_class
 from imbue.mng.config.agent_class_registry import reset_agent_class_registry
@@ -42,10 +41,9 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     set_default_agent_class(BaseAgent)
 
     # Register built-in agent type classes (each has a hookimpl static method)
-    # claude, code_guardian, and fixme_fairy are registered via entry points
-    # from the mng_claude plugin
+    # claude, code_guardian, fixme_fairy, and headless_claude are registered
+    # via entry points from the mng_claude plugin
     pm.register(codex_agent, name="codex")
-    pm.register(headless_claude_agent, name="headless_claude")
 
     # Call the hook to get all agent type registrations
     # Each implementation returns a single tuple

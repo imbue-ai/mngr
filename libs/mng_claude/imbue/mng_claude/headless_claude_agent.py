@@ -8,9 +8,6 @@ from typing import Callable
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng import hookimpl
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import NoCommandDefinedError
@@ -23,6 +20,9 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
 from imbue.mng.utils.polling import poll_until
+from imbue.mng_claude import hookimpl
+from imbue.mng_claude.plugin import ClaudeAgent
+from imbue.mng_claude.plugin import ClaudeAgentConfig
 
 _TAIL_POLL_INTERVAL: float = 0.05
 _TAIL_POLL_TIMEOUT: float = 300.0
