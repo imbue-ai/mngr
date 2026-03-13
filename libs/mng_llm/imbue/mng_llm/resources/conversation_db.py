@@ -73,7 +73,8 @@ def lookup_model(db_path: str, conversation_id: str) -> None:
         finally:
             conn.close()
     except sqlite3.Error as e:
-        _warn(f"lookup-model failed: {e}")
+        if "no such table" not in str(e):
+            _warn(f"lookup-model failed: {e}")
 
 
 def count(db_path: str) -> None:
@@ -98,7 +99,10 @@ def max_rowid(db_path: str) -> None:
         finally:
             conn.close()
     except sqlite3.Error as e:
-        _warn(f"max-rowid failed: {e}")
+        # The conversations table is created by llm on first use, so
+        # "no such table" is expected on fresh databases -- not a warning.
+        if "no such table" not in str(e):
+            _warn(f"max-rowid failed: {e}")
         _write_stdout(0)
 
 
@@ -139,7 +143,8 @@ def poll_new(db_path: str, max_rowid: str) -> None:
         finally:
             conn.close()
     except sqlite3.Error as e:
-        _warn(f"poll-new failed: {e}")
+        if "no such table" not in str(e):
+            _warn(f"poll-new failed: {e}")
 
 
 def main() -> None:
