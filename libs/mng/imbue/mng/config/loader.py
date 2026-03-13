@@ -182,6 +182,11 @@ def load_config(
     if config.logging is not None:
         config_dict["logging"] = config.logging
 
+    config_dict["unset_vars"] = config.unset_vars
+    config_dict["pager"] = config.pager
+    config_dict["enabled_backends"] = config.enabled_backends
+    config_dict["connect_command"] = config.connect_command
+    config_dict["is_remote_agent_installation_allowed"] = config.is_remote_agent_installation_allowed
     config_dict["is_nested_tmux_allowed"] = config.is_nested_tmux_allowed
     # Apply MNG_HEADLESS env var override (env var > config file > default)
     headless_env = os.environ.get("MNG_HEADLESS")
@@ -515,6 +520,20 @@ def parse_config(
     kwargs: dict[str, Any] = {}
     kwargs["prefix"] = raw.pop("prefix", None)
     kwargs["default_host_dir"] = raw.pop("default_host_dir", None)
+    # List fields: only include when present so pydantic's default applies when absent
+    # (model_construct stores explicit None, but merge_with concatenates lists and can't handle None)
+    if "unset_vars" in raw:
+        kwargs["unset_vars"] = raw.pop("unset_vars")
+    if "enabled_backends" in raw:
+        kwargs["enabled_backends"] = raw.pop("enabled_backends")
+    # Scalar fields: None signals "not set" (merge_with checks `is not None`)
+    kwargs["pager"] = raw.pop("pager", None) if "pager" in raw else None
+    kwargs["connect_command"] = raw.pop("connect_command", None) if "connect_command" in raw else None
+    kwargs["is_remote_agent_installation_allowed"] = (
+        raw.pop("is_remote_agent_installation_allowed", None)
+        if "is_remote_agent_installation_allowed" in raw
+        else None
+    )
     kwargs["agent_types"] = (
         _parse_agent_types(raw.pop("agent_types", {}), strict=strict) if "agent_types" in raw else {}
     )
