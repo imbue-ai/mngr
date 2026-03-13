@@ -1172,3 +1172,25 @@ def test_creation_status_api_rejects_unauthenticated(tmp_path: Path) -> None:
 
     response = client.get("/api/create-agent/{}/status".format(AgentId()))
     assert response.status_code == 403
+
+
+# -- Backend ready API tests --
+
+
+def test_backend_ready_returns_true_when_backend_available(tmp_path: Path) -> None:
+    """GET /api/backend-ready/{id}/{server} returns ready=true when backend exists."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/api/backend-ready/{}/{}/".format(agent_id, DEFAULT_SERVER_NAME))
+    assert response.status_code == 200
+    assert response.json() == {"ready": True}
+
+
+def test_backend_ready_returns_false_when_backend_unavailable(tmp_path: Path) -> None:
+    """GET /api/backend-ready/{id}/{server} returns ready=false when no backend."""
+    client, _, agent_id = _setup_test_server_without_backend(tmp_path)
+
+    response = client.get("/api/backend-ready/{}/{}/".format(agent_id, DEFAULT_SERVER_NAME))
+    assert response.status_code == 200
+    assert response.json() == {"ready": False}
