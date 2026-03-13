@@ -18,14 +18,39 @@ import argparse
 import os
 import sys
 import textwrap
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Ensure the scripts directory is importable regardless of working directory.
+_scripts_str = str(SCRIPT_DIR)
+if _scripts_str not in sys.path:
+    sys.path.insert(0, _scripts_str)
+
+from verify_skill_overrides import CATEGORY_EXTENSIONS  # noqa: E402
+from verify_skill_overrides import NEW_CATEGORIES  # noqa: E402
+from verify_skill_overrides import OverrideAction  # noqa: E402
+
 REPO_ROOT = SCRIPT_DIR.parent
 
 # Output paths (vet-generated, checked in)
 BRANCH_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "code-issue-categories.md"
 CONVERSATION_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "conversation-issue-categories.md"
+
+
+# ---------------------------------------------------------------------------
+# Intermediate representation for a category section
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CategorySection:
+    issue_code: str
+    guide: str
+    examples: list[str] = field(default_factory=list)
+    exceptions: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +77,33 @@ def format_guide_section(guide) -> str:
     if guide.exceptions:
         lines.append("**Exceptions:**")
         for exception in guide.exceptions:
+            lines.append(f"- {exception}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_category_section(section: CategorySection) -> str:
+    """Format a CategorySection into a markdown section."""
+    lines: list[str] = []
+
+    lines.append(f"## {section.issue_code}")
+    lines.append("")
+
+    lines.append(section.guide)
+    lines.append("")
+
+    if section.examples:
+        lines.append("**Examples:**")
+        for example in section.examples:
+            lines.append(f"- {example}")
+        lines.append("")
+
+    if section.exceptions:
+        lines.append("**Exceptions:**")
+        for exception in section.exceptions:
             lines.append(f"- {exception}")
         lines.append("")
 
@@ -95,8 +147,71 @@ CONVERSATION_OUTPUT_FORMAT = textwrap.dedent("""\
 # ---------------------------------------------------------------------------
 
 
+def _vet_guide_to_section(guide) -> CategorySection:
+    """Convert a vet IssueIdentificationGuide to a CategorySection."""
+    return CategorySection(
+        issue_code=guide.issue_code.value,
+        guide=guide.guide,
+        examples=list(guide.examples),
+        exceptions=list(guide.exceptions),
+    )
+
+
+def _apply_overrides(sections: list[CategorySection]) -> list[CategorySection]:
+    """Apply mng-specific overrides to the category sections.
+
+    Inserts new categories and extends existing ones with additional guidance.
+    """
+    sections_by_code: dict[str, CategorySection] = {s.issue_code: s for s in sections}
+
+    # Insert new categories after their specified anchor.
+    for issue_code, (guide_text, insert_after) in NEW_CATEGORIES.items():
+        new_section = CategorySection(issue_code=issue_code, guide=guide_text)
+        # Find the index of the anchor and insert after it.
+        anchor_idx = next(
+            (i for i, s in enumerate(sections) if s.issue_code == insert_after),
+            None,
+        )
+        if anchor_idx is None:
+            msg = f"Override anchor '{insert_after}' not found for new category '{issue_code}'"
+            raise ValueError(msg)
+        sections.insert(anchor_idx + 1, new_section)
+        sections_by_code[issue_code] = new_section
+
+    # Apply extensions to existing categories.
+    for override in CATEGORY_EXTENSIONS:
+        section = sections_by_code.get(override.issue_code)
+        if section is None:
+            msg = f"Override target '{override.issue_code}' not found in categories"
+            raise ValueError(msg)
+        match override.action:
+            case OverrideAction.APPEND_GUIDE:
+                section.guide = section.guide + "\n" + override.content
+            case OverrideAction.APPEND_EXAMPLES:
+                section.examples.extend(_split_list_items(override.content))
+            case OverrideAction.APPEND_EXCEPTIONS:
+                section.exceptions.extend(_split_list_items(override.content))
+            case OverrideAction.ADD_CATEGORY:
+                msg = "ADD_CATEGORY should use NEW_CATEGORIES, not CATEGORY_EXTENSIONS"
+                raise ValueError(msg)
+
+    return sections
+
+
+def _split_list_items(text: str) -> list[str]:
+    """Split a block of '- item' lines into individual items (without the leading '- ')."""
+    items: list[str] = []
+    for line in text.strip().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            items.append(stripped[2:])
+        elif stripped:
+            items.append(stripped)
+    return items
+
+
 def generate_branch_categories(vet_modules) -> str:
-    """Generate branch issue categories from vet: batched commit + correctness guides."""
+    """Generate branch issue categories from vet, with mng-specific overrides applied."""
     codes_batch = vet_modules["ISSUE_CODES_FOR_BATCHED_COMMIT_CHECK"]
     codes_correctness = vet_modules["ISSUE_CODES_FOR_CORRECTNESS_CHECK"]
     guides_by_code = vet_modules["ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE"]
@@ -108,10 +223,13 @@ def generate_branch_categories(vet_modules) -> str:
             seen.add(code)
             codes.append(code)
 
-    sections: list[str] = [BRANCH_PREAMBLE]
-    for code in codes:
-        sections.append(format_guide_section(guides_by_code[code]))
-    return "\n".join(sections)
+    sections = [_vet_guide_to_section(guides_by_code[code]) for code in codes]
+    sections = _apply_overrides(sections)
+
+    parts: list[str] = [BRANCH_PREAMBLE]
+    for section in sections:
+        parts.append(format_category_section(section))
+    return "\n".join(parts)
 
 
 def generate_conversation_categories(vet_modules) -> str:

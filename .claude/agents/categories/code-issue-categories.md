@@ -31,6 +31,16 @@ Review the code for the following types of issues:
 
 ---
 
+## commit_contents
+
+The diff should not include excessive changes, or changes unrelated to the user's request. In particular, avoid:
+
+1. Checking in binaries, compiled files, dependencies, or build artifacts
+2. Accidental deletion of files or folders
+3. Unrequested changes to test time limits, config vars, minimum required test coverage, ratchet test values, and any other settings that are supposed to constrain the codebase. It is *very* important to flag these issues as a MAJOR issue!
+
+---
+
 ## documentation_implementation_mismatch
 
 - The implementation should follow, in this priority order: 1. the user's request, 2. documentation existing in the code base, 3. existing code around it, 4. general best practices and common sense
@@ -56,6 +66,8 @@ Review the code for the following types of issues:
     - If the codebase uses specific import/export patterns (e.g., relative vs. absolute imports), new code should use the same patterns
 - The diff should integrate functionally with existing code by adding invocations, updating invocations, replacing code with newly defined functions or variables, removing duplicate code when a new piece replaces it, etc.
 - Prefer using existing library/dependency APIs over custom implementations when the library provides (or will provide) the needed functionality.
+- Tests should be given the correct decorators (ex: @pytest.mark.acceptance for tests that require network access/credentials and @pytest.mark.release for end-to-end tests that are not "core", eg, test rarer cases)
+- Tests should be placed in the correctly named file (ex: *_test.py for unit tests, test_*.py for integration/acceptance/release tests)
 
 **Examples:**
 - The codebase uses absolute Python imports from the project root, but a new file uses relative imports.
@@ -103,6 +115,7 @@ Repetitive or duplicate code.
 - A file is duplicated (make exceptions for cases where duplication may be necessary such as test files).
 - A significant amount of code is introduced which duplicates functionality from standard or well-known libraries.
 - Multiple functions format or build the same string or data structure in the same way without using a shared helper function or test fixture.
+- This is particularly common in tests, where multiple test cases may duplicate setup or validation logic that could be shared (e.g. as a fixture). It is important to flag such cases as a MAJOR issue!
 
 **Exceptions:**
 - Do not flag duplication between legacy and new implementations when the codebase is clearly undergoing a migration or maintaining multiple versions for compatibility.
@@ -115,10 +128,16 @@ Repetitive or duplicate code.
 - Functions that have gotten long (> 50 lines) and are mixing multiple concerns and/or combining several different steps should be broken up. (Typically by using helper functions and/or separate classes to encapsulate individual concerns.)
 - Classes or files that are combining different concerns should be broken up, such that each class / file only deals with one primary concern.
     - Note: we don't impose any minimal or maximal length on a class or file. Classes and files are ok to be long, as long as they only deal with a single concern.
+- This also includes structures that are unsafe (ex: returning a type that has an error state rather than raising an exception).
+- Using primitive types (strings, integers, etc) to represent domain-level data--actual data types should be preferred instead, even if they simply inherit from the built-in types, as it makes the code more readable.
+- Using an if/elif/.../else construct where you could use a match statement instead (eg, to dispatch on an enum value)
 
 **Examples:**
 - New functionality that is orthogonal to the existing functionality in a function is inserted into the existing function's body instead of being separated out into its own function.
 - A class mixes two different use cases that could be separated into two classes.
+- A function that returns a value that can be either a valid result or an error state (e.g. None, False, -1) instead of raising an exception for the error case.
+- A class that has a "name" attribute that is just a string, instead of having a proper Name class.
+- An if/elif/.../else construct that dispatches on the value of an enum, instead of using a match statement.
 
 ---
 
@@ -130,6 +149,22 @@ Repetitive or duplicate code.
 
 **Exceptions:**
 - Syntactical or logical issues in tests will be raised in other issue types and do not belong in this category.
+
+---
+
+## test_quality
+
+Any tests added in the diff should be of high quality individually, and should collectively create a high-quality test suite. This means:
+- Avoid pointless and trivial tests
+- Avoid creating lots of highly repetitive tests (parameterize the test or check all cases in a single test instead of making a separate test for each case, when appropriate)
+- Ensure that common test code is factored out into fixtures
+- Ensure that existing fixtures are used (when applicable)
+- Ensure that tests are robust (ex: wait for conditions to be met rather than using hard-coded sleep statements, use appropriate timeouts, avoid flakiness)
+- Ensure that the overall test suite for the changes is comprehensive and covers the new functionality well, but without creating more tests than necessary
+- Ensure that functionality is tested with unit tests whenever possible, only creating a small number of slower integration tests when necessary
+- Ensure that multiple integration tests for similar functionality are serving unique purposes and are not overly repetitive or duplicative
+- Ensure that the tests are as fast and simple as possible
+- Ensure that individual tests are clearly named and easy to understand
 
 ---
 
@@ -186,6 +221,8 @@ Repetitive or duplicate code.
 ## fails_silently
 
 Code that fails silently is code that ignores errors without reporting them.
+- Any "except" clause that does *not* log the error (at least at "trace" level) and/or report it to an error tracking system. Real error conditions should be logged at least at warning level, and anything that violates a program invariant should generally be raised.
+- Any except clause must either log the error (if it is handling the error), or re-raise the error (if it is not handling the error).
 
 **Examples:**
 - Overly broad exception handlers (e.g. bare 'except' or 'except Exception') that catch errors and continue execution without handling, logging, or re-raising them.
@@ -249,6 +286,7 @@ Explicit instructions in files such as .claude.md, CLAUDE.md, and AGENTS.md MUST
 - Check string encoding/decoding operations: calls to .encode() or .decode() without error handling (try/except or 'errors' parameter) that could raise UnicodeEncodeError or UnicodeDecodeError, especially when processing untrusted or streamed data.
 - Look for operations with global side effects that could cause problems: os.chdir() without proper restoration, modifying global state in ways that affect other code, operations that are not thread-safe when concurrency is present.
 - Only flag issues where there is clear evidence the code will fail or cause serious problems. Avoid speculating about potential issues in well-established language patterns or standard library usage.
+- Catch clauses that are too broad and could hide runtime errors: Almost all try/except blocks should only span a single line, and should generally catch a single class of errors.
 
 ---
 
@@ -257,6 +295,7 @@ Explicit instructions in files such as .claude.md, CLAUDE.md, and AGENTS.md MUST
 - Code that implements an algorithm incorrectly for its stated purpose.
 - Look for: sorting algorithms with wrong comparison logic, search algorithms with incorrect termination, mathematical calculations with wrong formulas, data structure operations that don't maintain invariants, algorithms that don't handle edge cases (empty inputs, single elements).
 - Only flag issues that are clearly incorrect for the stated purpose of the algorithm, and describe the problem and correction in detail.
+- Any reimplementation of complex algorithms that should be imported from standard libraries or well-known packages (ex: use max flow from networkx instead of reimplementing it)
 
 ---
 

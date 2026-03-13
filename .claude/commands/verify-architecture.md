@@ -20,7 +20,7 @@ Write a CONCISE description of the problem the branch is trying to solve, based 
 
 ## Phase 2: Validate the Diff
 
-Spawn a `validate-diff` Agent (`model: "haiku"`). Provide the base branch name and the problem description from Phase 1.
+Spawn a `validate-diff` Agent. Provide the base branch name and the problem description from Phase 1.
 
 Based on the agent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.

@@ -1,5 +1,7 @@
 ---
+name: validate-diff
 description: Quick sanity check on a branch's diff before detailed review.
+model: haiku
 ---
 
 You are doing a quick sanity check on a branch's diff before a more detailed review.

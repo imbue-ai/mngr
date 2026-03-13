@@ -1,4 +1,5 @@
 ---
+name: analyze-architecture
 description: Analyze whether the approach taken on a branch fits existing codebase patterns.
 ---
 

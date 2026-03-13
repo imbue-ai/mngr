@@ -1,4 +1,5 @@
 ---
+name: verify-and-fix
 description: Verify the current branch for code issues, plan fixes, and implement them.
 ---
 
