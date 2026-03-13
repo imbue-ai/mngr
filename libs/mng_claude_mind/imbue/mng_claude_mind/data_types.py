@@ -28,7 +28,8 @@ class ClaudeMindSettings(LlmSettings):
     agent_type: str | None = Field(
         default=None,
         description="Agent type for this mind (e.g. 'elena-code', 'claude-mind'). "
-        "Used by mind deploy to determine the agent type when --agent-type is not provided on the CLI.",
+        "Read during agent creation to determine the --type passed to mng create. "
+        "Falls back to 'claude-mind' when not set.",
     )
     watchers: WatcherSettings = Field(
         default_factory=WatcherSettings,
