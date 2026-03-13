@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import getpass
 import hashlib
+import importlib.resources
 import json
 import os
 import random
@@ -52,6 +53,7 @@ from imbue.mng.providers.ssh_host_setup import load_resource_script as _load_mng
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.polling import poll_until
 from imbue.mng_claude import hookimpl
+from imbue.mng_claude import resources as _claude_resources
 from imbue.mng_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mng_claude.claude_config import ClaudeOnboardingNotCompletedError
@@ -589,11 +591,7 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
 
 def _load_claude_resource_script(filename: str) -> str:
     """Load a shell script from the mng_claude resources package."""
-    import importlib.resources
-
-    from imbue.mng_claude import resources as claude_resources
-
-    resource_files = importlib.resources.files(claude_resources)
+    resource_files = importlib.resources.files(_claude_resources)
     script_path = resource_files.joinpath(filename)
     return script_path.read_text()
 
