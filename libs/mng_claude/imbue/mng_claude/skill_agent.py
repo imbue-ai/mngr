@@ -9,12 +9,12 @@ import click
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.utils.file_utils import atomic_write
+from imbue.mng_claude.plugin import ClaudeAgent
+from imbue.mng_claude.plugin import ClaudeAgentConfig
 
 
 class SkillProvisionedAgentConfig(ClaudeAgentConfig):

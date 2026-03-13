@@ -26,12 +26,12 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mng.agents.default_plugins.claude_config import encode_claude_project_dir_name
 from imbue.mng.cli.create import create
 from imbue.mng.cli.list import list_command
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 from imbue.mng.utils.testing import wait_for_agent_session
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
 from imbue.mng_claude_mind.conftest import StubCommandResult

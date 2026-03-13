@@ -270,6 +270,7 @@ This is a monorepo that contains the code for `mng` here:
 
 As well as the code for some plugins that we maintain, including:
 
+- [libs/mng_claude/](https://github.com/imbue-ai/mng/blob/main/libs/mng_claude/README.md)
 - [libs/mng_pair/](https://github.com/imbue-ai/mng/blob/main/libs/mng_pair/README.md)
 - [libs/mng_opencode/](https://github.com/imbue-ai/mng/blob/main/libs/mng_opencode/README.md)
 

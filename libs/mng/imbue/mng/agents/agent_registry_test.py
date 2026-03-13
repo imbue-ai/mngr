@@ -7,8 +7,6 @@ from pydantic import Field
 
 from imbue.mng.agents.agent_registry import list_registered_agent_types
 from imbue.mng.agents.base_agent import BaseAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.agents.default_plugins.codex_agent import CodexAgentConfig
 from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.agent_config_registry import ResolvedAgentType
@@ -21,6 +19,8 @@ from imbue.mng.errors import ConfigParseError
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import Permission
+from imbue.mng_claude.plugin import ClaudeAgent
+from imbue.mng_claude.plugin import ClaudeAgentConfig
 
 
 def test_get_agent_config_class_returns_base_for_unregistered_type() -> None:

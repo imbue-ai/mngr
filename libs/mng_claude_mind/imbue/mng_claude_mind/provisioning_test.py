@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from imbue.mng.agents.default_plugins.claude_config import encode_claude_project_dir_name
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_claude_mind.conftest import StubCommandResult
 from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.conftest import create_mind_conversations_table_in_test_db

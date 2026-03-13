@@ -10,7 +10,7 @@ set -euo pipefail
 # Locate the export_transcript.sh script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-EXPORT_SCRIPT="$REPO_ROOT/libs/mng/imbue/mng/resources/export_transcript.sh"
+EXPORT_SCRIPT="$REPO_ROOT/libs/mng_claude/imbue/mng_claude/resources/export_transcript.sh"
 
 if [ ! -f "$EXPORT_SCRIPT" ]; then
     echo "export_transcript.sh not found at $EXPORT_SCRIPT" >&2

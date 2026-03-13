@@ -8,7 +8,6 @@ from typing import cast
 
 import pluggy
 
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
 from imbue.mng.api.testing import FakeHost
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -17,6 +16,7 @@ from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import HostId
+from imbue.mng_claude.plugin import ClaudeAgent
 from imbue.mng_claude_mind.plugin import ClaudeMindAgent
 from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 from imbue.mng_elena_code.plugin import ELENA_SYSTEM_PROMPT

@@ -7,19 +7,6 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.agents.agent_registry import list_registered_agent_types
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
-from imbue.mng.agents.default_plugins.code_guardian_agent import CodeGuardianAgent
-from imbue.mng.agents.default_plugins.code_guardian_agent import CodeGuardianAgentConfig
-from imbue.mng.agents.default_plugins.code_guardian_agent import _CODE_GUARDIAN_SKILL_CONTENT
-from imbue.mng.agents.default_plugins.code_guardian_agent import _SKILL_NAME as CODE_GUARDIAN_SKILL_NAME
-from imbue.mng.agents.default_plugins.fixme_fairy_agent import FixmeFairyAgent
-from imbue.mng.agents.default_plugins.fixme_fairy_agent import FixmeFairyAgentConfig
-from imbue.mng.agents.default_plugins.fixme_fairy_agent import _FIXME_FAIRY_SKILL_CONTENT
-from imbue.mng.agents.default_plugins.fixme_fairy_agent import _SKILL_NAME as FIXME_FAIRY_SKILL_NAME
-from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgent
-from imbue.mng.agents.default_plugins.skill_agent import SkillProvisionedAgentConfig
-from imbue.mng.agents.default_plugins.skill_agent import _install_skill_locally
 from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.agent_config_registry import get_agent_config_class
 from imbue.mng.config.agent_config_registry import resolve_agent_type
@@ -28,6 +15,19 @@ from imbue.mng.config.data_types import MngContext
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.utils.testing import make_mng_ctx
+from imbue.mng_claude.code_guardian_agent import CodeGuardianAgent
+from imbue.mng_claude.code_guardian_agent import CodeGuardianAgentConfig
+from imbue.mng_claude.code_guardian_agent import _CODE_GUARDIAN_SKILL_CONTENT
+from imbue.mng_claude.code_guardian_agent import _SKILL_NAME as CODE_GUARDIAN_SKILL_NAME
+from imbue.mng_claude.fixme_fairy_agent import FixmeFairyAgent
+from imbue.mng_claude.fixme_fairy_agent import FixmeFairyAgentConfig
+from imbue.mng_claude.fixme_fairy_agent import _FIXME_FAIRY_SKILL_CONTENT
+from imbue.mng_claude.fixme_fairy_agent import _SKILL_NAME as FIXME_FAIRY_SKILL_NAME
+from imbue.mng_claude.plugin import ClaudeAgent
+from imbue.mng_claude.plugin import ClaudeAgentConfig
+from imbue.mng_claude.skill_agent import SkillProvisionedAgent
+from imbue.mng_claude.skill_agent import SkillProvisionedAgentConfig
+from imbue.mng_claude.skill_agent import _install_skill_locally
 
 # Each tuple: (type_name, agent_class, config_class, skill_name, skill_content)
 _SKILL_AGENTS = [
