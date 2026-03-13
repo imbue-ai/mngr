@@ -116,6 +116,7 @@ def setup_command_context(
     command_name: str,
     command_class: type[TCommandOptions],
     is_format_template_supported: bool = False,
+    strict: bool | None = None,
 ) -> tuple[MngContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for a command.
 
@@ -156,6 +157,7 @@ def setup_command_context(
         enabled_plugins=initial_opts.plugin,
         disabled_plugins=initial_opts.disable_plugin,
         is_interactive=False,
+        strict=strict,
     )
 
     # Resolve is_interactive from all sources.

@@ -19,7 +19,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.mng import hookimpl
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import ProviderInstanceConfig
 from imbue.mng.errors import ConfigStructureError
@@ -32,11 +31,12 @@ from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.deploy_utils import collect_provider_profile_files
-from imbue.mng.providers.modal.config import ModalProviderConfig
-from imbue.mng.providers.modal.instance import ModalProviderApp
-from imbue.mng.providers.modal.instance import ModalProviderInstance
-from imbue.mng.providers.modal.log_utils import ModalLoguruWriter
-from imbue.mng.providers.modal.log_utils import enable_modal_output_capture
+from imbue.mng_modal import hookimpl
+from imbue.mng_modal.config import ModalProviderConfig
+from imbue.mng_modal.instance import ModalProviderApp
+from imbue.mng_modal.instance import ModalProviderInstance
+from imbue.mng_modal.log_utils import ModalLoguruWriter
+from imbue.mng_modal.log_utils import enable_modal_output_capture
 
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"

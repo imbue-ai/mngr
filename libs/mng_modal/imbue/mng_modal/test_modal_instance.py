@@ -10,10 +10,10 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.providers.modal.errors import NoSnapshotsModalMngError
-from imbue.mng.providers.modal.instance import ModalProviderInstance
-from imbue.mng.providers.modal.volume import ModalVolume
 from imbue.mng.utils.polling import wait_for
+from imbue.mng_modal.errors import NoSnapshotsModalMngError
+from imbue.mng_modal.instance import ModalProviderInstance
+from imbue.mng_modal.volume import ModalVolume
 
 pytestmark = [pytest.mark.modal]
 

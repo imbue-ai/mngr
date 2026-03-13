@@ -80,15 +80,6 @@ from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
 from imbue.mng.providers.base_provider import BaseProviderInstance
-from imbue.mng.providers.modal.config import ModalProviderConfig
-from imbue.mng.providers.modal.errors import NoSnapshotsModalMngError
-from imbue.mng.providers.modal.routes.deployment import deploy_function
-from imbue.mng.providers.modal.ssh_utils import add_host_to_known_hosts
-from imbue.mng.providers.modal.ssh_utils import create_pyinfra_host
-from imbue.mng.providers.modal.ssh_utils import load_or_create_host_keypair
-from imbue.mng.providers.modal.ssh_utils import load_or_create_ssh_keypair
-from imbue.mng.providers.modal.ssh_utils import wait_for_sshd
-from imbue.mng.providers.modal.volume import ModalVolume
 from imbue.mng.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mng.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mng.providers.ssh_host_setup import build_add_known_hosts_command
@@ -97,6 +88,15 @@ from imbue.mng.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mng.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mng.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mng.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mng_modal.config import ModalProviderConfig
+from imbue.mng_modal.errors import NoSnapshotsModalMngError
+from imbue.mng_modal.routes.deployment import deploy_function
+from imbue.mng_modal.ssh_utils import add_host_to_known_hosts
+from imbue.mng_modal.ssh_utils import create_pyinfra_host
+from imbue.mng_modal.ssh_utils import load_or_create_host_keypair
+from imbue.mng_modal.ssh_utils import load_or_create_ssh_keypair
+from imbue.mng_modal.ssh_utils import wait_for_sshd
+from imbue.mng_modal.volume import ModalVolume
 
 # Constants
 CONTAINER_SSH_PORT: Final[int] = 22

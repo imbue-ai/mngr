@@ -266,6 +266,7 @@ This is a monorepo that contains the code for `mng` here:
 
 As well as the code for some plugins that we maintain, including:
 
+- [libs/mng_modal/](libs/mng_modal/README.md)
 - [libs/mng_claude/](libs/mng_claude/README.md)
 - [libs/mng_pair/](libs/mng_pair/README.md)
 - [libs/mng_opencode/](libs/mng_opencode/README.md)

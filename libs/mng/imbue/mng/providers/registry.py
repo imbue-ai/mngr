@@ -1,21 +1,7 @@
-# NOTE: These top-level imports cause Modal to be loaded even when not needed,
-# adding ~0.1s to every command. Profiling of `mng list --provider local` shows:
-#   - Total CLI time: ~0.9s
-#   - With Modal disabled entirely (--disable-plugin modal): ~0.76s
-#   - Python-level work (imports + list_agents): ~0.58s
-#
-# The Modal import happens here unconditionally, even when --provider filters to
-# local-only. To fix: move these imports inside load_backends_from_plugins() and
-# load_local_backend_only(), or only import backends that are actually enabled.
-#
-# Another candidate for lazy loading: celpy (~45ms) in api/list.py. It's only
-# needed when CEL filters are used (--include/--exclude), but is currently
-# imported at the top level via imbue.mng.utils.cel_utils.
 import pluggy
 
 import imbue.mng.providers.docker.backend as docker_backend_module
 import imbue.mng.providers.local.backend as local_backend_module
-import imbue.mng.providers.modal.backend as modal_backend_module
 import imbue.mng.providers.ssh.backend as ssh_backend_module
 from imbue.imbue_common.pure import pure
 from imbue.mng.config.data_types import MngContext
@@ -72,8 +58,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_doc
     pm.register(ssh_backend_module, name="ssh")
     if include_docker:
         pm.register(docker_backend_module, name="docker")
-    if include_modal:
-        pm.register(modal_backend_module, name="modal")
+    # Note: modal backend is loaded via the mng_modal plugin entry point
 
     registrations = pm.hook.register_provider_backend()
 
@@ -81,6 +66,8 @@ def _load_backends(pm: pluggy.PluginManager, *, include_modal: bool, include_doc
         if registration is not None:
             backend_class, config_class = registration
             backend_name = backend_class.get_name()
+            if not include_modal and str(backend_name) == "modal":
+                continue
             _backend_registry[backend_name] = backend_class
             register_provider_config(str(backend_name), config_class)
 

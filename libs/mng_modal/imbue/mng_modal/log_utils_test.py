@@ -1,9 +1,9 @@
 from io import StringIO
 
-from imbue.mng.providers.modal.log_utils import ModalLoguruWriter
-from imbue.mng.providers.modal.log_utils import _create_modal_loguru_writer
-from imbue.mng.providers.modal.log_utils import _create_multi_writer
-from imbue.mng.providers.modal.log_utils import enable_modal_output_capture
+from imbue.mng_modal.log_utils import ModalLoguruWriter
+from imbue.mng_modal.log_utils import _create_modal_loguru_writer
+from imbue.mng_modal.log_utils import _create_multi_writer
+from imbue.mng_modal.log_utils import enable_modal_output_capture
 
 
 def test_multi_writer_writes_to_all_files() -> None:

@@ -6,10 +6,15 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import HostId
+from imbue.mng.primitives import ProviderInstanceName
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
 
@@ -26,9 +31,10 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(d)
 
 
-def make_agents_json(*agent_ids: AgentId) -> str:
+def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
     """Build a JSON string matching `mng list --format json` output for the given agent IDs."""
-    return json.dumps({"agents": [{"id": str(agent_id)} for agent_id in agent_ids]})
+    effective_labels = labels if labels is not None else {"mind": "true"}
+    return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 
 def make_server_log(server: str, url: str) -> str:
@@ -50,7 +56,26 @@ def make_resolver_with_data(
 
     if agents_json is not None:
         parsed = parse_agents_from_json(agents_json)
-        resolver.update_agents(parsed)
+        # Build DiscoveredAgent objects from the JSON for list_known_mind_ids()
+        raw = json.loads(agents_json)
+        discovered = tuple(
+            DiscoveredAgent(
+                host_id=HostId("host-00000000000000000000000000000000"),
+                agent_id=AgentId(a["id"]),
+                agent_name=AgentName(a.get("name", a["id"])),
+                provider_name=ProviderInstanceName("local"),
+                certified_data={"labels": a.get("labels", {})},
+            )
+            for a in raw.get("agents", [])
+            if "id" in a
+        )
+        resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=parsed.agent_ids,
+                discovered_agents=discovered,
+                ssh_info_by_agent_id=parsed.ssh_info_by_agent_id,
+            )
+        )
 
     if server_logs:
         for agent_id_str, log_content in server_logs.items():

@@ -1,5 +1,5 @@
-from imbue.mng.providers.modal.instance import _build_listing_collection_script
-from imbue.mng.providers.modal.instance import _parse_listing_collection_output
+from imbue.mng_modal.instance import _build_listing_collection_script
+from imbue.mng_modal.instance import _parse_listing_collection_output
 
 
 def test_build_listing_collection_script_contains_key_sections() -> None:

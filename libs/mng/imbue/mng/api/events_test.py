@@ -480,6 +480,35 @@ def test_follow_event_file_via_host_with_tail_count(events_host_target: tuple[Ev
     assert "line1" not in joined
 
 
+def test_follow_event_file_via_host_retries_when_file_missing(
+    events_host_target: tuple[EventsTarget, Path],
+) -> None:
+    """Verify follow_event_file retries when the file doesn't exist yet."""
+    target, events_dir = events_host_target
+    event_file = events_dir / "delayed.log"
+
+    captured: list[str] = []
+
+    # Create the file after a short delay (the retry loop should pick it up)
+    def create_file_later() -> None:
+        threading.Event().wait(timeout=3.0)
+        event_file.write_text("appeared\n")
+
+    writer = threading.Thread(target=create_file_later, daemon=True)
+    writer.start()
+
+    with pytest.raises(_StopFollow):
+        follow_event_file(
+            target=target,
+            event_file_name="delayed.log",
+            on_new_content=_capture_and_stop_after(captured, after_count=1),
+            tail_count=None,
+        )
+
+    joined = "".join(captured)
+    assert "appeared" in joined
+
+
 def test_follow_event_file_via_host_detects_new_content(events_host_target: tuple[EventsTarget, Path]) -> None:
     """Verify follow_event_file via host streams new content appended to the file."""
     target, events_dir = events_host_target

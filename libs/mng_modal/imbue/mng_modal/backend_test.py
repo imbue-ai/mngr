@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.providers.modal.backend import get_files_for_deploy
+from imbue.mng_modal.backend import get_files_for_deploy
 
 # =============================================================================
 # get_files_for_deploy Tests

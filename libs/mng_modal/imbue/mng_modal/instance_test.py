@@ -24,23 +24,23 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import UserId
-from imbue.mng.providers.modal.config import ModalProviderConfig
-from imbue.mng.providers.modal.constants import MODAL_TEST_APP_PREFIX
-from imbue.mng.providers.modal.instance import HOST_VOLUME_INFIX
-from imbue.mng.providers.modal.instance import HostRecord
-from imbue.mng.providers.modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
-from imbue.mng.providers.modal.instance import ModalProviderApp
-from imbue.mng.providers.modal.instance import ModalProviderInstance
-from imbue.mng.providers.modal.instance import SandboxConfig
-from imbue.mng.providers.modal.instance import TAG_HOST_ID
-from imbue.mng.providers.modal.instance import TAG_HOST_NAME
-from imbue.mng.providers.modal.instance import TAG_USER_PREFIX
-from imbue.mng.providers.modal.instance import _build_modal_secrets_from_env
-from imbue.mng.providers.modal.instance import _parse_volume_spec
-from imbue.mng.providers.modal.instance import _substitute_dockerfile_build_args
-from imbue.mng.providers.modal.instance import build_sandbox_tags
-from imbue.mng.providers.modal.instance import check_host_name_is_unique
-from imbue.mng.providers.modal.instance import parse_sandbox_tags
+from imbue.mng_modal.config import ModalProviderConfig
+from imbue.mng_modal.constants import MODAL_TEST_APP_PREFIX
+from imbue.mng_modal.instance import HOST_VOLUME_INFIX
+from imbue.mng_modal.instance import HostRecord
+from imbue.mng_modal.instance import MODAL_VOLUME_NAME_MAX_LENGTH
+from imbue.mng_modal.instance import ModalProviderApp
+from imbue.mng_modal.instance import ModalProviderInstance
+from imbue.mng_modal.instance import SandboxConfig
+from imbue.mng_modal.instance import TAG_HOST_ID
+from imbue.mng_modal.instance import TAG_HOST_NAME
+from imbue.mng_modal.instance import TAG_USER_PREFIX
+from imbue.mng_modal.instance import _build_modal_secrets_from_env
+from imbue.mng_modal.instance import _parse_volume_spec
+from imbue.mng_modal.instance import _substitute_dockerfile_build_args
+from imbue.mng_modal.instance import build_sandbox_tags
+from imbue.mng_modal.instance import check_host_name_is_unique
+from imbue.mng_modal.instance import parse_sandbox_tags
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions

@@ -168,6 +168,20 @@ def build_uv_tool_install_add_path(
 
 
 @pure
+def build_uv_tool_install_add_requirements(
+    receipt: ToolReceipt,
+    new_requirements: list[ToolRequirement],
+) -> tuple[str, ...]:
+    """Build a ``uv tool install`` command that adds multiple dependencies at once.
+
+    Preserves all existing extras and appends the new ones. This avoids
+    running ``uv tool install`` multiple times when adding several plugins.
+    """
+    all_extras = list(receipt.extras) + new_requirements
+    return _build_uv_tool_install_command(receipt.base, all_extras)
+
+
+@pure
 def build_uv_tool_install_add_git(
     receipt: ToolReceipt,
     url: str,
@@ -195,4 +209,17 @@ def build_uv_tool_install_remove(
     Rebuilds with all extras *except* the one matching ``package_name``.
     """
     filtered = [r for r in receipt.extras if r.name != package_name]
+    return _build_uv_tool_install_command(receipt.base, filtered)
+
+
+@pure
+def build_uv_tool_install_remove_multiple(
+    receipt: ToolReceipt,
+    package_names: set[str],
+) -> tuple[str, ...]:
+    """Build a ``uv tool install`` command that removes multiple dependencies at once.
+
+    Rebuilds with all extras *except* those whose names are in ``package_names``.
+    """
+    filtered = [r for r in receipt.extras if r.name not in package_names]
     return _build_uv_tool_install_command(receipt.base, filtered)

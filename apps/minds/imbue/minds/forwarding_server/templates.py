@@ -92,9 +92,14 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
   <h1>Create a Mind</h1>
   <form action="/create" method="post">
     <div class="form-group">
+      <label for="agent_name">Name</label>
+      <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
+             placeholder="selene" required>
+    </div>
+    <div class="form-group">
       <label for="git_url">Git repository URL</label>
       <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
-             placeholder="https://github.com/user/repo.git" required>
+             placeholder="https://github.com/imbue-ai/simple_mind.git" required>
       <p class="help-text">The repository will be cloned and used as the agent's working directory.</p>
     </div>
     <button type="submit" class="btn">Create</button>
@@ -122,34 +127,68 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
       vertical-align: middle; margin-right: 8px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    #logs {
+      margin-top: 16px; padding: 12px; background: rgb(26, 26, 46); color: rgb(200, 210, 220);
+      font-family: monospace; font-size: 13px; border-radius: 6px;
+      max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+    }
   </style>
 </head>
 <body>
   <h1>Creating your mind...</h1>
   <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
+  <div id="logs"></div>
   <script>
     const agentId = '{{ agent_id }}';
-    async function pollStatus() {
-      try {
-        const resp = await fetch('/api/create-agent/' + agentId + '/status');
-        const data = await resp.json();
-        const el = document.getElementById('status');
-        if (data.status === 'DONE') {
-          el.textContent = 'Done! Redirecting...';
-          window.location.href = data.login_url;
-          return;
-        } else if (data.status === 'FAILED') {
-          el.textContent = 'Failed: ' + data.error;
-          el.classList.add('error');
-          return;
-        } else if (data.status === 'CREATING') {
-          el.textContent = 'Creating agent...';
-        }
-      } catch (e) { /* keep polling */ }
-      setTimeout(pollStatus, 2000);
-    }
-    pollStatus();
+    const logsEl = document.getElementById('logs');
+    const statusEl = document.getElementById('status');
+    const source = new EventSource('/api/create-agent/' + agentId + '/logs');
+
+    source.onmessage = function(event) {
+      const data = JSON.parse(event.data);
+      if (data.log) {
+        logsEl.textContent += data.log + '\\n';
+        logsEl.scrollTop = logsEl.scrollHeight;
+      }
+    };
+
+    source.addEventListener('done', function(event) {
+      source.close();
+      const data = JSON.parse(event.data);
+      if (data.status === 'DONE' && data.redirect_url) {
+        statusEl.textContent = 'Done! Redirecting...';
+        window.location.href = data.redirect_url;
+      } else if (data.status === 'FAILED') {
+        statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
+        statusEl.classList.add('error');
+      }
+    });
+
+    source.onerror = function() {
+      source.close();
+    };
   </script>
+</body>
+</html>"""
+)
+
+_LOGIN_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Login - Minds</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .login-message { color: gray; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Minds</h1>
+  <p class="login-message">
+    Please use the login URL printed in the terminal where the server is running.
+  </p>
 </body>
 </html>"""
 )
@@ -160,7 +199,7 @@ _LOGIN_REDIRECT_TEMPLATE: Final[str] = """<!DOCTYPE html>
 <body>
 <p>Authenticating...</p>
 <script>
-window.location.href = '/authenticate?agent_id={{ agent_id }}&one_time_code={{ one_time_code }}';
+window.location.href = '/authenticate?one_time_code={{ one_time_code }}';
 </script>
 </body>
 </html>"""
@@ -178,7 +217,7 @@ _AUTH_ERROR_TEMPLATE: Final[str] = """<!DOCTYPE html>
   <div class="error">
     <h2>Authentication Failed</h2>
     <p>{{ message }}</p>
-    <p>Please generate a new login URL for this device. Each login URL can only be used once.</p>
+    <p>Each login URL can only be used once. Please use the login URL printed in the terminal where the server is running, or restart the server to generate a new one.</p>
   </div>
 </body>
 </html>"""
@@ -193,22 +232,31 @@ def render_landing_page(
     return template.render(agent_ids=accessible_agent_ids)
 
 
+_DEFAULT_GIT_URL: Final[str] = "https://github.com/imbue-ai/simple_mind.git"
+
+
+_DEFAULT_AGENT_NAME: Final[str] = "selene"
+
+
 @pure
-def render_create_form(git_url: str = "") -> str:
+def render_create_form(git_url: str = "", agent_name: str = "") -> str:
     """Render the agent creation form page.
 
     When git_url is provided, the form field is pre-filled with that value.
+    Defaults to the simple_mind repository URL when empty.
     """
+    effective_url = git_url if git_url else _DEFAULT_GIT_URL
+    effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
     template = _JINJA_ENV.from_string(_CREATE_FORM_TEMPLATE)
-    return template.render(git_url=git_url)
+    return template.render(git_url=effective_url, agent_name=effective_name)
 
 
 @pure
 def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
     """Render the progress page shown while an agent is being created.
 
-    The page polls /api/create-agent/{agent_id}/status and auto-redirects
-    to the login URL when creation completes.
+    The page streams logs from /api/create-agent/{agent_id}/logs via SSE
+    and auto-redirects to the agent when creation completes.
     """
     status_text_map = {
         "CLONING": "Cloning repository...",
@@ -222,13 +270,19 @@ def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
 
 
 @pure
+def render_login_page() -> str:
+    """Render the login prompt page for unauthenticated users."""
+    template = _JINJA_ENV.from_string(_LOGIN_PAGE_TEMPLATE)
+    return template.render()
+
+
+@pure
 def render_login_redirect_page(
-    agent_id: AgentId,
     one_time_code: OneTimeCode,
 ) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
     template = _JINJA_ENV.from_string(_LOGIN_REDIRECT_TEMPLATE)
-    return template.render(agent_id=agent_id, one_time_code=one_time_code)
+    return template.render(one_time_code=one_time_code)
 
 
 @pure

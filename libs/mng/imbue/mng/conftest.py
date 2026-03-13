@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -13,7 +12,6 @@ import docker.errors
 import pluggy
 import psutil
 import pytest
-import toml
 from click.testing import CliRunner
 from urwid.widget.listbox import SimpleFocusListWalker
 
@@ -28,28 +26,17 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.plugins import hookspecs
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import UserId
 from imbue.mng.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mng.providers.docker.volume import LABEL_PROVIDER
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.providers.modal.backend import ModalProviderBackend
 from imbue.mng.providers.registry import load_local_backend_only
 from imbue.mng.providers.registry import reset_backend_registry
-from imbue.mng.utils.testing import ModalSubprocessTestEnv
 from imbue.mng.utils.testing import assert_home_is_temp_directory
 from imbue.mng.utils.testing import cleanup_tmux_session
-from imbue.mng.utils.testing import delete_modal_apps_in_environment
-from imbue.mng.utils.testing import delete_modal_environment
-from imbue.mng.utils.testing import delete_modal_volumes_in_environment
-from imbue.mng.utils.testing import generate_test_environment_name
-from imbue.mng.utils.testing import get_subprocess_test_env
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import isolate_home
 from imbue.mng.utils.testing import isolate_tmux_server
 from imbue.mng.utils.testing import make_mng_ctx
-from imbue.mng.utils.testing import worker_modal_app_names
-from imbue.mng.utils.testing import worker_modal_environment_names
-from imbue.mng.utils.testing import worker_modal_volume_names
 from imbue.mng.utils.testing import worker_test_ids
 
 # The urwid import above triggers creation of deprecated module aliases.
@@ -299,107 +286,6 @@ def cli_runner() -> CliRunner:
 
 
 # =============================================================================
-# Modal subprocess test environment fixture (session-scoped)
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_env_name() -> str:
-    """Generate a unique, timestamp-based environment name for this test session.
-
-    This fixture is session-scoped, so all tests in a session share the same
-    environment name. The name includes a UTC timestamp in the format:
-    mng_test-YYYY-MM-DD-HH-MM-SS
-    """
-    return generate_test_environment_name()
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_host_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Create a session-scoped host directory for Modal tests.
-
-    This ensures all tests in a session share the same host directory,
-    which means they share the same Modal environment.
-    """
-    host_dir = tmp_path_factory.mktemp("modal_session") / "mng"
-    host_dir.mkdir(parents=True, exist_ok=True)
-    return host_dir
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_user_id() -> UserId:
-    """Generate a deterministic user ID for the test session.
-
-    This user ID is shared across all subprocess Modal tests in a session
-    via the MNG_USER_ID environment variable. By generating it upfront,
-    the cleanup fixture can construct the exact environment name without
-    needing to find the user_id file in the profile directory structure.
-    """
-    return UserId(uuid4().hex)
-
-
-@pytest.fixture(scope="session")
-def modal_test_session_cleanup(
-    modal_test_session_env_name: str,
-    modal_test_session_user_id: UserId,
-) -> Generator[None, None, None]:
-    """Session-scoped fixture that cleans up the Modal environment at session end.
-
-    This fixture ensures the Modal environment created for tests is deleted
-    when the test session completes, including all apps and volumes.
-    """
-    yield
-
-    # Clean up Modal environment after the session.
-    # The environment name is {prefix}{user_id}, where prefix is based on the timestamp
-    # and user_id is the session-scoped deterministic ID.
-    prefix = f"{modal_test_session_env_name}-"
-    environment_name = f"{prefix}{modal_test_session_user_id}"
-
-    # Truncate environment_name if needed (Modal has 64 char limit)
-    if len(environment_name) > 64:
-        environment_name = environment_name[:64]
-
-    # Delete apps, volumes, and environment using functions from testing.py
-    delete_modal_apps_in_environment(environment_name)
-    delete_modal_volumes_in_environment(environment_name)
-    delete_modal_environment(environment_name)
-
-
-@pytest.fixture
-def modal_subprocess_env(
-    modal_test_session_env_name: str,
-    modal_test_session_host_dir: Path,
-    modal_test_session_cleanup: None,
-    modal_test_session_user_id: UserId,
-) -> Generator[ModalSubprocessTestEnv, None, None]:
-    """Create a subprocess test environment with session-scoped Modal environment.
-
-    This fixture:
-    1. Uses a session-scoped MNG_PREFIX based on UTC timestamp (mng_test-YYYY-MM-DD-HH-MM-SS)
-    2. Uses a session-scoped MNG_HOST_DIR so all tests share the same host directory
-    3. Sets MNG_USER_ID so all subprocesses use the same deterministic user ID
-    4. Cleans up the Modal environment at the end of the session (not per-test)
-
-    Using session-scoped environments reduces the number of environments created
-    and makes cleanup easier (environments have timestamps in their names).
-    """
-    prefix = f"{modal_test_session_env_name}-"
-    host_dir = modal_test_session_host_dir
-
-    env = get_subprocess_test_env(
-        root_name="mng-acceptance-test",
-        prefix=prefix,
-        host_dir=host_dir,
-    )
-    # Set the user ID so all subprocesses use the same deterministic ID.
-    # This ensures the cleanup fixture can construct the exact environment name.
-    env["MNG_USER_ID"] = modal_test_session_user_id
-
-    yield ModalSubprocessTestEnv(env=env, prefix=prefix, host_dir=host_dir)
-
-
-# =============================================================================
 # Autouse fixtures
 # =============================================================================
 
@@ -436,21 +322,6 @@ def setup_test_mng_env(
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
     """
-    # before we nuke our home directory, we need to load the right token from the real home directory
-    modal_toml_path = Path(os.path.expanduser("~/.modal.toml"))
-    if modal_toml_path.exists():
-        for value in toml.load(modal_toml_path).values():
-            if value.get("active", ""):
-                monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
-                monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
-                break
-    if not os.environ.get("MODAL_TOKEN_ID") or not os.environ.get("MODAL_TOKEN_SECRET"):
-        # check if we have "release" mark enabled:
-        if "release" in getattr(pytest, "current_test_marks", []):
-            raise Exception(
-                "No active Modal token found in ~/.modal.toml for release tests. Please ensure you have an active token configured or set the env vars"
-            )
-
     isolate_home(tmp_home_dir, monkeypatch)
     monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
     monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
@@ -597,9 +468,6 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     reset_backend_registry()
     reset_agent_registry()
 
-    # Clean up Modal app contexts to prevent async cleanup errors
-    ModalProviderBackend.reset_app_registry()
-
 
 # =============================================================================
 # Session Cleanup - Detect and clean up leaked test resources
@@ -655,185 +523,6 @@ def _is_alive_non_zombie(process: psutil.Process) -> bool:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
-
-
-def _get_leaked_modal_apps() -> list[tuple[str, str]]:
-    """Get Modal apps that were registered and are still running.
-
-    Returns a list of (app_id, app_name) tuples for apps that were created during
-    tests but are still running (not in 'stopped' state).
-
-    Uses 'uv run modal app list --json' to query the current state of all apps.
-    """
-    if not worker_modal_app_names:
-        return []
-
-    try:
-        result = subprocess.run(
-            ["uv", "run", "modal", "app", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-
-        apps = json.loads(result.stdout)
-        leaked: list[tuple[str, str]] = []
-
-        for app in apps:
-            app_name = app.get("Description", "")
-            app_id = app.get("App ID", "")
-            state = app.get("State", "")
-
-            # Check if this app was created by our tests and is not stopped
-            if app_name in worker_modal_app_names and state != "stopped":
-                leaked.append((app_id, app_name))
-
-        return leaked
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        return []
-
-
-def _stop_modal_apps(apps: list[tuple[str, str]]) -> None:
-    """Stop the specified Modal apps.
-
-    Takes a list of (app_id, app_name) tuples and stops each app using
-    'uv run modal app stop <app_id>'.
-
-    This function is defensive and will silently skip any apps that cannot
-    be stopped.
-    """
-    if not apps:
-        return
-
-    for app_id, _app_name in apps:
-        try:
-            subprocess.run(
-                ["uv", "run", "modal", "app", "stop", app_id],
-                capture_output=True,
-                timeout=30,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            pass
-
-
-def _get_leaked_modal_volumes() -> list[str]:
-    """Get Modal volumes that were registered and still exist.
-
-    Returns a list of volume names for volumes that were created during
-    tests and still exist (not yet deleted).
-
-    Uses 'uv run modal volume list --json' to query the current state of all volumes.
-    """
-    if not worker_modal_volume_names:
-        return []
-
-    try:
-        result = subprocess.run(
-            ["uv", "run", "modal", "volume", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-
-        volumes = json.loads(result.stdout)
-        leaked: list[str] = []
-
-        for volume in volumes:
-            volume_name = volume.get("Name", "")
-
-            # Check if this volume was created by our tests
-            if volume_name in worker_modal_volume_names:
-                leaked.append(volume_name)
-
-        return leaked
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        return []
-
-
-def _delete_modal_volumes(volume_names: list[str]) -> None:
-    """Delete the specified Modal volumes.
-
-    Takes a list of volume names and deletes each volume using
-    'uv run modal volume delete <volume_name> --yes'.
-
-    This function is defensive and will silently skip any volumes that cannot
-    be deleted.
-    """
-    if not volume_names:
-        return
-
-    for volume_name in volume_names:
-        try:
-            subprocess.run(
-                ["uv", "run", "modal", "volume", "delete", volume_name, "--yes"],
-                capture_output=True,
-                timeout=30,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            pass
-
-
-def _get_leaked_modal_environments() -> list[str]:
-    """Get Modal environments that were registered and still exist.
-
-    Returns a list of environment names for environments that were created during
-    tests and still exist (not yet deleted).
-
-    Uses 'uv run modal environment list --json' to query the current state of all environments.
-    """
-    if not worker_modal_environment_names:
-        return []
-
-    try:
-        result = subprocess.run(
-            ["uv", "run", "modal", "environment", "list", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return []
-
-        environments = json.loads(result.stdout)
-        leaked: list[str] = []
-
-        for env in environments:
-            env_name = env.get("name", "")
-
-            # Check if this environment was created by our tests
-            if env_name in worker_modal_environment_names:
-                leaked.append(env_name)
-
-        return leaked
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        return []
-
-
-def _delete_modal_environments(environment_names: list[str]) -> None:
-    """Delete the specified Modal environments.
-
-    Takes a list of environment names and deletes each environment using
-    'uv run modal environment delete <environment_name> --yes'.
-
-    This function is defensive and will silently skip any environments that cannot
-    be deleted.
-    """
-    if not environment_names:
-        return
-
-    for env_name in environment_names:
-        try:
-            subprocess.run(
-                ["uv", "run", "modal", "environment", "delete", env_name, "--yes"],
-                capture_output=True,
-                timeout=30,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            pass
 
 
 def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple[str, str]]:
@@ -960,10 +649,7 @@ def session_cleanup() -> Generator[None, None, None]:
     and checks for:
     1. Leftover child processes (excluding xdist workers on the leader)
     2. Leftover tmux sessions created by this worker's tests
-    3. Leftover Modal apps created by this worker's tests
-    4. Leftover Modal volumes created by this worker's tests
-    5. Leftover Modal environments created by this worker's tests
-    6. Stale Docker containers from tests (older than 1 hour), including
+    3. Stale Docker containers from tests (older than 1 hour), including
        both state containers and host containers
 
     If any leaked resources are found:
@@ -1022,43 +708,13 @@ def session_cleanup() -> Generator[None, None, None]:
             + "\n".join(f"  {s}" for s in leftover_sessions)
         )
 
-    # 3. Check for leftover Modal apps from this worker's tests
-    leftover_apps = _get_leaked_modal_apps()
-
-    if leftover_apps:
-        app_info = [f"  {app_id} ({app_name})" for app_id, app_name in leftover_apps]
-        errors.append(
-            "Leftover Modal apps found!\n"
-            "Tests should destroy their Modal hosts before completing.\n" + "\n".join(app_info)
-        )
-
-    # 4. Check for leftover Modal volumes from this worker's tests
-    leftover_volumes = _get_leaked_modal_volumes()
-
-    if leftover_volumes:
-        volume_info = [f"  {volume_name}" for volume_name in leftover_volumes]
-        errors.append(
-            "Leftover Modal volumes found!\n"
-            "Tests should delete their Modal volumes before completing.\n" + "\n".join(volume_info)
-        )
-
-    # 5. Check for leftover Modal environments from this worker's tests
-    leftover_environments = _get_leaked_modal_environments()
-
-    if leftover_environments:
-        env_info = [f"  {env_name}" for env_name in leftover_environments]
-        errors.append(
-            "Leftover Modal environments found!\n"
-            "Tests should delete their Modal environments before completing.\n" + "\n".join(env_info)
-        )
-
-    # 6. Check for stale Docker containers from tests (older than 1 hour).
+    # 3. Check for stale Docker containers from tests (older than 1 hour).
     # This catches both state containers and host containers that were leaked
     # by crashed or interrupted test runs.  We don't fail the test suite for
     # these (they may be from other sessions), but we do clean them up.
     stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
 
-    # 7. Clean up leaked resources (last-ditch safety measure)
+    # 4. Clean up leaked resources (last-ditch safety measure)
     for process in leftover_processes:
         try:
             process.kill()
@@ -1066,12 +722,9 @@ def session_cleanup() -> Generator[None, None, None]:
             pass
 
     _kill_tmux_sessions(leftover_sessions)
-    _stop_modal_apps(leftover_apps)
-    _delete_modal_volumes(leftover_volumes)
-    _delete_modal_environments(leftover_environments)
     _remove_docker_containers(stale_docker_containers)
 
-    # 8. Fail the test suite if any issues were found
+    # 5. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"

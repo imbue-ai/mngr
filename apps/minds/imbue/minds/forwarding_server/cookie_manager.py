@@ -1,53 +1,37 @@
-import re
 from typing import Final
 
 from itsdangerous import BadSignature
 from itsdangerous import URLSafeTimedSerializer
 
-from imbue.imbue_common.pure import pure
 from imbue.minds.primitives import CookieSigningKey
-from imbue.mng.primitives import AgentId
 
 _COOKIE_SALT: Final[str] = "mind-auth"
 
-_COOKIE_PREFIX: Final[str] = "mind_"
+SESSION_COOKIE_NAME: Final[str] = "mind_session"
+
+_SESSION_PAYLOAD: Final[str] = "authenticated"
 
 _COOKIE_MAX_AGE_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
-# Only allow alphanumeric characters, hyphens, and underscores in cookie names
-_SAFE_COOKIE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-zA-Z0-9_-]")
 
-
-@pure
-def get_cookie_name_for_agent(agent_id: AgentId) -> str:
-    """Return the cookie name used to store auth for a specific agent."""
-    sanitized = _SAFE_COOKIE_NAME_PATTERN.sub("_", str(agent_id))
-    return f"{_COOKIE_PREFIX}{sanitized}"
-
-
-def create_signed_cookie_value(
-    agent_id: AgentId,
-    signing_key: CookieSigningKey,
-) -> str:
-    """Create a signed cookie value containing the agent ID."""
+def create_session_cookie(signing_key: CookieSigningKey) -> str:
+    """Create a signed session cookie value for global authentication."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
-    return serializer.dumps(str(agent_id), salt=_COOKIE_SALT)
+    return serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
 
 
-def verify_signed_cookie_value(
+def verify_session_cookie(
     cookie_value: str,
     signing_key: CookieSigningKey,
-) -> AgentId | None:
-    """Verify and decode a signed cookie, returning the agent ID or None if invalid."""
+) -> bool:
+    """Verify a session cookie is valid and not expired."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
     try:
-        agent_id_str = serializer.loads(
+        payload = serializer.loads(
             cookie_value,
             salt=_COOKIE_SALT,
             max_age=_COOKIE_MAX_AGE_SECONDS,
         )
     except BadSignature:
-        return None
-    if not isinstance(agent_id_str, str) or not agent_id_str:
-        return None
-    return AgentId(agent_id_str)
+        return False
+    return payload == _SESSION_PAYLOAD

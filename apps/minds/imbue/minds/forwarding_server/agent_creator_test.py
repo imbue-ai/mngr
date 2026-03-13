@@ -1,3 +1,4 @@
+import queue as queue_mod
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.agent_creator import DEFAULT_AGENT_TYPE
 from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import extract_repo_name
-from imbue.minds.forwarding_server.agent_creator import generate_login_url
+from imbue.minds.forwarding_server.agent_creator import make_log_callback
 from imbue.minds.forwarding_server.agent_creator import resolve_agent_type
 from imbue.minds.primitives import GitUrl
 from imbue.minds.testing import init_and_commit_git_repo
@@ -84,27 +85,12 @@ def test_clone_git_repo_raises_on_bad_url(tmp_path: Path) -> None:
         clone_git_repo(GitUrl("/nonexistent/path"), dest)
 
 
-# -- generate_login_url tests --
-
-
-def test_generate_login_url_creates_url_with_code(tmp_path: Path) -> None:
-    paths = MindPaths(data_dir=tmp_path)
-    agent_id = AgentId()
-
-    url = generate_login_url(paths=paths, agent_id=agent_id, forwarding_server_port=8420)
-
-    assert "http://127.0.0.1:8420/login" in url
-    assert str(agent_id) in url
-    assert "one_time_code=" in url
-
-
 # -- AgentCreator tests --
 
 
 def test_agent_creator_get_creation_info_returns_none_for_unknown() -> None:
     creator = AgentCreator(
         paths=MindPaths(data_dir=Path("/tmp/test")),
-        forwarding_server_port=8420,
     )
     assert creator.get_creation_info(AgentId()) is None
 
@@ -117,7 +103,6 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     """
     creator = AgentCreator(
         paths=MindPaths(data_dir=tmp_path / "minds"),
-        forwarding_server_port=8420,
     )
 
     agent_id = creator.start_creation("file:///nonexistent-repo")
@@ -126,3 +111,38 @@ def test_agent_creator_start_creation_returns_agent_id_and_tracks_status(tmp_pat
     assert info is not None
     assert info.agent_id == agent_id
     assert info.status == AgentCreationStatus.CLONING
+
+
+def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
+    """Verify start_creation accepts a custom agent name."""
+    creator = AgentCreator(
+        paths=MindPaths(data_dir=tmp_path / "minds"),
+    )
+    agent_id = creator.start_creation("file:///nonexistent-repo", agent_name="my-agent")
+    info = creator.get_creation_info(agent_id)
+    assert info is not None
+
+
+def test_agent_creator_get_log_queue_returns_none_for_unknown() -> None:
+    creator = AgentCreator(
+        paths=MindPaths(data_dir=Path("/tmp/test")),
+    )
+    assert creator.get_log_queue(AgentId()) is None
+
+
+def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
+    creator = AgentCreator(
+        paths=MindPaths(data_dir=Path("/tmp/test")),
+    )
+    agent_id = creator.start_creation("file:///nonexistent-repo")
+    q = creator.get_log_queue(agent_id)
+    assert q is not None
+
+
+def test_make_log_callback_puts_lines_into_queue() -> None:
+    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
+    callback = make_log_callback(log_queue)
+    callback("hello\n", True)
+    callback("world\n", False)
+    assert log_queue.get_nowait() == "hello"
+    assert log_queue.get_nowait() == "world"

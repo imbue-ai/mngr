@@ -17,7 +17,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.providers.modal.instance import ModalProviderInstance
+from imbue.mng_modal.instance import ModalProviderInstance
 from imbue.mng_schedule.cli.group import schedule
 from imbue.mng_schedule.cli.options import ScheduleListCliOptions
 from imbue.mng_schedule.data_types import ScheduleCreationRecord

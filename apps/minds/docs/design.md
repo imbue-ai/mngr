@@ -56,7 +56,7 @@ When a user visits the forwarding server and no agents exist, they are shown a c
 1. Clones the repository to `~/.minds/<agent-id>/`
 2. Resolves the agent type from `minds.toml` (or uses `claude-mind` as default)
 3. Runs `mng create --type <type> --id <id> --in-place --label mind=true` to start the agent
-4. Generates a one-time auth code and redirects the user through the login flow
+4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 
 Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.
 
