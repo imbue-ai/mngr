@@ -22,17 +22,11 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
+from verify_skill_overrides import CATEGORY_EXTENSIONS
+from verify_skill_overrides import NEW_CATEGORIES
+from verify_skill_overrides import OverrideAction
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-
-# Ensure the scripts directory is importable regardless of working directory.
-_scripts_str = str(SCRIPT_DIR)
-if _scripts_str not in sys.path:
-    sys.path.insert(0, _scripts_str)
-
-from verify_skill_overrides import CATEGORY_EXTENSIONS  # noqa: E402
-from verify_skill_overrides import NEW_CATEGORIES  # noqa: E402
-from verify_skill_overrides import OverrideAction  # noqa: E402
-
 REPO_ROOT = SCRIPT_DIR.parent
 
 # Output paths (vet-generated, checked in)
