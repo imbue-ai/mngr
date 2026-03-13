@@ -470,7 +470,7 @@ def _follow_event_file_via_host(
                     if not has_logged:
                         logger.info("Event file not found yet, retrying in {}s", _RETRY_DELAY_SECONDS)
                         has_logged = True
-                    # FIXME: remove this--this is effectively a time.sleep().  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
+                    # FIXME: remove this--this is effectively a sleep.  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
                     #  Instead, here we should just be using tenacity to continually retry this type of error, log when it happens once, etc
                     threading.Event().wait(timeout=_RETRY_DELAY_SECONDS)
                     continue
