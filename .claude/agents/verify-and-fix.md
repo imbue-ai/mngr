@@ -65,7 +65,7 @@ For each issue, do the following in order:
 ## Implementation phase
 
 5. Implement the fix according to your plan.
-6. Commit only the code changes. Do NOT stage or commit any files in `.autofix/` (they are gitignored). Never use `git add -f` or `git add .` -- only add the specific files you changed. Use this format:
+6. Commit only the code changes. Do NOT use `git add -f` (files in `.autofix/` are gitignored and must stay that way). Use this format:
 
 ```
 <short summary>
