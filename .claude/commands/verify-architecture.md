@@ -20,7 +20,7 @@ Write a CONCISE description of the problem the branch is trying to solve, based 
 
 ## Phase 2: Validate the Diff
 
-Spawn a `validate-diff` Agent (`model: "haiku"`). Provide the base branch name and the problem description from Phase 1.
+Spawn an Agent (`subagent_type: "general-purpose"`, `model: "haiku"`) and tell it to read `.claude/agents/validate-diff.md` and follow its instructions. Provide the base branch name and the problem description from Phase 1.
 
 Based on the agent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
@@ -35,7 +35,7 @@ Resolve the base branch commit hash:
 git rev-parse {base_branch}
 ```
 
-Spawn a single `analyze-architecture` Agent. Provide:
+Spawn a single Agent (`subagent_type: "general-purpose"`) and tell it to read `.claude/agents/analyze-architecture.md` and follow its instructions. Provide:
 - The problem description from Phase 1
 - The base commit hash and feature branch tip hash
 
