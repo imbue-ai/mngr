@@ -29,8 +29,6 @@ VENDOR_DIR_NAME: Final[str] = "vendor"
 
 VENDOR_MNG_DIR_NAME: Final[str] = "mng"
 
-OutputCallback = Callable[[str, bool], None]
-
 
 def find_mng_repo_root() -> Path | None:
     """Find the mng monorepo root by walking up from this module's source file.
@@ -52,7 +50,7 @@ def find_mng_repo_root() -> Path | None:
 def vendor_mng(
     mind_dir: Path,
     mng_repo_root: Path | None,
-    on_output: OutputCallback | None = None,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Inject a copy of the mng repository into mind_dir/vendor/mng/.
 
@@ -83,7 +81,7 @@ def vendor_mng(
 def _run_git(
     args: list[str],
     cwd: Path,
-    on_output: OutputCallback | None = None,
+    on_output: Callable[[str, bool], None] | None = None,
     error_message: str = "git command failed",
 ) -> str:
     """Run a git command and return stdout.
@@ -112,7 +110,7 @@ def _run_git(
 def _vendor_from_local_repo(
     mng_root: Path,
     vendor_mng_dir: Path,
-    on_output: OutputCallback | None = None,
+    on_output: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Clone from the local mng repo, apply uncommitted changes, and fix the remote."""
     _run_git(

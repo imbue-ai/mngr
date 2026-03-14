@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.errors import VendorError
 from imbue.minds.forwarding_server.vendor_mng import MNG_GITHUB_URL
 from imbue.minds.forwarding_server.vendor_mng import VENDOR_DIR_NAME
@@ -10,7 +11,22 @@ from imbue.minds.forwarding_server.vendor_mng import VENDOR_MNG_DIR_NAME
 from imbue.minds.forwarding_server.vendor_mng import _vendor_from_local_repo
 from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
 from imbue.minds.forwarding_server.vendor_mng import vendor_mng
-from imbue.minds.testing import init_and_commit_git_repo
+
+
+def _add_and_commit(source: Path, tmp_path: Path) -> None:
+    """Stage all files and create a commit in the source repo."""
+    cg = ConcurrencyGroup(name="test-git-commit")
+    env = {
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@test",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@test",
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
+    with cg:
+        cg.run_process_to_completion(command=["git", "add", "."], cwd=source)
+        cg.run_process_to_completion(command=["git", "commit", "-m", "add files"], cwd=source, env=env)
 
 
 def test_find_mng_repo_root_returns_path() -> None:
@@ -32,86 +48,64 @@ def test_vendor_mng_skips_when_vendor_dir_exists(tmp_path: Path) -> None:
     assert marker.read_text() == "existing"
 
 
-def test_vendor_from_local_repo_clones_repo(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_clones_repo(vendor_test_repos: tuple[Path, Path], tmp_path: Path) -> None:
     """Clones the source repo into the vendor directory."""
-    source = tmp_path / "source"
-    source.mkdir()
+    source, vendor_mng_dir = vendor_test_repos
     (source / "hello.txt").write_text("hello")
-    init_and_commit_git_repo(source, tmp_path)
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
+    _add_and_commit(source, tmp_path)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
     assert (vendor_mng_dir / "hello.txt").read_text() == "hello"
 
 
-def test_vendor_from_local_repo_applies_uncommitted_changes(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_applies_uncommitted_changes(
+    vendor_test_repos: tuple[Path, Path], tmp_path: Path
+) -> None:
     """Uncommitted modifications to tracked files are applied in the vendored copy."""
-    source = tmp_path / "source"
-    source.mkdir()
+    source, vendor_mng_dir = vendor_test_repos
     (source / "hello.txt").write_text("original")
-    init_and_commit_git_repo(source, tmp_path)
+    _add_and_commit(source, tmp_path)
 
     (source / "hello.txt").write_text("modified")
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
     assert (vendor_mng_dir / "hello.txt").read_text() == "modified"
 
 
-def test_vendor_from_local_repo_copies_untracked_files(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_copies_untracked_files(vendor_test_repos: tuple[Path, Path]) -> None:
     """Untracked non-gitignored files are copied to the vendored copy."""
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "tracked.txt").write_text("tracked")
-    init_and_commit_git_repo(source, tmp_path)
-
+    source, vendor_mng_dir = vendor_test_repos
     (source / "untracked.txt").write_text("untracked content")
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
-    assert (vendor_mng_dir / "tracked.txt").read_text() == "tracked"
     assert (vendor_mng_dir / "untracked.txt").read_text() == "untracked content"
 
 
-def test_vendor_from_local_repo_copies_untracked_files_in_subdirs(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_copies_untracked_files_in_subdirs(vendor_test_repos: tuple[Path, Path]) -> None:
     """Untracked files in subdirectories are copied with their directory structure."""
-    source = tmp_path / "source"
-    source.mkdir()
-    init_and_commit_git_repo(source, tmp_path, allow_empty=True)
-
+    source, vendor_mng_dir = vendor_test_repos
     subdir = source / "subdir" / "nested"
     subdir.mkdir(parents=True)
     (subdir / "file.txt").write_text("nested content")
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
     assert (vendor_mng_dir / "subdir" / "nested" / "file.txt").read_text() == "nested content"
 
 
-def test_vendor_from_local_repo_excludes_gitignored_files(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_excludes_gitignored_files(
+    vendor_test_repos: tuple[Path, Path], tmp_path: Path
+) -> None:
     """Gitignored files are not included in the vendored copy."""
-    source = tmp_path / "source"
-    source.mkdir()
+    source, vendor_mng_dir = vendor_test_repos
     (source / ".gitignore").write_text("ignored.txt\n")
     (source / "tracked.txt").write_text("tracked")
-    init_and_commit_git_repo(source, tmp_path)
+    _add_and_commit(source, tmp_path)
 
     (source / "ignored.txt").write_text("should be excluded")
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
@@ -119,14 +113,9 @@ def test_vendor_from_local_repo_excludes_gitignored_files(tmp_path: Path) -> Non
     assert not (vendor_mng_dir / "ignored.txt").exists()
 
 
-def test_vendor_from_local_repo_resets_remote_to_github(tmp_path: Path) -> None:
+def test_vendor_from_local_repo_resets_remote_to_github(vendor_test_repos: tuple[Path, Path]) -> None:
     """The git remote origin is reset to point at the GitHub URL."""
-    source = tmp_path / "source"
-    source.mkdir()
-    init_and_commit_git_repo(source, tmp_path, allow_empty=True)
-
-    vendor_mng_dir = tmp_path / "dest" / VENDOR_DIR_NAME / VENDOR_MNG_DIR_NAME
-    vendor_mng_dir.parent.mkdir(parents=True)
+    source, vendor_mng_dir = vendor_test_repos
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
@@ -151,12 +140,11 @@ def test_vendor_from_local_repo_raises_on_invalid_source(tmp_path: Path) -> None
         _vendor_from_local_repo(source, vendor_mng_dir)
 
 
-def test_vendor_mng_dev_mode_integration(tmp_path: Path) -> None:
+def test_vendor_mng_dev_mode_integration(vendor_test_repos: tuple[Path, Path], tmp_path: Path) -> None:
     """Integration test: vendor_mng with a local mng repo root."""
-    source = tmp_path / "source"
-    source.mkdir()
+    source, _ = vendor_test_repos
     (source / "file.txt").write_text("content")
-    init_and_commit_git_repo(source, tmp_path)
+    _add_and_commit(source, tmp_path)
 
     mind_dir = tmp_path / "mind"
     mind_dir.mkdir()
