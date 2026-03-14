@@ -351,9 +351,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             if tui_indicator is not None:
                 self._wait_for_tui_ready(self.tmux_target, tui_indicator)
 
-    def capture_pane_content(self) -> str | None:
+    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
         """Capture the current tmux pane content for this agent."""
-        return self._capture_pane_content(self.tmux_target)
+        return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
 
     def _send_tmux_literal_keys(self, tmux_target: str, message: str) -> None:
         """Send literal text to a tmux pane, choosing the best method by length.
@@ -422,12 +422,13 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         # Send Enter and wait for submission signal
         self._send_enter_and_wait(tmux_target)
 
-    def _capture_pane_content(self, tmux_target: str) -> str | None:
+    def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
         """Capture the current pane content, returning None on failure."""
         return capture_tmux_pane_content(
             self.host,
             tmux_target,
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
+            include_scrollback=include_scrollback,
         )
 
     def _wait_for_tui_ready(self, tmux_target: str, indicator: str) -> None:

@@ -9,6 +9,7 @@ from click_option_group import OptionGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.agents.agent_registry import load_agents_from_plugins
 from imbue.mng.cli.ask import ask
+from imbue.mng.cli.capture import capture
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.clone import clone
 from imbue.mng.cli.common_opts import TCommand
@@ -297,6 +298,7 @@ def reset_plugin_manager() -> None:
 # Add built-in commands to the CLI group
 BUILTIN_COMMANDS: list[click.Command] = [
     ask,
+    capture,
     create,
     cleanup,
     destroy,

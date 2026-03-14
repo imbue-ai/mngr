@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.cli.capture import capture
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.config import config
 from imbue.mng.cli.connect import ConnectCliOptions
@@ -249,6 +250,7 @@ def create_test_agent(
 # =============================================================================
 
 _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
+    (capture, ["--help"], "capture"),
     (cleanup, ["--help"], "cleanup"),
     (config, ["--help"], "config"),
     (connect, ["--help"], "connect"),
@@ -292,6 +294,7 @@ def test_help_exits_zero(
 # =============================================================================
 
 _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
+    (capture, ["nonexistent-agent-55123"], "capture"),
     (destroy, ["nonexistent-agent-88421"], "destroy"),
     (exec_command, ["nonexistent-agent-99999", "echo hello"], "exec"),
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
