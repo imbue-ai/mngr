@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.errors import VendorError
 from imbue.minds.forwarding_server.vendor_mng import MNG_GITHUB_URL
 from imbue.minds.forwarding_server.vendor_mng import VENDOR_DIR_NAME
@@ -11,22 +10,7 @@ from imbue.minds.forwarding_server.vendor_mng import VENDOR_MNG_DIR_NAME
 from imbue.minds.forwarding_server.vendor_mng import _vendor_from_local_repo
 from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
 from imbue.minds.forwarding_server.vendor_mng import vendor_mng
-
-
-def _add_and_commit(source: Path, tmp_path: Path) -> None:
-    """Stage all files and create a commit in the source repo."""
-    cg = ConcurrencyGroup(name="test-git-commit")
-    env = {
-        "GIT_AUTHOR_NAME": "test",
-        "GIT_AUTHOR_EMAIL": "test@test",
-        "GIT_COMMITTER_NAME": "test",
-        "GIT_COMMITTER_EMAIL": "test@test",
-        "HOME": str(tmp_path),
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
-    }
-    with cg:
-        cg.run_process_to_completion(command=["git", "add", "."], cwd=source)
-        cg.run_process_to_completion(command=["git", "commit", "-m", "add files"], cwd=source, env=env)
+from imbue.minds.testing import add_and_commit_git_repo
 
 
 def test_find_mng_repo_root_returns_path() -> None:
@@ -52,7 +36,7 @@ def test_vendor_from_local_repo_clones_repo(vendor_test_repos: tuple[Path, Path]
     """Clones the source repo into the vendor directory."""
     source, vendor_mng_dir = vendor_test_repos
     (source / "hello.txt").write_text("hello")
-    _add_and_commit(source, tmp_path)
+    add_and_commit_git_repo(source, tmp_path)
 
     _vendor_from_local_repo(source, vendor_mng_dir)
 
@@ -65,7 +49,7 @@ def test_vendor_from_local_repo_applies_uncommitted_changes(
     """Uncommitted modifications to tracked files are applied in the vendored copy."""
     source, vendor_mng_dir = vendor_test_repos
     (source / "hello.txt").write_text("original")
-    _add_and_commit(source, tmp_path)
+    add_and_commit_git_repo(source, tmp_path)
 
     (source / "hello.txt").write_text("modified")
 
@@ -103,7 +87,7 @@ def test_vendor_from_local_repo_excludes_gitignored_files(
     source, vendor_mng_dir = vendor_test_repos
     (source / ".gitignore").write_text("ignored.txt\n")
     (source / "tracked.txt").write_text("tracked")
-    _add_and_commit(source, tmp_path)
+    add_and_commit_git_repo(source, tmp_path)
 
     (source / "ignored.txt").write_text("should be excluded")
 
@@ -144,7 +128,7 @@ def test_vendor_mng_dev_mode_integration(vendor_test_repos: tuple[Path, Path], t
     """Integration test: vendor_mng with a local mng repo root."""
     source, _ = vendor_test_repos
     (source / "file.txt").write_text("content")
-    _add_and_commit(source, tmp_path)
+    add_and_commit_git_repo(source, tmp_path)
 
     mind_dir = tmp_path / "mind"
     mind_dir.mkdir()
