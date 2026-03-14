@@ -1,5 +1,6 @@
 """Unit tests for the mng_claude_mind plugin."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from imbue.mng.interfaces.host import NamedCommand
 from imbue.mng.primitives import CommandString
 from imbue.mng_claude.plugin import ClaudeAgent
 from imbue.mng_claude.plugin import ClaudeAgentConfig
+from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_WINDOW_NAME
 from imbue.mng_claude_mind.plugin import ClaudeMindAgent
@@ -272,3 +274,49 @@ def test_get_role_from_env_raises_when_missing() -> None:
     )
     with pytest.raises(RuntimeError, match="ROLE environment variable is required"):
         ClaudeMindAgent._get_role_from_env(options)
+
+
+# -- _configure_role_settings tests --
+
+
+def test_configure_role_settings_writes_auto_memory_directory() -> None:
+    """Verify that _configure_role_settings sets autoMemoryDirectory in settings.local.json."""
+    host = StubHost()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        work_dir=Path("/home/user/minds/agent"),
+    )
+
+    agent._configure_role_settings(
+        cast(Any, host),
+        active_role="thinking",
+        role_dir_abs="/home/user/minds/agent/thinking",
+    )
+
+    written = [(str(p), content) for p, content in host.written_text_files]
+    settings_entries = [(p, content) for p, content in written if "settings.local.json" in p]
+    assert len(settings_entries) == 1
+
+    settings = json.loads(settings_entries[0][1])
+    assert settings["autoMemoryDirectory"] == "/home/user/minds/agent/thinking/memory"
+
+
+def test_configure_role_settings_includes_readiness_hooks() -> None:
+    """Verify that _configure_role_settings also includes readiness hooks."""
+    host = StubHost()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        work_dir=Path("/home/user/minds/agent"),
+    )
+
+    agent._configure_role_settings(
+        cast(Any, host),
+        active_role="thinking",
+        role_dir_abs="/home/user/minds/agent/thinking",
+    )
+
+    written = [(str(p), content) for p, content in host.written_text_files]
+    settings_entries = [(p, content) for p, content in written if "settings.local.json" in p]
+    settings = json.loads(settings_entries[0][1])
+    assert "hooks" in settings
+    assert "SessionStart" in settings["hooks"]

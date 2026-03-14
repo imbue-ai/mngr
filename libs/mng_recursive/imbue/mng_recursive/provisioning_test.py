@@ -45,13 +45,20 @@ def _make_mock_host(is_local: bool = False, host_dir: Path | None = None) -> Mag
 
 def _make_mock_mng_ctx(
     plugin_config: RecursivePluginConfig | None = None,
+    concurrency_group: ConcurrencyGroup | None = None,
 ) -> MagicMock:
-    """Create a mock MngContext."""
+    """Create a mock MngContext.
+
+    When concurrency_group is provided, uses a real ConcurrencyGroup instead
+    of a MagicMock to avoid deadlocks in tests that exercise
+    ConcurrencyGroupExecutor (which requires a real parent group).
+    """
     ctx = MagicMock()
     resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
     ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
-    ctx.concurrency_group = ConcurrencyGroup(name="test")
+    if concurrency_group is not None:
+        ctx.concurrency_group = concurrency_group
     return ctx
 
 
@@ -88,10 +95,10 @@ def test_resolve_remote_path_relative() -> None:
 # --- Upload tests ---
 
 
-def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
+def test_upload_deploy_files_with_path_source(tmp_path: Path, test_concurrency_group: ConcurrencyGroup) -> None:
     """Files with Path sources should be read and uploaded."""
     host = _make_mock_host()
-    ctx = _make_mock_mng_ctx()
+    ctx = _make_mock_mng_ctx(concurrency_group=test_concurrency_group)
     source_file = tmp_path / "config.toml"
     source_file.write_text("key = 'value'")
 
@@ -110,10 +117,10 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
     )
 
 
-def test_upload_deploy_files_with_string_source() -> None:
+def test_upload_deploy_files_with_string_source(test_concurrency_group: ConcurrencyGroup) -> None:
     """Files with string sources should be uploaded directly."""
     host = _make_mock_host()
-    ctx = _make_mock_mng_ctx()
+    ctx = _make_mock_mng_ctx(concurrency_group=test_concurrency_group)
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): 'key = "value"',
     }
@@ -128,10 +135,10 @@ def test_upload_deploy_files_with_string_source() -> None:
     )
 
 
-def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
+def test_upload_deploy_files_skips_missing_path(tmp_path: Path, test_concurrency_group: ConcurrencyGroup) -> None:
     """Missing Path source files should be skipped."""
     host = _make_mock_host()
-    ctx = _make_mock_mng_ctx()
+    ctx = _make_mock_mng_ctx(concurrency_group=test_concurrency_group)
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): tmp_path / "nonexistent.toml",
     }
@@ -144,10 +151,10 @@ def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
     host.write_text_file.assert_not_called()
 
 
-def test_upload_deploy_files_creates_parent_dirs() -> None:
+def test_upload_deploy_files_creates_parent_dirs(test_concurrency_group: ConcurrencyGroup) -> None:
     """Parent directories should be created before uploading."""
     host = _make_mock_host()
-    ctx = _make_mock_mng_ctx()
+    ctx = _make_mock_mng_ctx(concurrency_group=test_concurrency_group)
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/profiles/abc/settings.toml"): "content",
     }

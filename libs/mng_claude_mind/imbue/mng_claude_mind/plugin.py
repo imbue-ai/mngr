@@ -21,7 +21,6 @@ from imbue.mng_claude.claude_config import build_readiness_hooks_config
 from imbue.mng_claude.claude_config import merge_hooks_config
 from imbue.mng_claude.plugin import ClaudeAgent
 from imbue.mng_claude.plugin import ClaudeAgentConfig
-from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import build_stop_hook_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_claude_settings
@@ -91,7 +90,7 @@ class ClaudeMindAgent(ClaudeAgent):
     - Installs the llm toolchain (via mng_llm plugin)
     - Provisions default content (via mng_mind plugin)
     - Provisions Claude-specific settings.json and skills symlink
-    - Syncs per-role memory/ into Claude project memory via hooks
+    - Sets autoMemoryDirectory to point to per-role memory/
 
     Via tmux windows (injected by override_command_options), the following
     supporting services run alongside the role agent:
@@ -118,14 +117,14 @@ class ClaudeMindAgent(ClaudeAgent):
             )
         return self.agent_config
 
-    def _configure_role_hooks(
+    def _configure_role_settings(
         self,
         host: OnlineHostInterface,
         active_role: str,
         role_dir_abs: str,
         settings: ProvisioningSettings,
     ) -> None:
-        """Write all hooks (readiness + memory sync + stop) to the active role's settings.local.json."""
+        """Write hooks and required settings to the active role's settings.local.json."""
         settings_path = self.work_dir / active_role / ".claude" / "settings.local.json"
 
         existing_settings: dict[str, Any] = {}
@@ -140,18 +139,15 @@ class ClaudeMindAgent(ClaudeAgent):
         if merged is not None:
             existing_settings = merged
 
-        memory_config = build_memory_sync_hooks_config(role_dir_abs)
-        merged = merge_hooks_config(existing_settings, memory_config)
-        if merged is not None:
-            existing_settings = merged
-
         stop_hook_path = provision_stop_hook_script(host, self.work_dir, active_role, settings)
         stop_config = build_stop_hook_config(stop_hook_path)
         merged = merge_hooks_config(existing_settings, stop_config)
         if merged is not None:
             existing_settings = merged
 
-        with log_span("Configuring hooks in {}", settings_path):
+        existing_settings["autoMemoryDirectory"] = f"{role_dir_abs}/memory"
+
+        with log_span("Configuring settings in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(existing_settings, indent=2) + "\n")
 
     @staticmethod
@@ -201,7 +197,7 @@ class ClaudeMindAgent(ClaudeAgent):
         5. Symlink shared skills into active role's skills directory
         6. Claude-specific settings.json injection
         7. Symlinks (CLAUDE.md -> GLOBAL.md, CLAUDE.local.md -> PROMPT.md, .claude/skills -> skills)
-        8. All hooks (readiness + memory sync + stop) written to <role>/.claude/settings.local.json
+        8. All hooks (readiness + stop) and settings written to <role>/.claude/settings.local.json
         9. Supporting service scripts and chat utilities (via mng_llm)
         10. LLM tool scripts for conversation context (via mng_llm)
         11. Per-role memory directory setup
@@ -227,7 +223,7 @@ class ClaudeMindAgent(ClaudeAgent):
 
         work_dir_abs = resolve_work_dir_abs(host, self.work_dir, provisioning)
         role_dir_abs = f"{work_dir_abs}/{active_role}"
-        self._configure_role_hooks(host, active_role, role_dir_abs, provisioning)
+        self._configure_role_settings(host, active_role, role_dir_abs, provisioning)
 
         agent_state_dir = self._get_agent_dir()
 
@@ -243,7 +239,7 @@ class ClaudeMindAgent(ClaudeAgent):
             chat_model = settings.chat.model or "claude-opus-4.6"
             create_daily_conversation(host, agent_state_dir, provisioning, chat_model)
 
-        setup_memory_directory(host, self.work_dir, active_role, role_dir_abs, provisioning)
+        setup_memory_directory(host, self.work_dir, active_role, provisioning)
 
 
 def inject_supporting_services(params: dict[str, Any]) -> None:

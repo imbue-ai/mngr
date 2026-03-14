@@ -31,7 +31,6 @@ from imbue.mng.cli.list import list_command
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 from imbue.mng.utils.testing import wait_for_agent_session
-from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
 from imbue.mng_claude_mind.conftest import StubCommandResult
@@ -244,30 +243,15 @@ def test_provisioning_creates_symlinks(
 
 
 @pytest.mark.timeout(30)
-@pytest.mark.rsync
-def test_provisioning_syncs_memory_directory(
+def test_provisioning_creates_memory_directory(
     temp_git_repo: Path,
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that provisioning creates both memory dirs and syncs initial content."""
-    abs_work_dir = str(temp_git_repo.resolve())
-    role_dir_abs = f"{abs_work_dir}/thinking"
-    # Create a file in thinking/memory/ to verify initial sync
+    """Verify that provisioning creates the per-role memory directory."""
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", _DEFAULT_PROVISIONING)
+
     memory_dir = temp_git_repo / "thinking" / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "test.md").write_text("hello")
-
-    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", role_dir_abs, _DEFAULT_PROVISIONING)
-
     assert memory_dir.is_dir(), "memory dir should exist"
-
-    # Project dir name is derived from work dir (parent of role dir),
-    # matching build_memory_sync_hooks_config
-    project_dir_name = encode_claude_project_dir_name(Path(abs_work_dir))
-    project_memory = Path.home() / ".claude" / "projects" / project_dir_name / "memory"
-    assert project_memory.is_dir(), "Claude project memory should be a real directory"
-    assert not project_memory.is_symlink(), "Claude project memory should NOT be a symlink"
-    assert (project_memory / "test.md").read_text() == "hello"
 
 
 # -- Chat script tests --

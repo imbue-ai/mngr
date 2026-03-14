@@ -1,26 +1,14 @@
-"""Claude-specific provisioning functions for the claude-mind agent type.
-
-Provides Claude Code-specific provisioning: settings.json injection,
-.claude/skills symlink, memory directory setup, hook configuration,
-skill symlinking, and stop hook for unhandled event checking.
-
-Generic mind provisioning (default content, prompts, skills) is provided
-by the mng_mind plugin.
-"""
-
 from __future__ import annotations
 
 import json
 import shlex
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_llm.data_types import ProvisioningSettings
 from imbue.mng_llm.provisioning import execute_with_timing
 
@@ -162,41 +150,22 @@ def setup_memory_directory(
     host: OnlineHostInterface,
     work_dir: Path,
     active_role: str,
-    role_dir_abs: str,
     settings: ProvisioningSettings,
 ) -> None:
-    """Set up the per-role memory directory and initial sync into Claude project memory.
+    """Create the per-role memory directory if it doesn't exist.
 
-    Creates:
-    - <work_dir>/<active_role>/memory/ (if it doesn't exist)
-    - ~/.claude/projects/<project_name>/memory/ (real directory, not symlink)
-    - Initial rsync of contents from role memory/ to claude project memory/
+    Creates <work_dir>/<active_role>/memory/. Claude Code reads from and
+    writes to this directory directly via the autoMemoryDirectory setting
+    (configured in settings.local.json during provisioning).
     """
     memory_dir = work_dir / active_role / "memory"
-    # Use .parent because Claude Code's project dir is named after the git repo
-    # root (the mind dir), not the role subdirectory within it. This must
-    # match the path used by build_memory_sync_hooks_config.
-    project_dir_name = encode_claude_project_dir_name(Path(role_dir_abs).parent)
-
-    quoted_project_dir_name = shlex.quote(project_dir_name)
-    project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
-    cmd = f"mkdir -p {shlex.quote(str(memory_dir))} && rm -f {project_memory_shell} && mkdir -p {project_memory_shell}"
-    execute_with_timing(
-        host,
-        cmd,
-        hard_timeout=settings.fs_hard_timeout_seconds,
-        warn_threshold=settings.fs_warn_threshold_seconds,
-        label="mkdir memory dirs",
-    )
-
-    sync_cmd = f"rsync -a --delete {shlex.quote(str(memory_dir))}/ {project_memory_shell}/"
-    with log_span("Initial memory sync: {} -> $HOME/.claude/projects/{}/memory", memory_dir, project_dir_name):
-        result = execute_with_timing(
+    with log_span("Creating memory directory: {}", memory_dir):
+        execute_with_timing(
             host,
-            sync_cmd,
+            f"mkdir -p {shlex.quote(str(memory_dir))}",
             hard_timeout=settings.fs_hard_timeout_seconds,
             warn_threshold=settings.fs_warn_threshold_seconds,
-            label="initial memory sync",
+            label="mkdir memory dir",
         )
         if not result.success:
             raise RuntimeError(f"Failed to sync memory directory: {result.stderr}")
@@ -337,48 +306,6 @@ def build_stop_hook_config(script_path: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": str(script_path),
-                        }
-                    ],
-                }
-            ],
-        }
-    }
-
-
-def build_memory_sync_hooks_config(role_dir_abs: str) -> dict[str, Any]:
-    """Build Claude hooks config for syncing per-role memory with Claude project memory.
-
-    Returns a hooks config dict with PreToolUse and PostToolUse entries that
-    rsync the memory directory in the appropriate direction.
-    """
-    project_dir_name = encode_claude_project_dir_name(Path(role_dir_abs).parent)
-    quoted_work_memory = shlex.quote(f"{role_dir_abs}/memory")
-    quoted_project_dir_name = shlex.quote(project_dir_name)
-    project_memory_shell = f'"$HOME/.claude/projects/"{quoted_project_dir_name}/memory'
-
-    pre_cmd = f"rsync -a --delete {quoted_work_memory}/ {project_memory_shell}/"
-    post_cmd = f"rsync -a --delete {project_memory_shell}/ {quoted_work_memory}/"
-
-    return {
-        "hooks": {
-            "PreToolUse": [
-                {
-                    "matcher": "Read",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": pre_cmd,
-                        }
-                    ],
-                }
-            ],
-            "PostToolUse": [
-                {
-                    "matcher": "Write|Edit",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": post_cmd,
                         }
                     ],
                 }

@@ -33,8 +33,8 @@ Each role (except `talking/`) has its own directory structure:
 - `<role>/PROMPT.md` - role-specific prompt (symlinked as `CLAUDE.local.md` within the role directory)
 - `<role>/.claude/settings.json` - Claude Code settings for the role
 - `<role>/.claude/skills/` - skills available to the role
-- `<role>/.claude/settings.local.json` - mng-managed hooks (gitignored, written during provisioning)
-- `<role>/memory/` - per-role memory (synced into Claude project memory via hooks)
+- `<role>/.claude/settings.local.json` - mng-managed hooks and settings (gitignored, written during provisioning)
+- `<role>/memory/` - per-role memory (used directly by Claude via autoMemoryDirectory setting)
 
 Claude Code runs from within the role directory (via `cd $ROLE` in `assemble_command`), so `.claude/` is discovered naturally. `GLOBAL.md` at the repo root is symlinked as `CLAUDE.md` and discovered by Claude Code walking up the directory tree.
 
@@ -113,10 +113,10 @@ The `ClaudeMindAgent.provision()` method transforms the mind repo into a running
 3. Installs the `llm` toolchain (`llm`, `llm-anthropic`, `llm-live-chat`)
 4. Provisions default content (GLOBAL.md, role prompts, role configs) for any missing files
 5. Creates symlinks (`CLAUDE.md` -> `GLOBAL.md`, `<role>/CLAUDE.local.md` -> `<role>/PROMPT.md`)
-6. Configures hooks (readiness detection + memory sync) in `<role>/.claude/settings.local.json`
+6. Configures hooks (readiness detection) and autoMemoryDirectory in `<role>/.claude/settings.local.json`
 7. Deploys supporting service scripts and chat utilities to the host
 8. Creates the event log directory structure
-9. Sets up per-role memory directories with sync hooks
+9. Sets up per-role memory directories
 
 ## Dependencies
 
@@ -130,6 +130,6 @@ This plugin depends on:
 
 All roles that use Claude may have any of the following:
 - `<role>/PROMPT.md` - prompt for the agent role (symlinked as `CLAUDE.local.md` when this role is active).
-- `<role>/memory/` - per-role memory directory (synced into Claude's project memory via hooks).
+- `<role>/memory/` - per-role memory directory (used directly by Claude via autoMemoryDirectory setting).
 - `<role>/skills/` - skills available to the role (symlinked into `.claude/skills/` when this role is active).
 - `<role>/.claude` - contains any other claude-specific settings or configuration.
