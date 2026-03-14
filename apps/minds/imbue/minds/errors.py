@@ -28,3 +28,9 @@ class MngCommandError(MindError):
     """Raised when an mng CLI command fails."""
 
     ...
+
+
+class VendorError(MindError):
+    """Raised when vendoring mng into a mind repo fails."""
+
+    ...

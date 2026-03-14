@@ -51,6 +51,22 @@ def init_and_commit_git_repo(repo_dir: Path, tmp_path: Path, allow_empty: bool =
         )
 
 
+def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "update") -> None:
+    """Stage all changes and commit in an existing git repo.
+
+    Unlike init_and_commit_git_repo, this does not run ``git init`` and is
+    intended for adding follow-up commits to an already-initialized repo.
+    """
+    cg = ConcurrencyGroup(name="test-git-commit")
+    with cg:
+        cg.run_process_to_completion(command=["git", "add", "."], cwd=repo_dir)
+        cg.run_process_to_completion(
+            command=["git", "commit", "-m", message],
+            cwd=repo_dir,
+            env=_git_test_env(tmp_path),
+        )
+
+
 # ---------------------------------------------------------------------------
 # End-to-end test helpers (for real mng/mind subprocess calls)
 # ---------------------------------------------------------------------------
