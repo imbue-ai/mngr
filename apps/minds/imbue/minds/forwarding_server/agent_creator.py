@@ -31,6 +31,9 @@ from imbue.minds.config.data_types import MNG_BINARY
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngCommandError
+from imbue.minds.errors import VendorError
+from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
+from imbue.minds.forwarding_server.vendor_mng import vendor_mng
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitUrl
 from imbue.mng.primitives import AgentId
@@ -270,6 +273,10 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Cloning {}...".format(git_url))
                 clone_git_repo(GitUrl(git_url), mind_dir, on_output=emit_log)
 
+                log_queue.put("[minds] Vendoring mng...")
+                mng_repo_root = find_mng_repo_root()
+                vendor_mng(mind_dir, mng_repo_root, on_output=emit_log)
+
                 agent_type = resolve_agent_type(mind_dir)
                 parsed_name = AgentName(agent_name)
 
@@ -292,7 +299,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (GitCloneError, MngCommandError, ValueError, OSError) as e:
+        except (GitCloneError, MngCommandError, VendorError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
