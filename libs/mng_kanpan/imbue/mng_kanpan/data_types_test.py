@@ -8,6 +8,8 @@ from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSection
 from imbue.mng_kanpan.data_types import BoardSnapshot
 from imbue.mng_kanpan.data_types import CheckStatus
+from imbue.mng_kanpan.data_types import ColumnData
+from imbue.mng_kanpan.data_types import CustomColumnConfig
 from imbue.mng_kanpan.data_types import KanpanPluginConfig
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
@@ -126,6 +128,68 @@ def test_board_snapshot_with_errors() -> None:
     assert len(snapshot.entries) == 0
     assert len(snapshot.errors) == 2
     assert snapshot.errors[0] == "Connection failed"
+
+
+def test_agent_board_entry_column_data_default_empty() -> None:
+    entry = AgentBoardEntry(
+        name=AgentName("my-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+    )
+    assert entry.column_data.labels == {}
+    assert entry.column_data.plugin_data == {}
+
+
+def test_agent_board_entry_with_column_data() -> None:
+    entry = AgentBoardEntry(
+        name=AgentName("my-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        column_data=ColumnData(
+            labels={"blocked": "yes"},
+            plugin_data={"claude": {"cost": "1.50"}},
+        ),
+    )
+    assert entry.column_data.labels == {"blocked": "yes"}
+    assert entry.column_data.plugin_data["claude"]["cost"] == "1.50"
+
+
+def test_kanpan_plugin_config_merge_with_columns() -> None:
+    base = KanpanPluginConfig(
+        columns={"blocked": CustomColumnConfig(header="BLOCKED")},
+    )
+    override = KanpanPluginConfig(
+        columns={"wait": CustomColumnConfig(header="WAIT", plugin_name="claude", field="reason")},
+    )
+    merged = base.merge_with(override)
+    assert "blocked" in merged.columns
+    assert "wait" in merged.columns
+    assert merged.columns["wait"].plugin_name == "claude"
+
+
+def test_kanpan_plugin_config_merge_with_column_order() -> None:
+    base = KanpanPluginConfig(column_order=["name", "state", "link"])
+    override = KanpanPluginConfig(column_order=["name", "link"])
+    merged = base.merge_with(override)
+    assert merged.column_order == ["name", "link"]
+
+
+def test_kanpan_plugin_config_merge_with_column_order_none_keeps_base() -> None:
+    base = KanpanPluginConfig(column_order=["name", "state", "link"])
+    override = KanpanPluginConfig()
+    merged = base.merge_with(override)
+    assert merged.column_order == ["name", "state", "link"]
+
+
+def test_kanpan_plugin_config_merge_with_column_override_replaces() -> None:
+    base = KanpanPluginConfig(
+        columns={"blocked": CustomColumnConfig(header="OLD")},
+    )
+    override = KanpanPluginConfig(
+        columns={"blocked": CustomColumnConfig(header="NEW")},
+    )
+    merged = base.merge_with(override)
+    assert merged.columns["blocked"].header == "NEW"
 
 
 def test_refresh_hook_construction() -> None:

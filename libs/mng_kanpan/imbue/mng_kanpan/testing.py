@@ -1,6 +1,7 @@
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import HostDetails
@@ -30,6 +31,8 @@ def make_agent_details(
     work_dir: Path = Path("/tmp/test-work-dir"),
     provider_name: str = "local",
     initial_branch: str | None = None,
+    labels: dict[str, str] | None = None,
+    plugin: dict[str, Any] | None = None,
 ) -> AgentDetails:
     """Create a minimal AgentDetails for testing."""
     return AgentDetails(
@@ -43,6 +46,8 @@ def make_agent_details(
         start_on_boot=False,
         state=state,
         host=make_host_details(provider_name),
+        labels=labels or {},
+        plugin=plugin or {},
     )
 
 
