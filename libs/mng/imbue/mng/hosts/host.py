@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import importlib.resources
 import io
 import json
 import os
@@ -39,6 +40,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mng import resources as mng_resources
 from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
@@ -1777,14 +1779,15 @@ class Host(BaseHost, OnlineHostInterface):
         3. Validate required files exist, execute file transfers
         4. Write environment variables to agent env file (before agent.provision()
            so agent provisioning can use env vars like UV_TOOL_DIR)
-        5. Call agent.provision() (agent-type-specific provisioning)
-        6. Create directories (so paths exist for uploads)
-        7. Upload files (files exist before modifications)
-        8. Append text to files
-        9. Prepend text to files
-        10. Run sudo commands (system-level setup, with env vars sourced)
-        11. Run user commands (user-level setup, with env vars sourced)
-        12. Call agent.on_after_provisioning() (finalization)
+        5. Ensure mng_log.sh exists at host and agent level
+        6. Call agent.provision() (agent-type-specific provisioning)
+        7. Create directories (so paths exist for uploads)
+        8. Upload files (files exist before modifications)
+        9. Append text to files
+        10. Prepend text to files
+        11. Run sudo commands (system-level setup, with env vars sourced)
+        12. Run user commands (user-level setup, with env vars sourced)
+        13. Call agent.on_after_provisioning() (finalization)
         """
         # 1. Call pre-provisioning validation on agent
         with log_span("Calling on_before_provisioning for agent {}", agent.name):
@@ -1802,11 +1805,11 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, env_vars)
 
-        # 4.5. Ensure mng_log.sh exists at both host and agent level so that
+        # 5. Ensure mng_log.sh exists at both host and agent level so that
         # all bash scripts can source it for logging and timestamp utilities.
         self._ensure_mng_log_sh(agent)
 
-        # 5. Call agent.provision() for agent-type-specific provisioning
+        # 6. Call agent.provision() for agent-type-specific provisioning
         with log_span("Calling provision for agent {}", agent.name):
             agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
@@ -1821,24 +1824,24 @@ class Host(BaseHost, OnlineHostInterface):
             sudo_cmds=len(provisioning.sudo_commands),
             user_cmds=len(provisioning.user_commands),
         ):
-            # 6. Create directories
+            # 7. Create directories
             for directory in provisioning.create_directories:
                 self._mkdir(directory)
                 logger.trace("Created directory: {}", directory)
 
-            # 7. Upload files (read from local filesystem, write to host)
+            # 8. Upload files (read from local filesystem, write to host)
             for upload_spec in provisioning.upload_files:
                 # Read from local filesystem (not via host primitives)
                 local_content = upload_spec.local_path.read_bytes()
                 self.write_file(upload_spec.remote_path, local_content)
                 logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 8. Append text to files
+            # 9. Append text to files
             for append_spec in provisioning.append_to_files:
                 self._append_to_file(append_spec.remote_path, append_spec.text)
                 logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # 9. Prepend text to files
+            # 10. Prepend text to files
             for prepend_spec in provisioning.prepend_to_files:
                 self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
                 logger.trace("Prepended to file: {}", prepend_spec.remote_path)
@@ -1846,21 +1849,21 @@ class Host(BaseHost, OnlineHostInterface):
             # Build the source prefix for commands (sources host env, then agent env)
             source_prefix = self.build_source_env_prefix(agent)
 
-            # 10. Run sudo commands (with env vars sourced)
+            # 11. Run sudo commands (with env vars sourced)
             for cmd in provisioning.sudo_commands:
                 result = self._run_sudo_command(source_prefix + cmd)
                 logger.trace("Ran sudo command: {}", cmd)
                 if not result.success:
                     raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
 
-            # 11. Run user commands (with env vars sourced)
+            # 12. Run user commands (with env vars sourced)
             for cmd in provisioning.user_commands:
                 result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
                 logger.trace("Ran user command: {}", cmd)
                 if not result.success:
                     raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
 
-        # 12. Call post-provisioning on agent
+        # 13. Call post-provisioning on agent
         with log_span("Calling on_after_provisioning for agent {}", agent.name):
             agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
 
@@ -1875,9 +1878,7 @@ class Host(BaseHost, OnlineHostInterface):
         - ``<agent_state_dir>/commands/mng_log.sh``  (for agent-level scripts
           such as stream_transcript.sh, chat.sh)
         """
-        from imbue.mng.providers.ssh_host_setup import load_resource_script
-
-        content_bytes = load_resource_script("mng_log.sh").encode()
+        content_bytes = importlib.resources.files(mng_resources).joinpath("mng_log.sh").read_text().encode()
 
         host_commands = self.host_dir / "commands"
         self.write_file(host_commands / "mng_log.sh", content_bytes, mode="0755")
