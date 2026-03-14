@@ -52,7 +52,6 @@ from imbue.mng.plugins.hookspecs import OptionStackItem
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import WorkDirCopyMode
-from imbue.mng.providers.ssh_host_setup import load_resource_script as _load_mng_resource_script
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.polling import poll_until
 from imbue.mng_claude import hookimpl
@@ -614,16 +613,16 @@ def _load_claude_resource_script(filename: str) -> str:
 def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
     """Write the background task scripts to $MNG_AGENT_STATE_DIR/commands/.
 
-    Provisions mng_log.sh (shared logging library), stream_transcript.sh, and claude_background_tasks.sh so they can be
-    launched by the agent's assemble_command at runtime.
+    Provisions stream_transcript.sh, claude_background_tasks.sh, and
+    common_transcript.sh so they can be launched by the agent's
+    assemble_command at runtime.
+
+    Note: mng_log.sh (shared logging library) is provisioned by
+    Host.provision_agent() to both host-level and agent-level commands
+    directories, so we do not write it here.
     """
     commands_dir = agent_state_dir / "commands"
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
-
-    # mng_log.sh is a shared script from the core mng package
-    mng_log_content = _load_mng_resource_script("mng_log.sh")
-    with log_span("Writing mng_log.sh to agent state dir"):
-        host.write_file(commands_dir / "mng_log.sh", mng_log_content.encode(), mode="0755")
 
     # Claude-specific scripts from this plugin's resources
     for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):

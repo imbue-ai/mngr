@@ -44,11 +44,6 @@ LOG_FILE="$_MNG_LOG_FILE"
 # set this so that we dont get back funny-looking echo output
 export LLM_MATCHED_RESPONSE="Thinking..."
 
-# Nanosecond-precision UTC timestamp in ISO 8601 format.
-iso_timestamp_ns() {
-    date -u +"%Y-%m-%dT%H:%M:%S.%NZ"
-}
-
 # Log a message to the log file (not to stdout, since chat is interactive)
 log() {
     log_info "$*"
@@ -71,7 +66,7 @@ insert_conversation_record() {
     local conversation_id="$1"
     local tags="${2:-\{\}}"
     local created_at
-    created_at=$(iso_timestamp_ns)
+    created_at=$(mng_timestamp)
 
     mng llmdb insert "$_LLM_DB" "$conversation_id" "$tags" "$created_at"
     log "Inserted conversation record: conversation_id=$conversation_id tags=$tags"

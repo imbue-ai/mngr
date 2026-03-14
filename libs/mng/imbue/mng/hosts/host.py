@@ -1802,6 +1802,10 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, env_vars)
 
+        # 4.5. Ensure mng_log.sh exists at both host and agent level so that
+        # all bash scripts can source it for logging and timestamp utilities.
+        self._ensure_mng_log_sh(agent)
+
         # 5. Call agent.provision() for agent-type-specific provisioning
         with log_span("Calling provision for agent {}", agent.name):
             agent.provision(host=self, options=options, mng_ctx=mng_ctx)
@@ -1859,6 +1863,27 @@ class Host(BaseHost, OnlineHostInterface):
         # 12. Call post-provisioning on agent
         with log_span("Calling on_after_provisioning for agent {}", agent.name):
             agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+
+    def _ensure_mng_log_sh(self, agent: AgentInterface) -> None:
+        """Write mng_log.sh to both host-level and agent-level commands directories.
+
+        mng_log.sh provides shared JSONL logging and cross-platform timestamp
+        utilities for all mng bash scripts.  Two identical copies are maintained:
+
+        - ``<host_dir>/commands/mng_log.sh``   (for host-level scripts such as
+          activity_watcher.sh)
+        - ``<agent_state_dir>/commands/mng_log.sh``  (for agent-level scripts
+          such as stream_transcript.sh, chat.sh)
+        """
+        from imbue.mng.providers.ssh_host_setup import load_resource_script
+
+        content_bytes = load_resource_script("mng_log.sh").encode()
+
+        host_commands = self.host_dir / "commands"
+        self.write_file(host_commands / "mng_log.sh", content_bytes, mode="0755")
+
+        agent_commands = self._get_agent_state_dir(agent) / "commands"
+        self.write_file(agent_commands / "mng_log.sh", content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,

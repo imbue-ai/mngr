@@ -21,7 +21,6 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.providers.ssh_host_setup import load_resource_script
 from imbue.mng_llm import resources as llm_resources
 from imbue.mng_llm.data_types import ProvisioningSettings
 
@@ -163,9 +162,12 @@ def provision_supporting_services(
     """Write supporting service shell scripts to $MNG_AGENT_STATE_DIR/commands/.
 
     Provisions:
-    - Shared logging library (mng_log.sh)
     - Service scripts to commands/ (e.g. chat.sh)
     - Ttyd dispatch scripts to commands/ttyd/ (e.g. chat.sh)
+
+    Note: mng_log.sh (shared logging library) is provisioned by
+    Host.provision_agent() to both host-level and agent-level commands
+    directories, so we do not write it here.
     """
     commands_dir = agent_state_dir / "commands"
     ttyd_dir = commands_dir / "ttyd"
@@ -176,13 +178,6 @@ def provision_supporting_services(
         warn_threshold=settings.fs_warn_threshold_seconds,
         label="mkdir commands/ttyd",
     )
-
-    # Provision the shared logging library (from mng core resources) first,
-    # since the supporting service scripts source it.
-    mng_log_content = load_resource_script("mng_log.sh")
-    mng_log_path = commands_dir / "mng_log.sh"
-    with log_span("Writing mng_log.sh to host"):
-        host.write_file(mng_log_path, mng_log_content.encode(), mode="0755")
 
     for script_name in _SERVICE_SCRIPT_FILES:
         script_content = load_llm_resource(script_name)

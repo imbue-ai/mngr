@@ -18,6 +18,7 @@ def stub_mng_log_sh() -> str:
     """A no-op mng_log.sh stub for testing shell scripts that source it."""
     return textwrap.dedent("""\
         #!/bin/bash
+        mng_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
         log_info() { :; }
         log_debug() { :; }
         log_warn() { :; }
