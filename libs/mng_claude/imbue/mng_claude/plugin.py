@@ -60,6 +60,7 @@ from imbue.mng_claude import resources as _claude_resources
 from imbue.mng_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mng_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mng_claude.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mng_claude.claude_config import acknowledge_cost_threshold
 from imbue.mng_claude.claude_config import add_claude_trust_for_path
 from imbue.mng_claude.claude_config import build_readiness_hooks_config
 from imbue.mng_claude.claude_config import check_claude_dialogs_dismissed
@@ -1364,6 +1365,9 @@ class ClaudeAgent(BaseAgent):
                 # Check/prompt for all blocking dialogs
                 # source_path=None (clone/no-git) means trust is prompted for work_dir
                 self._ensure_no_blocking_dialogs(source_path, mng_ctx)
+
+        # no matter what, *always* dismiss the cost popup, it's pointless
+        acknowledge_cost_threshold(get_claude_config_path())
 
         # Ensure claude is installed (and at the right version if pinned)
         if config.check_installation:

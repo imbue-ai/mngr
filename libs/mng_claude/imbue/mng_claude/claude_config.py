@@ -361,7 +361,6 @@ def ensure_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> Non
     add_claude_trust_for_path(config_path, source_path)
     dismiss_effort_callout(config_path)
     complete_onboarding(config_path)
-    acknowledge_cost_threshold(config_path)
     # bypassPermissionsModeAccepted: not set here (Claude Code resets it).
     # skipDangerousModePermissionPrompt in settings.json handles this instead.
 
