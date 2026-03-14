@@ -586,20 +586,8 @@ def test_stop_hook_script_exits_0_when_no_events(tmp_path: Path) -> None:
 # -- link_skills.sh integration tests --
 
 
-@pytest.mark.timeout(10)
-def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
-    """link_skills.sh should create symlinks from top-level skills into the role's skills dir."""
-    # Set up directory structure
-    skills_dir = tmp_path / "skills"
-    (skills_dir / "delegate-task").mkdir(parents=True)
-    (skills_dir / "delegate-task" / "SKILL.md").write_text("delegate skill")
-    (skills_dir / "send-message").mkdir()
-    (skills_dir / "send-message" / "SKILL.md").write_text("send skill")
-
-    role_dir = tmp_path / "thinking"
-    (role_dir / "skills").mkdir(parents=True)
-
-    # Copy the script
+def _write_link_skills_script(tmp_path: Path) -> Path:
+    """Write the link_skills.sh script from defaults to tmp_path and make it executable."""
     import importlib.resources
 
     from imbue.mng_mind import defaults as defaults_package
@@ -609,6 +597,22 @@ def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
     script_path = tmp_path / "link_skills.sh"
     script_path.write_text(script_content)
     script_path.chmod(0o755)
+    return script_path
+
+
+@pytest.mark.timeout(10)
+def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
+    """link_skills.sh should create symlinks from top-level skills into the role's skills dir."""
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "delegate-task").mkdir(parents=True)
+    (skills_dir / "delegate-task" / "SKILL.md").write_text("delegate skill")
+    (skills_dir / "send-message").mkdir()
+    (skills_dir / "send-message" / "SKILL.md").write_text("send skill")
+
+    role_dir = tmp_path / "thinking"
+    (role_dir / "skills").mkdir(parents=True)
+
+    script_path = _write_link_skills_script(tmp_path)
 
     result = subprocess.run(
         [str(script_path), "thinking"],
@@ -619,7 +623,6 @@ def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
 
-    # Verify symlinks were created
     delegate_link = role_dir / "skills" / "delegate-task"
     assert delegate_link.is_symlink()
     assert (delegate_link / "SKILL.md").read_text() == "delegate skill"
@@ -640,15 +643,7 @@ def test_link_skills_script_warns_on_existing_skill(tmp_path: Path) -> None:
     (role_dir / "skills" / "delegate-task").mkdir(parents=True)
     (role_dir / "skills" / "delegate-task" / "SKILL.md").write_text("role-specific")
 
-    import importlib.resources
-
-    from imbue.mng_mind import defaults as defaults_package
-
-    defaults_root = importlib.resources.files(defaults_package)
-    script_content = (defaults_root / "link_skills.sh").read_text()
-    script_path = tmp_path / "link_skills.sh"
-    script_path.write_text(script_content)
-    script_path.chmod(0o755)
+    script_path = _write_link_skills_script(tmp_path)
 
     result = subprocess.run(
         [str(script_path), "thinking"],
