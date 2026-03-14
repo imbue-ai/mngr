@@ -87,7 +87,7 @@ class EventsTarget(FrozenModel):
 class EventRecord(FrozenModel):
     """A single parsed event from a JSONL event file."""
 
-    raw_line: str = Field(description="The original JSONL line")
+    raw_line: str = Field(description="The JSONL line (may be re-serialized if source was corrected)")
     timestamp: str = Field(description="ISO 8601 timestamp from the event envelope")
     event_id: str = Field(description="Unique event ID from the envelope")
     source: str = Field(description="Event source (subdirectory name)")
@@ -528,7 +528,9 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
     """Parse a single JSONL line into an EventRecord.
 
     Returns None if the line cannot be parsed (malformed JSON, missing required fields).
-    Uses source_hint as fallback if 'source' field is missing from the JSON.
+    Always uses source_hint (derived from the file path) as the authoritative source;
+    if the event JSON contains a different source, it is corrected and the mismatch
+    is recorded in the returned EventRecord's original_source field.
     Generates a deterministic fallback event_id from the line hash if missing.
     """
     stripped = line.strip()

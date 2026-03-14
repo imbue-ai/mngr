@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 import threading
 import time
@@ -1590,6 +1591,23 @@ def test_load_ignored_sources_caches_until_mtime_changes(tmp_path: Path) -> None
     # Same mtime, should return cached
     second_result = _load_ignored_sources_if_updated(state)
     assert second_result == frozenset({"messages"})
+
+
+def test_load_ignored_sources_rereads_on_mtime_change(tmp_path: Path) -> None:
+    ignored_file = tmp_path / "ignored_sources.txt"
+    ignored_file.write_text("messages\n")
+    state = _IgnoredSourcesState(file_path=ignored_file)
+
+    first_result = _load_ignored_sources_if_updated(state)
+    assert first_result == frozenset({"messages"})
+
+    # Write new content then bump mtime (some filesystems have 1s resolution)
+    ignored_file.write_text("messages\nscheduled\nmng/agents\n")
+    stat = ignored_file.stat()
+    os.utime(ignored_file, (stat.st_atime + 2, stat.st_mtime + 2))
+
+    updated_result = _load_ignored_sources_if_updated(state)
+    assert updated_result == frozenset({"messages", "scheduled", "mng/agents"})
 
 
 def test_load_ignored_sources_clears_when_file_deleted(tmp_path: Path) -> None:
