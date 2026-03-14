@@ -13,11 +13,11 @@ from imbue.mng_claude_mind.conftest import StubCommandResult
 from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.conftest import create_mind_conversations_table_in_test_db
 from imbue.mng_claude_mind.conftest import write_conversation_to_db
-from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
 from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import build_stop_hook_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_claude_settings
+from imbue.mng_claude_mind.provisioning import provision_stop_hook_script
 from imbue.mng_claude_mind.provisioning import run_link_skills_script
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
 from imbue.mng_llm.data_types import ProvisioningSettings
@@ -154,24 +154,29 @@ def test_build_memory_sync_hooks_config_post_syncs_project_to_role_dir() -> None
 # -- build_stop_hook_config tests --
 
 
-def test_build_stop_hook_config_has_stop_key() -> None:
-    config = build_stop_hook_config()
+def test_build_stop_hook_config_references_script_path() -> None:
+    script_path = Path("/test/work/thinking/.claude/hooks/on_stop_prevent_unhandled_events.sh")
+    config = build_stop_hook_config(script_path)
     assert "hooks" in config
     assert "Stop" in config["hooks"]
-
-
-def test_build_stop_hook_config_uses_stop_hook_command() -> None:
-    config = build_stop_hook_config()
     hook_command = config["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert hook_command == _STOP_HOOK_COMMAND
+    assert hook_command == str(script_path)
 
 
-def test_build_stop_hook_config_checks_events_and_handled_ids() -> None:
-    config = build_stop_hook_config()
-    hook_command = config["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert "/tmp/*.events" in hook_command
-    assert "handled_event_ids" in hook_command
-    assert "exit 2" in hook_command
+# -- provision_stop_hook_script tests --
+
+
+def test_provision_stop_hook_script_writes_and_chmods() -> None:
+    host = StubHost()
+    path = provision_stop_hook_script(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+    assert path == Path("/test/work/thinking/.claude/hooks/on_stop_prevent_unhandled_events.sh")
+    assert any("mkdir -p" in c and "hooks" in c for c in host.executed_commands)
+    assert any("chmod +x" in c for c in host.executed_commands)
+    assert len(host.written_text_files) == 1
+    written_path, content = host.written_text_files[0]
+    assert "on_stop_prevent_unhandled_events.sh" in str(written_path)
+    assert "#!/usr/bin/env bash" in content
+    assert "handled_event_ids" in content
 
 
 # -- run_link_skills_script tests --

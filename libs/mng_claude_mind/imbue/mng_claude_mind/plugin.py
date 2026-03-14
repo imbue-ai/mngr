@@ -25,9 +25,11 @@ from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
 from imbue.mng_claude_mind.provisioning import build_stop_hook_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_claude_settings
+from imbue.mng_claude_mind.provisioning import provision_stop_hook_script
 from imbue.mng_claude_mind.provisioning import run_link_skills_script
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
 from imbue.mng_claude_mind.settings import load_settings_from_host
+from imbue.mng_llm.data_types import ProvisioningSettings
 from imbue.mng_llm.plugin import set_llm_model_env_var
 from imbue.mng_llm.plugin import set_uv_tool_env_vars
 from imbue.mng_llm.provisioning import configure_llm_user_path
@@ -121,6 +123,7 @@ class ClaudeMindAgent(ClaudeAgent):
         host: OnlineHostInterface,
         active_role: str,
         role_dir_abs: str,
+        settings: ProvisioningSettings,
     ) -> None:
         """Write all hooks (readiness + memory sync + stop) to the active role's settings.local.json."""
         settings_path = self.work_dir / active_role / ".claude" / "settings.local.json"
@@ -142,7 +145,8 @@ class ClaudeMindAgent(ClaudeAgent):
         if merged is not None:
             existing_settings = merged
 
-        stop_config = build_stop_hook_config()
+        stop_hook_path = provision_stop_hook_script(host, self.work_dir, active_role, settings)
+        stop_config = build_stop_hook_config(stop_hook_path)
         merged = merge_hooks_config(existing_settings, stop_config)
         if merged is not None:
             existing_settings = merged
@@ -223,7 +227,7 @@ class ClaudeMindAgent(ClaudeAgent):
 
         work_dir_abs = resolve_work_dir_abs(host, self.work_dir, provisioning)
         role_dir_abs = f"{work_dir_abs}/{active_role}"
-        self._configure_role_hooks(host, active_role, role_dir_abs)
+        self._configure_role_hooks(host, active_role, role_dir_abs, provisioning)
 
         agent_state_dir = self._get_agent_dir()
 

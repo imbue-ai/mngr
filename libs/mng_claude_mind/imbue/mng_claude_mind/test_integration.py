@@ -532,70 +532,54 @@ print(json.dumps({{
     assert parsed["max_messages_per_minute"] == 20
 
 
-# -- Stop hook command integration tests --
+# -- Stop hook script integration tests --
+
+
+def _write_stop_hook_script(tmp_path: Path) -> Path:
+    """Write the stop hook script to tmp_path, patching /tmp references to use tmp_path."""
+    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_SCRIPT
+
+    patched = _STOP_HOOK_SCRIPT.replace("/tmp/", f"{tmp_path}/")
+    script_path = tmp_path / "on_stop_prevent_unhandled_events.sh"
+    script_path.write_text(patched)
+    script_path.chmod(0o755)
+    return script_path
 
 
 @pytest.mark.timeout(10)
-def test_stop_hook_command_exits_2_when_unhandled_events(tmp_path: Path) -> None:
-    """The stop hook command should exit 2 when events exist that are not in handled_event_ids."""
-    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+def test_stop_hook_script_exits_2_when_unhandled_events(tmp_path: Path) -> None:
+    """The stop hook script should exit 2 when events exist that are not in handled_event_ids."""
+    script = _write_stop_hook_script(tmp_path)
 
-    events_file = tmp_path / "test.events"
-    events_file.write_text('{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n')
-    handled_file = tmp_path / "handled_event_ids"
-    handled_file.write_text("evt-1\n")
-
-    # Replace /tmp with tmp_path in the command
-    cmd = _STOP_HOOK_COMMAND.replace("/tmp/", f"{tmp_path}/").replace("/tmp\\b", str(tmp_path))
-    # More precise replacement for the glob and handled_event_ids path
-    cmd = (
-        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
-        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
-        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
-        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
-        .replace("/tmp/handled_event_ids", str(handled_file))
+    (tmp_path / "test.events").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
     )
+    (tmp_path / "handled_event_ids").write_text("evt-1\n")
 
-    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
     assert result.returncode == 2
 
 
 @pytest.mark.timeout(10)
-def test_stop_hook_command_exits_0_when_all_handled(tmp_path: Path) -> None:
-    """The stop hook command should exit 0 when all events are handled."""
-    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+def test_stop_hook_script_exits_0_when_all_handled(tmp_path: Path) -> None:
+    """The stop hook script should exit 0 when all events are handled."""
+    script = _write_stop_hook_script(tmp_path)
 
-    events_file = tmp_path / "test.events"
-    events_file.write_text('{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n')
-    handled_file = tmp_path / "handled_event_ids"
-    handled_file.write_text("evt-1\nevt-2\n")
-
-    cmd = (
-        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
-        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
-        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
-        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
-        .replace("/tmp/handled_event_ids", str(handled_file))
+    (tmp_path / "test.events").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
     )
+    (tmp_path / "handled_event_ids").write_text("evt-1\nevt-2\n")
 
-    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0
 
 
 @pytest.mark.timeout(10)
-def test_stop_hook_command_exits_0_when_no_events(tmp_path: Path) -> None:
-    """The stop hook command should exit 0 when no .events files exist."""
-    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+def test_stop_hook_script_exits_0_when_no_events(tmp_path: Path) -> None:
+    """The stop hook script should exit 0 when no .events files exist."""
+    script = _write_stop_hook_script(tmp_path)
 
-    cmd = (
-        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
-        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
-        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
-        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
-        .replace("/tmp/handled_event_ids", f"{tmp_path}/handled_event_ids")
-    )
-
-    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0
 
 

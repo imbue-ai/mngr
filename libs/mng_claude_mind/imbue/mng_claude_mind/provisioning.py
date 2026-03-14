@@ -235,8 +235,7 @@ def run_link_skills_script(
             label="chmod link_skills",
         )
         if not chmod_result.success:
-            logger.warning("Failed to chmod link_skills.sh: {}", chmod_result.stderr)
-            return
+            raise RuntimeError(f"Failed to chmod link_skills.sh: {chmod_result.stderr}")
 
         result = execute_with_timing(
             host,
@@ -246,33 +245,87 @@ def run_link_skills_script(
             label="run link_skills",
         )
         if not result.success:
-            logger.warning("link_skills.sh failed: {}", result.stderr)
+            raise RuntimeError(f"link_skills.sh failed: {result.stderr}")
         elif result.stdout:
             logger.info("link_skills.sh output: {}", result.stdout.strip())
 
 
-# Shell command for the Stop hook that checks for unhandled events.
+_STOP_HOOK_SCRIPT: Final[str] = """\
+#!/usr/bin/env bash
+# Prevent Claude from stopping if there are unhandled events.
+#
 # Reads all event IDs from /tmp/*.events files, compares them against
 # /tmp/handled_event_ids, and exits with code 2 if any are unhandled
-# (which blocks Claude from stopping).
-_STOP_HOOK_COMMAND: Final[str] = (
-    "if ls /tmp/*.events >/dev/null 2>&1; then "
-    "cat /tmp/*.events | jq -r '.event_id // empty' | sort -u > /tmp/_mng_check_all.tmp; "
-    "sort -u /tmp/handled_event_ids > /tmp/_mng_check_done.tmp 2>/dev/null "
-    "|| touch /tmp/_mng_check_done.tmp; "
-    "_miss=$(comm -23 /tmp/_mng_check_all.tmp /tmp/_mng_check_done.tmp); "
-    "rm -f /tmp/_mng_check_all.tmp /tmp/_mng_check_done.tmp; "
-    'if [ -n "$_miss" ]; then exit 2; fi; '
-    "fi"
-)
+# (which tells Claude Code to block the stop).
+
+set -euo pipefail
+
+if ! ls /tmp/*.events >/dev/null 2>&1; then
+    exit 0
+fi
+
+all_ids=$(cat /tmp/*.events | jq -r '.event_id // empty' | sort -u)
+
+if [ -f /tmp/handled_event_ids ]; then
+    handled_ids=$(sort -u /tmp/handled_event_ids)
+else
+    handled_ids=""
+fi
+
+unhandled=$(comm -23 <(echo "$all_ids") <(echo "$handled_ids"))
+
+if [ -n "$unhandled" ]; then
+    exit 2
+fi
+"""
+
+_STOP_HOOK_SCRIPT_NAME: Final[str] = "on_stop_prevent_unhandled_events.sh"
 
 
-def build_stop_hook_config() -> dict[str, Any]:
+def provision_stop_hook_script(
+    host: OnlineHostInterface,
+    work_dir: Path,
+    active_role: str,
+    settings: ProvisioningSettings,
+) -> Path:
+    """Write the stop hook script to <work_dir>/<role>/.claude/hooks/ and make it executable.
+
+    Returns the path to the script file.
+    """
+    hooks_dir = work_dir / active_role / ".claude" / "hooks"
+    script_path = hooks_dir / _STOP_HOOK_SCRIPT_NAME
+
+    execute_with_timing(
+        host,
+        f"mkdir -p {shlex.quote(str(hooks_dir))}",
+        hard_timeout=settings.fs_hard_timeout_seconds,
+        warn_threshold=settings.fs_warn_threshold_seconds,
+        label="mkdir hooks dir",
+    )
+
+    with log_span("Writing stop hook script: {}", script_path):
+        host.write_text_file(script_path, _STOP_HOOK_SCRIPT)
+
+    chmod_result = execute_with_timing(
+        host,
+        f"chmod +x {shlex.quote(str(script_path))}",
+        hard_timeout=settings.fs_hard_timeout_seconds,
+        warn_threshold=settings.fs_warn_threshold_seconds,
+        label="chmod stop hook",
+    )
+    if not chmod_result.success:
+        raise RuntimeError(f"Failed to chmod stop hook script: {chmod_result.stderr}")
+
+    return script_path
+
+
+def build_stop_hook_config(script_path: Path) -> dict[str, Any]:
     """Build Claude hooks config for checking unhandled events on stop.
 
-    Returns a hooks config dict with a Stop entry that prevents Claude
-    from stopping if there are event IDs in /tmp/*.events files that
-    have not been written to /tmp/handled_event_ids.
+    Returns a hooks config dict with a Stop entry that runs the given
+    script. The script prevents Claude from stopping if there are event
+    IDs in /tmp/*.events files that have not been written to
+    /tmp/handled_event_ids.
 
     Exit code 2 from a Stop hook tells Claude Code to block the stop.
     """
@@ -283,7 +336,7 @@ def build_stop_hook_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _STOP_HOOK_COMMAND,
+                            "command": str(script_path),
                         }
                     ],
                 }
