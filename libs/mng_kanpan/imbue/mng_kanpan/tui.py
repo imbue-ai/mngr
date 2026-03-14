@@ -1004,9 +1004,7 @@ def _custom_col_text(
     """Get the text value for a custom column from the configured source."""
     if source == "labels":
         return entry.column_data.labels.get(col_key, "")
-    if source == "agent":
-        return str(entry.column_data.plugin_data.get(plugin_name or "", {}).get(field or "", ""))
-    return str(entry.column_data.plugin_state.get(plugin_name or "", {}).get(field or "", ""))
+    return str(entry.column_data.plugin_data.get(plugin_name or "", {}).get(field or "", ""))
 
 
 def _custom_col_markup(
@@ -1015,7 +1013,7 @@ def _custom_col_markup(
     plugin_name: str | None,
     field: str | None,
     colors: dict[str, str],
-    source: str = "state",
+    source: str = "labels",
 ) -> str | tuple[Hashable, str]:
     """Get markup for a custom column, applying color when configured."""
     value = _custom_col_text(entry, col_key, plugin_name, field, source=source)

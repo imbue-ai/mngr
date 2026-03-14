@@ -138,7 +138,6 @@ def test_agent_board_entry_column_data_default_empty() -> None:
     )
     assert entry.column_data.labels == {}
     assert entry.column_data.plugin_data == {}
-    assert entry.column_data.plugin_state == {}
 
 
 def test_agent_board_entry_with_column_data() -> None:
@@ -149,12 +148,10 @@ def test_agent_board_entry_with_column_data() -> None:
         column_data=ColumnData(
             labels={"blocked": "yes"},
             plugin_data={"claude": {"cost": "1.50"}},
-            plugin_state={"claude": {"waiting_reason": "PERMISSIONS"}},
         ),
     )
     assert entry.column_data.labels == {"blocked": "yes"}
     assert entry.column_data.plugin_data["claude"]["cost"] == "1.50"
-    assert entry.column_data.plugin_state["claude"]["waiting_reason"] == "PERMISSIONS"
 
 
 def test_kanpan_plugin_config_merge_with_columns() -> None:

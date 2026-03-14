@@ -56,10 +56,6 @@ class ColumnData(FrozenModel):
 
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels (key-value pairs)")
     plugin_data: dict[str, Any] = Field(default_factory=dict, description="Plugin fields from AgentDetails.plugin")
-    plugin_state: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Plugin data from certified data (data.json) and reported state dir files",
-    )
 
 
 class AgentBoardEntry(FrozenModel):
@@ -104,11 +100,11 @@ class CustomColumnConfig(FrozenModel):
     colors: dict[str, str] = Field(default_factory=dict, description="Mapping from value to urwid color name")
     source: str = Field(
         default="labels",
-        description="Data source: 'labels' (agent labels), 'state' (certified data + state dir files), "
-        "or 'agent' (AgentDetails.plugin, populated by agent_field_generators)",
+        description="Data source: 'labels' (agent labels) "
+        "or 'agent' (AgentDetails.plugin, populated by agent_field_generators via AgentInterface)",
     )
-    plugin_name: str | None = Field(default=None, description="Plugin name (required for 'state' and 'agent' sources)")
-    field: str | None = Field(default=None, description="Field name within plugin data")
+    plugin_name: str | None = Field(default=None, description="Plugin name (required for 'agent' source)")
+    field: str | None = Field(default=None, description="Field name within plugin data (required for 'agent' source)")
 
 
 class RefreshHook(FrozenModel):

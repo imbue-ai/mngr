@@ -16,7 +16,6 @@ from imbue.mng_kanpan.fetcher import _build_hook_env
 from imbue.mng_kanpan.fetcher import _build_pr_branch_index
 from imbue.mng_kanpan.fetcher import _find_git_cwd
 from imbue.mng_kanpan.fetcher import _pr_priority
-from imbue.mng_kanpan.fetcher import _read_reported_plugin_files
 from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
 from imbue.mng_kanpan.fetcher import run_refresh_hooks
@@ -289,7 +288,6 @@ def test_fetch_agent_snapshot_passes_labels_and_plugin_data() -> None:
 
     assert snapshot.entries[0].column_data.labels == {"project": "mng"}
     assert snapshot.entries[0].column_data.plugin_data == {"kanpan": {"muted": True}}
-    assert snapshot.entries[0].column_data.plugin_state == {}
 
 
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
@@ -327,53 +325,6 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
     # When PRs failed to load, create_pr_url should be suppressed even though
     # the agent has a branch and a valid GitHub remote
     assert snapshot.entries[0].create_pr_url is None
-
-
-# === _read_reported_plugin_files ===
-
-
-def test_read_reported_plugin_files_reads_files(tmp_path: Path) -> None:
-    agent_id = "agent-123"
-    plugin_dir = tmp_path / "agents" / agent_id / "plugin" / "claude"
-    plugin_dir.mkdir(parents=True)
-    (plugin_dir / "waiting_reason").write_text("PERMISSIONS\n")
-    (plugin_dir / "status").write_text("active")
-
-    result = _read_reported_plugin_files(tmp_path, agent_id)
-    assert result == {"claude": {"waiting_reason": "PERMISSIONS", "status": "active"}}
-
-
-def test_read_reported_plugin_files_multiple_plugins(tmp_path: Path) -> None:
-    agent_id = "agent-456"
-    for pname, fname, content in [("claude", "reason", "PERMS"), ("kanpan", "muted", "true")]:
-        d = tmp_path / "agents" / agent_id / "plugin" / pname
-        d.mkdir(parents=True, exist_ok=True)
-        (d / fname).write_text(content)
-
-    result = _read_reported_plugin_files(tmp_path, agent_id)
-    assert result["claude"]["reason"] == "PERMS"
-    assert result["kanpan"]["muted"] == "true"
-
-
-def test_read_reported_plugin_files_no_plugin_dir(tmp_path: Path) -> None:
-    assert _read_reported_plugin_files(tmp_path, "nonexistent") == {}
-
-
-def test_read_reported_plugin_files_empty_plugin_dir(tmp_path: Path) -> None:
-    plugin_dir = tmp_path / "agents" / "agent-1" / "plugin"
-    plugin_dir.mkdir(parents=True)
-    assert _read_reported_plugin_files(tmp_path, "agent-1") == {}
-
-
-def test_read_reported_plugin_files_skips_subdirectories(tmp_path: Path) -> None:
-    agent_id = "agent-1"
-    plugin_dir = tmp_path / "agents" / agent_id / "plugin" / "claude"
-    plugin_dir.mkdir(parents=True)
-    (plugin_dir / "file.txt").write_text("value")
-    (plugin_dir / "subdir").mkdir()
-
-    result = _read_reported_plugin_files(tmp_path, agent_id)
-    assert result == {"claude": {"file.txt": "value"}}
 
 
 # === _build_hook_env ===
