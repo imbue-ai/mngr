@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.providers.deploy_utils import MngInstallMode
@@ -50,6 +51,7 @@ def _make_mock_mng_ctx(
     resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
     ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
+    ctx.concurrency_group = ConcurrencyGroup(name="test")
     return ctx
 
 
@@ -97,7 +99,8 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
         Path("~/.mng/config.toml"): source_file,
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with ctx.concurrency_group:
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.execute_command.assert_called()
@@ -115,7 +118,8 @@ def test_upload_deploy_files_with_string_source() -> None:
         Path("~/.mng/config.toml"): 'key = "value"',
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with ctx.concurrency_group:
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.write_text_file.assert_called_once_with(
@@ -132,7 +136,8 @@ def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
         Path("~/.mng/config.toml"): tmp_path / "nonexistent.toml",
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with ctx.concurrency_group:
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 0
     host.write_file.assert_not_called()
@@ -147,7 +152,8 @@ def test_upload_deploy_files_creates_parent_dirs() -> None:
         Path("~/.mng/profiles/abc/settings.toml"): "content",
     }
 
-    _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
+    with ctx.concurrency_group:
+        _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     # Check that mkdir -p was called for the parent directory
     mkdir_calls = [call for call in host.execute_command.call_args_list if "mkdir -p" in str(call)]
