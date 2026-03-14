@@ -51,6 +51,8 @@ class TestCoderAgent(ClaudeMindAgent):
     predictable responses.
     """
 
+    agent_config: TestCoderConfig = Field(frozen=True, repr=False, description="Agent type config")
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -85,21 +87,10 @@ class TestCoderAgent(ClaudeMindAgent):
         """
         super().provision(host, options, mng_ctx)
 
-        config = self._get_test_coder_config()
-
-        if config.install_llm_matched_responses:
+        if self.agent_config.install_llm_matched_responses:
             _install_llm_matched_responses_plugin(host)
 
         _configure_model_as_default(host, self.work_dir)
-
-    def _get_test_coder_config(self) -> TestCoderConfig:
-        """Get the test-coder-specific config."""
-        if not isinstance(self.agent_config, TestCoderConfig):
-            raise TestCoderProvisioningError(
-                f"TestCoderAgent requires TestCoderConfig, got {type(self.agent_config).__name__}. "
-                "This indicates the agent type was registered with the wrong config class."
-            )
-        return self.agent_config
 
 
 def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:

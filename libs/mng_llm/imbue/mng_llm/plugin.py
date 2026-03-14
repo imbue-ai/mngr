@@ -101,7 +101,7 @@ class LlmAgentConfig(AgentTypeConfig):
         )
 
 
-class LlmAgent(BaseAgent):
+class LlmAgent(BaseAgent[LlmAgentConfig]):
     """Agent class for running the llm CLI tool.
 
     Extends BaseAgent with llm-specific provisioning:
@@ -132,19 +132,6 @@ class LlmAgent(BaseAgent):
         logger.trace("Assembled command: {}", command)
         return command
 
-    def _get_llm_config(self) -> LlmAgentConfig:
-        """Get the llm-specific config from this agent.
-
-        Raises RuntimeError if the agent config is not an LlmAgentConfig,
-        which indicates a misconfiguration in the agent type registration.
-        """
-        if not isinstance(self.agent_config, LlmAgentConfig):
-            raise RuntimeError(
-                f"LlmAgent requires LlmAgentConfig, got {type(self.agent_config).__name__}. "
-                "This indicates the agent type was registered with the wrong config class."
-            )
-        return self.agent_config
-
     def modify_env_vars(
         self,
         host: OnlineHostInterface,
@@ -174,7 +161,7 @@ class LlmAgent(BaseAgent):
 
         settings = load_settings_from_host(host, self.work_dir)
         provisioning = settings.provisioning
-        config = self._get_llm_config()
+        config = self.agent_config
 
         if config.install_llm:
             install_llm_toolchain(host, provisioning)
