@@ -532,6 +532,155 @@ print(json.dumps({{
     assert parsed["max_messages_per_minute"] == 20
 
 
+# -- Stop hook command integration tests --
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_command_exits_2_when_unhandled_events(tmp_path: Path) -> None:
+    """The stop hook command should exit 2 when events exist that are not in handled_event_ids."""
+    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+
+    events_file = tmp_path / "test.events"
+    events_file.write_text('{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n')
+    handled_file = tmp_path / "handled_event_ids"
+    handled_file.write_text("evt-1\n")
+
+    # Replace /tmp with tmp_path in the command
+    cmd = _STOP_HOOK_COMMAND.replace("/tmp/", f"{tmp_path}/").replace("/tmp\\b", str(tmp_path))
+    # More precise replacement for the glob and handled_event_ids path
+    cmd = (
+        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
+        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
+        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
+        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
+        .replace("/tmp/handled_event_ids", str(handled_file))
+    )
+
+    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_command_exits_0_when_all_handled(tmp_path: Path) -> None:
+    """The stop hook command should exit 0 when all events are handled."""
+    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+
+    events_file = tmp_path / "test.events"
+    events_file.write_text('{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n')
+    handled_file = tmp_path / "handled_event_ids"
+    handled_file.write_text("evt-1\nevt-2\n")
+
+    cmd = (
+        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
+        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
+        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
+        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
+        .replace("/tmp/handled_event_ids", str(handled_file))
+    )
+
+    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_command_exits_0_when_no_events(tmp_path: Path) -> None:
+    """The stop hook command should exit 0 when no .events files exist."""
+    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_COMMAND
+
+    cmd = (
+        _STOP_HOOK_COMMAND.replace("ls /tmp/*.events", f"ls {tmp_path}/*.events")
+        .replace("cat /tmp/*.events", f"cat {tmp_path}/*.events")
+        .replace("/tmp/_mng_check_all.tmp", f"{tmp_path}/_mng_check_all.tmp")
+        .replace("/tmp/_mng_check_done.tmp", f"{tmp_path}/_mng_check_done.tmp")
+        .replace("/tmp/handled_event_ids", f"{tmp_path}/handled_event_ids")
+    )
+
+    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+
+
+# -- link_skills.sh integration tests --
+
+
+@pytest.mark.timeout(10)
+def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
+    """link_skills.sh should create symlinks from top-level skills into the role's skills dir."""
+    # Set up directory structure
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "delegate-task").mkdir(parents=True)
+    (skills_dir / "delegate-task" / "SKILL.md").write_text("delegate skill")
+    (skills_dir / "send-message").mkdir()
+    (skills_dir / "send-message" / "SKILL.md").write_text("send skill")
+
+    role_dir = tmp_path / "thinking"
+    (role_dir / "skills").mkdir(parents=True)
+
+    # Copy the script
+    import importlib.resources
+
+    from imbue.mng_mind import defaults as defaults_package
+
+    defaults_root = importlib.resources.files(defaults_package)
+    script_content = (defaults_root / "link_skills.sh").read_text()
+    script_path = tmp_path / "link_skills.sh"
+    script_path.write_text(script_content)
+    script_path.chmod(0o755)
+
+    result = subprocess.run(
+        [str(script_path), "thinking"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0
+
+    # Verify symlinks were created
+    delegate_link = role_dir / "skills" / "delegate-task"
+    assert delegate_link.is_symlink()
+    assert (delegate_link / "SKILL.md").read_text() == "delegate skill"
+
+    send_link = role_dir / "skills" / "send-message"
+    assert send_link.is_symlink()
+    assert (send_link / "SKILL.md").read_text() == "send skill"
+
+
+@pytest.mark.timeout(10)
+def test_link_skills_script_warns_on_existing_skill(tmp_path: Path) -> None:
+    """link_skills.sh should warn and skip when a skill already exists in the role."""
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "delegate-task").mkdir(parents=True)
+    (skills_dir / "delegate-task" / "SKILL.md").write_text("shared")
+
+    role_dir = tmp_path / "thinking"
+    (role_dir / "skills" / "delegate-task").mkdir(parents=True)
+    (role_dir / "skills" / "delegate-task" / "SKILL.md").write_text("role-specific")
+
+    import importlib.resources
+
+    from imbue.mng_mind import defaults as defaults_package
+
+    defaults_root = importlib.resources.files(defaults_package)
+    script_content = (defaults_root / "link_skills.sh").read_text()
+    script_path = tmp_path / "link_skills.sh"
+    script_path.write_text(script_content)
+    script_path.chmod(0o755)
+
+    result = subprocess.run(
+        [str(script_path), "thinking"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0
+    assert "WARNING" in result.stderr
+
+    # Verify the existing skill was NOT overwritten
+    assert (role_dir / "skills" / "delegate-task" / "SKILL.md").read_text() == "role-specific"
+    assert not (role_dir / "skills" / "delegate-task").is_symlink()
+
+
 # -- Tmux window injection integration tests --
 
 

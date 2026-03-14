@@ -565,12 +565,12 @@ def _filter_catchup_events(
     return deliverable_lines, last_parsed, is_catching_up
 
 
-def _write_events_file(event_lines: list[str], directory: str = "/tmp") -> str | None:
+def _write_events_file(event_lines: list[str], directory: Path = Path("/tmp")) -> Path | None:
     """Write event lines to a temporary JSONL file.
 
     Returns the file path on success, or None on failure.
     """
-    file_path = f"{directory}/{uuid4().hex}.events"
+    file_path = directory / f"{uuid4().hex}.events"
     try:
         with open(file_path, "w") as f:
             for line in event_lines:
@@ -622,7 +622,7 @@ def _deliver_batch(
 
     logger.warning("Failed to deliver {} event(s), will retry", len(deliverable_lines))
     try:
-        Path(events_file_path).unlink(missing_ok=True)
+        events_file_path.unlink(missing_ok=True)
     except OSError as exc:
         logger.debug("Failed to clean up events file {}: {}", events_file_path, exc)
     with buffer_lock:

@@ -351,12 +351,12 @@ def test_write_events_file_creates_file_with_jsonl_content(tmp_path: Path) -> No
         '{"event_id":"evt-1","timestamp":"2026-03-01T00:00:00Z"}',
         '{"event_id":"evt-2","timestamp":"2026-03-01T00:01:00Z"}',
     ]
-    file_path = _write_events_file(event_lines, directory=str(tmp_path))
+    file_path = _write_events_file(event_lines, directory=tmp_path)
     assert file_path is not None
-    assert file_path.startswith(str(tmp_path))
-    assert file_path.endswith(".events")
+    assert str(file_path).startswith(str(tmp_path))
+    assert str(file_path).endswith(".events")
 
-    content = Path(file_path).read_text()
+    content = file_path.read_text()
     lines = content.strip().split("\n")
     assert len(lines) == 2
     assert json.loads(lines[0])["event_id"] == "evt-1"
@@ -364,7 +364,7 @@ def test_write_events_file_creates_file_with_jsonl_content(tmp_path: Path) -> No
 
 
 def test_write_events_file_returns_none_on_write_failure() -> None:
-    result = _write_events_file(['{"event_id":"evt-1"}'], directory="/nonexistent_dir_xyz")
+    result = _write_events_file(['{"event_id":"evt-1"}'], directory=Path("/nonexistent_dir_xyz"))
     assert result is None
 
 
