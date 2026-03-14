@@ -107,14 +107,8 @@ def _has_api_credentials_available(
     return False
 
 
-class PiCodingAgent(BaseAgent):
+class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
     """Agent implementation for the pi coding agent with TUI handling."""
-
-    def _get_pi_config(self) -> PiCodingAgentConfig:
-        """Get the pi-specific config from this agent."""
-        if isinstance(self.agent_config, PiCodingAgentConfig):
-            return self.agent_config
-        return PiCodingAgentConfig()
 
     def get_pi_config_dir(self) -> Path:
         """Return the per-agent pi config directory path.
@@ -289,7 +283,7 @@ class PiCodingAgent(BaseAgent):
         mng_ctx: MngContext,
     ) -> None:
         """Provision the per-agent config dir and install pi if needed."""
-        config = self._get_pi_config()
+        config = self.agent_config
 
         if config.check_installation:
             is_installed = _check_pi_installed(host)

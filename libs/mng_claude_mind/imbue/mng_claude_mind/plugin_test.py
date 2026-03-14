@@ -14,7 +14,6 @@ from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NamedCommand
 from imbue.mng.primitives import CommandString
 from imbue.mng_claude.plugin import ClaudeAgent
-from imbue.mng_claude.plugin import ClaudeAgentConfig
 from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_WINDOW_NAME
@@ -26,6 +25,7 @@ from imbue.mng_claude_mind.plugin import WEB_SERVER_WINDOW_NAME
 from imbue.mng_claude_mind.plugin import get_agent_type_from_params
 from imbue.mng_claude_mind.plugin import inject_supporting_services
 from imbue.mng_claude_mind.plugin import override_command_options
+from imbue.mng_llm.data_types import ProvisioningSettings
 
 # Total number of tmux windows injected by inject_supporting_services:
 # conv_watcher, events, web_server
@@ -137,26 +137,6 @@ def test_inject_supporting_services_preserves_existing() -> None:
     inject_supporting_services(params)
     assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT + 1
     assert params["extra_window"][0] == 'foo="bar"'
-
-
-# -- ClaudeMindAgent._get_mind_config tests --
-
-
-def test_get_mind_config_raises_on_wrong_type() -> None:
-    """Verify that _get_mind_config raises RuntimeError for non-ClaudeMindConfig."""
-    agent_stub = SimpleNamespace(agent_config=ClaudeAgentConfig())
-
-    with pytest.raises(RuntimeError, match="ClaudeMindAgent requires ClaudeMindConfig"):
-        ClaudeMindAgent._get_mind_config(cast(Any, agent_stub))
-
-
-def test_get_mind_config_returns_config_when_correct_type() -> None:
-    """Verify that _get_mind_config returns the config when it is the correct type."""
-    config = ClaudeMindConfig()
-    agent_stub = SimpleNamespace(agent_config=config)
-
-    result = ClaudeMindAgent._get_mind_config(cast(Any, agent_stub))
-    assert result is config
 
 
 # -- get_agent_type_from_params tests --
@@ -291,6 +271,7 @@ def test_configure_role_settings_writes_auto_memory_directory() -> None:
         cast(Any, host),
         active_role="thinking",
         role_dir_abs="/home/user/minds/agent/thinking",
+        settings=ProvisioningSettings(),
     )
 
     written = [(str(p), content) for p, content in host.written_text_files]
@@ -313,6 +294,7 @@ def test_configure_role_settings_includes_readiness_hooks() -> None:
         cast(Any, host),
         active_role="thinking",
         role_dir_abs="/home/user/minds/agent/thinking",
+        settings=ProvisioningSettings(),
     )
 
     written = [(str(p), content) for p, content in host.written_text_files]

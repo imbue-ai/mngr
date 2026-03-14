@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import click
 from loguru import logger
+from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng.config.data_types import MngContext
@@ -81,6 +82,8 @@ class SkillProvisionedAgent(ClaudeAgent):
     Subclasses must set the _skill_name and _skill_content class variables
     to define which skill to install.
     """
+
+    agent_config: SkillProvisionedAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
 
     _skill_name: ClassVar[str]
     _skill_content: ClassVar[str]

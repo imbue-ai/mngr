@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Generic
 from typing import Mapping
 from typing import Sequence
 from typing import TYPE_CHECKING
+from typing import TypeVar
 
 from pydantic import Field
 
@@ -30,9 +32,16 @@ if TYPE_CHECKING:
     from imbue.mng.interfaces.host import CreateAgentOptions
     from imbue.mng.interfaces.host import OnlineHostInterface
 
+AgentConfigT = TypeVar("AgentConfigT", bound=AgentTypeConfig)
 
-class AgentInterface(MutableModel, ABC):
-    """Interface for agent implementations."""
+
+class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
+    """Interface for agent implementations.
+
+    Generic over AgentConfigT so that each agent subclass can declare the
+    specific config type it requires, and ``self.agent_config`` will have
+    the correct narrowed type for the type checker.
+    """
 
     id: AgentId = Field(frozen=True, description="Unique identifier for this agent")
     name: AgentName = Field(description="Human-readable agent name")
@@ -41,7 +50,7 @@ class AgentInterface(MutableModel, ABC):
     create_time: datetime = Field(frozen=True, description="When the agent was created")
     host_id: HostId = Field(description="ID of the host this agent runs on")
     mng_ctx: MngContext = Field(frozen=True, repr=False, description="Mng context")
-    agent_config: AgentTypeConfig = Field(frozen=True, repr=False, description="Agent type config")
+    agent_config: AgentConfigT = Field(frozen=True, repr=False, description="Agent type config")
 
     @abstractmethod
     def get_host(self) -> OnlineHostInterface:

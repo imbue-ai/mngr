@@ -99,23 +99,12 @@ class ClaudeMindAgent(ClaudeAgent):
     - Web server (main web interface with conversation selector and agent list)
     """
 
+    agent_config: ClaudeMindConfig = Field(frozen=True, repr=False, description="Agent type config")
+
     enter_submission_timeout_seconds: float = Field(
         default=15.0,
         description="Timeout in seconds for waiting on the enter submission signal",
     )
-
-    def _get_mind_config(self) -> ClaudeMindConfig:
-        """Get the mind-specific config from this agent.
-
-        Raises RuntimeError if the agent config is not a ClaudeMindConfig,
-        which indicates a misconfiguration in the agent type registration.
-        """
-        if not isinstance(self.agent_config, ClaudeMindConfig):
-            raise RuntimeError(
-                f"ClaudeMindAgent requires ClaudeMindConfig, got {type(self.agent_config).__name__}. "
-                "This indicates the agent type was registered with the wrong config class."
-            )
-        return self.agent_config
 
     def _configure_role_settings(
         self,
@@ -207,7 +196,7 @@ class ClaudeMindAgent(ClaudeAgent):
 
         super().provision(host, options, mng_ctx)
 
-        config = self._get_mind_config()
+        config = self.agent_config
         active_role = self._get_role_from_env(options)
 
         settings = load_settings_from_host(host, self.work_dir)

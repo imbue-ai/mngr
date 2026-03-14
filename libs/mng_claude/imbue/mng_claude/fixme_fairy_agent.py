@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from pydantic import Field
+
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng_claude import hookimpl
@@ -81,6 +83,8 @@ class FixmeFairyAgentConfig(SkillProvisionedAgentConfig):
 
 class FixmeFairyAgent(SkillProvisionedAgent):
     """Agent implementation for fixme-fairy with skill provisioning."""
+
+    agent_config: FixmeFairyAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
 
     _skill_name = _SKILL_NAME
     _skill_content = _FIXME_FAIRY_SKILL_CONTENT

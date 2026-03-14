@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from pydantic import Field
+
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng_claude import hookimpl
@@ -69,6 +71,8 @@ class CodeGuardianAgentConfig(SkillProvisionedAgentConfig):
 
 class CodeGuardianAgent(SkillProvisionedAgent):
     """Agent implementation for code-guardian with skill provisioning."""
+
+    agent_config: CodeGuardianAgentConfig = Field(frozen=True, repr=False, description="Agent type config")
 
     _skill_name = _SKILL_NAME
     _skill_content = _CODE_GUARDIAN_SKILL_CONTENT

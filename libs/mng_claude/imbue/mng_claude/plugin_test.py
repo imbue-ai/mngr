@@ -17,7 +17,6 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.api.testing import FakeHost
-from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -70,7 +69,7 @@ def make_claude_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     mng_ctx: MngContext,
-    agent_config: ClaudeAgentConfig | AgentTypeConfig | None = None,
+    agent_config: ClaudeAgentConfig | None = None,
     agent_type: AgentTypeName | None = None,
     work_dir: Path | None = None,
 ) -> tuple[ClaudeAgent, Host]:
@@ -388,7 +387,7 @@ def test_claude_agent_assemble_command_raises_when_no_command(
         local_provider,
         tmp_path,
         temp_mng_ctx,
-        agent_config=AgentTypeConfig(),
+        agent_config=ClaudeAgentConfig.model_construct(command=None, check_installation=False),
         agent_type=AgentTypeName("custom"),
     )
 
@@ -444,41 +443,6 @@ def test_build_background_tasks_command(
 
     # Should pass the session name as argument
     assert session_name in cmd
-
-
-# =============================================================================
-# _get_claude_config Tests
-# =============================================================================
-
-
-def test_get_claude_config_returns_config_when_claude_agent_config(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
-) -> None:
-    """_get_claude_config should return the config when it is a ClaudeAgentConfig."""
-    config = ClaudeAgentConfig(cli_args=("--verbose",), check_installation=False)
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx, agent_config=config)
-
-    result = agent._get_claude_config()
-
-    assert result is config
-    assert result.cli_args == ("--verbose",)
-
-
-def test_get_claude_config_returns_default_when_not_claude_agent_config(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
-) -> None:
-    """_get_claude_config should return default ClaudeAgentConfig when config is not ClaudeAgentConfig."""
-    agent, _ = make_claude_agent(
-        local_provider,
-        tmp_path,
-        temp_mng_ctx,
-        agent_config=AgentTypeConfig(),
-    )
-
-    result = agent._get_claude_config()
-
-    assert isinstance(result, ClaudeAgentConfig)
-    assert result.command == CommandString("claude")
 
 
 # =============================================================================

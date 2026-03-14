@@ -22,6 +22,7 @@ from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.common import determine_lifecycle_state
 from imbue.mng.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mng.hosts.tmux import capture_tmux_pane_content
+from imbue.mng.interfaces.agent import AgentConfigT
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import FileTransferSpec
 from imbue.mng.interfaces.host import CreateAgentOptions
@@ -71,7 +72,7 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-class BaseAgent(AgentInterface):
+class BaseAgent(AgentInterface[AgentConfigT]):
     """Concrete agent implementation that stores data on the host filesystem."""
 
     host: OnlineHostInterface = Field(description="The host this agent runs on (must be online)")

@@ -781,15 +781,8 @@ class CostThresholdDialogIndicator(DialogIndicator):
         return self._MATCH_SPENDING_TEXT in content and self._MATCH_DOCS_URL in content
 
 
-class ClaudeAgent(BaseAgent):
+class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
-
-    def _get_claude_config(self) -> ClaudeAgentConfig:
-        """Get the claude-specific config from this agent."""
-        if isinstance(self.agent_config, ClaudeAgentConfig):
-            return self.agent_config
-        # Fall back to default config if not a ClaudeAgentConfig
-        return ClaudeAgentConfig()
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.
@@ -802,7 +795,7 @@ class ClaudeAgent(BaseAgent):
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and optionally enable common transcript emission."""
         env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
-        config = self._get_claude_config()
+        config = self.agent_config
         if config.emit_common_transcript:
             env_vars["MNG_EMIT_COMMON_TRANSCRIPT"] = "1"
 
@@ -1005,7 +998,7 @@ class ClaudeAgent(BaseAgent):
                     "Use --copy or --clone instead."
                 )
 
-        config = self._get_claude_config()
+        config = self.agent_config
 
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when trust_working_directory is True because
@@ -1042,7 +1035,7 @@ class ClaudeAgent(BaseAgent):
         mng_ctx: MngContext,
     ) -> Sequence[FileTransferSpec]:
         """Return file transfers for claude settings."""
-        config = self._get_claude_config()
+        config = self.agent_config
         transfers: list[FileTransferSpec] = []
 
         # Transfer repo-local claude settings
@@ -1200,7 +1193,7 @@ class ClaudeAgent(BaseAgent):
         - Writes .claude.json, .credentials.json, settings.json directly
         - Copies skills/, agents/, commands/, plugins/ from ~/.claude/
         """
-        config = self._get_claude_config()
+        config = self.agent_config
         config_dir = self.get_claude_config_dir()
 
         # Create the config directory (0700: contains credentials and session data)
@@ -1349,7 +1342,7 @@ class ClaudeAgent(BaseAgent):
         - clone: trust is prompted for the work_dir
         - trust_working_directory=True: trust is auto-added for work_dir
         """
-        config = self._get_claude_config()
+        config = self.agent_config
 
         if host.is_local:
             # Determine the source path for trust extension
