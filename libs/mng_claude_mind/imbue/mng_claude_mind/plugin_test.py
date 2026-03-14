@@ -180,6 +180,16 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
     assert named_cmd.window_name == WEB_SERVER_WINDOW_NAME
 
 
+def test_observer_command_is_parseable_as_named_command() -> None:
+    """Verify the observer command is parseable as a NamedCommand."""
+    params: dict[str, Any] = {}
+    inject_supporting_services(params)
+    observer_entries = [c for c in params["extra_window"] if OBSERVER_WINDOW_NAME in c]
+    assert len(observer_entries) == 1
+    named_cmd = NamedCommand.from_string(observer_entries[0])
+    assert named_cmd.window_name == OBSERVER_WINDOW_NAME
+
+
 # -- modify_env_vars tests --
 
 

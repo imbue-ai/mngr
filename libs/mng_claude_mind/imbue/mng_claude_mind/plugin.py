@@ -102,6 +102,7 @@ class ClaudeMindAgent(ClaudeAgent):
     - Conversation watcher (syncs llm DB to events/messages/events.jsonl)
     - Event watcher (sends new events to primary role agent via mng message)
     - Web server (main web interface with conversation selector and agent list)
+    - Observer (runs mng observe writing agent state events to the agent state directory)
     """
 
     agent_config: ClaudeMindConfig = Field(frozen=True, repr=False, description="Agent type config")
