@@ -185,6 +185,7 @@ layers = [
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
+    "imbue.mng.resources",
 ]
 
 [[tool.importlinter.contracts]]
