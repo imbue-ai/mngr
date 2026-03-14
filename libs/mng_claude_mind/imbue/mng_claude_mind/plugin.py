@@ -75,6 +75,24 @@ class ClaudeMindConfig(ClaudeAgentConfig):
         description="Automatically trust the agent's working directory in ~/.claude.json. "
         "Enabled by default for minds since they run in-place in their own repo.",
     )
+    sync_home_settings: bool = Field(
+        default=False,
+        description="Whether to sync Claude settings from ~/.claude/ to the per-agent config dir",
+    )
+    sync_claude_json: bool = Field(
+        default=False,
+        description="Whether to sync the local ~/.claude.json to a remote host (useful for API key settings and permissions)",
+    )
+    sync_claude_credentials: bool = Field(
+        default=False,
+        description="Whether to sync the local ~/.claude/.credentials.json to the per-agent config dir",
+    )
+    symlink_user_resources: bool = Field(
+        default=False,
+        description="Whether to symlink (True) or copy (False) user resources from ~/.claude/ "
+        "into local per-agent config dirs. Symlinks avoid duplication and keep the "
+        "per-agent dir lightweight; copies provide full isolation.",
+    )
     install_llm: bool = Field(
         default=True,
         description="Whether to install llm and its plugins (llm-anthropic, llm-live-chat) during provisioning.",
