@@ -160,7 +160,7 @@ def setup_memory_directory(
     """
     memory_dir = work_dir / active_role / "memory"
     with log_span("Creating memory directory: {}", memory_dir):
-        execute_with_timing(
+        result = execute_with_timing(
             host,
             f"mkdir -p {shlex.quote(str(memory_dir))}",
             hard_timeout=settings.fs_hard_timeout_seconds,

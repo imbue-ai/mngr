@@ -179,7 +179,7 @@ class ClaudeMindAgent(ClaudeAgent):
     ) -> CommandString:
         """Prepend ``cd "$ROLE" &&`` so Claude Code runs from within the role directory."""
         base_command = super().assemble_command(host, agent_args, command_override)
-        return CommandString(f'cd "$ROLE" && {base_command}')
+        return CommandString(f'cd "$ROLE" && ( {base_command} )')
 
     def provision(
         self,
