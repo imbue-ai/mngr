@@ -23,6 +23,8 @@ Environment:
   MNG_AGENT_STATE_DIR  - agent state directory (contains events/)
   MNG_AGENT_WORK_DIR   - agent working directory (contains minds.toml)
   MNG_AGENT_ID         - ID of the primary agent to send messages to
+  ROLE                 - (optional) role name; ignored_sources.txt is read
+                         from $MNG_AGENT_WORK_DIR/$ROLE/ignored_sources.txt
 """
 
 from __future__ import annotations

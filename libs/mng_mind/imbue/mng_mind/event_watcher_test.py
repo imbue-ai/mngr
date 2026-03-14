@@ -1353,6 +1353,115 @@ def test_delivery_loop_aggregates_events_exceeding_batch_limit(tmp_path: Path) -
     assert len(list_lines) == 3
 
 
+@pytest.mark.timeout(15)
+def test_delivery_loop_filters_ignored_sources(tmp_path: Path) -> None:
+    """Events from sources listed in ignored_sources.txt are excluded from delivery."""
+    state_file, events_dir, event_batches_dir, event_lists_dir, ignored_sources_state = _setup_delivery_loop_dirs(
+        tmp_path
+    )
+    settings = _EventWatcherSettings(burst_size=5, max_messages_per_minute=60)
+
+    # Write an ignored_sources.txt that filters out "scheduled"
+    ignored_sources_state.file_path.write_text("scheduled\n")
+
+    event_buffer: list[str] = []
+    buffer_lock = threading.Lock()
+    stop_event = threading.Event()
+    capture = _MessageCapture()
+
+    # Buffer has events from two sources: one ignored, one not
+    event_buffer.append(_make_event_line("evt-keep", source="messages"))
+    event_buffer.append(_make_event_line("evt-drop", timestamp="2026-03-01T12:01:00Z", source="scheduled"))
+
+    thread = threading.Thread(
+        target=_run_delivery_loop,
+        args=(
+            settings,
+            "test-agent",
+            state_file,
+            events_dir,
+            event_buffer,
+            buffer_lock,
+            stop_event,
+            event_batches_dir,
+            event_lists_dir,
+            ignored_sources_state,
+        ),
+        kwargs={"send_message": capture},
+        daemon=True,
+    )
+    thread.start()
+
+    capture.wait_for_call(timeout=5.0)
+
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert len(capture.calls) == 1
+
+    # Only the non-ignored event should be in the batch
+    batch_files = list(event_batches_dir.glob("*.jsonl"))
+    assert len(batch_files) == 1
+    lines = batch_files[0].read_text().strip().split("\n")
+    assert len(lines) == 1
+    assert json.loads(lines[0])["event_id"] == "evt-keep"
+
+
+@pytest.mark.timeout(15)
+def test_delivery_loop_skips_empty_batch_after_ignored_sources(tmp_path: Path) -> None:
+    """When all events in a batch are from ignored sources, no delivery happens."""
+    state_file, events_dir, event_batches_dir, event_lists_dir, ignored_sources_state = _setup_delivery_loop_dirs(
+        tmp_path
+    )
+    settings = _EventWatcherSettings(burst_size=5, max_messages_per_minute=60)
+
+    # Write ignored_sources.txt that filters out everything we'll send
+    ignored_sources_state.file_path.write_text("scheduled\n")
+
+    event_buffer: list[str] = []
+    buffer_lock = threading.Lock()
+    stop_event = threading.Event()
+    capture = _MessageCapture()
+
+    # All events are from the ignored source
+    event_buffer.append(_make_event_line("evt-1", source="scheduled"))
+    event_buffer.append(_make_event_line("evt-2", timestamp="2026-03-01T12:01:00Z", source="scheduled"))
+
+    thread = threading.Thread(
+        target=_run_delivery_loop,
+        args=(
+            settings,
+            "test-agent",
+            state_file,
+            events_dir,
+            event_buffer,
+            buffer_lock,
+            stop_event,
+            event_batches_dir,
+            event_lists_dir,
+            ignored_sources_state,
+        ),
+        kwargs={"send_message": capture},
+        daemon=True,
+    )
+    thread.start()
+
+    # Wait for the delivery loop to drain the buffer (events are ignored, so no delivery)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        with buffer_lock:
+            if not event_buffer:
+                break
+        stop_event.wait(timeout=0.05)
+
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    # No messages should have been sent since all events were ignored
+    assert len(capture.calls) == 0
+    assert len(list(event_batches_dir.glob("*.jsonl"))) == 0
+
+
 # -- main() tests --
 
 
