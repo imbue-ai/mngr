@@ -45,7 +45,10 @@ def _find_common_transcript_source(target: EventsTarget) -> str:
     matching_sources = [
         s
         for s in sources
-        if s.source_path == _COMMON_TRANSCRIPT_SUFFIX or s.source_path.endswith(f"/{_COMMON_TRANSCRIPT_SUFFIX}")
+        if (
+            (s.source_path == _COMMON_TRANSCRIPT_SUFFIX or s.source_path.endswith(f"/{_COMMON_TRANSCRIPT_SUFFIX}"))
+            and not s.source_path.startswith("logs/")
+        )
     ]
     if len(matching_sources) == 0:
         raise MngError(
