@@ -7,7 +7,9 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.find import AgentMatch
+from imbue.mng.api.find import find_agents_by_identifiers_or_state
+from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -17,13 +19,13 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import CommonCliOptions
+from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.errors import AgentNotFoundError
+from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.primitives import DiscoveredAgent
-from imbue.mng.primitives import DiscoveredHost
+from imbue.mng.primitives import HostId
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.providers.base_provider import BaseProviderInstance
 
@@ -95,100 +97,131 @@ def _merge_labels(current: dict[str, str], new: dict[str, str]) -> dict[str, str
     return {**current, **new}
 
 
-@pure
-def _find_matching_agents(
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
-    agent_identifiers: list[str],
-    label_all: bool,
-) -> tuple[list[tuple[DiscoveredHost, DiscoveredAgent]], set[str]]:
-    """Find agents matching the given identifiers or all agents.
-
-    Returns a tuple of (matched_agents, matched_identifiers).
-    """
-    matched_agents: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
-    matched_identifiers: set[str] = set()
-
-    for host_ref, agent_refs in agents_by_host.items():
-        for agent_ref in agent_refs:
-            should_include: bool
-            if label_all:
-                should_include = True
-            elif agent_identifiers:
-                agent_name_str = str(agent_ref.agent_name)
-                agent_id_str = str(agent_ref.agent_id)
-                should_include = False
-                for identifier in agent_identifiers:
-                    if identifier == agent_name_str or identifier == agent_id_str:
-                        should_include = True
-                        matched_identifiers.add(identifier)
-            else:
-                should_include = False
-
-            if should_include:
-                matched_agents.append((host_ref, agent_ref))
-
-    return matched_agents, matched_identifiers
-
-
-def _apply_labels_online(
+def _apply_labels_to_agent_online(
+    agent_match: AgentMatch,
     online_host: OnlineHostInterface,
-    agent_ref: DiscoveredAgent,
     labels_to_set: dict[str, str],
     output_opts: OutputOptions,
     changes: list[dict[str, Any]],
 ) -> None:
-    """Apply labels to an agent on an online host."""
+    """Apply labels to a single agent on an online host."""
     for agent in online_host.get_agents():
-        if agent.id == agent_ref.agent_id:
+        if agent.id == agent_match.agent_id:
             current_labels = agent.get_labels()
             merged_labels = _merge_labels(current_labels, labels_to_set)
             agent.set_labels(merged_labels)
-            _output(
-                f"Updated labels for agent {agent_ref.agent_name}",
-                output_opts,
-            )
+            _output(f"Updated labels for agent {agent_match.agent_name}", output_opts)
             changes.append(
                 {
-                    "agent_id": str(agent_ref.agent_id),
-                    "agent_name": str(agent_ref.agent_name),
+                    "agent_id": str(agent_match.agent_id),
+                    "agent_name": str(agent_match.agent_name),
                     "labels": merged_labels,
                 }
             )
             return
-    raise AgentNotFoundError(str(agent_ref.agent_id))
+    raise AgentNotFoundOnHostError(agent_match.agent_id, agent_match.host_id)
 
 
-def _apply_labels_offline(
+def _apply_labels_to_agents_offline(
     provider: BaseProviderInstance,
-    host_ref: DiscoveredHost,
-    agent_ref: DiscoveredAgent,
+    host_id: HostId,
+    agent_matches: list[AgentMatch],
     labels_to_set: dict[str, str],
     output_opts: OutputOptions,
     changes: list[dict[str, Any]],
 ) -> None:
-    """Apply labels to an agent on an offline host by updating persisted data.
+    """Apply labels to agents on an offline host by updating persisted data.
 
-    Uses the provider's persist_agent_data method to update the agent's
-    certified data without requiring the host to be started.
+    Uses the provider's persisted agent data to read current labels, merge
+    new labels, and write back without requiring the host to be started.
     """
-    current_data = dict(agent_ref.certified_data)
-    current_labels = dict(current_data.get("labels", {}))
-    merged_labels = _merge_labels(current_labels, labels_to_set)
-    current_data["labels"] = merged_labels
+    persisted_records = provider.list_persisted_agent_data_for_host(host_id)
+    target_ids = {str(m.agent_id) for m in agent_matches}
 
-    provider.persist_agent_data(host_ref.host_id, current_data)
+    for record in persisted_records:
+        agent_id_str = record.get("id", "")
+        if agent_id_str not in target_ids:
+            continue
 
-    _output(
-        f"Updated labels for agent {agent_ref.agent_name} (offline)",
-        output_opts,
-    )
-    changes.append(
-        {
-            "agent_id": str(agent_ref.agent_id),
-            "agent_name": str(agent_ref.agent_name),
-            "labels": merged_labels,
-        }
-    )
+        current_labels = dict(record.get("labels", {}))
+        merged_labels = _merge_labels(current_labels, labels_to_set)
+        record["labels"] = merged_labels
+
+        provider.persist_agent_data(host_id, record)
+
+        match_name = next(str(m.agent_name) for m in agent_matches if str(m.agent_id) == agent_id_str)
+        _output(f"Updated labels for agent {match_name} (offline)", output_opts)
+        changes.append(
+            {
+                "agent_id": agent_id_str,
+                "agent_name": match_name,
+                "labels": merged_labels,
+            }
+        )
+
+
+def _collect_agent_identifiers(opts: LabelCliOptions) -> list[str]:
+    """Collect agent identifiers from positional args, --agent flag, and stdin.
+
+    Reads from stdin automatically when no identifiers are provided and
+    stdin is not a TTY.
+    """
+    agent_identifiers = list(opts.agents) + list(opts.agent_list)
+
+    if not agent_identifiers and not opts.label_all:
+        try:
+            if not sys.stdin.isatty():
+                stdin_identifiers = _read_agent_identifiers_from_stdin()
+                agent_identifiers.extend(stdin_identifiers)
+        except (ValueError, AttributeError) as e:
+            logger.debug("Failed to read agent identifiers from stdin: {}", e)
+
+    return agent_identifiers
+
+
+def _apply_labels(
+    target_agents: list[AgentMatch],
+    labels_to_set: dict[str, str],
+    mng_ctx: MngContext,
+    output_opts: OutputOptions,
+) -> list[dict[str, Any]]:
+    """Apply labels to all target agents, handling both online and offline hosts.
+
+    Groups agents by host to avoid redundant host lookups.
+    """
+    changes: list[dict[str, Any]] = []
+    agents_by_host = group_agents_by_host(target_agents)
+
+    for host_key, agent_list in agents_by_host.items():
+        host_id_str, _ = host_key.split(":", 1)
+        provider_name = agent_list[0].provider_name
+
+        provider = get_provider_instance(provider_name, mng_ctx)
+        host = provider.get_host(HostId(host_id_str))
+
+        match host:
+            case OnlineHostInterface() as online_host:
+                for agent_match in agent_list:
+                    _apply_labels_to_agent_online(
+                        agent_match=agent_match,
+                        online_host=online_host,
+                        labels_to_set=labels_to_set,
+                        output_opts=output_opts,
+                        changes=changes,
+                    )
+            case HostInterface():
+                _apply_labels_to_agents_offline(
+                    provider=provider,
+                    host_id=HostId(host_id_str),
+                    agent_matches=agent_list,
+                    labels_to_set=labels_to_set,
+                    output_opts=output_opts,
+                    changes=changes,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    return changes
 
 
 @click.command(name="label")
@@ -241,16 +274,7 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
         labels_to_set[key] = value
 
     # Collect agent identifiers from args, --agent, and stdin
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
-
-    # Read from stdin if no agent identifiers provided and stdin is not a TTY
-    if not agent_identifiers and not opts.label_all:
-        try:
-            if not sys.stdin.isatty():
-                stdin_identifiers = _read_agent_identifiers_from_stdin()
-                agent_identifiers.extend(stdin_identifiers)
-        except (ValueError, AttributeError):
-            pass
+    agent_identifiers = _collect_agent_identifiers(opts)
 
     if not agent_identifiers and not opts.label_all:
         raise click.UsageError("Must specify at least one agent, use --all, or pipe agent names via stdin")
@@ -258,20 +282,15 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
     if agent_identifiers and opts.label_all:
         raise click.UsageError("Cannot specify both agent names and --all")
 
-    # Discover all agents
-    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
+    # Find matching agents using the shared infrastructure (same as limit, stop, etc.)
+    target_agents = find_agents_by_identifiers_or_state(
+        agent_identifiers=agent_identifiers,
+        filter_all=opts.label_all,
+        target_state=None,
+        mng_ctx=mng_ctx,
+    )
 
-    # Find matching agents
-    matched_agents, matched_identifiers = _find_matching_agents(agents_by_host, agent_identifiers, opts.label_all)
-
-    # Verify all specified identifiers were found
-    if agent_identifiers:
-        unmatched = set(agent_identifiers) - matched_identifiers
-        if unmatched:
-            unmatched_list = ", ".join(sorted(unmatched))
-            raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
-
-    if not matched_agents:
+    if not target_agents:
         _output("No agents found to label", output_opts)
         return
 
@@ -281,36 +300,12 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
         for key, value in labels_to_set.items():
             _output(f"  {key}={value}", output_opts)
         _output("To agents:", output_opts)
-        for host_ref, agent_ref in matched_agents:
-            _output(f"  - {agent_ref.agent_name} (on host {host_ref.host_id})", output_opts)
+        for match in target_agents:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
-    # Apply labels
-    changes: list[dict[str, Any]] = []
-    for host_ref, agent_ref in matched_agents:
-        provider = get_provider_instance(host_ref.provider_name, mng_ctx)
-        host = provider.get_host(host_ref.host_id)
-
-        match host:
-            case OnlineHostInterface() as online_host:
-                _apply_labels_online(
-                    online_host=online_host,
-                    agent_ref=agent_ref,
-                    labels_to_set=labels_to_set,
-                    output_opts=output_opts,
-                    changes=changes,
-                )
-            case HostInterface():
-                _apply_labels_offline(
-                    provider=provider,
-                    host_ref=host_ref,
-                    agent_ref=agent_ref,
-                    labels_to_set=labels_to_set,
-                    output_opts=output_opts,
-                    changes=changes,
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
+    # Apply labels (grouped by host for efficiency)
+    changes = _apply_labels(target_agents, labels_to_set, mng_ctx, output_opts)
 
     _output_result(changes, output_opts)
 

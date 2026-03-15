@@ -1,10 +1,10 @@
 import json
+from pathlib import Path
 
 import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.label import LabelCliOptions
 from imbue.mng.cli.label import _merge_labels
 from imbue.mng.cli.label import _output
 from imbue.mng.cli.label import _output_result
@@ -12,6 +12,11 @@ from imbue.mng.cli.label import label
 from imbue.mng.cli.label import parse_label_string
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import UserInputError
+from imbue.mng.hosts.host import Host
+from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import OutputFormat
 
 
@@ -19,79 +24,55 @@ def _make_output_opts(fmt: OutputFormat = OutputFormat.HUMAN) -> OutputOptions:
     return OutputOptions(output_format=fmt, format_template=None)
 
 
-def test_label_cli_options_parsing() -> None:
-    """Test that LabelCliOptions can be constructed with expected fields."""
-    opts = LabelCliOptions(
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        log_command_output=None,
-        log_env_vars=None,
-        project_context_path=None,
-        plugin=(),
-        disable_plugin=(),
-        agents=("agent-1",),
-        agent_list=(),
-        label=("key=value",),
-        label_all=False,
-        dry_run=False,
-    )
-    assert opts.agents == ("agent-1",)
-    assert opts.label == ("key=value",)
-    assert opts.dry_run is False
+# =============================================================================
+# Pure function tests
+# =============================================================================
 
 
-def test_parse_label_string_valid() -> None:
-    """parse_label_string should split KEY=VALUE correctly."""
-    key, value = parse_label_string("archived_at=2026-03-15")
-    assert key == "archived_at"
-    assert value == "2026-03-15"
+@pytest.mark.parametrize(
+    ("input_str", "expected_key", "expected_value"),
+    [
+        pytest.param("archived_at=2026-03-15", "archived_at", "2026-03-15", id="simple"),
+        pytest.param("note=a=b=c", "note", "a=b=c", id="value_with_equals"),
+        pytest.param("status=", "status", "", id="empty_value"),
+    ],
+)
+def test_parse_label_string_valid(input_str: str, expected_key: str, expected_value: str) -> None:
+    """parse_label_string should correctly parse valid KEY=VALUE strings."""
+    key, value = parse_label_string(input_str)
+    assert key == expected_key
+    assert value == expected_value
 
 
-def test_parse_label_string_value_with_equals() -> None:
-    """parse_label_string should handle values that contain equals signs."""
-    key, value = parse_label_string("note=a=b=c")
-    assert key == "note"
-    assert value == "a=b=c"
+@pytest.mark.parametrize(
+    ("input_str", "match_text"),
+    [
+        pytest.param("noequalssign", "KEY=VALUE", id="no_equals"),
+        pytest.param("=value", "key cannot be empty", id="empty_key"),
+    ],
+)
+def test_parse_label_string_invalid(input_str: str, match_text: str) -> None:
+    """parse_label_string should raise UserInputError on invalid input."""
+    with pytest.raises(UserInputError, match=match_text):
+        parse_label_string(input_str)
 
 
-def test_parse_label_string_empty_value() -> None:
-    """parse_label_string should accept empty values."""
-    key, value = parse_label_string("status=")
-    assert key == "status"
-    assert value == ""
+@pytest.mark.parametrize(
+    ("current", "new", "expected"),
+    [
+        pytest.param({"a": "1"}, {"b": "2"}, {"a": "1", "b": "2"}, id="adds_new"),
+        pytest.param({"a": "1", "b": "2"}, {"a": "updated"}, {"a": "updated", "b": "2"}, id="overwrites"),
+        pytest.param({}, {"key": "value"}, {"key": "value"}, id="empty_current"),
+    ],
+)
+def test_merge_labels(current: dict[str, str], new: dict[str, str], expected: dict[str, str]) -> None:
+    """_merge_labels should correctly merge labels."""
+    assert _merge_labels(current, new) == expected
 
 
-def test_parse_label_string_no_equals() -> None:
-    """parse_label_string should raise on missing equals sign."""
-    with pytest.raises(UserInputError, match="KEY=VALUE"):
-        parse_label_string("noequalssign")
-
-
-def test_parse_label_string_empty_key() -> None:
-    """parse_label_string should raise on empty key."""
-    with pytest.raises(UserInputError, match="key cannot be empty"):
-        parse_label_string("=value")
-
-
-def test_merge_labels_adds_new() -> None:
-    """_merge_labels should add new keys."""
-    result = _merge_labels({"a": "1"}, {"b": "2"})
-    assert result == {"a": "1", "b": "2"}
-
-
-def test_merge_labels_overwrites_existing() -> None:
-    """_merge_labels should overwrite existing keys."""
-    result = _merge_labels({"a": "1", "b": "2"}, {"a": "updated"})
-    assert result == {"a": "updated", "b": "2"}
-
-
-def test_merge_labels_empty_current() -> None:
-    """_merge_labels should work with empty current labels."""
-    result = _merge_labels({}, {"key": "value"})
-    assert result == {"key": "value"}
+# =============================================================================
+# Output tests
+# =============================================================================
 
 
 def test_output_human(capsys) -> None:
@@ -143,6 +124,11 @@ def test_output_result_empty_changes(capsys) -> None:
     assert captured.out == ""
 
 
+# =============================================================================
+# CLI validation tests
+# =============================================================================
+
+
 def test_label_requires_label_flag(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -183,3 +169,160 @@ def test_label_agents_and_all_conflict(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+
+
+# =============================================================================
+# Integration tests
+# =============================================================================
+
+
+def test_label_applies_labels_to_agent(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Label command should apply labels to an agent on a local host."""
+    options = CreateAgentOptions(
+        name=AgentName("label-test-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = local_host.create_agent_state(temp_work_dir, options)
+
+    # Verify agent starts with no labels
+    assert agent.get_labels() == {}
+
+    result = cli_runner.invoke(
+        label,
+        ["label-test-agent", "--label", "env=prod", "--label", "team=backend"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # Verify labels were applied
+    labels = agent.get_labels()
+    assert labels == {"env": "prod", "team": "backend"}
+
+
+def test_label_merges_with_existing_labels(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Label command should merge new labels with existing ones."""
+    options = CreateAgentOptions(
+        name=AgentName("merge-label-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = local_host.create_agent_state(temp_work_dir, options)
+
+    # Set initial labels directly
+    agent.set_labels({"existing": "value", "overwrite_me": "old"})
+
+    result = cli_runner.invoke(
+        label,
+        ["merge-label-agent", "--label", "overwrite_me=new", "--label", "added=yes"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    labels = agent.get_labels()
+    assert labels == {"existing": "value", "overwrite_me": "new", "added": "yes"}
+
+
+def test_label_all_applies_to_all_agents(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+) -> None:
+    """Label --all should apply labels to all agents."""
+    # Create two agents
+    work_dir_1 = tmp_path / "work1"
+    work_dir_1.mkdir()
+    work_dir_2 = tmp_path / "work2"
+    work_dir_2.mkdir()
+
+    options_1 = CreateAgentOptions(
+        name=AgentName("all-label-agent-1"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    options_2 = CreateAgentOptions(
+        name=AgentName("all-label-agent-2"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent_1 = local_host.create_agent_state(work_dir_1, options_1)
+    agent_2 = local_host.create_agent_state(work_dir_2, options_2)
+
+    result = cli_runner.invoke(
+        label,
+        ["--all", "--label", "batch=true"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    assert agent_1.get_labels() == {"batch": "true"}
+    assert agent_2.get_labels() == {"batch": "true"}
+
+
+def test_label_dry_run_does_not_modify(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Label --dry-run should not actually modify any labels."""
+    options = CreateAgentOptions(
+        name=AgentName("dry-run-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = local_host.create_agent_state(temp_work_dir, options)
+
+    result = cli_runner.invoke(
+        label,
+        ["dry-run-agent", "--label", "should_not=appear", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "Would apply labels" in result.output
+
+    # Verify labels were NOT applied
+    assert agent.get_labels() == {}
+
+
+def test_label_json_output(
+    local_host: Host,
+    temp_work_dir: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Label command should produce valid JSON output with --format json."""
+    options = CreateAgentOptions(
+        name=AgentName("json-label-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    local_host.create_agent_state(temp_work_dir, options)
+
+    result = cli_runner.invoke(
+        label,
+        ["json-label-agent", "--label", "key=value", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    output = json.loads(result.output.strip())
+    assert output["count"] == 1
+    assert output["changes"][0]["labels"]["key"] == "value"
