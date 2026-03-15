@@ -48,10 +48,12 @@ def _to_modal_stream_type(st: StreamType) -> ModalStreamType:
 def _to_file_entry_type(modal_type: ModalFileEntryType) -> FileEntryType:
     """Convert modal's FileEntryType to ours."""
     match modal_type:
+        case ModalFileEntryType.FILE:
+            return FileEntryType.FILE
         case ModalFileEntryType.DIRECTORY:
             return FileEntryType.DIRECTORY
         case _:
-            return FileEntryType.FILE
+            raise ModalProxyError(f"Unsupported Modal FileEntryType: {modal_type}")
 
 
 # ---------------------------------------------------------------------------
