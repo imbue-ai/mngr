@@ -35,6 +35,8 @@ addopts = [
   "--timeout-method=signal",
   "--max-worker-restart=0",
   "-m not acceptance and not release",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
 ]
 
 [tool.coverage.run]
