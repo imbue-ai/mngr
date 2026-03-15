@@ -1,38 +1,36 @@
 import json
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mng.api.find import AgentMatch
+from imbue.mng.cli.label import _apply_labels_to_agents_offline
 from imbue.mng.cli.label import _merge_labels
 from imbue.mng.cli.label import _output
 from imbue.mng.cli.label import _output_result
 from imbue.mng.cli.label import label
 from imbue.mng.cli.label import parse_label_string
+from imbue.mng.cli.testing import create_test_agent_state
 from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import Host
-from imbue.mng.interfaces.agent import AgentInterface
-from imbue.mng.interfaces.host import CreateAgentOptions
+from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentTypeName
-from imbue.mng.primitives import CommandString
+from imbue.mng.primitives import HostId
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.providers.base_provider import BaseProviderInstance
+from imbue.mng.providers.docker.host_store import DockerHostStore
+from imbue.mng.providers.local.volume import LocalVolume
 
 
 def _make_output_opts(fmt: OutputFormat = OutputFormat.HUMAN) -> OutputOptions:
     return OutputOptions(output_format=fmt, format_template=None)
-
-
-def _create_test_agent(host: Host, work_dir: Path, name: str) -> AgentInterface:
-    """Create a minimal test agent with the given name."""
-    options = CreateAgentOptions(
-        name=AgentName(name),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-    )
-    return host.create_agent_state(work_dir, options)
 
 
 # =============================================================================
@@ -102,7 +100,7 @@ def test_output_json_silent(capsys) -> None:
 
 def test_output_result_human(capsys) -> None:
     """_output_result in HUMAN format shows change count."""
-    changes = [{"agent_name": "a", "labels": {"k": "v"}}]
+    changes: list[dict[str, Any]] = [{"agent_name": "a", "labels": {"k": "v"}}]
     _output_result(changes, _make_output_opts(OutputFormat.HUMAN))
     captured = capsys.readouterr()
     assert "1 agent(s)" in captured.out
@@ -110,7 +108,7 @@ def test_output_result_human(capsys) -> None:
 
 def test_output_result_json(capsys) -> None:
     """_output_result in JSON format emits structured JSON."""
-    changes = [{"agent_name": "a", "labels": {"k": "v"}}]
+    changes: list[dict[str, Any]] = [{"agent_name": "a", "labels": {"k": "v"}}]
     _output_result(changes, _make_output_opts(OutputFormat.JSON))
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
@@ -120,7 +118,7 @@ def test_output_result_json(capsys) -> None:
 
 def test_output_result_jsonl(capsys) -> None:
     """_output_result in JSONL format emits event with data."""
-    changes = [{"agent_name": "a", "labels": {"k": "v"}}]
+    changes: list[dict[str, Any]] = [{"agent_name": "a", "labels": {"k": "v"}}]
     _output_result(changes, _make_output_opts(OutputFormat.JSONL))
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
@@ -183,7 +181,7 @@ def test_label_agents_and_all_conflict(
 
 
 # =============================================================================
-# Integration tests
+# Integration tests (online path)
 # =============================================================================
 
 
@@ -194,7 +192,7 @@ def test_label_applies_labels_to_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Label command should apply labels to an agent on a local host."""
-    agent = _create_test_agent(local_host, temp_work_dir, "label-test-agent")
+    agent = create_test_agent_state(local_host, temp_work_dir, "label-test-agent")
     assert agent.get_labels() == {}
 
     result = cli_runner.invoke(
@@ -214,7 +212,7 @@ def test_label_merges_with_existing_labels(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Label command should merge new labels with existing ones."""
-    agent = _create_test_agent(local_host, temp_work_dir, "merge-label-agent")
+    agent = create_test_agent_state(local_host, temp_work_dir, "merge-label-agent")
     agent.set_labels({"existing": "value", "overwrite_me": "old"})
 
     result = cli_runner.invoke(
@@ -239,8 +237,8 @@ def test_label_all_applies_to_all_agents(
     work_dir_2 = tmp_path / "work2"
     work_dir_2.mkdir()
 
-    agent_1 = _create_test_agent(local_host, work_dir_1, "all-label-agent-1")
-    agent_2 = _create_test_agent(local_host, work_dir_2, "all-label-agent-2")
+    agent_1 = create_test_agent_state(local_host, work_dir_1, "all-label-agent-1")
+    agent_2 = create_test_agent_state(local_host, work_dir_2, "all-label-agent-2")
 
     result = cli_runner.invoke(
         label,
@@ -260,7 +258,7 @@ def test_label_dry_run_does_not_modify(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Label --dry-run should not actually modify any labels."""
-    agent = _create_test_agent(local_host, temp_work_dir, "dry-run-agent")
+    agent = create_test_agent_state(local_host, temp_work_dir, "dry-run-agent")
 
     result = cli_runner.invoke(
         label,
@@ -280,7 +278,7 @@ def test_label_json_output(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Label command should produce valid JSON output with --format json."""
-    _create_test_agent(local_host, temp_work_dir, "json-label-agent")
+    create_test_agent_state(local_host, temp_work_dir, "json-label-agent")
 
     result = cli_runner.invoke(
         label,
@@ -293,3 +291,85 @@ def test_label_json_output(
     output = json.loads(result.output.strip())
     assert output["count"] == 1
     assert output["changes"][0]["labels"]["key"] == "value"
+
+
+# =============================================================================
+# Offline path tests
+# =============================================================================
+
+
+def test_apply_labels_offline_updates_persisted_data(
+    tmp_path: Path,
+) -> None:
+    """_apply_labels_to_agents_offline should merge labels in persisted data."""
+    # Set up a DockerHostStore backed by a local filesystem volume
+    vol_path = tmp_path / "state_vol"
+    vol_path.mkdir()
+    volume = LocalVolume(root_path=vol_path)
+    store = DockerHostStore(volume=volume)
+
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+
+    # Seed persisted agent data with existing labels
+    store.persist_agent_data(
+        host_id,
+        {"id": str(agent_id), "name": "offline-agent", "labels": {"existing": "old"}},
+    )
+
+    agent_match = AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("offline-agent"),
+        host_id=host_id,
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+    changes: list[dict[str, Any]] = []
+    _apply_labels_to_agents_offline(
+        provider=cast(BaseProviderInstance, store),
+        host_id=host_id,
+        agent_matches=[agent_match],
+        labels_to_set={"new_key": "new_val", "existing": "updated"},
+        output_opts=_make_output_opts(),
+        changes=changes,
+    )
+
+    assert len(changes) == 1
+    assert changes[0]["labels"] == {"existing": "updated", "new_key": "new_val"}
+
+    # Verify the persisted data was actually written
+    records = store.list_persisted_agent_data_for_host(host_id)
+    assert len(records) == 1
+    assert records[0]["labels"] == {"existing": "updated", "new_key": "new_val"}
+
+
+def test_apply_labels_offline_raises_when_agent_not_found(
+    tmp_path: Path,
+) -> None:
+    """_apply_labels_to_agents_offline should raise when agent is missing from persisted data."""
+    vol_path = tmp_path / "state_vol"
+    vol_path.mkdir()
+    volume = LocalVolume(root_path=vol_path)
+    store = DockerHostStore(volume=volume)
+
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+
+    # No persisted data seeded -- agent does not exist in store
+    agent_match = AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("missing-agent"),
+        host_id=host_id,
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+    changes: list[dict[str, Any]] = []
+    with pytest.raises(AgentNotFoundOnHostError):
+        _apply_labels_to_agents_offline(
+            provider=cast(BaseProviderInstance, store),
+            host_id=host_id,
+            agent_matches=[agent_match],
+            labels_to_set={"key": "val"},
+            output_opts=_make_output_opts(),
+            changes=changes,
+        )

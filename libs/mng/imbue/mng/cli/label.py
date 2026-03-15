@@ -134,15 +134,20 @@ def _apply_labels_to_agents_offline(
 
     Uses the provider's persisted agent data to read current labels, merge
     new labels, and write back without requiring the host to be started.
+
+    Raises AgentNotFoundOnHostError if any target agent is not found in
+    the persisted records.
     """
     persisted_records = provider.list_persisted_agent_data_for_host(host_id)
     target_ids = {str(m.agent_id) for m in agent_matches}
+    found_ids: set[str] = set()
 
     for record in persisted_records:
         agent_id_str = record.get("id", "")
         if agent_id_str not in target_ids:
             continue
 
+        found_ids.add(agent_id_str)
         current_labels = dict(record.get("labels", {}))
         merged_labels = _merge_labels(current_labels, labels_to_set)
         record["labels"] = merged_labels
@@ -158,6 +163,12 @@ def _apply_labels_to_agents_offline(
                 "labels": merged_labels,
             }
         )
+
+    # Report any agents that were not found in persisted data
+    missing_ids = target_ids - found_ids
+    for missing_id in missing_ids:
+        match = next(m for m in agent_matches if str(m.agent_id) == missing_id)
+        raise AgentNotFoundOnHostError(match.agent_id, match.host_id)
 
 
 def _collect_agent_identifiers(opts: LabelCliOptions) -> list[str]:

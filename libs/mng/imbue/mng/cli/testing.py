@@ -2,7 +2,28 @@ import json
 from pathlib import Path
 from typing import Any
 
+from imbue.mng.hosts.host import Host
+from imbue.mng.interfaces.agent import AgentInterface
+from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import CommandString
+
+
+def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInterface:
+    """Create a minimal agent state (without starting it) for testing.
+
+    Creates the agent's data.json and state directory on the host without
+    creating a tmux session or starting the agent process. Useful for tests
+    that need an agent to exist but don't need it running.
+    """
+    options = CreateAgentOptions(
+        name=AgentName(name),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    return host.create_agent_state(work_dir, options)
 
 
 def create_agent_with_events_dir(
