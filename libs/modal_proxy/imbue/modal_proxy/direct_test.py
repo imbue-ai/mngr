@@ -1,4 +1,4 @@
-from contextlib import AbstractContextManager
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from typing import Mapping
@@ -39,7 +39,7 @@ class _FakeApp(AppInterface):
     def get_name(self) -> str:
         return "fake"
 
-    def run(self, *, environment_name: str) -> AbstractContextManager["AppInterface"]:
+    def run(self, *, environment_name: str) -> Generator["AppInterface", None, None]:
         raise NotImplementedError
 
 

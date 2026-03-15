@@ -1,10 +1,9 @@
 # Direct implementation of ModalInterface that wraps the real Modal Python SDK.
 
-import contextlib
 import io
 import os
 import subprocess
-from contextlib import AbstractContextManager
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from typing import Mapping
@@ -258,13 +257,18 @@ class DirectApp(AppInterface):
     app: modal.App = Field(description="The underlying modal.App", repr=False)
 
     def get_app_id(self) -> str:
-        return self.app.app_id
+        app_id = self.app.app_id
+        if app_id is None:
+            raise ModalProxyError("App has no app_id (not yet initialized)")
+        return app_id
 
     def get_name(self) -> str:
-        return self.app.name
+        name = self.app.name
+        if name is None:
+            raise ModalProxyError("App has no name")
+        return name
 
-    @contextlib.contextmanager
-    def run(self, *, environment_name: str) -> AbstractContextManager["AppInterface"]:
+    def run(self, *, environment_name: str) -> Generator[AppInterface, None, None]:
         with self.app.run(environment_name=environment_name):
             yield self
 
@@ -342,7 +346,7 @@ class DirectModalInterface(ModalInterface):
         cidr_allowlist: Sequence[str] | None = None,
         volumes: Mapping[str, VolumeInterface] | None = None,
     ) -> SandboxInterface:
-        modal_volumes: dict[str | os.PathLike[str], modal.Volume | modal.CloudBucketMount] | None = None
+        modal_volumes: dict[str | os.PathLike[str], modal.Volume | modal.CloudBucketMount] = {}
         if volumes is not None:
             modal_volumes = {path: _unwrap_volume(vol) for path, vol in volumes.items()}
 
@@ -378,13 +382,19 @@ class DirectModalInterface(ModalInterface):
         environment_name: str,
         version: int | None = None,
     ) -> VolumeInterface:
-        kwargs: dict[str, object] = {
-            "create_if_missing": create_if_missing,
-            "environment_name": environment_name,
-        }
         if version is not None:
-            kwargs["version"] = version
-        vol = modal.Volume.from_name(name, **kwargs)
+            vol = modal.Volume.from_name(
+                name,
+                create_if_missing=create_if_missing,
+                environment_name=environment_name,
+                version=version,
+            )
+        else:
+            vol = modal.Volume.from_name(
+                name,
+                create_if_missing=create_if_missing,
+                environment_name=environment_name,
+            )
         return DirectVolume.model_construct(volume=vol, volume_name=name)
 
     def volume_list(self, *, environment_name: str) -> list[VolumeInterface]:

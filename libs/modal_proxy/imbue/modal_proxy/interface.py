@@ -12,7 +12,7 @@
 
 from abc import ABC
 from abc import abstractmethod
-from contextlib import AbstractContextManager
+from collections.abc import Generator
 from pathlib import Path
 from typing import Mapping
 from typing import Sequence
@@ -187,7 +187,7 @@ class AppInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def run(self, *, environment_name: str) -> AbstractContextManager["AppInterface"]:
+    def run(self, *, environment_name: str) -> Generator["AppInterface", None, None]:
         """Enter this app's run context (for ephemeral apps)."""
         ...
 
