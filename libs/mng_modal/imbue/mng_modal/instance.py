@@ -669,7 +669,9 @@ class ModalProviderInstance(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         volume_name = self._get_host_volume_name(host_id)
         try:
-            vol_iface = self._modal_iface.volume_from_name(volume_name, environment_name=self.environment_name)
+            vol_iface = self._modal_iface.volume_from_name(
+                volume_name, create_if_missing=False, environment_name=self.environment_name
+            )
             # Probe the volume to verify it exists (from_name returns lazy references)
             vol_iface.listdir("/")
             modal_volume = ModalVolume.model_construct(modal_volume=vol_iface)
