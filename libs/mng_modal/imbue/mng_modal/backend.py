@@ -412,6 +412,8 @@ Supported build arguments for the modal provider:
         match config.mode:
             case ModalMode.DIRECT:
                 modal_iface: ModalInterface = DirectModalInterface()
+            case _:
+                raise MngError(f"Unsupported modal mode: {config.mode}")
 
         # Use prefix + user_id for the environment name, ensuring isolation
         # between different mng installations sharing the same Modal account.

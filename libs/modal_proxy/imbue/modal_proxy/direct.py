@@ -7,6 +7,7 @@
 import io
 import os
 import subprocess
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -507,14 +508,19 @@ class DirectModalInterface(ModalInterface):
             cmd.extend(["--env", environment_name])
         cmd.append(str(script_path))
 
-        result = subprocess.run(
-            cmd,
-            timeout=180,
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "MNG_MODAL_APP_NAME": app_name},
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = subprocess.run(
+                cmd,
+                timeout=180,
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "MNG_MODAL_APP_NAME": app_name,
+                    "MNG_MODAL_APP_BUILD_PATH": tmpdir,
+                },
+            )
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
