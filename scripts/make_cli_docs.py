@@ -48,6 +48,7 @@ SECONDARY_COMMANDS = {
     "cleanup",
     "config",
     "gc",
+    "label",
     "limit",
     "events",
     "message",
