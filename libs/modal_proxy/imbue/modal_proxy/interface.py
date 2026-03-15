@@ -244,7 +244,6 @@ class ModalInterface(MutableModel, ABC):
         command: Sequence[str],
         *,
         stdout: ExecStreamType = ExecStreamType.PIPE,
-        stderr: ExecStreamType = ExecStreamType.PIPE,
     ) -> ExecHandle:
         """Execute a command inside a running sandbox."""
         ...
