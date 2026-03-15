@@ -17,6 +17,7 @@ from imbue.mng.cli.destroy import destroy
 from imbue.mng.cli.events import events
 from imbue.mng.cli.exec import exec_command
 from imbue.mng.cli.gc import gc
+from imbue.mng.cli.label import label
 from imbue.mng.cli.limit import limit
 from imbue.mng.cli.message import message
 from imbue.mng.cli.migrate import migrate
@@ -258,6 +259,7 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (destroy, ["--help"], "destroy"),
     (exec_command, ["--help"], "exec"),
     (gc, ["--help"], "gc"),
+    (label, ["--help"], "label"),
     (limit, ["--help"], "limit"),
     (events, ["--help"], "events"),
     (transcript, ["--help"], "transcript"),
@@ -299,6 +301,7 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (capture, ["nonexistent-agent-55123"], "capture"),
     (destroy, ["nonexistent-agent-88421"], "destroy"),
     (exec_command, ["nonexistent-agent-99999", "echo hello"], "exec"),
+    (label, ["nonexistent-agent-44321", "--label", "key=value"], "label"),
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
     (events, ["nonexistent-agent-34892"], "events"),
     (transcript, ["nonexistent-agent-82341"], "transcript"),

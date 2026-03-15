@@ -27,6 +27,7 @@ from imbue.mng.cli.gc import gc
 from imbue.mng.cli.help_formatter import get_help_metadata
 from imbue.mng.cli.issue_reporting import handle_not_implemented_error
 from imbue.mng.cli.issue_reporting import handle_unexpected_error
+from imbue.mng.cli.label import label
 from imbue.mng.cli.limit import limit
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.message import message
@@ -318,6 +319,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     snapshot,
     config,
     gc,
+    label,
     plugin_command,
     observe,
     transcript,
