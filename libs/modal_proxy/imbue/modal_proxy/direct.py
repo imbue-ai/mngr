@@ -21,6 +21,7 @@ from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
@@ -279,12 +280,15 @@ class DirectModalInterface(ModalInterface):
     # =====================================================================
 
     def environment_create(self, name: str) -> None:
-        subprocess.run(
+        result = subprocess.run(
             ["modal", "environment", "create", name],
             timeout=30,
             check=False,
             capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            raise ModalProxyError(f"Failed to create Modal environment '{name}': {result.stderr or result.stdout}")
 
     # =====================================================================
     # App
