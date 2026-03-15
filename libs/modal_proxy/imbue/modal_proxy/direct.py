@@ -41,6 +41,8 @@ def _to_modal_stream_type(st: StreamType) -> ModalStreamType:
             return ModalStreamType.PIPE
         case StreamType.DEVNULL:
             return ModalStreamType.DEVNULL
+        case _:
+            raise ModalProxyError(f"Unsupported StreamType: {st}")
 
 
 def _to_file_entry_type(modal_type: ModalFileEntryType) -> FileEntryType:
@@ -429,10 +431,14 @@ class DirectModalInterface(ModalInterface):
             cmd.extend(["--env", environment_name])
         cmd.append(str(script_path))
 
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             timeout=180,
-            check=True,
+            check=False,
             capture_output=True,
+            text=True,
             env={**os.environ, "MNG_MODAL_APP_NAME": app_name},
         )
+        if result.returncode != 0:
+            output = (result.stdout + "\n" + result.stderr).strip()
+            raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
