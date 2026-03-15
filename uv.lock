@@ -32,6 +32,7 @@ members = [
     "mng-test-coder",
     "mng-ttyd",
     "mng-tutor",
+    "modal-proxy",
     "resource-guards",
     "sculptor-web",
     "slack-exporter",
@@ -2151,6 +2152,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/f1/3e/97805b561e37eaac6
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/bb/6ad9a6df012cfc5adecfb639622b525c2b4d82833ff800cb62b7c462599a/modal-1.3.1-py3-none-any.whl", hash = "sha256:aae46d83d9b034e2ec28c82b0cbdd2e74e21aca3db18dbeb708e3ba36f726209", size = 755322, upload-time = "2026-01-22T16:15:50.668Z" },
 ]
+
+[[package]]
+name = "modal-proxy"
+version = "0.1.0"
+source = { editable = "libs/modal_proxy" }
+dependencies = [
+    { name = "imbue-common" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-common", editable = "libs/imbue_common" }]
 
 [[package]]
 name = "multidict"
