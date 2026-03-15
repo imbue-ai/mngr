@@ -1,5 +1,6 @@
 from contextlib import AbstractContextManager
 from pathlib import Path
+from typing import Any
 from typing import Mapping
 from typing import Sequence
 
@@ -26,8 +27,10 @@ from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
 from imbue.modal_proxy.interface import VolumeInterface
 
+# --- Fake implementations for testing unwrap rejection ---
 
-class _FakeAppInterface(AppInterface):
+
+class _FakeApp(AppInterface):
     """Non-Direct AppInterface for testing unwrap rejection."""
 
     def get_app_id(self) -> str:
@@ -40,7 +43,7 @@ class _FakeAppInterface(AppInterface):
         raise NotImplementedError
 
 
-class _FakeImageInterface(ImageInterface):
+class _FakeImage(ImageInterface):
     """Non-Direct ImageInterface for testing unwrap rejection."""
 
     def get_object_id(self) -> str:
@@ -59,7 +62,7 @@ class _FakeImageInterface(ImageInterface):
         raise NotImplementedError
 
 
-class _FakeVolumeInterface(VolumeInterface):
+class _FakeVolume(VolumeInterface):
     """Non-Direct VolumeInterface for testing unwrap rejection."""
 
     def get_name(self) -> str | None:
@@ -84,77 +87,62 @@ class _FakeVolumeInterface(VolumeInterface):
         raise NotImplementedError
 
 
-class _FakeSecretInterface(SecretInterface):
+class _FakeSecret(SecretInterface):
     """Non-Direct SecretInterface for testing unwrap rejection."""
 
 
-# --- StreamType conversion ---
+# --- Conversion tests ---
 
 
-def test_to_modal_stream_type_pipe() -> None:
-    assert _to_modal_stream_type(StreamType.PIPE) == ModalStreamType.PIPE
+@pytest.mark.parametrize(
+    ("ours", "modals"),
+    [
+        (StreamType.PIPE, ModalStreamType.PIPE),
+        (StreamType.DEVNULL, ModalStreamType.DEVNULL),
+    ],
+)
+def test_to_modal_stream_type(ours: StreamType, modals: ModalStreamType) -> None:
+    assert _to_modal_stream_type(ours) == modals
 
 
-def test_to_modal_stream_type_devnull() -> None:
-    assert _to_modal_stream_type(StreamType.DEVNULL) == ModalStreamType.DEVNULL
+@pytest.mark.parametrize(
+    ("modal_type", "expected"),
+    [
+        (ModalFileEntryType.FILE, FileEntryType.FILE),
+        (ModalFileEntryType.DIRECTORY, FileEntryType.DIRECTORY),
+    ],
+)
+def test_to_file_entry_type(modal_type: ModalFileEntryType, expected: FileEntryType) -> None:
+    assert _to_file_entry_type(modal_type) == expected
 
 
-# --- FileEntryType conversion ---
+# --- Unwrap helpers ---
 
 
-def test_to_file_entry_type_file() -> None:
-    assert _to_file_entry_type(ModalFileEntryType.FILE) == FileEntryType.FILE
+_UNWRAP_CASES: list[tuple[Any, Any, type, str]] = [
+    (_unwrap_image, _FakeImage, DirectImage, "image"),
+    (_unwrap_app, _FakeApp, DirectApp, "app"),
+    (_unwrap_volume, _FakeVolume, DirectVolume, "volume"),
+    (_unwrap_secret, _FakeSecret, DirectSecret, "secret"),
+]
 
 
-def test_to_file_entry_type_directory() -> None:
-    assert _to_file_entry_type(ModalFileEntryType.DIRECTORY) == FileEntryType.DIRECTORY
+@pytest.mark.parametrize(
+    ("unwrap_fn", "fake_cls", "direct_cls", "field_name"),
+    _UNWRAP_CASES,
+    ids=["image", "app", "volume", "secret"],
+)
+def test_unwrap_rejects_non_direct(unwrap_fn: Any, fake_cls: Any, direct_cls: Any, field_name: str) -> None:
+    with pytest.raises(ModalProxyTypeError):
+        unwrap_fn(fake_cls.model_construct())
 
 
-# --- Unwrap helpers reject non-Direct types ---
-
-
-def test_unwrap_image_rejects_non_direct() -> None:
-    with pytest.raises(ModalProxyTypeError, match="Expected DirectImage"):
-        _unwrap_image(_FakeImageInterface.model_construct())
-
-
-def test_unwrap_app_rejects_non_direct() -> None:
-    with pytest.raises(ModalProxyTypeError, match="Expected DirectApp"):
-        _unwrap_app(_FakeAppInterface.model_construct())
-
-
-def test_unwrap_volume_rejects_non_direct() -> None:
-    with pytest.raises(ModalProxyTypeError, match="Expected DirectVolume"):
-        _unwrap_volume(_FakeVolumeInterface.model_construct())
-
-
-def test_unwrap_secret_rejects_non_direct() -> None:
-    with pytest.raises(ModalProxyTypeError, match="Expected DirectSecret"):
-        _unwrap_secret(_FakeSecretInterface.model_construct())
-
-
-# --- Unwrap helpers accept Direct types ---
-
-
-def test_unwrap_image_accepts_direct() -> None:
+@pytest.mark.parametrize(
+    ("unwrap_fn", "fake_cls", "direct_cls", "field_name"),
+    _UNWRAP_CASES,
+    ids=["image", "app", "volume", "secret"],
+)
+def test_unwrap_accepts_direct(unwrap_fn: Any, fake_cls: Any, direct_cls: Any, field_name: str) -> None:
     sentinel = object()
-    direct = DirectImage.model_construct(image=sentinel)
-    assert _unwrap_image(direct) is sentinel
-
-
-def test_unwrap_app_accepts_direct() -> None:
-    sentinel = object()
-    direct = DirectApp.model_construct(app=sentinel)
-    assert _unwrap_app(direct) is sentinel
-
-
-def test_unwrap_volume_accepts_direct() -> None:
-    sentinel = object()
-    direct = DirectVolume.model_construct(volume=sentinel)
-    assert _unwrap_volume(direct) is sentinel
-
-
-def test_unwrap_secret_accepts_direct() -> None:
-    sentinel = object()
-    direct = DirectSecret.model_construct(secret=sentinel)
-    assert _unwrap_secret(direct) is sentinel
+    direct = direct_cls.model_construct(**{field_name: sentinel})
+    assert unwrap_fn(direct) is sentinel
