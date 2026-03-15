@@ -1,4 +1,3 @@
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Generator
@@ -31,41 +30,8 @@ from imbue.mng.cli.stop import stop
 from imbue.mng.cli.transcript import transcript
 from imbue.mng.config.data_types import CreateCliOptions
 from imbue.mng.main import cli
-from imbue.mng.primitives import AgentId
 from imbue.mng.utils.testing import cleanup_tmux_session
 from imbue.mng.utils.testing import create_test_agent_via_cli
-
-
-def create_agent_with_events_dir(
-    per_host_dir: Path,
-    agent_name: str,
-    events_source: str | None = None,
-    agent_type: str = "generic",
-) -> tuple[AgentId, Path]:
-    """Create a minimal agent directory with an events subdirectory.
-
-    Returns (agent_id, events_dir) where events_dir is ready for test files.
-    If events_source is given, events_dir is per_host_dir/agents/<id>/events/<source>;
-    otherwise it is per_host_dir/agents/<id>/events.
-    """
-    agent_id = AgentId.generate()
-    agent_dir = per_host_dir / "agents" / str(agent_id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "id": str(agent_id),
-        "name": agent_name,
-        "type": agent_type,
-        "command": "sleep 1",
-        "work_dir": "/tmp/test",
-        "create_time": "2026-01-01T00:00:00+00:00",
-    }
-    (agent_dir / "data.json").write_text(json.dumps(data))
-    if events_source is not None:
-        events_dir = agent_dir / "events" / events_source
-    else:
-        events_dir = agent_dir / "events"
-    events_dir.mkdir(parents=True, exist_ok=True)
-    return agent_id, events_dir
 
 
 @pytest.fixture

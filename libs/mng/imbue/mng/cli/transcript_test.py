@@ -3,7 +3,8 @@ import json
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mng.cli.conftest import create_agent_with_events_dir
+from imbue.mng.cli.testing import create_agent_with_events_dir
+from imbue.mng.cli.testing import create_agent_with_sample_transcript
 from imbue.mng.cli.transcript import TranscriptCliOptions
 from imbue.mng.cli.transcript import _format_event_human
 from imbue.mng.cli.transcript import _get_event_role
@@ -274,33 +275,7 @@ def test_transcript_cli_reads_and_displays_human_format(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-human-test",
-    )
-    events = [
-        {
-            "timestamp": "2026-01-01T00:00:00Z",
-            "type": "user_message",
-            "event_id": "e1",
-            "source": "claude/common_transcript",
-            "role": "user",
-            "content": "Hello agent",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:01Z",
-            "type": "assistant_message",
-            "event_id": "e2",
-            "source": "claude/common_transcript",
-            "role": "assistant",
-            "text": "Hi there!",
-            "tool_calls": [],
-            "model": "claude-opus-4.6",
-        },
-    ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="transcript-human-test")
 
     result = cli_runner.invoke(
         transcript,
@@ -308,8 +283,8 @@ def test_transcript_cli_reads_and_displays_human_format(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    assert "Hello agent" in result.output
-    assert "Hi there!" in result.output
+    assert "Hello" in result.output
+    assert "World" in result.output
     assert "user:" in result.output
     assert "assistant:" in result.output
 
@@ -320,23 +295,7 @@ def test_transcript_cli_reads_jsonl_format(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-jsonl-test",
-    )
-    events = [
-        {
-            "timestamp": "2026-01-01T00:00:00Z",
-            "type": "user_message",
-            "event_id": "e1",
-            "source": "claude/common_transcript",
-            "role": "user",
-            "content": "Hello",
-        },
-    ]
-    (events_dir / "events.jsonl").write_text(json.dumps(events[0]) + "\n")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="transcript-jsonl-test")
 
     result = cli_runner.invoke(
         transcript,
@@ -344,7 +303,9 @@ def test_transcript_cli_reads_jsonl_format(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    parsed = json.loads(result.output.strip())
+    lines = [line for line in result.output.strip().split("\n") if line.strip()]
+    assert len(lines) == 3
+    parsed = json.loads(lines[0])
     assert parsed["type"] == "user_message"
     assert parsed["content"] == "Hello"
 
@@ -355,33 +316,7 @@ def test_transcript_cli_reads_json_format(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-json-test",
-    )
-    events = [
-        {
-            "timestamp": "2026-01-01T00:00:00Z",
-            "type": "user_message",
-            "event_id": "e1",
-            "source": "claude/common_transcript",
-            "role": "user",
-            "content": "Hello",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:01Z",
-            "type": "assistant_message",
-            "event_id": "e2",
-            "source": "claude/common_transcript",
-            "role": "assistant",
-            "text": "World",
-            "tool_calls": [],
-            "model": "test",
-        },
-    ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="transcript-json-test")
 
     result = cli_runner.invoke(
         transcript,
@@ -391,7 +326,7 @@ def test_transcript_cli_reads_json_format(
     assert result.exit_code == 0
     parsed = json.loads(result.output)
     assert isinstance(parsed, list)
-    assert len(parsed) == 2
+    assert len(parsed) == 3
 
 
 def test_transcript_cli_filters_by_role(
@@ -400,42 +335,7 @@ def test_transcript_cli_filters_by_role(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-role-test",
-    )
-    events = [
-        {
-            "timestamp": "2026-01-01T00:00:00Z",
-            "type": "user_message",
-            "event_id": "e1",
-            "source": "claude/common_transcript",
-            "role": "user",
-            "content": "Hello",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:01Z",
-            "type": "assistant_message",
-            "event_id": "e2",
-            "source": "claude/common_transcript",
-            "role": "assistant",
-            "text": "World",
-            "tool_calls": [],
-            "model": "test",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:02Z",
-            "type": "tool_result",
-            "event_id": "e3",
-            "source": "claude/common_transcript",
-            "tool_name": "Bash",
-            "output": "ok",
-            "is_error": False,
-        },
-    ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="transcript-role-test")
 
     result = cli_runner.invoke(
         transcript,
@@ -455,42 +355,7 @@ def test_transcript_cli_filters_by_multiple_roles(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-multirole-test",
-    )
-    events = [
-        {
-            "timestamp": "2026-01-01T00:00:00Z",
-            "type": "user_message",
-            "event_id": "e1",
-            "source": "claude/common_transcript",
-            "role": "user",
-            "content": "Hello",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:01Z",
-            "type": "assistant_message",
-            "event_id": "e2",
-            "source": "claude/common_transcript",
-            "role": "assistant",
-            "text": "World",
-            "tool_calls": [],
-            "model": "test",
-        },
-        {
-            "timestamp": "2026-01-01T00:00:02Z",
-            "type": "tool_result",
-            "event_id": "e3",
-            "source": "claude/common_transcript",
-            "tool_name": "Bash",
-            "output": "ok",
-            "is_error": False,
-        },
-    ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="transcript-multirole-test")
 
     result = cli_runner.invoke(
         transcript,
@@ -508,13 +373,7 @@ def test_transcript_cli_applies_tail(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-tail-test",
-    )
-    events = [
+    numbered_events = [
         {
             "timestamp": "2026-01-01T00:00:00Z",
             "type": "user_message",
@@ -525,7 +384,9 @@ def test_transcript_cli_applies_tail(
         }
         for i in range(5)
     ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(
+        local_provider.host_dir, agent_name="transcript-tail-test", events=numbered_events
+    )
 
     result = cli_runner.invoke(
         transcript,
@@ -545,13 +406,7 @@ def test_transcript_cli_applies_head(
     local_provider,
     temp_mng_ctx,
 ) -> None:
-    _, events_dir = create_agent_with_events_dir(
-        local_provider.host_dir,
-        events_source="claude/common_transcript",
-        agent_type="claude",
-        agent_name="transcript-head-test",
-    )
-    events = [
+    numbered_events = [
         {
             "timestamp": "2026-01-01T00:00:00Z",
             "type": "user_message",
@@ -562,7 +417,9 @@ def test_transcript_cli_applies_head(
         }
         for i in range(5)
     ]
-    (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    create_agent_with_sample_transcript(
+        local_provider.host_dir, agent_name="transcript-head-test", events=numbered_events
+    )
 
     result = cli_runner.invoke(
         transcript,

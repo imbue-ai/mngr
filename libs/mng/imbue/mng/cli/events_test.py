@@ -5,12 +5,12 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mng.api.events import EventRecord
-from imbue.mng.cli.conftest import create_agent_with_events_dir
 from imbue.mng.cli.events import EventsCliOptions
 from imbue.mng.cli.events import _emit_event_content
 from imbue.mng.cli.events import _emit_event_record
 from imbue.mng.cli.events import _write_and_flush_stdout
 from imbue.mng.cli.events import events
+from imbue.mng.cli.testing import create_agent_with_events_dir
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import OutputFormat
 
