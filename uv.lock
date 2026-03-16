@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -30,6 +30,7 @@ members = [
     "mng-recursive",
     "mng-schedule",
     "mng-test-coder",
+    "mng-tmr",
     "mng-ttyd",
     "mng-tutor",
     "resource-guards",
@@ -2097,6 +2098,21 @@ dependencies = [
 requires-dist = [
     { name = "mng", editable = "libs/mng" },
     { name = "mng-claude-mind", editable = "libs/mng_claude_mind" },
+]
+
+[[package]]
+name = "mng-tmr"
+version = "0.1.0"
+source = { editable = "libs/mng_tmr" }
+dependencies = [
+    { name = "markdown-it-py" },
+    { name = "mng" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "markdown-it-py", specifier = ">=3.0.0" },
+    { name = "mng", editable = "libs/mng" },
 ]
 
 [[package]]
