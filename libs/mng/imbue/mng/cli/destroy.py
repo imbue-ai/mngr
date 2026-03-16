@@ -395,7 +395,6 @@ def _partition_destroy_targets(
     """
     online_agents: list[tuple[AgentInterface, OnlineHostInterface]] = []
     offline_hosts: list[_OfflineHostToDestroy] = []
-    seen_hosts: set[str] = set()
 
     # Group matched agent IDs by host for the offline "all targeted" check
     matched_ids_by_host: dict[str, set[AgentId]] = {}
@@ -403,10 +402,6 @@ def _partition_destroy_targets(
         matched_ids_by_host.setdefault(str(match.host_id), set()).add(match.agent_id)
 
     for host_id_str, matched_ids in matched_ids_by_host.items():
-        if host_id_str in seen_hosts:
-            continue
-        seen_hosts.add(host_id_str)
-
         # Get the provider from any match on this host
         provider_name = next(m.provider_name for m in matches if str(m.host_id) == host_id_str)
         provider = get_provider_instance(provider_name, mng_ctx)
@@ -428,9 +423,16 @@ def _partition_destroy_targets(
                     )
                     continue
 
+                found_ids: set[AgentId] = set()
                 for agent in agents:
                     if agent.id in matched_ids:
                         online_agents.append((agent, online_host))
+                        found_ids.add(agent.id)
+                missing_ids = matched_ids - found_ids
+                for missing_id in missing_ids:
+                    raise AgentNotFoundError(
+                        f"Agent {missing_id} was discovered on host {host_id_str} but is no longer present"
+                    )
             case HostInterface() as offline_host:
                 _check_all_agents_targeted_on_offline_host(
                     offline_host, matched_ids, host_id_str, offline_hosts, provider
