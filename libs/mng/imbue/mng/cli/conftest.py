@@ -8,6 +8,8 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.cli.archive import archive
+from imbue.mng.cli.capture import capture
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.config import config
 from imbue.mng.cli.connect import ConnectCliOptions
@@ -16,6 +18,7 @@ from imbue.mng.cli.destroy import destroy
 from imbue.mng.cli.events import events
 from imbue.mng.cli.exec import exec_command
 from imbue.mng.cli.gc import gc
+from imbue.mng.cli.label import label
 from imbue.mng.cli.limit import limit
 from imbue.mng.cli.message import message
 from imbue.mng.cli.migrate import migrate
@@ -26,6 +29,7 @@ from imbue.mng.cli.rename import rename
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
+from imbue.mng.cli.transcript import transcript
 from imbue.mng.config.data_types import CreateCliOptions
 from imbue.mng.main import cli
 from imbue.mng.utils.testing import cleanup_tmux_session
@@ -249,14 +253,18 @@ def create_test_agent(
 # =============================================================================
 
 _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
+    (archive, ["--help"], "archive"),
+    (capture, ["--help"], "capture"),
     (cleanup, ["--help"], "cleanup"),
     (config, ["--help"], "config"),
     (connect, ["--help"], "connect"),
     (destroy, ["--help"], "destroy"),
     (exec_command, ["--help"], "exec"),
     (gc, ["--help"], "gc"),
+    (label, ["--help"], "label"),
     (limit, ["--help"], "limit"),
     (events, ["--help"], "events"),
+    (transcript, ["--help"], "transcript"),
     (message, ["--help"], "message"),
     (migrate, ["--help"], "migrate"),
     (provision, ["--help"], "provision"),
@@ -292,10 +300,13 @@ def test_help_exits_zero(
 # =============================================================================
 
 _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
+    (capture, ["nonexistent-agent-55123"], "capture"),
     (destroy, ["nonexistent-agent-88421"], "destroy"),
     (exec_command, ["nonexistent-agent-99999", "echo hello"], "exec"),
+    (label, ["nonexistent-agent-44321", "--label", "key=value"], "label"),
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
     (events, ["nonexistent-agent-34892"], "events"),
+    (transcript, ["nonexistent-agent-82341"], "transcript"),
     (provision, ["nonexistent-agent-77412"], "provision"),
     (pull, ["nonexistent-agent-66201"], "pull"),
     (push, ["nonexistent-agent-77312"], "push"),

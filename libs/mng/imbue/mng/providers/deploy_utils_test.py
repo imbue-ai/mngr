@@ -147,6 +147,13 @@ def test_detect_mng_install_mode_returns_editable_for_mng() -> None:
 # --- resolve_mng_install_mode tests ---
 
 
+def test_detect_mng_install_mode_returns_package_for_non_editable_package() -> None:
+    """detect_mng_install_mode should return PACKAGE for a regularly installed package."""
+    # pytest is pip-installed (not editable), so it should return PACKAGE
+    result = detect_mng_install_mode("pytest")
+    assert result == MngInstallMode.PACKAGE
+
+
 def test_resolve_mng_install_mode_resolves_auto() -> None:
     """resolve_mng_install_mode should resolve AUTO to a concrete mode."""
     result = resolve_mng_install_mode(MngInstallMode.AUTO)

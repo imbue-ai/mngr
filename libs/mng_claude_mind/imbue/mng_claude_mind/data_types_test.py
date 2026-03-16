@@ -1,59 +1,15 @@
-"""Unit tests for mind data types."""
+"""Unit tests for claude mind data types."""
 
-import json
-
-import pytest
-
-from imbue.imbue_common.event_envelope import EventId
-from imbue.imbue_common.event_envelope import EventSource
-from imbue.imbue_common.event_envelope import EventType
-from imbue.imbue_common.event_envelope import IsoTimestamp
-from imbue.mng_claude_mind.data_types import ConversationId
-from imbue.mng_claude_mind.data_types import MessageEvent
-from imbue.mng_claude_mind.data_types import MessageRole
-from imbue.mng_claude_mind.data_types import MindEvent
-from imbue.mng_claude_mind.data_types import SOURCE_MESSAGES
-
-_TS = IsoTimestamp("2026-02-28T00:00:00.000000000Z")
-_EID = EventId("evt-1234")
+from imbue.mng_claude_mind.data_types import ClaudeMindSettings
+from imbue.mng_mind.data_types import WatcherSettings
 
 
-# -- Primitive types --
+def test_claude_mind_settings_defaults() -> None:
+    settings = ClaudeMindSettings()
+    assert settings.agent_type is None
+    assert settings.watchers == WatcherSettings()
 
 
-def test_conversation_id_rejects_empty() -> None:
-    with pytest.raises(ValueError, match="cannot be empty"):
-        ConversationId("")
-
-
-# -- MessageEvent --
-
-
-def test_message_event_is_self_describing() -> None:
-    event = MessageEvent(
-        timestamp=_TS,
-        type=EventType("message"),
-        event_id=_EID,
-        source=SOURCE_MESSAGES,
-        conversation_id=ConversationId("conv-1"),
-        role=MessageRole("user"),
-        content="Hello",
-    )
-    data = json.loads(event.model_dump_json())
-    assert data["conversation_id"] == "conv-1"
-    assert data["role"] == "user"
-    assert data["source"] == "messages"
-
-
-# -- MindEvent --
-
-
-def test_mind_event_with_data() -> None:
-    event = MindEvent(
-        timestamp=_TS,
-        type=EventType("sub_agent_waiting"),
-        event_id=_EID,
-        source=EventSource("mng/agents"),
-        data={"agent_name": "helper-1"},
-    )
-    assert event.data["agent_name"] == "helper-1"
+def test_claude_mind_settings_with_agent_type() -> None:
+    settings = ClaudeMindSettings.model_validate({"agent_type": "claude-mind"})
+    assert settings.agent_type == "claude-mind"

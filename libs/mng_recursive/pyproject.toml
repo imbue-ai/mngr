@@ -2,9 +2,11 @@
 name = "mng-recursive"
 version = "0.1.0"
 description = "Recursive mng plugin: injects mng config and dependencies into remote hosts during provisioning"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.4",
+    "watchdog>=4.0",
 ]
 
 [project.entry-points.mng]

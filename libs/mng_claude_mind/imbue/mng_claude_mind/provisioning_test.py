@@ -1,359 +1,77 @@
 """Unit tests for the mng_claude_mind provisioning module."""
 
 import importlib
-import json
 import os
-import subprocess
-import sys
-import tempfile
-import types
 from pathlib import Path
 from typing import Any
 from typing import cast
 
 import pytest
 
-from imbue.mng_claude_mind.conftest import StubCommandResult
-from imbue.mng_claude_mind.conftest import StubHost
-from imbue.mng_claude_mind.conftest import create_mind_conversations_table_in_test_db
-from imbue.mng_claude_mind.conftest import write_conversation_to_db
-from imbue.mng_claude_mind.data_types import CommonToolResultEvent
-from imbue.mng_claude_mind.data_types import ProvisioningSettings
-from imbue.mng_claude_mind.provisioning import MIND_CONVERSATIONS_TABLE_SQL
-from imbue.mng_claude_mind.provisioning import TalkingRoleConstraintError
-from imbue.mng_claude_mind.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_mind.provisioning import _SERVICE_SCRIPT_FILES
-from imbue.mng_claude_mind.provisioning import build_memory_sync_hooks_config
-from imbue.mng_claude_mind.provisioning import compute_claude_project_dir_name
-from imbue.mng_claude_mind.provisioning import configure_llm_user_path
-from imbue.mng_claude_mind.provisioning import create_daily_conversation
-from imbue.mng_claude_mind.provisioning import create_event_log_directories
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
+from imbue.mng_claude_mind.provisioning import build_stop_hook_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
-from imbue.mng_claude_mind.provisioning import create_slack_notifications_conversation
-from imbue.mng_claude_mind.provisioning import create_system_notifications_conversation
-from imbue.mng_claude_mind.provisioning import install_llm_toolchain
-from imbue.mng_claude_mind.provisioning import load_mind_resource
-from imbue.mng_claude_mind.provisioning import provision_default_content
-from imbue.mng_claude_mind.provisioning import provision_llm_tools
-from imbue.mng_claude_mind.provisioning import provision_supporting_services
-from imbue.mng_claude_mind.provisioning import resolve_work_dir_abs
+from imbue.mng_claude_mind.provisioning import provision_claude_settings
+from imbue.mng_claude_mind.provisioning import provision_event_exclude_sources
+from imbue.mng_claude_mind.provisioning import provision_stop_hook_script
+from imbue.mng_claude_mind.provisioning import run_link_skills_script
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
-from imbue.mng_claude_mind.provisioning import validate_talking_role_constraints
-from imbue.mng_claude_mind.resources import context_tool as context_tool_module
-from imbue.mng_claude_mind.resources import extra_context_tool as extra_context_tool_module
-from imbue.mng_claude_mind.resources.watcher_common import MngNotInstalledError
-from imbue.mng_claude_mind.resources.watcher_common import get_mng_command
+from imbue.mng_llm.conftest import create_mind_conversations_table_in_test_db
+from imbue.mng_llm.conftest import write_conversation_to_db
+from imbue.mng_llm.data_types import ProvisioningSettings
+from imbue.mng_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL
+from imbue.mng_llm.provisioning import _LLM_TOOL_FILES
+from imbue.mng_llm.provisioning import _SERVICE_SCRIPT_FILES
+from imbue.mng_llm.provisioning import _TTYD_DISPATCH_SCRIPTS
+from imbue.mng_llm.provisioning import configure_llm_user_path
+from imbue.mng_llm.provisioning import create_daily_conversation
+from imbue.mng_llm.provisioning import create_slack_notifications_conversation
+from imbue.mng_llm.provisioning import create_system_notifications_conversation
+from imbue.mng_llm.provisioning import install_llm_toolchain
+from imbue.mng_llm.provisioning import load_llm_resource
+from imbue.mng_llm.provisioning import provision_llm_tools
+from imbue.mng_llm.provisioning import provision_supporting_services
+from imbue.mng_llm.provisioning import resolve_work_dir_abs
+from imbue.mng_llm.resources import context_tool as context_tool_module
+from imbue.mng_llm.resources import extra_context_tool as extra_context_tool_module
+from imbue.mng_mind.conftest import StubCommandResult
+from imbue.mng_mind.conftest import StubHost
+from imbue.mng_mind.provisioning import provision_link_skills_script_file
+from imbue.mng_recursive.watcher_common import MngNotInstalledError
+from imbue.mng_recursive.watcher_common import get_mng_command
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
 
-def test_load_mind_resource_loads_resource() -> None:
-    """Check that the load_mind_resource works at all"""
-    content = load_mind_resource("chat.sh")
-    assert "#!/usr/bin/env bash" in content
+# -- provision_claude_settings tests --
 
 
-# -- Transcript watcher conversion logic tests --
+def test_provision_claude_settings_writes_when_missing() -> None:
+    """Verify provision_claude_settings writes settings.json when it doesn't exist."""
+    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
+    provision_claude_settings(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    written_paths = [str(p) for p, _ in host.written_text_files]
+    assert any("thinking/.claude/settings.json" in p for p in written_paths)
 
 
-# FIXME: transcript_watcher.sh is entirely dead code and should be entirely removed... what are these tests doing?
-def _extract_convert_script() -> str:
-    """Extract the inline Python CONVERT_SCRIPT from transcript_watcher.sh."""
-    content = load_mind_resource("transcript_watcher.sh")
-    start_marker = "python3 << 'CONVERT_SCRIPT'"
-    start_idx = content.index(start_marker)
-    start_of_python = content.index("\n", start_idx) + 1
-    remaining = content[start_of_python:]
-    python_lines = []
-    for line in remaining.split("\n"):
-        if line.strip() == "CONVERT_SCRIPT":
-            break
-        python_lines.append(line)
-    return "\n".join(python_lines)
+def test_provision_claude_settings_does_not_overwrite() -> None:
+    """Verify provision_claude_settings skips when file exists."""
+    host = StubHost()
+    provision_claude_settings(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    assert len(host.written_text_files) == 0
 
 
-def _run_conversion(
-    input_lines: list[str],
-    existing_output_lines: list[str] | None = None,
-    tmp_path: Path = Path("/tmp"),
-) -> list[dict[str, Any]]:
-    """Run the conversion logic on the given input and return output events."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_file = Path(tmpdir) / "input.jsonl"
-        output_file = Path(tmpdir) / "output.jsonl"
-
-        input_file.write_text("\n".join(input_lines) + "\n" if input_lines else "")
-
-        if existing_output_lines:
-            output_file.write_text("\n".join(existing_output_lines) + "\n")
-
-        script = _extract_convert_script()
-        env = {
-            **os.environ,
-            "_INPUT_FILE": str(input_file),
-            "_OUTPUT_FILE": str(output_file),
-        }
-
-        result = subprocess.run(
-            ["python3", "-c", script],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Conversion failed: {result.stderr}")
-
-        if not output_file.exists():
-            return []
-
-        output_text = output_file.read_text()
-        events = []
-        for line in output_text.strip().split("\n"):
-            if line.strip():
-                events.append(json.loads(line))
-        return events
+# -- Memory directory tests --
 
 
-def test_conversion_handles_user_text_message() -> None:
-    raw = json.dumps(
-        {
-            "type": "user",
-            "uuid": "user-uuid-1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": "Hello world"},
-        }
-    )
-    events = _run_conversion([raw])
-    assert len(events) == 1
-    assert events[0]["type"] == "user_message"
-    assert events[0]["content"] == "Hello world"
-    assert events[0]["source"] == "common_transcript"
-    assert events[0]["event_id"] == "user-uuid-1-user"
+def test_encode_claude_project_dir_name_replaces_slashes() -> None:
+    assert encode_claude_project_dir_name(Path("/home/user/project")) == "-home-user-project"
 
 
-def test_conversion_handles_assistant_message_with_text() -> None:
-    raw = json.dumps(
-        {
-            "type": "assistant",
-            "uuid": "asst-uuid-1",
-            "timestamp": "2026-01-01T00:00:01Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4.6",
-                "content": [{"type": "text", "text": "Hello back!"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 100, "output_tokens": 50},
-            },
-        }
-    )
-    events = _run_conversion([raw])
-    assert len(events) == 1
-    assert events[0]["type"] == "assistant_message"
-    assert events[0]["model"] == "claude-opus-4.6"
-    assert events[0]["text"] == "Hello back!"
-
-
-def test_conversion_handles_tool_results() -> None:
-    assistant = json.dumps(
-        {
-            "type": "assistant",
-            "uuid": "asst-uuid-3",
-            "timestamp": "2026-01-01T00:00:03Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4.6",
-                "content": [
-                    {"type": "tool_use", "id": "toolu_456", "name": "Read", "input": {"file_path": "/tmp/test.txt"}},
-                ],
-                "stop_reason": "tool_use",
-                "usage": {"input_tokens": 50, "output_tokens": 30},
-            },
-        }
-    )
-    user_result = json.dumps(
-        {
-            "type": "user",
-            "uuid": "user-uuid-2",
-            "timestamp": "2026-01-01T00:00:04Z",
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_456",
-                        "content": "file contents here",
-                        "is_error": False,
-                    },
-                ],
-            },
-        }
-    )
-    events = _run_conversion([assistant, user_result])
-    tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert len(tool_results) == 1
-    assert tool_results[0]["tool_call_id"] == "toolu_456"
-    assert tool_results[0]["tool_name"] == "Read"
-
-
-def test_conversion_skips_progress_events() -> None:
-    raw = json.dumps(
-        {
-            "type": "progress",
-            "uuid": "prog-uuid-1",
-            "timestamp": "2026-01-01T00:00:05Z",
-            "data": {"type": "bash_progress"},
-        }
-    )
-    events = _run_conversion([raw])
-    assert len(events) == 0
-
-
-def test_conversion_deduplicates_by_event_id() -> None:
-    raw = json.dumps(
-        {
-            "type": "user",
-            "uuid": "user-uuid-3",
-            "timestamp": "2026-01-01T00:00:07Z",
-            "message": {"role": "user", "content": "dedup test"},
-        }
-    )
-    existing = json.dumps(
-        {
-            "timestamp": "2026-01-01T00:00:07Z",
-            "type": "user_message",
-            "event_id": "user-uuid-3-user",
-            "source": "common_transcript",
-            "role": "user",
-            "content": "dedup test",
-        }
-    )
-    events = _run_conversion([raw], existing_output_lines=[existing])
-    assert len(events) == 1  # only the pre-existing one
-
-
-def test_conversion_handles_malformed_lines_gracefully() -> None:
-    valid = json.dumps(
-        {
-            "type": "user",
-            "uuid": "user-uuid-4",
-            "timestamp": "2026-01-01T00:00:08Z",
-            "message": {"role": "user", "content": "valid"},
-        }
-    )
-    events = _run_conversion(["not json at all", valid, '{"incomplete": true'])
-    assert len(events) == 1
-    assert events[0]["content"] == "valid"
-
-
-def test_conversion_user_message_validates_against_pydantic_schema() -> None:
-    pass
-
-
-# -- Transcript watcher conversion logic tests --
-
-
-def _strip_below_watchdog_marker(source: str) -> str:
-    """Strip everything at and below the WATCHDOG-DEPENDENT marker line.
-
-    Searches for the marker as a standalone comment line (not inside a string
-    literal like a docstring). Returns the source text up to (but not including)
-    the marker line.
-    """
-    marker_prefix = "# --- WATCHDOG-DEPENDENT CODE BELOW"
-    lines = source.split("\n")
-    # Walk backwards to find the last occurrence (the real one, not a docstring mention)
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].startswith(marker_prefix):
-            return "\n".join(lines[:i])
-    raise ValueError(f"Marker {marker_prefix!r} not found in source")
-
-
-def test_conversion_assistant_message_validates_against_pydantic_schema() -> None:
-    pass
-
-
-def _load_transcript_watcher_module() -> dict[str, Any]:
-    """Load the stdlib-only portion of transcript_watcher.py (above the watchdog marker).
-
-    Returns a namespace dict containing the conversion functions.
-    """
-    content = load_mind_resource("transcript_watcher.py")
-    # Also load watcher_common.py (stripped above its watchdog marker) so
-    # transcript_watcher.py can import Logger from it.
-    watcher_common_content = load_mind_resource("watcher_common.py")
-    watcher_common_stripped = _strip_below_watchdog_marker(watcher_common_content)
-
-    stripped = _strip_below_watchdog_marker(content)
-
-    # Exec watcher_common first so transcript_watcher can import from it
-    watcher_common_ns: dict[str, Any] = {}
-    exec(compile(watcher_common_stripped, "watcher_common.py", "exec"), watcher_common_ns)
-
-    # Patch sys.modules so `from watcher_common import ...` works during exec
-    watcher_common_mod = types.ModuleType("watcher_common")
-    for key, value in watcher_common_ns.items():
-        if not key.startswith("__"):
-            setattr(watcher_common_mod, key, value)
-
-    old_mod = sys.modules.get("watcher_common")
-    sys.modules["watcher_common"] = watcher_common_mod
-    try:
-        ns: dict[str, Any] = {"__file__": "/tmp/transcript_watcher.py"}
-        exec(compile(stripped, "transcript_watcher.py", "exec"), ns)
-    finally:
-        if old_mod is not None:
-            sys.modules["watcher_common"] = old_mod
-        else:
-            sys.modules.pop("watcher_common", None)
-    return ns
-
-
-def test_conversion_tool_result_validates_against_pydantic_schema() -> None:
-    assistant = json.dumps(
-        {
-            "type": "assistant",
-            "uuid": "contract-asst-2",
-            "timestamp": "2026-01-01T00:00:02.000000000Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4.6",
-                "content": [{"type": "tool_use", "id": "toolu_c2", "name": "Read", "input": {"file": "test.txt"}}],
-                "stop_reason": "tool_use",
-                "usage": {"input_tokens": 50, "output_tokens": 30},
-            },
-        }
-    )
-    user_result = json.dumps(
-        {
-            "type": "user",
-            "uuid": "contract-user-2",
-            "timestamp": "2026-01-01T00:00:03.000000000Z",
-            "message": {
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_c2", "content": "file contents", "is_error": False}
-                ],
-            },
-        }
-    )
-    events = _run_conversion([assistant, user_result])
-    tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert len(tool_results) == 1
-    validated = CommonToolResultEvent.model_validate(tool_results[0])
-    assert validated.tool_call_id == "toolu_c2"
-    assert validated.tool_name == "Read"
-
-
-# -- Memory linker content tests --
-
-
-def test_compute_claude_project_dir_name_replaces_slashes() -> None:
-    assert compute_claude_project_dir_name("/home/user/project") == "-home-user-project"
-
-
-def test_compute_claude_project_dir_name_replaces_dots() -> None:
-    assert compute_claude_project_dir_name("/home/user/.minds/agent") == "-home-user--minds-agent"
+def test_encode_claude_project_dir_name_replaces_dots() -> None:
+    assert encode_claude_project_dir_name(Path("/home/user/.minds/agent")) == "-home-user--minds-agent"
 
 
 def _run_setup_memory(
@@ -362,75 +80,79 @@ def _run_setup_memory(
 ) -> StubHost:
     """Run setup_memory_directory on a StubHost and return the host for inspection."""
     host = StubHost()
-    role_dir_abs = f"{work_dir}/{active_role}"
-    setup_memory_directory(cast(Any, host), Path(work_dir), active_role, role_dir_abs, _DEFAULT_PROVISIONING)
+    setup_memory_directory(cast(Any, host), Path(work_dir), active_role, _DEFAULT_PROVISIONING)
     return host
 
 
-def test_setup_memory_directory_creates_both_dirs() -> None:
+def test_setup_memory_directory_creates_dir() -> None:
     host = _run_setup_memory()
     assert any("mkdir" in c and "/memory" in c for c in host.executed_commands)
-    assert any("mkdir" in c and ".claude/projects" in c for c in host.executed_commands)
 
 
-def test_setup_memory_directory_creates_project_dir_with_home_var() -> None:
+def test_setup_memory_directory_no_rsync() -> None:
+    """Memory sync is handled by autoMemoryDirectory, not rsync hooks."""
     host = _run_setup_memory()
-    # Must use $HOME (not ~) so tilde expansion works inside quotes
-    mkdir_cmds = [c for c in host.executed_commands if "mkdir" in c and ".claude/projects" in c]
-    assert len(mkdir_cmds) >= 1
-    assert "$HOME" in mkdir_cmds[0]
-    # Project dir name is derived from the work directory (parent of role dir),
-    # matching build_memory_sync_hooks_config which uses .parent
-    assert "-home-user--minds-agent" in mkdir_cmds[0]
+    assert not any("rsync" in c for c in host.executed_commands)
 
 
-def test_setup_memory_directory_rsyncs_initial_content() -> None:
+def test_setup_memory_directory_no_claude_project_dir() -> None:
+    """Claude project memory dir is not created; autoMemoryDirectory handles memory location."""
     host = _run_setup_memory()
-    rsync_cmds = [c for c in host.executed_commands if "rsync" in c]
-    assert len(rsync_cmds) == 1
-    assert "/memory/" in rsync_cmds[0]
-    assert "$HOME/.claude/projects/" in rsync_cmds[0]
+    assert not any(".claude/projects" in c for c in host.executed_commands)
 
 
-def test_setup_memory_directory_removes_old_symlink() -> None:
-    """Verify that rm -f is used to remove any old symlink before mkdir."""
-    host = _run_setup_memory()
-    mkdir_cmds = [c for c in host.executed_commands if "rm -f" in c and ".claude/projects" in c]
-    assert len(mkdir_cmds) >= 1
+# -- build_stop_hook_config tests --
 
 
-def test_setup_memory_directory_does_not_use_literal_tilde() -> None:
-    """Verify that ~ is never used in paths (it doesn't expand inside single quotes)."""
-    host = _run_setup_memory(work_dir="/home/user/project")
-    for cmd in host.executed_commands:
-        if ".claude/projects" in cmd:
-            assert "~" not in cmd, f"Found literal ~ in command (won't expand in quotes): {cmd}"
+def test_build_stop_hook_config_references_script_path() -> None:
+    script_path = Path("/test/work/thinking/.claude/hooks/on_stop_prevent_unhandled_events.sh")
+    config = build_stop_hook_config(script_path)
+    assert "hooks" in config
+    assert "Stop" in config["hooks"]
+    hook_command = config["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert hook_command == str(script_path)
 
 
-def test_build_memory_sync_hooks_config_has_pre_and_post() -> None:
-    config = build_memory_sync_hooks_config("/home/user/.minds/agent/thinking")
-    assert "PreToolUse" in config["hooks"]
-    assert "PostToolUse" in config["hooks"]
+# -- provision_stop_hook_script tests --
 
 
-def test_build_memory_sync_hooks_config_pre_syncs_role_dir_to_project() -> None:
-    """PreToolUse should rsync FROM <role_dir>/memory/ TO Claude project memory/."""
-    config = build_memory_sync_hooks_config("/home/user/.minds/agent/thinking")
-    pre_cmd = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    # rsync source comes before destination: rsync -a --delete SRC/ DST/
-    role_dir_pos = pre_cmd.index("/home/user/.minds/agent/thinking/memory")
-    project_pos = pre_cmd.index("$HOME/.claude/projects/")
-    assert role_dir_pos < project_pos, "PreToolUse should sync role_dir -> project (role_dir first in rsync args)"
+def test_provision_stop_hook_script_writes_and_chmods() -> None:
+    host = StubHost()
+    path = provision_stop_hook_script(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+    assert path == Path("/test/work/thinking/.claude/hooks/on_stop_prevent_unhandled_events.sh")
+    assert any("mkdir -p" in c and "hooks" in c for c in host.executed_commands)
+    assert any("chmod +x" in c for c in host.executed_commands)
+    assert len(host.written_text_files) == 1
+    written_path, content = host.written_text_files[0]
+    assert "on_stop_prevent_unhandled_events.sh" in str(written_path)
+    assert "#!/usr/bin/env bash" in content
+    assert "handled_event_id" in content
+    assert "event_batches" in content
 
 
-def test_build_memory_sync_hooks_config_post_syncs_project_to_role_dir() -> None:
-    """PostToolUse should rsync FROM Claude project memory/ TO <role_dir>/memory/."""
-    config = build_memory_sync_hooks_config("/home/user/.minds/agent/thinking")
-    post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    # rsync source comes before destination: rsync -a --delete SRC/ DST/
-    role_dir_pos = post_cmd.index("/home/user/.minds/agent/thinking/memory")
-    project_pos = post_cmd.index("$HOME/.claude/projects/")
-    assert project_pos < role_dir_pos, "PostToolUse should sync project -> role_dir (project first in rsync args)"
+# -- run_link_skills_script tests --
+
+
+def test_run_link_skills_script_skips_when_script_missing() -> None:
+    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
+    run_link_skills_script(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    assert not any("chmod" in c for c in host.executed_commands)
+
+
+def test_run_link_skills_script_runs_when_script_exists() -> None:
+    host = StubHost()
+    run_link_skills_script(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    assert any("chmod +x" in c for c in host.executed_commands)
+    assert any("link_skills.sh" in c and "thinking" in c for c in host.executed_commands)
+
+
+def test_run_link_skills_script_passes_role_as_argument() -> None:
+    host = StubHost()
+    run_link_skills_script(cast(Any, host), Path("/test/work"), "custom-role", _DEFAULT_PROVISIONING)
+
+    assert any("custom-role" in c for c in host.executed_commands)
 
 
 # -- Provisioning function tests (using _StubHost) --
@@ -498,14 +220,6 @@ def test_create_mind_symlinks_checks_thinking_prompt() -> None:
     assert any("thinking/PROMPT.md" in c for c in host.executed_commands)
 
 
-def test_create_mind_symlinks_does_not_create_claude_dir_symlink() -> None:
-    """Verify that .claude/ symlink is NOT created (Claude Code runs from within the role dir)."""
-    host = StubHost()
-    create_mind_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
-
-    assert not any("ln -sfn" in c and "thinking/.claude" in c for c in host.executed_commands)
-
-
 def test_create_mind_symlinks_creates_claude_md() -> None:
     host = StubHost()
     create_mind_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
@@ -520,43 +234,35 @@ def test_create_mind_symlinks_creates_claude_local_md() -> None:
     assert any("ln -sf" in c and "CLAUDE.local.md" in c for c in host.executed_commands)
 
 
-def test_provision_default_content_writes_global_md() -> None:
+def test_create_mind_symlinks_creates_skills_symlink() -> None:
+    """Verify that .claude/skills is symlinked to skills."""
+    host = StubHost()
+    create_mind_symlinks(cast(Any, host), Path("/test/work"), "thinking", _DEFAULT_PROVISIONING)
+
+    assert any("ln -sf" in c and ".claude/skills" in c for c in host.executed_commands)
+    assert any("thinking/skills" in c for c in host.executed_commands)
+
+
+def test_provision_link_skills_script_file_writes_when_missing() -> None:
     host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    provision_link_skills_script_file(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
     written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("GLOBAL.md" in p for p in written_paths)
+    assert any("link_skills.sh" in p for p in written_paths)
 
 
-def test_provision_default_content_writes_thinking_prompt() -> None:
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+def test_provision_link_skills_script_file_skips_when_existing() -> None:
+    host = StubHost()
+    provision_link_skills_script_file(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
-    written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/PROMPT.md" in p for p in written_paths)
-
-
-def test_provision_default_content_writes_thinking_settings() -> None:
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/.claude/settings.json" in p for p in written_paths)
+    assert len(host.written_text_files) == 0
 
 
-def test_provision_default_content_writes_skills_to_thinking() -> None:
-    host = StubHost(command_results={"test -f": StubCommandResult(success=False)})
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(p) for p, _ in host.written_text_files]
-    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
-
-
-def test_provision_supporting_services_creates_commands_dir() -> None:
+def test_provision_supporting_services_creates_commands_and_ttyd_dirs() -> None:
     host = StubHost()
     provision_supporting_services(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
 
-    assert any("mkdir" in c and "commands" in c for c in host.executed_commands)
+    assert any("mkdir" in c and "commands/ttyd" in c for c in host.executed_commands)
 
 
 def test_provision_supporting_services_writes_all_scripts() -> None:
@@ -576,6 +282,17 @@ def test_provision_supporting_services_uses_executable_mode() -> None:
         assert mode == "0755", f"Expected 0755 for script {path.name}, got {mode}"
 
 
+def test_provision_supporting_services_writes_ttyd_dispatch_scripts() -> None:
+    """Verify that ttyd dispatch scripts are written to commands/ttyd/."""
+    host = StubHost()
+    provision_supporting_services(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
+
+    written_names = [str(path) for path, _, _ in host.written_files]
+    for _, target_name in _TTYD_DISPATCH_SCRIPTS:
+        expected_suffix = f"commands/ttyd/{target_name}"
+        assert any(expected_suffix in name for name in written_names), f"ttyd/{target_name} not written"
+
+
 def test_provision_llm_tools_creates_tools_dir() -> None:
     host = StubHost()
     provision_llm_tools(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
@@ -592,28 +309,6 @@ def test_provision_llm_tools_writes_all_tool_files() -> None:
         assert any(tool_file in name for name in written_names), f"{tool_file} not written"
 
 
-def test_create_event_log_directories_creates_all_source_dirs() -> None:
-    host = StubHost()
-    create_event_log_directories(cast(Any, host), Path("/tmp/mng-test/agents/agent-123"), _DEFAULT_PROVISIONING)
-
-    for source in (
-        "messages",
-        "scheduled",
-        "mng/agents",
-        "stop",
-        "monitor",
-        "delivery_failures",
-        "common_transcript",
-        "servers",
-    ):
-        assert any(source in c and "mkdir" in c for c in host.executed_commands), f"Missing mkdir for {source}"
-
-    # Also verify log directories are created
-    assert any("claude_transcript" in c and "mkdir" in c for c in host.executed_commands), (
-        "Missing mkdir for logs/claude_transcript"
-    )
-
-
 # -- Schema sync tests --
 
 
@@ -625,7 +320,7 @@ def test_conversation_db_schema_matches_provisioning() -> None:
     checking that every column definition from the authoritative schema appears
     in the resource file source.
     """
-    source = load_mind_resource("conversation_db.py")
+    source = load_llm_resource("conversation_db.py")
     # Extract column definitions from the authoritative schema constant.
     # Each "X TEXT ..." clause must appear in conversation_db.py's source.
     for fragment in MIND_CONVERSATIONS_TABLE_SQL.split("(", 1)[1].rsplit(")", 1)[0].split(","):
@@ -1315,7 +1010,7 @@ def test_create_mind_symlinks_raises_on_symlink_failure() -> None:
     """Verify RuntimeError when symlink creation fails."""
     host = StubHost(
         command_results={
-            "ln -sf": StubCommandResult(success=False, stderr="permission denied"),
+            "ln -sfn": StubCommandResult(success=False, stderr="permission denied"),
         }
     )
     with pytest.raises(RuntimeError, match="Failed to create symlink"):
@@ -1344,19 +1039,6 @@ def test_resolve_work_dir_abs_raises_on_failure() -> None:
         resolve_work_dir_abs(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
 
 
-def test_setup_memory_directory_raises_on_sync_failure() -> None:
-    """Verify RuntimeError when memory rsync fails."""
-    host = StubHost(
-        command_results={
-            "rsync": StubCommandResult(success=False, stderr="sync failed"),
-        }
-    )
-    with pytest.raises(RuntimeError, match="Failed to sync memory directory"):
-        setup_memory_directory(
-            cast(Any, host), Path("/test/work"), "thinking", "/test/work/thinking", _DEFAULT_PROVISIONING
-        )
-
-
 def test_provision_llm_tools_uses_correct_mode() -> None:
     """Verify LLM tool files are written with 0644 mode."""
     host = StubHost()
@@ -1366,12 +1048,12 @@ def test_provision_llm_tools_uses_correct_mode() -> None:
         assert mode == "0644"
 
 
-def test_compute_claude_project_dir_name_simple_path() -> None:
-    assert compute_claude_project_dir_name("/tmp/foo") == "-tmp-foo"
+def test_encode_claude_project_dir_name_simple_path() -> None:
+    assert encode_claude_project_dir_name(Path("/tmp/foo")) == "-tmp-foo"
 
 
-def test_compute_claude_project_dir_name_no_dots_or_slashes() -> None:
-    assert compute_claude_project_dir_name("simple") == "simple"
+def test_encode_claude_project_dir_name_no_dots_or_slashes() -> None:
+    assert encode_claude_project_dir_name(Path("simple")) == "simple"
 
 
 # -- Extra context tool tests --
@@ -1505,7 +1187,12 @@ def test_extra_context_tool_with_successful_mng_list(
     """Verify gather_extra_context displays agent list on successful mng list."""
     module = _load_fresh_extra_context_tool()
     bin_dir = tmp_path / "fake_bin"
-    _setup_fake_mng_binary(bin_dir, monkeypatch, exit_code=0, stdout='[{"name":"test-agent","state":"RUNNING"}]')
+    _setup_fake_mng_binary(
+        bin_dir,
+        monkeypatch,
+        exit_code=0,
+        stdout='[{"name":"test-agent","state":"RUNNING"}]',
+    )
 
     result = module.gather_extra_context()
     assert "Current Agents" in result
@@ -1525,7 +1212,9 @@ def test_extra_context_tool_with_failed_mng_list(
     assert "No agents or unable to retrieve" in result
 
 
-def test_extra_context_tool_with_empty_transcript(extra_context_env: tuple[Any, Path]) -> None:
+def test_extra_context_tool_with_empty_transcript(
+    extra_context_env: tuple[Any, Path],
+) -> None:
     """Verify gather_extra_context handles empty transcript file."""
     module, data_dir = extra_context_env
 
@@ -1557,7 +1246,9 @@ def test_extra_context_tool_conversations_empty_db(
     assert "All Conversations" not in result
 
 
-def test_extra_context_tool_conversations_no_db(extra_context_env: tuple[Any, Path]) -> None:
+def test_extra_context_tool_conversations_no_db(
+    extra_context_env: tuple[Any, Path],
+) -> None:
     """Verify gather_extra_context works when no llm DB exists."""
     module, data_dir = extra_context_env
 
@@ -1565,7 +1256,9 @@ def test_extra_context_tool_conversations_no_db(extra_context_env: tuple[Any, Pa
     assert "All Conversations" not in result
 
 
-def test_extra_context_tool_transcript_with_many_entries(extra_context_env: tuple[Any, Path]) -> None:
+def test_extra_context_tool_transcript_with_many_entries(
+    extra_context_env: tuple[Any, Path],
+) -> None:
     """Verify gather_extra_context limits transcript to last 50 entries."""
     module, data_dir = extra_context_env
 
@@ -1647,99 +1340,79 @@ def test_get_mng_command_raises_when_binary_missing(tmp_path: Path, monkeypatch:
         get_mng_command()
 
 
-def test_provision_default_content_writes_missing_files() -> None:
-    """Verify provision_default_content writes all default files when none exist."""
-    host = StubHost(
-        command_results={"test -f": StubCommandResult(success=False)},
-    )
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(path) for path, _ in host.written_text_files]
-    assert any("GLOBAL.md" in p for p in written_paths)
-    assert any("talking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/.claude/settings.json" in p for p in written_paths)
-    assert any("thinking/.claude/skills/send-message-to-user/SKILL.md" in p for p in written_paths)
-    assert any("thinking/.claude/skills/list-conversations/SKILL.md" in p for p in written_paths)
-    assert any("thinking/.claude/skills/delegate-task/SKILL.md" in p for p in written_paths)
-    assert any("thinking/.claude/skills/list-event-types/SKILL.md" in p for p in written_paths)
-    assert any("thinking/.claude/skills/get-event-type-info/SKILL.md" in p for p in written_paths)
+# -- provision_event_exclude_sources tests --
 
 
-def test_provision_default_content_skips_existing_files() -> None:
-    """Verify provision_default_content does not overwrite existing files."""
-    # test -f returns success (file exists) by default in StubHost
+def test_provision_event_exclude_sources_writes_to_new_file() -> None:
+    """When no minds.toml exists, creates one with event_exclude_sources."""
     host = StubHost()
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    work_dir = Path("/work")
+
+    provision_event_exclude_sources(cast(Any, host), work_dir, ("claude/common_transcript",))
+
+    assert len(host.written_text_files) == 1
+    path, content = host.written_text_files[0]
+    assert "minds.toml" in str(path)
+    assert 'event_exclude_sources = ["claude/common_transcript"]' in content
+
+
+def test_provision_event_exclude_sources_preserves_existing_settings() -> None:
+    """When minds.toml has existing settings, they are preserved."""
+    host = StubHost(
+        text_file_contents={"minds.toml": '[chat]\nmodel = "claude-sonnet-4-6"\n'},
+    )
+    work_dir = Path("/work")
+
+    provision_event_exclude_sources(cast(Any, host), work_dir, ("claude/common_transcript",))
+
+    assert len(host.written_text_files) == 1
+    _, content = host.written_text_files[0]
+    assert "claude-sonnet-4-6" in content
+    assert 'event_exclude_sources = ["claude/common_transcript"]' in content
+
+
+def test_provision_event_exclude_sources_merges_with_existing() -> None:
+    """When event_exclude_sources already has entries, the new ones are merged in."""
+    host = StubHost(
+        text_file_contents={
+            "minds.toml": '[watchers]\nevent_exclude_sources = ["other/source"]\n',
+        },
+    )
+    work_dir = Path("/work")
+
+    provision_event_exclude_sources(cast(Any, host), work_dir, ("claude/common_transcript",))
+
+    assert len(host.written_text_files) == 1
+    _, content = host.written_text_files[0]
+    assert "claude/common_transcript" in content
+    assert "other/source" in content
+
+
+def test_provision_event_exclude_sources_skips_when_already_present() -> None:
+    """When the desired source is already excluded, no write happens."""
+    host = StubHost(
+        text_file_contents={
+            "minds.toml": '[watchers]\nevent_exclude_sources = ["claude/common_transcript"]\n',
+        },
+    )
+    work_dir = Path("/work")
+
+    provision_event_exclude_sources(cast(Any, host), work_dir, ("claude/common_transcript",))
 
     assert len(host.written_text_files) == 0
 
 
-def test_provision_default_content_creates_parent_directories() -> None:
-    """Verify provision_default_content creates parent directories for missing files."""
+def test_provision_event_exclude_sources_preserves_comments() -> None:
+    """Comments in existing minds.toml are preserved when adding exclude sources."""
+    toml_with_comments = '# Main chat config\n[chat]\nmodel = "claude-sonnet-4-6"\n'
     host = StubHost(
-        command_results={"test -f": StubCommandResult(success=False)},
+        text_file_contents={"minds.toml": toml_with_comments},
     )
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
+    work_dir = Path("/work")
 
-    mkdir_cmds = [c for c in host.executed_commands if "mkdir -p" in c]
-    assert len(mkdir_cmds) > 0
+    provision_event_exclude_sources(cast(Any, host), work_dir, ("claude/common_transcript",))
 
-
-def test_provision_default_content_writes_to_thinking_dir() -> None:
-    """Verify provision_default_content writes thinking agent files to the thinking directory."""
-    host = StubHost(
-        command_results={"test -f": StubCommandResult(success=False)},
-    )
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(path) for path, _ in host.written_text_files]
-    assert any("thinking/PROMPT.md" in p for p in written_paths)
-    assert any("thinking/.claude/settings.json" in p for p in written_paths)
-
-
-# -- validate_talking_role_constraints tests --
-
-
-def test_validate_talking_role_constraints_passes_when_nothing_exists() -> None:
-    """Verify validation passes when talking/ has no skills or settings."""
-    host = StubHost(
-        command_results={"test -e": StubCommandResult(success=False)},
-    )
-    validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-
-def test_validate_talking_role_constraints_raises_for_skills_directory() -> None:
-    """Verify validation raises with an actionable message when talking/skills/ exists."""
-    host = StubHost(
-        command_results={"talking/skills": StubCommandResult(success=True)},
-    )
-    with pytest.raises(TalkingRoleConstraintError, match="skills") as exc_info:
-        validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-    assert "Remove this path" in str(exc_info.value)
-
-
-def test_validate_talking_role_constraints_raises_for_settings_json() -> None:
-    """Verify validation raises when talking/settings.json exists."""
-    host = StubHost(
-        command_results={
-            "talking/skills": StubCommandResult(success=False),
-            "talking/settings.json": StubCommandResult(success=True),
-        },
-    )
-    with pytest.raises(TalkingRoleConstraintError, match="settings.json"):
-        validate_talking_role_constraints(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-
-# -- talking/PROMPT.md tests --
-
-
-def test_provision_default_content_writes_talking_prompt() -> None:
-    """Verify provision_default_content writes talking/PROMPT.md when missing."""
-    host = StubHost(
-        command_results={"test -f": StubCommandResult(success=False)},
-    )
-    provision_default_content(cast(Any, host), Path("/test/work"), _DEFAULT_PROVISIONING)
-
-    written_paths = [str(path) for path, _ in host.written_text_files]
-    assert any("talking/PROMPT.md" in p for p in written_paths)
+    assert len(host.written_text_files) == 1
+    _, content = host.written_text_files[0]
+    assert "# Main chat config" in content
+    assert "claude/common_transcript" in content

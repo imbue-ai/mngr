@@ -205,7 +205,7 @@ def get_subprocess_test_env(
 
     Sets MNG_ROOT_NAME to a value that doesn't have a corresponding config directory,
     preventing subprocess tests from picking up .mng/settings.toml which might have
-    settings like add_command that would interfere with tests.
+    settings like extra_window that would interfere with tests.
 
     The root_name parameter defaults to "mng-test" but can be set to a descriptive
     name for your test category (e.g., "mng-acceptance-test", "mng-release-test").
@@ -493,6 +493,7 @@ def make_test_agent_details(
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
+    host_state: HostState = HostState.RUNNING,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -504,7 +505,7 @@ def make_test_agent_details(
         name="test-host",
         provider_name=provider_name or ProviderInstanceName("local"),
         snapshots=snapshots or [],
-        state=HostState.RUNNING,
+        state=host_state,
         plugin=host_plugin or {},
         tags=host_tags or {},
         ssh=ssh,
@@ -1032,14 +1033,23 @@ def make_test_discovered_host() -> DiscoveredHost:
     )
 
 
-def write_discovery_snapshot_to_path(events_path: Path, agent_names: Sequence[str]) -> None:
+def write_discovery_snapshot_to_path(
+    events_path: Path,
+    agent_names: Sequence[str],
+    host_names: Sequence[str] | None = None,
+) -> None:
     """Write a DISCOVERY_FULL event to a JSONL file for testing completion and event replay."""
     events_path.parent.mkdir(parents=True, exist_ok=True)
     agents = [
         {"agent_id": f"agent-{i}", "agent_name": name, "host_id": "host-1", "provider_name": "local"}
         for i, name in enumerate(agent_names)
     ]
-    hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+    if host_names is not None:
+        hosts = [
+            {"host_id": f"host-{i}", "host_name": name, "provider_name": "local"} for i, name in enumerate(host_names)
+        ]
+    else:
+        hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
     event = {
         "timestamp": "2025-01-01T00:00:00Z",
         "type": "DISCOVERY_FULL",

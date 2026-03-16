@@ -11,23 +11,31 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
 
 
-def build_tmux_capture_pane_command(session_name: str) -> str:
-    """Build the tmux command string to capture pane content for a session."""
-    return f"tmux capture-pane -t '{session_name}' -p"
+def build_tmux_capture_pane_command(session_name: str, include_scrollback: bool = False) -> str:
+    """Build the tmux command string to capture pane content for a session.
+
+    When include_scrollback is True, uses ``-S -`` to capture from the start of the
+    scrollback buffer instead of just the visible pane.
+    """
+    scrollback_flag = " -S -" if include_scrollback else ""
+    return f"tmux capture-pane -t '{session_name}'{scrollback_flag} -p"
 
 
 def capture_tmux_pane_content(
     host: OnlineHostInterface,
     session_name: str,
     timeout_seconds: float = _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS,
+    include_scrollback: bool = False,
 ) -> str | None:
     """Capture the current tmux pane content via a host, returning None on failure.
 
     This is the canonical implementation for capturing tmux pane content through
     a host's command execution layer (which works both locally and over SSH).
+
+    When include_scrollback is True, captures the full scrollback buffer.
     """
     result: CommandResult = host.execute_command(
-        build_tmux_capture_pane_command(session_name),
+        build_tmux_capture_pane_command(session_name, include_scrollback=include_scrollback),
         timeout_seconds=timeout_seconds,
     )
     if result.success:

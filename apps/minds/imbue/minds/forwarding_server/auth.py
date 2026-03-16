@@ -16,7 +16,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
-from imbue.mng.primitives import AgentId
 
 _SIGNING_KEY_LENGTH: Final[int] = 64
 
@@ -37,17 +36,15 @@ class StoredOneTimeCode(FrozenModel):
     """A one-time code with its current usage status."""
 
     code: OneTimeCode = Field(description="The one-time code value")
-    agent_id: AgentId = Field(description="The agent this code grants access to")
     status: OneTimeCodeStatus = Field(description="Current status of this code")
 
 
 class AuthStoreInterface(MutableModel, ABC):
-    """Manages one-time codes and cookie signing for authentication."""
+    """Manages one-time codes and cookie signing for global session authentication."""
 
     @abstractmethod
     def validate_and_consume_code(
         self,
-        agent_id: AgentId,
         code: OneTimeCode,
     ) -> bool:
         """Validate a one-time code and mark it as used if valid."""
@@ -59,14 +56,9 @@ class AuthStoreInterface(MutableModel, ABC):
     @abstractmethod
     def add_one_time_code(
         self,
-        agent_id: AgentId,
         code: OneTimeCode,
     ) -> None:
-        """Register a new one-time code for an agent."""
-
-    @abstractmethod
-    def list_agent_ids_with_valid_codes(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have at least one valid (unused) code."""
+        """Register a new one-time code."""
 
 
 class FileAuthStore(AuthStoreInterface):
@@ -76,36 +68,34 @@ class FileAuthStore(AuthStoreInterface):
 
     def validate_and_consume_code(
         self,
-        agent_id: AgentId,
         code: OneTimeCode,
     ) -> bool:
-        with log_span("Validating one-time code for {}", agent_id):
+        with log_span("Validating one-time code"):
             stored_codes = self._load_codes()
 
             matching_code_idx: int | None = None
             for idx, stored in enumerate(stored_codes):
-                if stored.code == code and stored.agent_id == agent_id:
+                if stored.code == code:
                     matching_code_idx = idx
                     break
 
             if matching_code_idx is None:
-                logger.debug("Rejected unknown code for {}", agent_id)
+                logger.debug("Rejected unknown code")
                 return False
 
             matched = stored_codes[matching_code_idx]
             if matched.status != OneTimeCodeStatus.VALID:
-                logger.debug("Rejected already-{} code for {}", matched.status, agent_id)
+                logger.debug("Rejected already-{} code", matched.status)
                 return False
 
             # Mark as used
             updated_codes = list(stored_codes)
             updated_codes[matching_code_idx] = StoredOneTimeCode(
                 code=matched.code,
-                agent_id=matched.agent_id,
                 status=OneTimeCodeStatus.USED,
             )
             self._save_codes(tuple(updated_codes))
-            logger.debug("Accepted and consumed code for {}", agent_id)
+            logger.debug("Accepted and consumed code")
             return True
 
     def get_signing_key(self) -> CookieSigningKey:
@@ -132,25 +122,15 @@ class FileAuthStore(AuthStoreInterface):
 
     def add_one_time_code(
         self,
-        agent_id: AgentId,
         code: OneTimeCode,
     ) -> None:
-        with log_span("Adding one-time code for {}", agent_id):
+        with log_span("Adding one-time code"):
             existing_codes = self._load_codes()
             new_code = StoredOneTimeCode(
                 code=code,
-                agent_id=agent_id,
                 status=OneTimeCodeStatus.VALID,
             )
             self._save_codes(existing_codes + (new_code,))
-
-    def list_agent_ids_with_valid_codes(self) -> tuple[AgentId, ...]:
-        stored_codes = self._load_codes()
-        ids: set[str] = set()
-        for stored in stored_codes:
-            if stored.status == OneTimeCodeStatus.VALID:
-                ids.add(str(stored.agent_id))
-        return tuple(AgentId(i) for i in sorted(ids))
 
     def _load_codes(self) -> tuple[StoredOneTimeCode, ...]:
         codes_path = self.data_directory / _CODES_FILENAME

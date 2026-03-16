@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import CommandResult
 from imbue.mng.providers.deploy_utils import MngInstallMode
@@ -44,12 +45,20 @@ def _make_mock_host(is_local: bool = False, host_dir: Path | None = None) -> Mag
 
 def _make_mock_mng_ctx(
     plugin_config: RecursivePluginConfig | None = None,
+    concurrency_group: ConcurrencyGroup | None = None,
 ) -> MagicMock:
-    """Create a mock MngContext."""
+    """Create a mock MngContext.
+
+    If concurrency_group is provided, it will be used for the mock's
+    concurrency_group attribute. This is required for tests that exercise
+    code paths using ConcurrencyGroupExecutor (e.g. _upload_deploy_files).
+    """
     ctx = MagicMock()
     resolved_config = plugin_config if plugin_config is not None else RecursivePluginConfig()
     ctx.get_plugin_config.return_value = resolved_config
     ctx.pm.hook.get_files_for_deploy.return_value = []
+    if concurrency_group is not None:
+        ctx.concurrency_group = concurrency_group
     return ctx
 
 
@@ -96,13 +105,15 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
         Path("~/.mng/config.toml"): source_file,
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_mock_mng_ctx(concurrency_group=cg)
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.execute_command.assert_called()
     host.write_file.assert_called_once_with(
-        Path("/home/testuser/.mng/config.toml"),
-        source_file.read_bytes(),
+        path=Path("/home/testuser/.mng/config.toml"),
+        content=source_file.read_bytes(),
     )
 
 
@@ -113,12 +124,14 @@ def test_upload_deploy_files_with_string_source() -> None:
         Path("~/.mng/config.toml"): 'key = "value"',
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_mock_mng_ctx(concurrency_group=cg)
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
     host.write_text_file.assert_called_once_with(
-        Path("/home/testuser/.mng/config.toml"),
-        'key = "value"',
+        path=Path("/home/testuser/.mng/config.toml"),
+        content='key = "value"',
     )
 
 
@@ -129,7 +142,9 @@ def test_upload_deploy_files_skips_missing_path(tmp_path: Path) -> None:
         Path("~/.mng/config.toml"): tmp_path / "nonexistent.toml",
     }
 
-    count = _upload_deploy_files(host, deploy_files, "/home/testuser")
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_mock_mng_ctx(concurrency_group=cg)
+        count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 0
     host.write_file.assert_not_called()
@@ -143,7 +158,9 @@ def test_upload_deploy_files_creates_parent_dirs() -> None:
         Path("~/.mng/profiles/abc/settings.toml"): "content",
     }
 
-    _upload_deploy_files(host, deploy_files, "/home/testuser")
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_mock_mng_ctx(concurrency_group=cg)
+        _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     # Check that mkdir -p was called for the parent directory
     mkdir_calls = [call for call in host.execute_command.call_args_list if "mkdir -p" in str(call)]
@@ -518,8 +535,10 @@ def test_upload_deploy_files_raises_on_mkdir_failure() -> None:
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mng/config.toml"): "content",
     }
-    with pytest.raises(MngError, match="Failed to create directory"):
-        _upload_deploy_files(host, deploy_files, "/home/testuser")
+    with ConcurrencyGroup(name="test") as cg:
+        ctx = _make_mock_mng_ctx(concurrency_group=cg)
+        with pytest.raises(MngError, match="Failed to create director"):
+            _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
 
 def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:

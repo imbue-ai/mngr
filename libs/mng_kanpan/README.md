@@ -50,6 +50,45 @@ markable = true
 refresh_afterwards = true
 ```
 
+## Custom columns
+
+Add extra columns to the board that display per-agent data. The `source` field selects where the column reads from:
+
+- **`"labels"`** (default) -- reads `agent.labels[key]`, where `key` is the column's config key.
+- **`"agent"`** -- reads from `AgentDetails.plugin`, populated by `agent_field_generators` via `AgentInterface`. Works for both local and remote agents. Requires `plugin_name` and `field`.
+
+Values can be colored by mapping specific strings to urwid color names.
+
+```toml
+# Label-backed column (source = "labels" is the default)
+[plugins.kanpan.columns.blocked]
+header = "BLOCKED"
+[plugins.kanpan.columns.blocked.colors]
+unblocked = "light green"
+blocked = "light red"
+
+# Plugin data column: reads from AgentDetails.plugin (populated by agent_field_generators)
+[plugins.kanpan.columns.waiting]
+header = "WAIT"
+source = "agent"
+plugin_name = "claude"
+field = "waiting_reason"
+[plugins.kanpan.columns.waiting.colors]
+PERMISSIONS = "light red"
+END_OF_TURN = "light green"
+```
+
+By default, custom columns appear after the built-in columns (before LINK). To control the order of all columns, set `column_order`:
+
+```toml
+[plugins.kanpan]
+column_order = ["name", "state", "custom_blocked", "git", "pr", "ci", "link"]
+```
+
+Built-in column names are: `name`, `state`, `git`, `pr`, `ci`, `link`. Custom columns use `custom_<key>` (e.g. `custom_blocked` for a column defined under `[plugins.kanpan.columns.blocked]`). Columns not listed in `column_order` are omitted.
+
+When no label or plugin data is present for an agent, the column shows an empty cell.
+
 ## Refresh behavior
 
 Kanpan uses two refresh strategies:

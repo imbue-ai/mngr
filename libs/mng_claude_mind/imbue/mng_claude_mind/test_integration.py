@@ -33,26 +33,21 @@ from imbue.mng.utils.testing import tmux_session_exists
 from imbue.mng.utils.testing import wait_for_agent_session
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
-from imbue.mng_claude_mind.conftest import StubCommandResult
-from imbue.mng_claude_mind.conftest import StubHost
 from imbue.mng_claude_mind.conftest import assert_conversation_exists_in_db
-from imbue.mng_claude_mind.conftest import create_test_llm_db
-from imbue.mng_claude_mind.conftest import write_conversation_to_db
-from imbue.mng_claude_mind.data_types import ProvisioningSettings
-from imbue.mng_claude_mind.provisioning import _DEFAULT_SKILL_DIRS
-from imbue.mng_claude_mind.provisioning import _DEFAULT_THINKING_DIR_FILES
-from imbue.mng_claude_mind.provisioning import _DEFAULT_WORK_DIR_FILES
-from imbue.mng_claude_mind.provisioning import _LLM_TOOL_FILES
-from imbue.mng_claude_mind.provisioning import _SERVICE_SCRIPT_FILES
-from imbue.mng_claude_mind.provisioning import compute_claude_project_dir_name
-from imbue.mng_claude_mind.provisioning import create_event_log_directories
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
-from imbue.mng_claude_mind.provisioning import load_mind_resource
-from imbue.mng_claude_mind.provisioning import provision_default_content
-from imbue.mng_claude_mind.provisioning import provision_llm_tools
-from imbue.mng_claude_mind.provisioning import provision_supporting_services
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
-from imbue.mng_claude_mind.resources.conversation_watcher import _sync_messages
+from imbue.mng_llm.conftest import create_test_llm_db
+from imbue.mng_llm.conftest import write_conversation_to_db
+from imbue.mng_llm.data_types import ProvisioningSettings
+from imbue.mng_llm.provisioning import _LLM_TOOL_FILES
+from imbue.mng_llm.provisioning import _SERVICE_SCRIPT_FILES
+from imbue.mng_llm.provisioning import load_llm_resource
+from imbue.mng_llm.provisioning import provision_llm_tools
+from imbue.mng_llm.provisioning import provision_supporting_services
+from imbue.mng_llm.resources.conversation_watcher import _sync_messages
+from imbue.mng_mind.conftest import StubCommandResult
+from imbue.mng_mind.conftest import StubHost
+from imbue.mng_mind.provisioning import provision_link_skills_script_file
 
 _DEFAULT_PROVISIONING = ProvisioningSettings()
 
@@ -127,33 +122,6 @@ def _run_sync_script(messages_file: Path, db_path: Path) -> int:
 
 
 @pytest.mark.timeout(30)
-def test_provisioning_creates_event_log_directories(
-    temp_host_dir: Path,
-) -> None:
-    """Verify that provisioning creates all expected event log directories."""
-    agent_state_dir = temp_host_dir / "agents" / "test-agent"
-    agent_state_dir.mkdir(parents=True)
-
-    host = StubHost(host_dir=temp_host_dir, execute_mkdir=True)
-    create_event_log_directories(cast(Any, host), agent_state_dir, _DEFAULT_PROVISIONING)
-
-    expected_sources = (
-        "messages",
-        "scheduled",
-        "mng/agents",
-        "stop",
-        "monitor",
-    )
-    for source in expected_sources:
-        source_dir = agent_state_dir / "events" / source
-        assert source_dir.exists(), f"Expected events/{source}/ directory to exist"
-
-    # Log directories
-    claude_transcript_dir = agent_state_dir / "logs" / "claude_transcript"
-    assert claude_transcript_dir.exists(), "Expected logs/claude_transcript/ directory to exist"
-
-
-@pytest.mark.timeout(30)
 def test_provisioning_writes_supporting_services_to_host(
     local_shell_host: LocalShellHost,
 ) -> None:
@@ -189,52 +157,32 @@ def test_provisioning_writes_llm_tools_to_host(
 
 
 @pytest.mark.timeout(30)
-def test_provisioning_creates_default_content_when_missing(
+def test_provisioning_creates_link_skills_script_when_missing(
     temp_git_repo: Path,
     temp_host_dir: Path,
 ) -> None:
-    """Verify that provisioning writes default content files when they don't exist."""
+    """Verify that provisioning writes link_skills.sh when it doesn't exist."""
     host = StubHost(
         host_dir=temp_host_dir,
         command_results={"test -f": StubCommandResult(success=False)},
         execute_mkdir=True,
     )
 
-    written_paths: list[tuple[Path, str]] = []
-    original_write = host.write_text_file
+    provision_link_skills_script_file(cast(Any, host), temp_git_repo, _DEFAULT_PROVISIONING)
 
-    def tracking_write(path: Path, content: str) -> None:
-        written_paths.append((path, content))
-        original_write(path, content)
-
-    host.write_text_file = tracking_write  # type: ignore[assignment]
-
-    provision_default_content(cast(Any, host), temp_git_repo, _DEFAULT_PROVISIONING)
-
-    written_path_strings = [str(p) for p, _ in written_paths]
-
-    for _, relative_path in _DEFAULT_WORK_DIR_FILES:
-        expected = str(temp_git_repo / relative_path)
-        assert expected in written_path_strings, f"Expected {relative_path} to be written to work dir"
-
-    for _, relative_path in _DEFAULT_THINKING_DIR_FILES:
-        expected = str(temp_git_repo / relative_path)
-        assert expected in written_path_strings, f"Expected {relative_path} to be written to work dir"
-
-    for skill_name in _DEFAULT_SKILL_DIRS:
-        expected = str(temp_git_repo / "thinking" / ".claude" / "skills" / skill_name / "SKILL.md")
-        assert expected in written_path_strings, f"Expected skill {skill_name}/SKILL.md to be written"
+    written_path_strings = [str(p) for p, _ in host.written_text_files]
+    assert any("link_skills.sh" in p for p in written_path_strings), "Expected link_skills.sh to be written"
 
 
 @pytest.mark.timeout(30)
-def test_provisioning_does_not_overwrite_existing_content(
+def test_provisioning_does_not_overwrite_existing_link_skills_script(
     temp_git_repo: Path,
     temp_host_dir: Path,
 ) -> None:
-    """Verify that provisioning does not overwrite files that already exist."""
+    """Verify that provisioning does not overwrite link_skills.sh if it already exists."""
     host = StubHost(host_dir=temp_host_dir)
 
-    provision_default_content(cast(Any, host), temp_git_repo, _DEFAULT_PROVISIONING)
+    provision_link_skills_script_file(cast(Any, host), temp_git_repo, _DEFAULT_PROVISIONING)
 
     assert len(host.written_text_files) == 0, "Should not overwrite existing files"
 
@@ -277,30 +225,15 @@ def test_provisioning_creates_symlinks(
 
 
 @pytest.mark.timeout(30)
-@pytest.mark.rsync
-def test_provisioning_syncs_memory_directory(
+def test_provisioning_creates_memory_directory(
     temp_git_repo: Path,
     local_shell_host: LocalShellHost,
 ) -> None:
-    """Verify that provisioning creates both memory dirs and syncs initial content."""
-    abs_work_dir = str(temp_git_repo.resolve())
-    role_dir_abs = f"{abs_work_dir}/thinking"
-    # Create a file in thinking/memory/ to verify initial sync
+    """Verify that provisioning creates the per-role memory directory."""
+    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", _DEFAULT_PROVISIONING)
+
     memory_dir = temp_git_repo / "thinking" / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "test.md").write_text("hello")
-
-    setup_memory_directory(cast(Any, local_shell_host), temp_git_repo, "thinking", role_dir_abs, _DEFAULT_PROVISIONING)
-
     assert memory_dir.is_dir(), "memory dir should exist"
-
-    # Project dir name is derived from work dir (parent of role dir),
-    # matching build_memory_sync_hooks_config
-    project_dir_name = compute_claude_project_dir_name(abs_work_dir)
-    project_memory = Path.home() / ".claude" / "projects" / project_dir_name / "memory"
-    assert project_memory.is_dir(), "Claude project memory should be a real directory"
-    assert not project_memory.is_symlink(), "Claude project memory should NOT be a symlink"
-    assert (project_memory / "test.md").read_text() == "hello"
 
 
 # -- Chat script tests --
@@ -373,7 +306,7 @@ def test_conversation_watcher_script_is_valid_python(chat_env: ChatScriptEnv) ->
     """Verify that conversation_watcher.py passes Python syntax check."""
     watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "conversation_watcher.py"
     watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_mind_resource("conversation_watcher.py"))
+    watcher_script.write_text(load_llm_resource("conversation_watcher.py"))
 
     result = subprocess.run(
         [sys.executable, "-m", "py_compile", str(watcher_script)],
@@ -386,20 +319,11 @@ def test_conversation_watcher_script_is_valid_python(chat_env: ChatScriptEnv) ->
 
 
 @pytest.mark.timeout(30)
-def test_event_watcher_script_is_valid_python(chat_env: ChatScriptEnv) -> None:
-    """Verify that event_watcher.py passes Python syntax check."""
-    watcher_script = chat_env.agent_state_dir.parent.parent / "commands" / "event_watcher.py"
-    watcher_script.parent.mkdir(parents=True, exist_ok=True)
-    watcher_script.write_text(load_mind_resource("event_watcher.py"))
+def test_event_watcher_module_is_importable() -> None:
+    """Verify that event_watcher module can be imported from mng_mind."""
+    from imbue.mng_mind.event_watcher import main
 
-    result = subprocess.run(
-        [sys.executable, "-m", "py_compile", str(watcher_script)],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
-    assert result.returncode == 0, f"Syntax check failed: {result.stderr}"
+    assert callable(main)
 
 
 # -- Agent creation integration tests --
@@ -457,7 +381,7 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
     """Verify that conversation records written by chat.sh are stored in the database."""
     chat_env.set_default_model("claude-sonnet-4-6")
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "test-conv", "--as-agent")
 
     assert result.returncode == 0, f"chat.sh failed: stdout={result.stdout!r} stderr={result.stderr!r}"
 
@@ -473,8 +397,8 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
     chat_env.set_default_model("claude-sonnet-4-6")
 
     conversation_ids = []
-    for _ in range(3):
-        result = chat_env.run("--new", "--as-agent")
+    for i in range(3):
+        result = chat_env.run("--new", "--name", f"test-conv-{i}", "--as-agent")
         assert result.returncode == 0
         conversation_ids.append(result.stdout.strip())
 
@@ -485,21 +409,21 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
 
 
 @pytest.mark.timeout(30)
-def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh reads the model from settings.toml."""
-    chat_env.set_default_model("claude-haiku-4-5")
+def test_chat_model_read_from_env_var(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh reads the model from MNG_LLM_MODEL env var."""
+    chat_env.env["MNG_LLM_MODEL"] = "claude-haiku-4-5"
 
     # Ensure log directory exists so we can check the log for the model
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "model-test", "--as-agent")
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
     assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
-    # Verify the model from settings.toml was used (visible in log output)
+    # Verify the model from env var was used (visible in log output)
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists()
     log_content = log_file.read_text()
@@ -509,18 +433,18 @@ def test_chat_model_read_from_settings_toml(chat_env: ChatScriptEnv) -> None:
 @pytest.mark.timeout(30)
 def test_chat_script_creates_log_file(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh creates a log file with operation records."""
-    chat_env.set_default_model("claude-sonnet-4-6")
+    chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
 
     # The log dir is at $MNG_AGENT_STATE_DIR/events/logs/
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    chat_env.run("--new", "--as-agent")
+    chat_env.run("--new", "--name", "log-test", "--as-agent")
 
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists(), "events/logs/chat/events.jsonl should be created"
     log_content = log_file.read_text()
-    assert "Creating new conversation" in log_content
+    assert "No existing conversation" in log_content
 
 
 # -- Event watcher offset tracking tests --
@@ -542,7 +466,6 @@ def test_event_watcher_reads_settings_for_watched_sources(
         'event_cel_filter = "source == \\"messages\\""\n'
         "event_burst_size = 3\n"
         "max_event_messages_per_minute = 20\n"
-        "high_rate_warning_threshold_per_minute = 15\n"
     )
     settings_path = work_dir / "minds.toml"
     settings_path.write_text(settings_content)
@@ -559,7 +482,6 @@ print(json.dumps({{
     'cel_filter': w.get('event_cel_filter', ''),
     'burst_size': w.get('event_burst_size', 5),
     'max_messages_per_minute': w.get('max_event_messages_per_minute', 10),
-    'high_rate_warning_threshold': w.get('high_rate_warning_threshold_per_minute', 8),
 }}))
 """
     result = subprocess.run(
@@ -574,7 +496,193 @@ print(json.dumps({{
     assert parsed["cel_filter"] == 'source == "messages"'
     assert parsed["burst_size"] == 3
     assert parsed["max_messages_per_minute"] == 20
-    assert parsed["high_rate_warning_threshold"] == 15
+
+
+# -- Stop hook script integration tests --
+
+
+def _write_stop_hook_script(tmp_path: Path) -> Path:
+    """Write the stop hook script to tmp_path for testing.
+
+    Sets MNG_AGENT_STATE_DIR to tmp_path so the script reads from
+    tmp_path/mind/event_batches/ and tmp_path/events/handled_events/.
+    """
+    from imbue.mng_claude_mind.provisioning import _STOP_HOOK_SCRIPT
+
+    # Wrap the script to export MNG_AGENT_STATE_DIR, replacing the original shebang
+    body = _STOP_HOOK_SCRIPT.split("\n", 1)[1]
+    wrapped = f"#!/usr/bin/env bash\nexport MNG_AGENT_STATE_DIR={tmp_path}\n{body}"
+    script_path = tmp_path / "on_stop_prevent_unhandled_events.sh"
+    script_path.write_text(wrapped)
+    script_path.chmod(0o755)
+    return script_path
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_script_exits_2_when_unhandled_events(tmp_path: Path) -> None:
+    """The stop hook script should exit 2 when events exist that are not handled."""
+    script = _write_stop_hook_script(tmp_path)
+
+    batches_dir = tmp_path / "mind" / "event_batches"
+    batches_dir.mkdir(parents=True)
+    (batches_dir / "test.jsonl").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
+    )
+
+    handled_dir = tmp_path / "events" / "handled_events"
+    handled_dir.mkdir(parents=True)
+    (handled_dir / "events.jsonl").write_text('{"handled_event_id":"evt-1"}\n')
+
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+    assert "evt-2" in result.stderr
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_script_exits_0_when_all_handled(tmp_path: Path) -> None:
+    """The stop hook script should exit 0 when all events are handled."""
+    script = _write_stop_hook_script(tmp_path)
+
+    batches_dir = tmp_path / "mind" / "event_batches"
+    batches_dir.mkdir(parents=True)
+    (batches_dir / "test.jsonl").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
+    )
+
+    handled_dir = tmp_path / "events" / "handled_events"
+    handled_dir.mkdir(parents=True)
+    (handled_dir / "events.jsonl").write_text('{"handled_event_id":"evt-1"}\n{"handled_event_id":"evt-2"}\n')
+
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_script_exits_0_when_no_events(tmp_path: Path) -> None:
+    """The stop hook script should exit 0 when no event batch files exist."""
+    script = _write_stop_hook_script(tmp_path)
+
+    # Create the batches dir but leave it empty
+    (tmp_path / "mind" / "event_batches").mkdir(parents=True)
+
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_script_reads_rotated_events_file(tmp_path: Path) -> None:
+    """The stop hook script should read handled events from events.jsonl.1 (rotated file)."""
+    script = _write_stop_hook_script(tmp_path)
+
+    batches_dir = tmp_path / "mind" / "event_batches"
+    batches_dir.mkdir(parents=True)
+    (batches_dir / "test.jsonl").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
+    )
+
+    handled_dir = tmp_path / "events" / "handled_events"
+    handled_dir.mkdir(parents=True)
+    # evt-1 in rotated file, evt-2 in current file
+    (handled_dir / "events.jsonl.1").write_text('{"handled_event_id":"evt-1"}\n')
+    (handled_dir / "events.jsonl").write_text('{"handled_event_id":"evt-2"}\n')
+
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0
+
+
+@pytest.mark.timeout(10)
+def test_stop_hook_script_exits_2_when_nothing_handled(tmp_path: Path) -> None:
+    """The stop hook script should exit 2 when events exist but nothing has been handled."""
+    script = _write_stop_hook_script(tmp_path)
+
+    batches_dir = tmp_path / "mind" / "event_batches"
+    batches_dir.mkdir(parents=True)
+    (batches_dir / "test.jsonl").write_text(
+        '{"event_id":"evt-1","source":"messages"}\n{"event_id":"evt-2","source":"messages"}\n'
+    )
+
+    # No handled_events directory or files at all
+    result = subprocess.run([str(script)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+    assert "evt-1" in result.stderr
+    assert "evt-2" in result.stderr
+
+
+# -- link_skills.sh integration tests --
+
+
+def _write_link_skills_script(tmp_path: Path) -> Path:
+    """Write the link_skills.sh script from resources to tmp_path and make it executable."""
+    import importlib.resources
+
+    from imbue.mng_mind import resources as resources_package
+
+    resources_root = importlib.resources.files(resources_package)
+    script_content = (resources_root / "link_skills.sh").read_text()
+    script_path = tmp_path / "link_skills.sh"
+    script_path.write_text(script_content)
+    script_path.chmod(0o755)
+    return script_path
+
+
+@pytest.mark.timeout(10)
+def test_link_skills_script_creates_symlinks(tmp_path: Path) -> None:
+    """link_skills.sh should create symlinks from top-level skills into the role's skills dir."""
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "delegate-task").mkdir(parents=True)
+    (skills_dir / "delegate-task" / "SKILL.md").write_text("delegate skill")
+    (skills_dir / "send-message").mkdir()
+    (skills_dir / "send-message" / "SKILL.md").write_text("send skill")
+
+    role_dir = tmp_path / "thinking"
+    (role_dir / "skills").mkdir(parents=True)
+
+    script_path = _write_link_skills_script(tmp_path)
+
+    result = subprocess.run(
+        [str(script_path), "thinking"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0
+
+    delegate_link = role_dir / "skills" / "delegate-task"
+    assert delegate_link.is_symlink()
+    assert (delegate_link / "SKILL.md").read_text() == "delegate skill"
+
+    send_link = role_dir / "skills" / "send-message"
+    assert send_link.is_symlink()
+    assert (send_link / "SKILL.md").read_text() == "send skill"
+
+
+@pytest.mark.timeout(10)
+def test_link_skills_script_warns_on_existing_skill(tmp_path: Path) -> None:
+    """link_skills.sh should warn and skip when a skill already exists in the role."""
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "delegate-task").mkdir(parents=True)
+    (skills_dir / "delegate-task" / "SKILL.md").write_text("shared")
+
+    role_dir = tmp_path / "thinking"
+    (role_dir / "skills" / "delegate-task").mkdir(parents=True)
+    (role_dir / "skills" / "delegate-task" / "SKILL.md").write_text("role-specific")
+
+    script_path = _write_link_skills_script(tmp_path)
+
+    result = subprocess.run(
+        [str(script_path), "thinking"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0
+    assert "WARNING" in result.stderr
+
+    # Verify the existing skill was NOT overwritten
+    assert (role_dir / "skills" / "delegate-task" / "SKILL.md").read_text() == "role-specific"
+    assert not (role_dir / "skills" / "delegate-task").is_symlink()
 
 
 # -- Tmux window injection integration tests --
@@ -738,15 +846,15 @@ def test_conversation_watcher_sync_is_idempotent(
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_uses_hardcoded_default_when_no_settings(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh falls back to the hardcoded default model when settings.toml is absent."""
-    # Do NOT call set_default_model -- no settings.toml exists
+def test_chat_script_uses_hardcoded_default_when_no_env_var(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh falls back to the hardcoded default model when MNG_LLM_MODEL is not set."""
+    # Do NOT set MNG_LLM_MODEL -- rely on hardcoded default
 
     # Ensure log directory exists so we can check the log for the default model
     log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    result = chat_env.run("--new", "--as-agent")
+    result = chat_env.run("--new", "--name", "default-model-test", "--as-agent")
     assert result.returncode == 0
 
     conversation_id = result.stdout.strip()
@@ -773,10 +881,10 @@ def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv
     write_conversation_to_db(chat_env.llm_db_path, cid1, model="claude-sonnet-4-6")
     write_conversation_to_db(chat_env.llm_db_path, cid2, model="claude-haiku-4-5")
 
-    # Use the conversation_db module directly (same logic as mng minddb)
+    # Use the conversation_db module directly (same logic as mng llmdb)
     import io
 
-    from imbue.mng_claude_mind.resources.conversation_db import lookup_model
+    from imbue.mng_llm.resources.conversation_db import lookup_model
 
     old_stdout = sys.stdout
     sys.stdout = io.StringIO()
@@ -805,14 +913,67 @@ def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
     written to the DB regardless, since insert_conversation_record runs
     before the llm inject call.
     """
-    chat_env.set_default_model("claude-sonnet-4-6")
+    chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
 
     # This will fail at the `llm inject` call since llm is not installed,
     # but the conversation record should already be inserted because
     # insert_conversation_record runs before the llm inject call.
-    chat_env.run("--new", "--as-agent", "hello from test")
+    chat_env.run("--new", "--name", "msg-test", "--as-agent", "hello from test")
 
     # At least one conversation should exist (the one just created)
     with sqlite3.connect(str(chat_env.llm_db_path)) as conn:
         rows = conn.execute("SELECT conversation_id FROM mind_conversations").fetchall()
     assert len(rows) >= 1, "conversation record should be written even when llm inject fails"
+
+
+# -- Reply command tests --
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_reply_requires_conversation_id(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh --reply without a conversation ID fails with usage error."""
+    result = chat_env.run("--reply")
+
+    assert result.returncode != 0
+    assert "usage" in result.stderr.lower()
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_reply_requires_message(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh --reply with only a conversation ID fails with usage error."""
+    result = chat_env.run("--reply", "conv-123")
+
+    assert result.returncode != 0
+    assert "usage" in result.stderr.lower()
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_reply_logs_correct_model_and_conversation(chat_env: ChatScriptEnv) -> None:
+    """Verify that --reply logs the correct model and conversation ID before calling llm inject.
+
+    The llm inject call will fail since llm is not installed in the test
+    environment, but the log entry written before the call should contain
+    the expected model and conversation ID.
+    """
+    chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
+
+    log_dir = Path(chat_env.env["MNG_AGENT_STATE_DIR"]) / "events" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    chat_env.run("--reply", "conv-reply-test", "hello from reply")
+
+    log_file = log_dir / "chat" / "events.jsonl"
+    assert log_file.exists()
+    log_content = log_file.read_text()
+    assert "conv-reply-test" in log_content
+    assert "claude-sonnet-4-6" in log_content
+    assert "reply_to_conversation" in log_content
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_help_shows_reply(chat_env: ChatScriptEnv) -> None:
+    """Verify that chat.sh --help output includes the --reply option."""
+    result = chat_env.run("--help")
+
+    assert result.returncode == 0
+    assert "--reply" in result.stdout

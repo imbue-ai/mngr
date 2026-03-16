@@ -17,7 +17,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.providers.modal.instance import ModalProviderInstance
+from imbue.mng_modal.instance import ModalProviderInstance
 from imbue.mng_schedule.cli.group import schedule
 from imbue.mng_schedule.cli.options import ScheduleListCliOptions
 from imbue.mng_schedule.data_types import ScheduleCreationRecord
@@ -50,7 +50,7 @@ def schedule_list(ctx: click.Context, **kwargs: Any) -> None:
     Examples:
       mng schedule list --provider local
       mng schedule list --provider modal --all
-      mng schedule list --provider local --json
+      mng schedule list --provider local --format=json
     """
     mng_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,

@@ -21,6 +21,7 @@ from imbue.mng.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mng.api.discovery_events import HostSSHInfoEvent
 from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import DiscoveredAgent
 
 SERVERS_LOG_FILENAME: Final[str] = "servers/events.jsonl"
 
@@ -54,6 +55,14 @@ class BackendResolverInterface(MutableModel, ABC):
     @abstractmethod
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         """Return all known agent IDs."""
+
+    def list_known_mind_ids(self) -> tuple[AgentId, ...]:
+        """Return agent IDs that have the mind=true label.
+
+        Default implementation returns all known agent IDs (no filtering).
+        Subclasses with access to agent labels should override this.
+        """
+        return self.list_known_agent_ids()
 
     @abstractmethod
     def list_servers_for_agent(self, agent_id: AgentId) -> tuple[ServerName, ...]:
@@ -99,9 +108,12 @@ class StaticBackendResolver(BackendResolverInterface):
 
 
 class ParsedAgentsResult(FrozenModel):
-    """Result of parsing agent and SSH info from discovery events or mng list --json output."""
+    """Result of parsing agent and SSH info from discovery events or mng list --format json output."""
 
     agent_ids: tuple[AgentId, ...] = Field(default=(), description="All discovered agent IDs")
+    discovered_agents: tuple[DiscoveredAgent, ...] = Field(
+        default=(), description="Full DiscoveredAgent data for each agent"
+    )
     ssh_info_by_agent_id: Mapping[str, RemoteSSHInfo] = Field(
         default_factory=dict,
         description="SSH info keyed by agent ID string, only for remote agents",
@@ -109,7 +121,7 @@ class ParsedAgentsResult(FrozenModel):
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
-    """Parse agent IDs and SSH info from mng list --json output.
+    """Parse agent IDs and SSH info from mng list --format json output.
 
     Returns both agent IDs and a mapping of agent ID -> RemoteSSHInfo for agents
     that have SSH connection info (i.e., are running on remote hosts).
@@ -157,7 +169,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
 
 
 def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
-    """Parse agent IDs from mng list --json output, discarding SSH info."""
+    """Parse agent IDs from mng list --format json output, discarding SSH info."""
     return parse_agents_from_json(json_output).agent_ids
 
 
@@ -233,6 +245,11 @@ class MngCliBackendResolver(BackendResolverInterface):
         with self._lock:
             return self._agents_result.agent_ids
 
+    def list_known_mind_ids(self) -> tuple[AgentId, ...]:
+        """Return agent IDs that have the mind label set."""
+        with self._lock:
+            return tuple(agent.agent_id for agent in self._agents_result.discovered_agents if "mind" in agent.labels)
+
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
@@ -259,6 +276,7 @@ class MngStreamManager(MutableModel):
     _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mng-stream-manager"))
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _events_servers: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
@@ -320,7 +338,7 @@ class MngStreamManager(MutableModel):
         with self._lock:
             self._agent_host_map = agent_host_map
 
-        self._update_resolver(tuple(agent_ids))
+        self._update_resolver(tuple(agent_ids), event.agents)
 
         new_ids = {str(agent_id) for agent_id in agent_ids}
         self._sync_events_streams(new_ids)
@@ -339,7 +357,11 @@ class MngStreamManager(MutableModel):
 
         self._update_resolver(agent_ids)
 
-    def _update_resolver(self, agent_ids: tuple[AgentId, ...]) -> None:
+    def _update_resolver(
+        self,
+        agent_ids: tuple[AgentId, ...],
+        discovered_agents: tuple[DiscoveredAgent, ...] | None = None,
+    ) -> None:
         """Rebuild and push the ParsedAgentsResult to the resolver."""
         with self._lock:
             ssh_info_by_agent_id: dict[str, RemoteSSHInfo] = {}
@@ -347,10 +369,14 @@ class MngStreamManager(MutableModel):
                 ssh = self._ssh_by_host_id.get(host_id_str)
                 if ssh is not None:
                     ssh_info_by_agent_id[aid_str] = ssh
+            if discovered_agents is not None:
+                self._discovered_agents = discovered_agents
+            agents = self._discovered_agents
 
         self.resolver.update_agents(
             ParsedAgentsResult(
                 agent_ids=agent_ids,
+                discovered_agents=agents,
                 ssh_info_by_agent_id=ssh_info_by_agent_id,
             )
         )

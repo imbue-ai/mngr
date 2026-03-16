@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import importlib.resources
 import io
 import json
 import os
@@ -16,9 +17,11 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from typing import cast
 from uuid import uuid4
 
 from loguru import logger
+from paramiko import SFTPClient
 from paramiko import SSHException
 from pydantic import Field
 from pydantic import ValidationError
@@ -37,6 +40,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mng import resources as mng_resources
 from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
@@ -90,15 +94,28 @@ def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
 
 
 @pure
-def _is_socket_closed_os_error(exception: BaseException) -> bool:
-    return isinstance(exception, OSError) and "Socket is closed" in str(exception)
+def _is_transient_ssh_error(exception: BaseException) -> bool:
+    """Check if the exception is a transient SSH connection error worth retrying.
+
+    Matches:
+    - OSError with "Socket is closed" (stale socket from pyinfra)
+    - SSHException (e.g. "SSH session not active" when transport dies)
+    - EOFError (remote end closed connection)
+    """
+    if isinstance(exception, OSError) and "Socket is closed" in str(exception):
+        return True
+    if isinstance(exception, SSHException):
+        return True
+    if isinstance(exception, EOFError):
+        return True
+    return False
 
 
-# Shared retry decorator for file operations that encounter intermittent
-# "Socket is closed" errors.  Retries after (0, 1, 3, 6) seconds for a
-# total backoff window of ~10 seconds.
-_retry_on_socket_closed = retry(
-    retry=retry_if_exception(_is_socket_closed_os_error),
+# Shared retry decorator for file operations that encounter transient SSH
+# connection errors.  Retries after (0, 1, 3, 6) seconds for a total
+# backoff window of ~10 seconds.
+_retry_on_transient_ssh_error = retry(
+    retry=retry_if_exception(_is_transient_ssh_error),
     stop=stop_after_attempt(5),
     wait=wait_chain(
         wait_fixed(0),
@@ -108,6 +125,12 @@ _retry_on_socket_closed = retry(
     ),
     reraise=True,
 )
+
+
+@pure
+def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Compute the state directory path for an agent given the host directory and agent ID."""
+    return host_dir / "agents" / str(agent_id)
 
 
 class HostLocation(FrozenModel):
@@ -268,7 +291,7 @@ class Host(BaseHost, OnlineHostInterface):
         """
         with self._notify_on_connection_error():
             try:
-                return self._get_file_with_socket_retry(remote_filename, filename_or_io, remote_temp_filename)
+                return self._get_file_with_transient_retry(remote_filename, filename_or_io, remote_temp_filename)
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while reading file") from e
@@ -276,8 +299,8 @@ class Host(BaseHost, OnlineHostInterface):
             except (EOFError, SSHException) as e:
                 raise HostConnectionError("Could not read file due to connection error") from e
 
-    @_retry_on_socket_closed
-    def _get_file_with_socket_retry(
+    @_retry_on_transient_ssh_error
+    def _get_file_with_transient_retry(
         self,
         remote_filename: str,
         filename_or_io: str | IO[bytes],
@@ -289,6 +312,13 @@ class Host(BaseHost, OnlineHostInterface):
             filename_or_io.seek(0)
             filename_or_io.truncate(0)
         try:
+            # For remote hosts, always use a dedicated paramiko SFTP channel
+            # instead of pyinfra's memoized one. pyinfra caches a single
+            # SFTPClient per connection, which is not thread-safe -- concurrent
+            # file operations deadlock. Using a fresh channel per call avoids
+            # this entirely.
+            if not self.is_local:
+                return self._get_file_via_paramiko(remote_filename, filename_or_io)
             return self.connector.host.get_file(
                 remote_filename,
                 filename_or_io,
@@ -305,6 +335,38 @@ class Host(BaseHost, OnlineHostInterface):
                 raise
             else:
                 raise
+        except (SSHException, EOFError) as e:
+            logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
+            self.connector.host.disconnect()
+            raise
+
+    def _get_file_via_paramiko(
+        self,
+        remote_filename: str,
+        filename_or_io: str | IO[bytes],
+    ) -> bool:
+        """Download a file using a dedicated paramiko SFTP channel.
+
+        Creates a fresh SFTPClient from the shared SSH transport for each call.
+        This is thread-safe because paramiko transports can multiplex channels.
+        """
+        transport = self._get_paramiko_transport()
+        sftp = self._create_sftp_client(transport)
+        if sftp is None:
+            raise HostConnectionError("Failed to create SFTP channel from transport")
+        try:
+            if isinstance(filename_or_io, str):
+                sftp.get(remote_filename, filename_or_io)
+            else:
+                sftp.getfo(remote_filename, filename_or_io)
+            return True
+        except IOError as e:
+            error_msg = str(e)
+            if "No such file" in error_msg or "not found" in error_msg.lower():
+                raise FileNotFoundError(f"File not found: {remote_filename}") from e
+            raise
+        finally:
+            sftp.close()
 
     def _put_file(
         self,
@@ -320,7 +382,7 @@ class Host(BaseHost, OnlineHostInterface):
         """
         with self._notify_on_connection_error():
             try:
-                return self._put_file_with_socket_retry(filename_or_io, remote_filename, remote_temp_filename)
+                return self._put_file_with_transient_retry(filename_or_io, remote_filename, remote_temp_filename)
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while writing file") from e
@@ -328,8 +390,8 @@ class Host(BaseHost, OnlineHostInterface):
             except (EOFError, SSHException) as e:
                 raise HostConnectionError("Could not write file due to connection error") from e
 
-    @_retry_on_socket_closed
-    def _put_file_with_socket_retry(
+    @_retry_on_transient_ssh_error
+    def _put_file_with_transient_retry(
         self,
         filename_or_io: str | IO[str] | IO[bytes],
         remote_filename: str,
@@ -340,6 +402,13 @@ class Host(BaseHost, OnlineHostInterface):
         if not isinstance(filename_or_io, str):
             filename_or_io.seek(0)
         try:
+            # For remote hosts, always use a dedicated paramiko SFTP channel
+            # instead of pyinfra's memoized one. pyinfra caches a single
+            # SFTPClient per connection, which is not thread-safe -- concurrent
+            # file operations deadlock. Using a fresh channel per call avoids
+            # this entirely.
+            if not self.is_local:
+                return self._put_file_via_paramiko(filename_or_io, remote_filename)
             return self.connector.host.put_file(
                 filename_or_io,
                 remote_filename,
@@ -352,6 +421,55 @@ class Host(BaseHost, OnlineHostInterface):
                 raise
             else:
                 raise
+        except (SSHException, EOFError) as e:
+            logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
+            self.connector.host.disconnect()
+            raise
+
+    def _get_paramiko_transport(self) -> object:
+        """Get the paramiko Transport from the SSH connector.
+
+        Raises HostConnectionError if the host does not have an SSH client
+        or the transport is not active.
+        """
+        try:
+            connector = cast(Any, self.connector.host.connector)
+            transport = connector.client.get_transport()
+        except AttributeError as e:
+            raise HostConnectionError(f"Host does not support SSH file transfer: {e}") from e
+        if transport is None:
+            raise HostConnectionError("No active SSH transport")
+        return transport
+
+    def _create_sftp_client(self, transport: object) -> SFTPClient | None:
+        """Create an SFTPClient from a paramiko Transport.
+
+        Extracted as a method so tests can override it without monkeypatching.
+        """
+        return SFTPClient.from_transport(transport)
+
+    def _put_file_via_paramiko(
+        self,
+        filename_or_io: str | IO[str] | IO[bytes],
+        remote_filename: str,
+    ) -> bool:
+        """Upload a file using a dedicated paramiko SFTP channel.
+
+        Creates a fresh SFTPClient from the shared SSH transport for each call.
+        This is thread-safe because paramiko transports can multiplex channels.
+        """
+        transport = self._get_paramiko_transport()
+        sftp = self._create_sftp_client(transport)
+        if sftp is None:
+            raise HostConnectionError("Failed to create SFTP channel from transport")
+        try:
+            if isinstance(filename_or_io, str):
+                sftp.put(filename_or_io, remote_filename)
+            else:
+                sftp.putfo(filename_or_io, remote_filename)
+            return True
+        finally:
+            sftp.close()
 
     # =========================================================================
     # Convenience methods (built on core primitives)
@@ -1334,6 +1452,8 @@ class Host(BaseHost, OnlineHostInterface):
         exclude_git: bool = False,
     ) -> None:
         """Copy a directory from source_host:source_path to self:target_path using rsync."""
+        # Ensure the target directory exists -- rsync does not create intermediate parents.
+        self.execute_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
         self._rsync_files(
             source_host,
             source_path,
@@ -1510,7 +1630,7 @@ class Host(BaseHost, OnlineHostInterface):
         ):
             resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
-            state_dir = self.host_dir / "agents" / str(agent_id)
+            state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             self._mkdirs([state_dir, state_dir / "events"])
 
             create_time = datetime.now(timezone.utc)
@@ -1571,7 +1691,7 @@ class Host(BaseHost, OnlineHostInterface):
 
     def _get_agent_state_dir(self, agent: AgentInterface) -> Path:
         """Get the state directory for an agent."""
-        return self.host_dir / "agents" / str(agent.id)
+        return get_agent_state_dir_path(self.host_dir, agent.id)
 
     def get_agent_env_path(self, agent: AgentInterface) -> Path:
         """Get the path to the agent's environment file."""
@@ -1659,14 +1779,15 @@ class Host(BaseHost, OnlineHostInterface):
         3. Validate required files exist, execute file transfers
         4. Write environment variables to agent env file (before agent.provision()
            so agent provisioning can use env vars like UV_TOOL_DIR)
-        5. Call agent.provision() (agent-type-specific provisioning)
-        6. Create directories (so paths exist for uploads)
-        7. Upload files (files exist before modifications)
-        8. Append text to files
-        9. Prepend text to files
-        10. Run sudo commands (system-level setup, with env vars sourced)
-        11. Run user commands (user-level setup, with env vars sourced)
-        12. Call agent.on_after_provisioning() (finalization)
+        5. Ensure mng_log.sh exists at host and agent level
+        6. Call agent.provision() (agent-type-specific provisioning)
+        7. Create directories (so paths exist for uploads)
+        8. Upload files (files exist before modifications)
+        9. Append text to files
+        10. Prepend text to files
+        11. Run sudo commands (system-level setup, with env vars sourced)
+        12. Run user commands (user-level setup, with env vars sourced)
+        13. Call agent.on_after_provisioning() (finalization)
         """
         # 1. Call pre-provisioning validation on agent
         with log_span("Calling on_before_provisioning for agent {}", agent.name):
@@ -1684,7 +1805,11 @@ class Host(BaseHost, OnlineHostInterface):
         env_vars = self._collect_agent_env_vars(agent, options)
         self._write_agent_env_file(agent, env_vars)
 
-        # 5. Call agent.provision() for agent-type-specific provisioning
+        # 5. Ensure mng_log.sh exists at both host and agent level so that
+        # all bash scripts can source it for logging and timestamp utilities.
+        self._ensure_mng_log_sh(agent)
+
+        # 6. Call agent.provision() for agent-type-specific provisioning
         with log_span("Calling provision for agent {}", agent.name):
             agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
@@ -1699,24 +1824,24 @@ class Host(BaseHost, OnlineHostInterface):
             sudo_cmds=len(provisioning.sudo_commands),
             user_cmds=len(provisioning.user_commands),
         ):
-            # 6. Create directories
+            # 7. Create directories
             for directory in provisioning.create_directories:
                 self._mkdir(directory)
                 logger.trace("Created directory: {}", directory)
 
-            # 7. Upload files (read from local filesystem, write to host)
+            # 8. Upload files (read from local filesystem, write to host)
             for upload_spec in provisioning.upload_files:
                 # Read from local filesystem (not via host primitives)
                 local_content = upload_spec.local_path.read_bytes()
                 self.write_file(upload_spec.remote_path, local_content)
                 logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 8. Append text to files
+            # 9. Append text to files
             for append_spec in provisioning.append_to_files:
                 self._append_to_file(append_spec.remote_path, append_spec.text)
                 logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # 9. Prepend text to files
+            # 10. Prepend text to files
             for prepend_spec in provisioning.prepend_to_files:
                 self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
                 logger.trace("Prepended to file: {}", prepend_spec.remote_path)
@@ -1724,23 +1849,42 @@ class Host(BaseHost, OnlineHostInterface):
             # Build the source prefix for commands (sources host env, then agent env)
             source_prefix = self.build_source_env_prefix(agent)
 
-            # 10. Run sudo commands (with env vars sourced)
+            # 11. Run sudo commands (with env vars sourced)
             for cmd in provisioning.sudo_commands:
                 result = self._run_sudo_command(source_prefix + cmd)
                 logger.trace("Ran sudo command: {}", cmd)
                 if not result.success:
                     raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
 
-            # 11. Run user commands (with env vars sourced)
+            # 12. Run user commands (with env vars sourced)
             for cmd in provisioning.user_commands:
                 result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
                 logger.trace("Ran user command: {}", cmd)
                 if not result.success:
                     raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
 
-        # 12. Call post-provisioning on agent
+        # 13. Call post-provisioning on agent
         with log_span("Calling on_after_provisioning for agent {}", agent.name):
             agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+
+    def _ensure_mng_log_sh(self, agent: AgentInterface) -> None:
+        """Write mng_log.sh to both host-level and agent-level commands directories.
+
+        mng_log.sh provides shared JSONL logging and cross-platform timestamp
+        utilities for all mng bash scripts.  Two identical copies are maintained:
+
+        - ``<host_dir>/commands/mng_log.sh``   (for host-level scripts such as
+          activity_watcher.sh)
+        - ``<agent_state_dir>/commands/mng_log.sh``  (for agent-level scripts
+          such as stream_transcript.sh, chat.sh)
+        """
+        content_bytes = importlib.resources.files(mng_resources).joinpath("mng_log.sh").read_text().encode()
+
+        host_commands = self.host_dir / "commands"
+        self.write_file(host_commands / "mng_log.sh", content_bytes, mode="0755")
+
+        agent_commands = self._get_agent_state_dir(agent) / "commands"
+        self.write_file(agent_commands / "mng_log.sh", content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,

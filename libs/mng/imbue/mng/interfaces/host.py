@@ -789,6 +789,16 @@ class CreateAgentOptions(FrozenModel):
         default_factory=AgentProvisioningOptions,
         description="Simple provisioning options",
     )
+    plugin_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Opaque dict for plugins to pass data through the creation pipeline. "
+        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+    )
+    source_agent_state_dir: Path | None = Field(
+        default=None,
+        description="Agent state directory of the source agent, used to transfer "
+        "per-agent data during clone operations (set when cloning via --from-agent)",
+    )
 
 
 # =========================================================================

@@ -9,10 +9,13 @@ import threading
 import time
 from collections.abc import Callable
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import IO
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import Field
@@ -84,11 +87,15 @@ class EventsTarget(FrozenModel):
 class EventRecord(FrozenModel):
     """A single parsed event from a JSONL event file."""
 
-    raw_line: str = Field(description="The original JSONL line")
+    raw_line: str = Field(description="The JSONL line (may be re-serialized if source was corrected)")
     timestamp: str = Field(description="ISO 8601 timestamp from the event envelope")
     event_id: str = Field(description="Unique event ID from the envelope")
     source: str = Field(description="Event source (subdirectory name)")
     data: dict[str, Any] = Field(description="Full parsed JSON dict for CEL filtering")
+    original_source: str | None = Field(
+        default=None,
+        description="Original source from the event JSON if it differed from the path-derived source",
+    )
 
 
 class EventSourceInfo(FrozenModel):
@@ -115,6 +122,10 @@ class _AllEventsStreamState(MutableModel):
     )
     is_online: bool = Field(default=False, description="Whether the target is currently considered online")
     last_source_scan_time: float = Field(default=0.0, description="Monotonic time of last directory scan")
+    warned_incorrect_sources: set[str] = Field(
+        default_factory=set,
+        description="Original source values for which a mismatch warning has already been emitted",
+    )
 
 
 def resolve_events_target(
@@ -436,39 +447,57 @@ def _follow_event_file_via_host(
 
     logger.debug("Following event file via host: {}", " ".join(cmd))
 
-    process = popen_interactive_subprocess(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        assert process.stdout is not None
-        assert process.stderr is not None
-
-        # Drain stderr in a background thread to prevent pipe buffer deadlock
-        stderr_chunks: list[bytes] = []
-        stderr_thread = threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_chunks), daemon=True)
-        stderr_thread.start()
-
-        # Stream stdout line by line
-        for raw_line in iter(process.stdout.readline, b""):
-            on_new_content(raw_line.decode("utf-8", errors="replace"))
-
-        # The stdout loop ended because the process exited; check for errors
-        process.wait()
-        stderr_thread.join(timeout=5)
-        if process.returncode != 0:
-            stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-            raise MngError(f"Failed to follow event file (exit code {process.returncode}): {stderr_output.strip()}")
-    except KeyboardInterrupt:
-        raise
-    finally:
-        process.terminate()
+    # Retry loop: if the file doesn't exist yet, wait and try again.
+    # This handles the race where we start following before the file is created.
+    _RETRY_DELAY_SECONDS = 2.0
+    has_logged = False
+    attempt = 0
+    while attempt < float("inf"):
+        attempt += 1
+        process = popen_interactive_subprocess(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            assert process.stdout is not None
+            assert process.stderr is not None
+
+            # Drain stderr in a background thread to prevent pipe buffer deadlock
+            stderr_chunks: list[bytes] = []
+            stderr_thread = threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_chunks), daemon=True)
+            stderr_thread.start()
+
+            # Stream stdout line by line
+            for raw_line in iter(process.stdout.readline, b""):
+                on_new_content(raw_line.decode("utf-8", errors="replace"))
+
+            # The stdout loop ended because the process exited; check for errors
             process.wait()
+            stderr_thread.join(timeout=5)
+            if process.returncode != 0:
+                stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+                if "No such file or directory" in stderr_output:
+                    if not has_logged:
+                        logger.info("Event file not found yet, retrying in {}s", _RETRY_DELAY_SECONDS)
+                        has_logged = True
+                    # FIXME: remove this--this is effectively a sleep.  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
+                    #  Instead, here we should just be using tenacity to continually retry this type of error, log when it happens once, etc
+                    threading.Event().wait(timeout=_RETRY_DELAY_SECONDS)
+                    continue
+                raise MngError(
+                    f"Failed to follow event file (exit code {process.returncode}): {stderr_output.strip()}"
+                )
+            return
+        except KeyboardInterrupt:
+            raise
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def _drain_pipe(pipe: IO[bytes], chunks: list[bytes]) -> None:
@@ -499,7 +528,9 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
     """Parse a single JSONL line into an EventRecord.
 
     Returns None if the line cannot be parsed (malformed JSON, missing required fields).
-    Uses source_hint as fallback if 'source' field is missing from the JSON.
+    Always uses source_hint (derived from the file path) as the authoritative source;
+    if the event JSON contains a different source, it is corrected and the mismatch
+    is recorded in the returned EventRecord's original_source field.
     Generates a deterministic fallback event_id from the line hash if missing.
     """
     stripped = line.strip()
@@ -522,21 +553,75 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord | None:
         # Generate deterministic fallback from line content
         event_id = "hash-" + hashlib.sha256(stripped.encode()).hexdigest()[:24]
 
-    source = data.get("source", source_hint)
+    # The source_hint (derived from the file path) is always authoritative.
+    # If the event JSON contains a different source, we correct it and record
+    # the mismatch so a warning can be emitted downstream.
+    event_source = data.get("source", "")
+    original_source: str | None = None
+    if event_source and event_source != source_hint:
+        original_source = event_source
+        logger.trace(
+            "Correcting event source from '{}' to '{}' for event {}",
+            event_source,
+            source_hint,
+            event_id,
+        )
 
-    # Ensure source is always in data so CEL filters can reference it.
-    # Some event files omit 'source' from individual JSON lines since
-    # the source is implied by the file path; we backfill it here.
-    if "source" not in data:
-        data["source"] = source
+    source = source_hint
+    data["source"] = source
+
+    # Re-serialize raw_line if the source was corrected so downstream
+    # consumers (e.g. CLI output) see the correct source
+    corrected_raw_line = json.dumps(data, separators=(",", ":")) if original_source is not None else stripped
 
     return EventRecord(
-        raw_line=stripped,
+        raw_line=corrected_raw_line,
         timestamp=timestamp,
         event_id=event_id,
         source=source,
         data=data,
+        original_source=original_source,
     )
+
+
+def _create_source_mismatch_warning(original_source: str, correct_source: str) -> EventRecord:
+    """Create a warning event about an incorrect source field encountered in the stream."""
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
+    warning_event_id = f"evt-{uuid4().hex}"
+    message = (
+        f"Event source field mismatch: event had source='{original_source}' "
+        f"but was found under path '{correct_source}'. "
+        f"The source has been corrected to '{correct_source}'."
+    )
+    data: dict[str, Any] = {
+        "timestamp": timestamp,
+        "type": "warn_about_incorrect_source_field",
+        "event_id": warning_event_id,
+        "source": "event_watcher",
+        "original_source": original_source,
+        "correct_source": correct_source,
+        "message": message,
+    }
+    return EventRecord(
+        raw_line=json.dumps(data, separators=(",", ":")),
+        timestamp=timestamp,
+        event_id=warning_event_id,
+        source="event_watcher",
+        data=data,
+    )
+
+
+def _maybe_emit_source_mismatch_warning(
+    event: EventRecord,
+    warned_sources: set[str],
+    on_event: Callable[[EventRecord], None],
+) -> None:
+    """If the event had an incorrect source, emit a warning event (at most once per source)."""
+    if event.original_source is not None and event.original_source not in warned_sources:
+        warned_sources.add(event.original_source)
+        warning = _create_source_mismatch_warning(event.original_source, event.source)
+        on_event(warning)
 
 
 @pure
@@ -859,6 +944,7 @@ def _emit_historical_events(
         if event.event_id in state.emitted_event_ids:
             continue
         state.emitted_event_ids.add(event.event_id)
+        _maybe_emit_source_mismatch_warning(event, state.warned_incorrect_sources, on_event)
         on_event(event)
 
 
@@ -1195,6 +1281,7 @@ def _consume_event_queue(
         if event.event_id in state.emitted_event_ids:
             continue
         state.emitted_event_ids.add(event.event_id)
+        _maybe_emit_source_mismatch_warning(event, state.warned_incorrect_sources, on_event)
         on_event(event)
 
 

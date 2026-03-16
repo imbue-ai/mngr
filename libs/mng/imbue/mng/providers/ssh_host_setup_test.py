@@ -14,6 +14,7 @@ import imbue.mng.resources as mng_resources
 from imbue.mng.providers.ssh_host_setup import RequiredHostPackage
 from imbue.mng.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mng.providers.ssh_host_setup import _build_package_check_snippet
+from imbue.mng.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mng.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mng.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mng.providers.ssh_host_setup import build_configure_ssh_command
@@ -220,6 +221,26 @@ def test_build_add_known_hosts_command_escapes_quotes() -> None:
     assert cmd is not None
     # Single quotes should be escaped as '\"'\"'
     assert "'\"'\"'" in cmd
+
+
+# =============================================================================
+# build_add_authorized_keys_command tests
+# =============================================================================
+
+
+def test_build_add_authorized_keys_command_empty() -> None:
+    """Should return None when no entries are provided."""
+    result = build_add_authorized_keys_command("root", ())
+    assert result is None
+
+
+def test_build_add_authorized_keys_command_regular_user() -> None:
+    """Should use the correct path for non-root users."""
+    entry = "ssh-ed25519 AAAAC3... user@host"
+    cmd = build_add_authorized_keys_command("bob", (entry,))
+    assert cmd is not None
+    assert "/home/bob/.ssh" in cmd
+    assert "/root" not in cmd
 
 
 # =============================================================================

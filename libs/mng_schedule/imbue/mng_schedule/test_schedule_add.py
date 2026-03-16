@@ -147,7 +147,7 @@ def test_schedule_list_shows_deployed_schedule() -> None:
 
     This end-to-end test verifies:
     1. schedule add deploys and saves a creation record
-    2. schedule list --json reads and returns the saved record
+    2. schedule list --format=json reads and returns the saved record
     3. The record contains the expected trigger data
     """
     trigger_name = "test-schedule-list"
@@ -186,7 +186,7 @@ def test_schedule_list_shows_deployed_schedule() -> None:
 
         # List schedules and verify the deployed schedule appears
         list_result = subprocess.run(
-            ["uv", "run", "mng", "schedule", "list", "--provider", "modal", "--json"],
+            ["uv", "run", "mng", "schedule", "list", "--provider", "modal", "--format=json"],
             capture_output=True,
             text=True,
             timeout=60,

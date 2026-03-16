@@ -1,5 +1,6 @@
 from enum import auto
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 
@@ -50,6 +51,13 @@ class PrInfo(FrozenModel):
     is_draft: bool = Field(description="Whether the PR is a draft")
 
 
+class ColumnData(FrozenModel):
+    """Data sources available to custom columns for a single agent."""
+
+    labels: dict[str, str] = Field(default_factory=dict, description="Agent labels (key-value pairs)")
+    plugin_data: dict[str, Any] = Field(default_factory=dict, description="Plugin fields from AgentDetails.plugin")
+
+
 class AgentBoardEntry(FrozenModel):
     """A single agent entry on the pankan board."""
 
@@ -64,6 +72,7 @@ class AgentBoardEntry(FrozenModel):
     )
     create_pr_url: str | None = Field(default=None, description="URL to create a new PR for this branch")
     is_muted: bool = Field(default=False, description="Whether the agent is muted (relegated to bottom)")
+    column_data: ColumnData = Field(default_factory=ColumnData, description="Data sources for custom columns")
 
 
 class BoardSnapshot(FrozenModel):
@@ -82,6 +91,20 @@ class GitHubData(FrozenModel):
     repo_path: str | None = Field(default=None, description="GitHub owner/repo path (e.g. 'owner/repo')")
     prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched")
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during remote fetch")
+
+
+class CustomColumnConfig(FrozenModel):
+    """Configuration for a single custom column on the kanpan board."""
+
+    header: str = Field(description="Column header text")
+    colors: dict[str, str] = Field(default_factory=dict, description="Mapping from value to urwid color name")
+    source: str = Field(
+        default="labels",
+        description="Data source: 'labels' (agent labels) "
+        "or 'agent' (AgentDetails.plugin, populated by agent_field_generators via AgentInterface)",
+    )
+    plugin_name: str | None = Field(default=None, description="Plugin name (required for 'agent' source)")
+    field: str | None = Field(default=None, description="Field name within plugin data (required for 'agent' source)")
 
 
 class RefreshHook(FrozenModel):
@@ -116,6 +139,16 @@ class KanpanPluginConfig(PluginConfig):
         default_factory=dict,
         description="Custom commands keyed by their trigger key",
     )
+    columns: dict[str, CustomColumnConfig] = Field(
+        default_factory=dict,
+        description="Custom columns keyed by column identifier",
+    )
+    column_order: list[str] | None = Field(
+        default=None,
+        description="Display order for all columns (built-in and custom). "
+        "Built-in names: name, state, git, pr, ci, link. "
+        "If None, defaults to: name, state, git, pr, ci, [custom in config order], link.",
+    )
     refresh_interval_seconds: float = Field(
         default=600.0,
         description="Seconds between periodic full refreshes (default 10 minutes)",
@@ -139,6 +172,8 @@ class KanpanPluginConfig(PluginConfig):
             return self
         merged_enabled = override.enabled if override.enabled is not None else self.enabled
         merged_commands = {**self.commands, **override.commands}
+        merged_columns = {**self.columns, **override.columns}
+        merged_column_order = override.column_order if override.column_order is not None else self.column_order
         merged_refresh_interval = (
             override.refresh_interval_seconds
             if override.refresh_interval_seconds is not None
@@ -154,6 +189,8 @@ class KanpanPluginConfig(PluginConfig):
         return KanpanPluginConfig(
             enabled=merged_enabled,
             commands=merged_commands,
+            columns=merged_columns,
+            column_order=merged_column_order,
             refresh_interval_seconds=merged_refresh_interval,
             retry_cooldown_seconds=merged_auto_cooldown,
             on_before_refresh=merged_on_before_refresh,

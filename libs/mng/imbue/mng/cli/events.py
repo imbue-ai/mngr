@@ -69,6 +69,7 @@ def _write_and_flush_stdout(content: str) -> None:
     help="Print the first N events (or lines when viewing a specific file)",
 )
 @optgroup.group("Filtering")
+# FIXME: this should be consistent with the rest of the API (two repeatable args, --include and --exclude, that can be used together to build up complex filters)
 @optgroup.option(
     "--filter",
     "filter",

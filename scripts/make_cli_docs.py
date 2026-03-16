@@ -48,14 +48,17 @@ SECONDARY_COMMANDS = {
     "cleanup",
     "config",
     "gc",
+    "label",
     "limit",
     "events",
     "message",
     "provision",
     "plugin",
     "snapshot",
+    "transcript",
 }
 ALIAS_COMMANDS = {
+    "archive",
     "clone",
     "migrate",
 }

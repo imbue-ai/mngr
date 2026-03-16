@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# mng_log.sh -- Shared JSONL logging library for mng bash scripts.
+# mng_log.sh -- Shared JSONL logging library and timestamp utilities for mng
+# bash scripts.
 #
 # Source this file after setting the required variables:
 #   _MNG_LOG_TYPE    - the event type (e.g. "event_watcher", "chat")
@@ -8,16 +9,66 @@ set -euo pipefail
 #   _MNG_LOG_FILE    - absolute path to the JSONL log file
 #
 # Provides:
-#   _json_escape <string>         - escape a string for JSON embedding
-#   _log_jsonl <level> <message>  - write a JSONL log line to $_MNG_LOG_FILE
-#   log_info <message>            - log at INFO level
-#   log_debug <message>           - log at DEBUG level
-#   log_warn <message>            - log at WARNING level
-#   log_error <message>           - log at ERROR level
+#   mng_timestamp                    - print ISO 8601 UTC timestamp with best
+#                                      available sub-second precision
+#   _json_escape <string>            - escape a string for JSON embedding
+#   _log_jsonl <level> <message>     - write a JSONL log line to $_MNG_LOG_FILE
+#   log_info <message>               - log at INFO level
+#   log_debug <message>              - log at DEBUG level
+#   log_warn <message>               - log at WARNING level
+#   log_error <message>              - log at ERROR level
 #
 # Level names match Python's loguru: DEBUG, INFO, WARNING, ERROR.
 # Note: this file sets strict mode (set -euo pipefail) -- all sourcing
 # scripts are expected to use strict mode as well.
+
+# ---------------------------------------------------------------------------
+# Timestamp generation
+# ---------------------------------------------------------------------------
+# Detect the best available method for generating high-precision timestamps.
+# This runs once when the file is sourced so that every subsequent call to
+# mng_timestamp is fast.
+#
+# Methods (in preference order):
+#   gnu   - GNU coreutils date with nanosecond %N support (Linux)
+#   perl  - perl with Time::HiRes for microsecond precision (macOS with perl)
+#   basic - BSD/macOS date without sub-second precision (zero-padded to 9 digits)
+_MNG_TIMESTAMP_METHOD=""
+
+_mng_detect_timestamp_method() {
+    local test_ts
+    test_ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ" 2>/dev/null) || true
+    if [[ "$test_ts" != *"%N"* ]]; then
+        _MNG_TIMESTAMP_METHOD="gnu"
+        return
+    fi
+    if perl -MTime::HiRes=gettimeofday -e '1' 2>/dev/null; then
+        _MNG_TIMESTAMP_METHOD="perl"
+        return
+    fi
+    _MNG_TIMESTAMP_METHOD="basic"
+}
+
+_mng_detect_timestamp_method
+
+mng_timestamp() {
+    case "$_MNG_TIMESTAMP_METHOD" in
+        gnu)
+            date -u +"%Y-%m-%dT%H:%M:%S.%NZ"
+            ;;
+        perl)
+            perl -MTime::HiRes=gettimeofday -MPOSIX=strftime \
+                -e '($s,$us)=gettimeofday();printf "%s.%09dZ\n",strftime("%Y-%m-%dT%H:%M:%S",gmtime($s)),$us*1000'
+            ;;
+        basic)
+            date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# JSON escaping
+# ---------------------------------------------------------------------------
 
 _json_escape() {
     local s="$1"
@@ -29,16 +80,15 @@ _json_escape() {
     printf '%s' "$s"
 }
 
+# ---------------------------------------------------------------------------
+# JSONL logging
+# ---------------------------------------------------------------------------
+
 _log_jsonl() {
     local level="$1"
     local msg="$2"
-    # GNU date supports %N (nanoseconds); macOS BSD date does not.
-    # Fall back to zero-padded microseconds on macOS.
     local ts
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ" 2>/dev/null)
-    if [[ "$ts" == *"%N"* ]]; then
-        ts=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
-    fi
+    ts=$(mng_timestamp)
     local eid
     eid="evt-$(head -c 16 /dev/urandom | xxd -p)"
     local escaped_msg

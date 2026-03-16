@@ -1,33 +1,37 @@
 """Unit tests for the mng_claude_mind plugin."""
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
 
 import pytest
 
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgent
-from imbue.mng.agents.default_plugins.claude_agent import ClaudeAgentConfig
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NamedCommand
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_mind.plugin import CHAT_TTYD_WINDOW_NAME
+from imbue.mng_claude.plugin import ClaudeAgent
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_COMMAND
 from imbue.mng_claude_mind.plugin import CONV_WATCHER_WINDOW_NAME
 from imbue.mng_claude_mind.plugin import ClaudeMindAgent
 from imbue.mng_claude_mind.plugin import ClaudeMindConfig
 from imbue.mng_claude_mind.plugin import EVENT_WATCHER_COMMAND
 from imbue.mng_claude_mind.plugin import EVENT_WATCHER_WINDOW_NAME
+from imbue.mng_claude_mind.plugin import OBSERVER_COMMAND
+from imbue.mng_claude_mind.plugin import OBSERVER_WINDOW_NAME
 from imbue.mng_claude_mind.plugin import WEB_SERVER_WINDOW_NAME
 from imbue.mng_claude_mind.plugin import get_agent_type_from_params
 from imbue.mng_claude_mind.plugin import inject_supporting_services
 from imbue.mng_claude_mind.plugin import override_command_options
+from imbue.mng_llm.data_types import ProvisioningSettings
+from imbue.mng_mind.conftest import StubHost
 
 # Total number of tmux windows injected by inject_supporting_services:
-# agent ttyd, conv_watcher, events, web_server, transcript, chat ttyd
-_SUPPORTING_SERVICE_COUNT = 6
+# conv_watcher, events, web_server, observer
+_SUPPORTING_SERVICE_COUNT = 4
 
 
 class _DummyCommandClass:
@@ -37,7 +41,7 @@ class _DummyCommandClass:
 @pytest.fixture()
 def mind_create_params() -> dict[str, Any]:
     """Run override_command_options for a claude-mind create and return the modified params."""
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude-mind"}
     override_command_options(
         command_name="create",
         command_class=_DummyCommandClass,
@@ -72,6 +76,12 @@ def test_adds_web_server_service(mind_create_params: dict[str, Any]) -> None:
     assert len(entries) == 1
 
 
+def test_adds_observer_service(mind_create_params: dict[str, Any]) -> None:
+    entries = [c for c in mind_create_params["extra_window"] if OBSERVER_WINDOW_NAME in c]
+    assert len(entries) == 1
+    assert OBSERVER_COMMAND in entries[0]
+
+
 def test_adds_supporting_services_for_positional_agent_type() -> None:
     params: dict[str, Any] = {"extra_window": (), "positional_agent_type": "claude-mind"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
@@ -79,13 +89,13 @@ def test_adds_supporting_services_for_positional_agent_type() -> None:
 
 
 def test_does_not_modify_non_create_commands() -> None:
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude-mind"}
     override_command_options(command_name="connect", command_class=_DummyCommandClass, params=params)
     assert params["extra_window"] == ()
 
 
 def test_does_not_modify_for_other_agent_types() -> None:
-    params: dict[str, Any] = {"extra_window": (), "agent_type": "claude"}
+    params: dict[str, Any] = {"extra_window": (), "type": "claude"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert params["extra_window"] == ()
 
@@ -106,7 +116,7 @@ def test_injects_supporting_services_for_registered_subclass() -> None:
 
     try:
         register_agent_class("test-subclass-82741", _TestSubclassAgent)
-        params: dict[str, Any] = {"extra_window": (), "agent_type": "test-subclass-82741"}
+        params: dict[str, Any] = {"extra_window": (), "type": "test-subclass-82741"}
         override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
         assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT
     finally:
@@ -114,7 +124,7 @@ def test_injects_supporting_services_for_registered_subclass() -> None:
 
 
 def test_preserves_existing_extra_windows() -> None:
-    params: dict[str, Any] = {"extra_window": ('monitor="htop"',), "agent_type": "claude-mind"}
+    params: dict[str, Any] = {"extra_window": ('monitor="htop"',), "type": "claude-mind"}
     override_command_options(command_name="create", command_class=_DummyCommandClass, params=params)
     assert len(params["extra_window"]) == _SUPPORTING_SERVICE_COUNT + 1
     assert params["extra_window"][0] == 'monitor="htop"'
@@ -137,31 +147,11 @@ def test_inject_supporting_services_preserves_existing() -> None:
     assert params["extra_window"][0] == 'foo="bar"'
 
 
-# -- ClaudeMindAgent._get_mind_config tests --
-
-
-def test_get_mind_config_raises_on_wrong_type() -> None:
-    """Verify that _get_mind_config raises RuntimeError for non-ClaudeMindConfig."""
-    agent_stub = SimpleNamespace(agent_config=ClaudeAgentConfig())
-
-    with pytest.raises(RuntimeError, match="ClaudeMindAgent requires ClaudeMindConfig"):
-        ClaudeMindAgent._get_mind_config(cast(Any, agent_stub))
-
-
-def test_get_mind_config_returns_config_when_correct_type() -> None:
-    """Verify that _get_mind_config returns the config when it is the correct type."""
-    config = ClaudeMindConfig()
-    agent_stub = SimpleNamespace(agent_config=config)
-
-    result = ClaudeMindAgent._get_mind_config(cast(Any, agent_stub))
-    assert result is config
-
-
 # -- get_agent_type_from_params tests --
 
 
 def test_get_agent_type_from_params_returns_agent_type() -> None:
-    assert get_agent_type_from_params({"agent_type": "claude"}) == "claude"
+    assert get_agent_type_from_params({"type": "claude"}) == "claude"
 
 
 def test_get_agent_type_from_params_returns_positional() -> None:
@@ -169,7 +159,7 @@ def test_get_agent_type_from_params_returns_positional() -> None:
 
 
 def test_get_agent_type_from_params_prefers_agent_type() -> None:
-    params = {"agent_type": "claude", "positional_agent_type": "codex"}
+    params = {"type": "claude", "positional_agent_type": "codex"}
     assert get_agent_type_from_params(params) == "claude"
 
 
@@ -190,12 +180,60 @@ def test_web_server_command_is_parseable_as_named_command() -> None:
     assert named_cmd.window_name == WEB_SERVER_WINDOW_NAME
 
 
-# -- Chat ttyd service tests --
+def test_observer_command_is_parseable_as_named_command() -> None:
+    """Verify the observer command is parseable as a NamedCommand."""
+    params: dict[str, Any] = {}
+    inject_supporting_services(params)
+    observer_entries = [c for c in params["extra_window"] if OBSERVER_WINDOW_NAME in c]
+    assert len(observer_entries) == 1
+    named_cmd = NamedCommand.from_string(observer_entries[0])
+    assert named_cmd.window_name == OBSERVER_WINDOW_NAME
 
 
-def test_adds_chat_ttyd_service(mind_create_params: dict[str, Any]) -> None:
-    entries = [c for c in mind_create_params["extra_window"] if CHAT_TTYD_WINDOW_NAME in c]
-    assert len(entries) == 1
+# -- modify_env_vars tests --
+
+
+def _make_host_stub() -> Any:
+    """Create a host stub that supports execute_command for settings loading."""
+    # execute_command is called by load_settings_from_host to check for minds.toml
+    stub = SimpleNamespace(
+        host_dir=Path("/home/user/.mng"),
+        execute_command=lambda cmd, **kwargs: SimpleNamespace(success=False, stdout="", stderr=""),
+    )
+    return stub
+
+
+def test_modify_env_vars_sets_uv_tool_dirs() -> None:
+    """Verify that modify_env_vars sets UV_TOOL_DIR, UV_TOOL_BIN_DIR, and MNG_LLM_MODEL."""
+    host_stub = _make_host_stub()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        host=host_stub,
+        id="abc",
+        work_dir=Path("/home/user/work"),
+    )
+    env_vars = {"MNG_AGENT_STATE_DIR": "/home/user/.mng/agents/abc"}
+    agent.modify_env_vars(cast(Any, host_stub), env_vars)
+    assert env_vars["UV_TOOL_DIR"] == "/home/user/.mng/agents/abc/tools"
+    assert env_vars["UV_TOOL_BIN_DIR"] == "/home/user/.mng/agents/abc/bin"
+    assert env_vars["MNG_LLM_MODEL"] == "claude-opus-4.6"
+
+
+def test_modify_env_vars_noop_without_state_dir() -> None:
+    """Verify that modify_env_vars does nothing for UV dirs when MNG_AGENT_STATE_DIR is not set."""
+    host_stub = _make_host_stub()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        host=host_stub,
+        id="abc",
+        work_dir=Path("/home/user/work"),
+    )
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(cast(Any, host_stub), env_vars)
+    assert "UV_TOOL_DIR" not in env_vars
+    assert "UV_TOOL_BIN_DIR" not in env_vars
+    # MNG_LLM_MODEL should still be set even without state dir
+    assert env_vars["MNG_LLM_MODEL"] == "claude-opus-4.6"
 
 
 # -- assemble_command tests --
@@ -234,3 +272,51 @@ def test_get_role_from_env_raises_when_missing() -> None:
     )
     with pytest.raises(RuntimeError, match="ROLE environment variable is required"):
         ClaudeMindAgent._get_role_from_env(options)
+
+
+# -- _configure_role_settings tests --
+
+
+def test_configure_role_settings_writes_auto_memory_directory() -> None:
+    """Verify that _configure_role_settings sets autoMemoryDirectory in settings.local.json."""
+    host = StubHost()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        work_dir=Path("/home/user/minds/agent"),
+    )
+
+    agent._configure_role_settings(
+        cast(Any, host),
+        active_role="thinking",
+        role_dir_abs="/home/user/minds/agent/thinking",
+        settings=ProvisioningSettings(),
+    )
+
+    written = [(str(p), content) for p, content in host.written_text_files]
+    settings_entries = [(p, content) for p, content in written if "settings.local.json" in p]
+    assert len(settings_entries) == 1
+
+    settings = json.loads(settings_entries[0][1])
+    assert settings["autoMemoryDirectory"] == "/home/user/minds/agent/thinking/memory"
+
+
+def test_configure_role_settings_includes_readiness_hooks() -> None:
+    """Verify that _configure_role_settings also includes readiness hooks."""
+    host = StubHost()
+    agent = ClaudeMindAgent.model_construct(
+        agent_config=ClaudeMindConfig(),
+        work_dir=Path("/home/user/minds/agent"),
+    )
+
+    agent._configure_role_settings(
+        cast(Any, host),
+        active_role="thinking",
+        role_dir_abs="/home/user/minds/agent/thinking",
+        settings=ProvisioningSettings(),
+    )
+
+    written = [(str(p), content) for p, content in host.written_text_files]
+    settings_entries = [(p, content) for p, content in written if "settings.local.json" in p]
+    settings = json.loads(settings_entries[0][1])
+    assert "hooks" in settings
+    assert "SessionStart" in settings["hooks"]

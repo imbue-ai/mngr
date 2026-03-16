@@ -22,6 +22,7 @@ from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.common import determine_lifecycle_state
 from imbue.mng.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mng.hosts.tmux import capture_tmux_pane_content
+from imbue.mng.interfaces.agent import AgentConfigT
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import FileTransferSpec
 from imbue.mng.interfaces.host import CreateAgentOptions
@@ -71,7 +72,7 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-class BaseAgent(AgentInterface):
+class BaseAgent(AgentInterface[AgentConfigT]):
     """Concrete agent implementation that stores data on the host filesystem."""
 
     host: OnlineHostInterface = Field(description="The host this agent runs on (must be online)")
@@ -350,9 +351,9 @@ class BaseAgent(AgentInterface):
             if tui_indicator is not None:
                 self._wait_for_tui_ready(self.tmux_target, tui_indicator)
 
-    def capture_pane_content(self) -> str | None:
+    def capture_pane_content(self, include_scrollback: bool = False) -> str | None:
         """Capture the current tmux pane content for this agent."""
-        return self._capture_pane_content(self.tmux_target)
+        return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
 
     def _send_tmux_literal_keys(self, tmux_target: str, message: str) -> None:
         """Send literal text to a tmux pane, choosing the best method by length.
@@ -421,12 +422,13 @@ class BaseAgent(AgentInterface):
         # Send Enter and wait for submission signal
         self._send_enter_and_wait(tmux_target)
 
-    def _capture_pane_content(self, tmux_target: str) -> str | None:
+    def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
         """Capture the current pane content, returning None on failure."""
         return capture_tmux_pane_content(
             self.host,
             tmux_target,
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
+            include_scrollback=include_scrollback,
         )
 
     def _wait_for_tui_ready(self, tmux_target: str, indicator: str) -> None:
@@ -583,6 +585,7 @@ class BaseAgent(AgentInterface):
 
         return False
 
+    # FIXME: this logic is claude specific, and needs to be refactored so that other agents can properly implement it as well
     def _get_last_queue_timestamp(self, timeout_secs: float) -> str | None:
         env_command_prefix = self.host.build_source_env_prefix(self)
         initial_read_queue_ops_result = self.host.execute_command(

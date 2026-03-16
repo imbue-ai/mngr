@@ -18,7 +18,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.deploy_utils import MngInstallMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
-from imbue.mng.providers.modal.instance import ModalProviderInstance
+from imbue.mng_modal.instance import ModalProviderInstance
 from imbue.mng_schedule.cli.group import add_trigger_options
 from imbue.mng_schedule.cli.group import resolve_positional_name
 from imbue.mng_schedule.cli.group import schedule

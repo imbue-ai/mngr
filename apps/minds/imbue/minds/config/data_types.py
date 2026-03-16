@@ -1,10 +1,8 @@
-from enum import auto
 from pathlib import Path
 from typing import Final
 
 from pydantic import Field
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.primitives import AgentId
 
@@ -30,21 +28,6 @@ class MindPaths(FrozenModel):
     def mind_dir(self, agent_id: AgentId) -> Path:
         """Directory for a specific mind's repo (e.g. ~/.minds/<agent-id>/)."""
         return self.data_dir / str(agent_id)
-
-
-class DeploymentProvider(UpperCaseStrEnum):
-    """Where the mind can be deployed."""
-
-    LOCAL = auto()
-    MODAL = auto()
-    DOCKER = auto()
-
-
-class SelfDeployChoice(UpperCaseStrEnum):
-    """Whether the mind can launch its own agents."""
-
-    YES = auto()
-    NOT_NOW = auto()
 
 
 def get_default_data_dir() -> Path:

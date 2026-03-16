@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [stop|s] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
+mng [stop|s] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
 ```
 
 Stop running agent(s).
@@ -16,6 +16,11 @@ running unless idle detection stops it automatically.
 
 For local agents, this stops the agent's tmux session. The local host
 itself cannot be stopped (if you want that, shut down your computer).
+
+Use --archive to also set an 'archived_at' label on each stopped agent.
+This marks the agent as archived without destroying it, allowing it to
+be filtered out of listings while preserving its state. The 'mng archive'
+command is a shorthand for 'mng stop --archive'.
 
 Supports custom format templates via --format. Available fields: name.
 
@@ -47,6 +52,7 @@ mng stop [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--archive` | boolean | Set an 'archived_at' label on each stopped agent (marks it as archived) | `False` |
 | `--dry-run` | boolean | Show what would be stopped without actually stopping | `False` |
 | `--snapshot-mode` | choice (`auto` &#x7C; `always` &#x7C; `never`) | Control snapshot creation when stopping: auto (snapshot if needed), always, or never [future] | None |
 | `--graceful`, `--no-graceful` | boolean | Wait for agent to reach a clean state before stopping [future] | `True` |
@@ -74,6 +80,7 @@ mng stop [OPTIONS] [AGENTS]...
 - [mng start](./start.md) - Start stopped agents
 - [mng connect](./connect.md) - Connect to an agent
 - [mng list](./list.md) - List existing agents
+- [mng archive](../aliases/archive.md) - Stop and archive agents (shorthand for stop --archive)
 
 ## Examples
 
@@ -93,6 +100,12 @@ $ mng stop agent1 agent2
 
 ```bash
 $ mng stop --all
+```
+
+**Stop and archive an agent**
+
+```bash
+$ mng stop my-agent --archive
 ```
 
 **Stop by tmux session name**

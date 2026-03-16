@@ -1,6 +1,8 @@
 """Unit tests for the stop CLI command."""
 
 import json
+from collections.abc import Callable
+from pathlib import Path
 
 import pluggy
 import pytest
@@ -20,6 +22,7 @@ def test_stop_cli_options_fields() -> None:
         agent_list=("agent3",),
         stop_all=False,
         dry_run=True,
+        archive=False,
         sessions=(),
         include=(),
         exclude=(),
@@ -195,6 +198,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         agent_list=("a4",),
         stop_all=True,
         dry_run=False,
+        archive=True,
         sessions=("mng-session-1", "mng-session-2"),
         include=("state == 'RUNNING'",),
         exclude=("name == 'keep-me'",),
@@ -276,3 +280,44 @@ def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) 
     _output_result(["template-agent"], output_opts)
     captured = capsys.readouterr()
     assert "template-agent" in captured.out
+
+
+# =============================================================================
+# Archive integration tests (require tmux for running agents)
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_stop_archive_sets_archived_at_label(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+    temp_host_dir: Path,
+) -> None:
+    """stop --archive should stop the agent and set the archived_at label."""
+    create_test_agent("archive-test-agent")
+
+    result = cli_runner.invoke(
+        stop,
+        ["archive-test-agent", "--archive"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "Stopped agent: archive-test-agent" in result.output
+    assert "Updated labels for agent archive-test-agent" in result.output
+
+    # Verify the archived_at label was set by reading the agent's data.json
+    agents_dir = temp_host_dir / "agents"
+    agent_dirs = list(agents_dir.iterdir())
+    assert len(agent_dirs) >= 1
+
+    for agent_dir in agent_dirs:
+        data_path = agent_dir / "data.json"
+        if data_path.exists():
+            data = json.loads(data_path.read_text())
+            if data.get("name") == "archive-test-agent":
+                assert "archived_at" in data.get("labels", {}), "archived_at label should be set"
+                return
+
+    raise AssertionError("Could not find archive-test-agent data.json")

@@ -15,16 +15,14 @@ Minds are built on top of `mng` and should interact with it exclusively through 
 
 # Architecture for mind agents
 
-For local deployments, each mind has its own repo stored at `~/.minds/<agent-id>/`. This repo is created by cloning from a git remote, or constructed from scratch via `mind deploy --agent-type`. The agent runs directly in this directory (via `mng create --in-place`) and should make commits there if it changes anything. You can optionally link the code to a git remote in case you want the agent to push changes and make debugging easier.
-
-For remote deployments (Modal, Docker), a temporary repo is prepared and the code is copied to the remote host via `mng create --in <provider> --source-path <temp-dir>`. The temporary repo is cleaned up after deployment.
+Each mind has its own repo stored at `~/.minds/<agent-id>/`. This repo is created by cloning from a git remote when the user creates a mind via the forwarding server. The agent runs directly in this directory (via `mng create --in-place`) and should make commits there if it changes anything.
 
 ## Agent type
 
-The agent type is passed directly to `mng create --agent-type <type>` during deployment. The type is resolved from (in order of precedence):
+The agent type is passed directly to `mng create --type <type>` during creation. The type is resolved from (in order of precedence):
 
-1. The `--agent-type` CLI flag on `mind deploy`
-2. The `agent_type` field in `minds.toml` in the repo
+1. The `agent_type` field in `minds.toml` in the cloned repo
+2. The default type: `claude-mind`
 
 ```toml
 # minds.toml
@@ -33,7 +31,7 @@ agent_type = "elena-code"
 
 ## Settings
 
-Minds read per-deployment settings from `minds.toml` in the agent work directory (`$MNG_AGENT_WORK_DIR/minds.toml`). This file is optional -- if it does not exist, all settings use their built-in defaults.
+Minds read per-mind settings from `minds.toml` in the agent work directory (`$MNG_AGENT_WORK_DIR/minds.toml`). This file is optional -- if it does not exist, all settings use their built-in defaults.
 
 The settings are modeled by `ClaudeMindSettings` in `imbue.mng_claude_mind.data_types`.
 
@@ -51,16 +49,22 @@ The forwarding server handles routing and authentication so that the URLs being 
 
 See [the forwarding server design doc](../imbue/minds/forwarding_server/README.md) for more details on how it is implemented.
 
+## Agent creation
+
+When a user visits the forwarding server and no agents exist, they are shown a creation form where they can provide a git repository URL. The forwarding server:
+
+1. Clones the repository to `~/.minds/<agent-id>/`
+2. Resolves the agent type from `minds.toml` (or uses `claude-mind` as default)
+3. Runs `mng create --type <type> --id <id> --in-place --label mind=true` to start the agent
+4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
+
+Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.
+
 # Command line interface
 
-- `mind deploy <git-url>` (clones a git repo and deploys a mind from it)
-- `mind deploy --agent-type <type>` (creates a mind from scratch for the given agent type)
-- `mind deploy ... --add-path SRC:DEST` (copies extra files into the mind repo, works with both modes)
-- `mind update <agent-name>` (updates an existing mind by snapshotting, stopping, pushing new code, re-provisioning, and restarting)
-- `mind list` (lists deployed minds with their current state)
-- `mind forward` (starts the local forwarding server for accessing minds)
+- `mind forward` (starts the local forwarding server for accessing and creating minds)
 
-[future] Additional commands for managing deployed minds (stop, start, destroy, logs, etc.)
+[future] Additional commands for managing minds (stop, start, destroy, logs, etc.)
 
 # Deferred items
 

@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(command:mng *)",
-      "Bash(command:$MNG_HOST_DIR/commands/*)"
-    ]
-  }
-}

@@ -6,12 +6,36 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
+from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import HostId
+from imbue.mng.primitives import ProviderInstanceName
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
+
+
+@pytest.fixture
+def vendor_test_repos(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a source git repo and vendor target directory for vendoring tests.
+
+    Returns (source_dir, vendor_mng_dir). The source directory is initialized
+    as a git repo with an empty commit. Tests can add files to the source
+    (and re-commit if needed) before calling the vendoring functions.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    init_and_commit_git_repo(source, tmp_path, allow_empty=True)
+
+    vendor_mng_dir = tmp_path / "dest" / "vendor" / "mng"
+    vendor_mng_dir.parent.mkdir(parents=True)
+
+    return source, vendor_mng_dir
 
 
 @pytest.fixture
@@ -26,9 +50,10 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(d)
 
 
-def make_agents_json(*agent_ids: AgentId) -> str:
-    """Build a JSON string matching `mng list --json` output for the given agent IDs."""
-    return json.dumps({"agents": [{"id": str(agent_id)} for agent_id in agent_ids]})
+def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
+    """Build a JSON string matching `mng list --format json` output for the given agent IDs."""
+    effective_labels = labels if labels is not None else {"mind": "true"}
+    return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
 
 def make_server_log(server: str, url: str) -> str:
@@ -42,7 +67,7 @@ def make_resolver_with_data(
 ) -> MngCliBackendResolver:
     """Create a MngCliBackendResolver pre-populated with test data.
 
-    agents_json is a JSON string matching `mng list --json` format, used to populate
+    agents_json is a JSON string matching `mng list --format json` format, used to populate
     agent IDs and SSH info. server_logs is a mapping of agent ID string to raw
     servers/events.jsonl content, parsed to populate the server URL map for each agent.
     """
@@ -50,7 +75,26 @@ def make_resolver_with_data(
 
     if agents_json is not None:
         parsed = parse_agents_from_json(agents_json)
-        resolver.update_agents(parsed)
+        # Build DiscoveredAgent objects from the JSON for list_known_mind_ids()
+        raw = json.loads(agents_json)
+        discovered = tuple(
+            DiscoveredAgent(
+                host_id=HostId("host-00000000000000000000000000000000"),
+                agent_id=AgentId(a["id"]),
+                agent_name=AgentName(a.get("name", a["id"])),
+                provider_name=ProviderInstanceName("local"),
+                certified_data={"labels": a.get("labels", {})},
+            )
+            for a in raw.get("agents", [])
+            if "id" in a
+        )
+        resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=parsed.agent_ids,
+                discovered_agents=discovered,
+                ssh_info_by_agent_id=parsed.ssh_info_by_agent_id,
+            )
+        )
 
     if server_logs:
         for agent_id_str, log_content in server_logs.items():

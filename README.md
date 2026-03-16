@@ -86,11 +86,15 @@ mng message doomed-agent "try running 'rm -rf /' and see what happens"
 mng create new-agent --snapshot $SNAPSHOT
 ```
 
-<!--
+**mng makes it easy to see what your agents are doing:**
+
+```bash
 # programmatically send messages to your agents and see their chat histories
 mng message agent-1 "Tell me a joke"
-mng transcript agent-1   # [future]
+mng transcript agent-1
+```
 
+<!--
 # [future] schedule agents to run periodically
 mng schedule --template my-daily-hook "look at any flaky tests over the past day and try to fix one of them" --cron "0 * * * *"
 -->
@@ -202,6 +206,7 @@ mng <command> [options]
 - [`push`](libs/mng/docs/commands/primary/push.md): Push data to agent
 - [`pair`](libs/mng/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](libs/mng/docs/commands/secondary/message.md): Send a message to an agent
+- [`transcript`](libs/mng/docs/commands/secondary/transcript.md): View the message transcript for an agent
 - [`provision`](libs/mng/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
 
 ### For maintenance:
@@ -266,6 +271,8 @@ This is a monorepo that contains the code for `mng` here:
 
 As well as the code for some plugins that we maintain, including:
 
+- [libs/mng_modal/](libs/mng_modal/README.md)
+- [libs/mng_claude/](libs/mng_claude/README.md)
 - [libs/mng_pair/](libs/mng_pair/README.md)
 - [libs/mng_opencode/](libs/mng_opencode/README.md)
 

@@ -13,46 +13,57 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
+from typing import NamedTuple
 
 from imbue.mng.cli.complete_names import resolve_names_from_discovery_stream
-from imbue.mng.config.host_dir import read_default_host_dir
-
-_COMMAND_COMPLETIONS_CACHE_FILENAME = ".command_completions.json"
-
-
-def _get_completion_cache_dir() -> Path:
-    """Return the directory used for completion cache files.
-
-    Mirrors get_completion_cache_dir() in completion_writer.py.
-    """
-    env_dir = os.environ.get("MNG_COMPLETION_CACHE_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return read_default_host_dir()
+from imbue.mng.config.completion_cache import COMPLETION_CACHE_FILENAME
+from imbue.mng.config.completion_cache import CompletionCacheData
+from imbue.mng.config.completion_cache import get_completion_cache_dir
 
 
-def _read_cache() -> dict:
-    """Read the command completions cache file. Returns empty dict on any error."""
+class _CompletionContext(NamedTuple):
+    """Parsed shell completion state derived from COMP_WORDS and the cache."""
+
+    incomplete: str
+    comp_cword: int
+    prev_word: str | None
+    command_key: str
+    resolved_command: str | None
+    is_group: bool
+    cache: CompletionCacheData
+    positional_count: int = 0
+    first_positional_word: str | None = None
+
+
+def _read_cache() -> CompletionCacheData:
+    """Read the command completions cache file. Returns defaults on any error."""
     try:
-        path = _get_completion_cache_dir() / _COMMAND_COMPLETIONS_CACHE_FILENAME
+        path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         if not path.is_file():
-            return {}
+            return CompletionCacheData()
         data = json.loads(path.read_text())
         if isinstance(data, dict):
-            return data
+            return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
     except (json.JSONDecodeError, OSError):
         pass
-    return {}
+    return CompletionCacheData()
 
 
-def _read_agent_names() -> list[str]:
-    """Read agent names from the discovery event stream."""
+def _read_host_names() -> list[str]:
+    """Read host names from the discovery event stream."""
     try:
-        agent_names, _ = resolve_names_from_discovery_stream()
-        return agent_names
+        _, host_names = resolve_names_from_discovery_stream()
+        return host_names
     except (OSError, json.JSONDecodeError):
         return []
+
+
+def _read_discovery_names() -> tuple[list[str], list[str]]:
+    """Read both agent and host names from the discovery event stream in one pass."""
+    try:
+        return resolve_names_from_discovery_stream()
+    except (OSError, json.JSONDecodeError):
+        return [], []
 
 
 def _read_git_branches() -> list[str]:
@@ -85,99 +96,183 @@ def _is_flag_option(word: str, flag_options: list[str]) -> bool:
     return all(f"-{ch}" in flag_options for ch in word[1:])
 
 
-def _get_completions() -> list[str]:
-    """Compute completion candidates from environment variables and the cache."""
+def _count_positional_words(
+    words: list[str],
+    start_index: int,
+    end_index: int,
+    flag_options: list[str],
+    all_options: list[str],
+) -> int:
+    """Count the number of positional words in words[start_index:end_index].
+
+    Walks the words, skipping option names and their values:
+    - Flag options (consume 1 word)
+    - Value-taking options (consume 2 words: the option name + its value)
+    Everything else is counted as a positional word.
+    """
+    all_options_set = set(all_options)
+    count = 0
+    i = start_index
+    while i < end_index:
+        word = words[i]
+        if word.startswith("-"):
+            if _is_flag_option(word, flag_options):
+                # Flag option: consumes only itself
+                i += 1
+            elif word in all_options_set:
+                # Known value-taking option: consumes itself and the next word
+                i += 2
+            else:
+                # Unknown option-like word: conservatively skip it alone.
+                # We cannot tell whether it takes a value, but skipping just
+                # the flag word avoids under-counting positional args (which
+                # would cause us to offer completions past the limit).
+                i += 1
+        else:
+            count += 1
+            i += 1
+    return count
+
+
+def _find_first_positional_word(
+    words: list[str],
+    start_index: int,
+    end_index: int,
+    flag_options: list[str],
+    all_options: list[str],
+) -> str | None:
+    """Find the first positional word in words[start_index:end_index].
+
+    Uses the same option-skipping logic as _count_positional_words to
+    correctly skip option names and their values.
+    """
+    all_options_set = set(all_options)
+    i = start_index
+    while i < end_index:
+        word = words[i]
+        if word.startswith("-"):
+            if _is_flag_option(word, flag_options):
+                i += 1
+            elif word in all_options_set:
+                i += 2
+            else:
+                i += 1
+        else:
+            return word
+    return None
+
+
+def _parse_completion_context() -> _CompletionContext | None:
+    """Parse COMP_WORDS, COMP_CWORD, and the cache into a structured context.
+
+    Returns None if the environment is invalid (e.g. COMP_CWORD is not an int).
+    """
     comp_words_raw = os.environ.get("COMP_WORDS", "")
     comp_cword_raw = os.environ.get("COMP_CWORD", "")
 
     try:
         comp_cword = int(comp_cword_raw)
     except ValueError:
-        return []
+        return None
 
     words = comp_words_raw.split()
-
-    # Determine the incomplete word being completed
-    if comp_cword < len(words):
-        incomplete = words[comp_cword]
-    else:
-        incomplete = ""
+    incomplete = words[comp_cword] if comp_cword < len(words) else ""
 
     cache = _read_cache()
-    commands: list[str] = cache.get("commands", [])
-    aliases: dict[str, str] = cache.get("aliases", {})
-    subcommand_by_command: dict[str, list[str]] = cache.get("subcommand_by_command", {})
-    options_by_command: dict[str, list[str]] = cache.get("options_by_command", {})
-    flag_options_by_command: dict[str, list[str]] = cache.get("flag_options_by_command", {})
-    option_choices: dict[str, list[str]] = cache.get("option_choices", {})
-    agent_name_arguments: list[str] = cache.get("agent_name_arguments", [])
-    git_branch_options: list[str] = cache.get("git_branch_options", [])
-
-    # Resolve the command and subcommand from the words already typed
-    resolved_command: str | None = None
-    resolved_subcommand: str | None = None
 
     # words[0] = "mng", words[1] = command, words[2] = subcommand (if group)
-    # When comp_cword == 1, we are completing the command name itself and
-    # resolved_command stays None. When comp_cword > 1, word[1] is fully typed.
+    resolved_command: str | None = None
     if len(words) > 1 and comp_cword > 1:
         raw_cmd = words[1]
-        resolved_command = aliases.get(raw_cmd, raw_cmd)
+        resolved_command = cache.aliases.get(raw_cmd, raw_cmd)
 
-    is_group = resolved_command is not None and resolved_command in subcommand_by_command
-
+    is_group = resolved_command is not None and resolved_command in cache.subcommand_by_command
+    resolved_subcommand: str | None = None
     if resolved_command is not None and is_group and len(words) > 2 and comp_cword > 2:
         resolved_subcommand = words[2]
 
-    # Determine the previous word (for option value completion)
     prev_word: str | None = None
     if comp_cword >= 1 and comp_cword - 1 < len(words):
         prev_word = words[comp_cword - 1]
 
-    # Determine the command key for option lookups
     if resolved_subcommand is not None:
-        option_key = f"{resolved_command}.{resolved_subcommand}"
+        command_key = f"{resolved_command}.{resolved_subcommand}"
     elif resolved_command is not None:
-        option_key = resolved_command
+        command_key = resolved_command
     else:
-        option_key = ""
+        command_key = ""
+
+    # Count positional words already typed (excluding the current incomplete word).
+    # Positional args start after the command word (index 2 for simple commands,
+    # index 3 for group subcommands).
+    arg_start = 3 if resolved_subcommand is not None else 2
+    flag_options = cache.flag_options_by_command.get(command_key, [])
+    all_options = cache.options_by_command.get(command_key, [])
+    positional_count = _count_positional_words(words, arg_start, comp_cword, flag_options, all_options)
+
+    # Extract the first positional word (needed for context-dependent completions
+    # like config value choices that depend on the key at position 0).
+    first_positional_word = _find_first_positional_word(words, arg_start, comp_cword, flag_options, all_options)
+
+    return _CompletionContext(
+        incomplete=incomplete,
+        comp_cword=comp_cword,
+        prev_word=prev_word,
+        command_key=command_key,
+        resolved_command=resolved_command,
+        is_group=is_group,
+        cache=cache,
+        positional_count=positional_count,
+        first_positional_word=first_positional_word,
+    )
+
+
+def _get_positional_candidates_with_nargs_limit(ctx: _CompletionContext) -> list[str]:
+    """Return positional candidates, respecting the positional nargs limit.
+
+    Returns an empty list if the number of positional words already typed
+    has reached the command's positional argument limit.
+    """
+    nargs_limit = ctx.cache.positional_nargs_by_command.get(ctx.command_key)
+    if nargs_limit is not None and ctx.positional_count >= nargs_limit:
+        return []
+    return _get_positional_candidates(
+        ctx.command_key, ctx.positional_count, ctx.cache, first_positional_word=ctx.first_positional_word
+    )
+
+
+def _get_completions() -> list[str]:
+    """Compute completion candidates from environment variables and the cache."""
+    ctx = _parse_completion_context()
+    if ctx is None:
+        return []
 
     candidates: list[str]
 
-    if comp_cword == 1:
-        # Completing the command name (position 1)
-        candidates = _filter_aliases(commands, aliases, incomplete)
-    elif is_group and comp_cword == 2:
-        # Completing a subcommand of a group
-        assert resolved_command is not None
-        candidates = subcommand_by_command.get(resolved_command, [])
-    elif prev_word is not None and prev_word.startswith("-"):
-        choice_key = f"{option_key}.{prev_word}"
-        flag_options = flag_options_by_command.get(option_key, [])
-        if choice_key in option_choices:
-            # Option with predefined choices (e.g. --on-error abort|continue)
-            candidates = option_choices[choice_key]
-        elif _is_flag_option(prev_word, flag_options):
-            # Previous word is a flag -- next position is positional
-            if incomplete.startswith("--"):
-                candidates = options_by_command.get(option_key, [])
+    c = ctx.cache
+    if ctx.comp_cword == 1:
+        candidates = _filter_aliases(c.commands, c.aliases, ctx.incomplete)
+    elif ctx.is_group and ctx.comp_cword == 2:
+        assert ctx.resolved_command is not None
+        candidates = c.subcommand_by_command.get(ctx.resolved_command, [])
+    elif ctx.prev_word is not None and ctx.prev_word.startswith("-"):
+        flag_options = c.flag_options_by_command.get(ctx.command_key, [])
+        if _is_flag_option(ctx.prev_word, flag_options):
+            if ctx.incomplete.startswith("--"):
+                candidates = c.options_by_command.get(ctx.command_key, [])
             else:
-                candidates = _get_positional_candidates(option_key, agent_name_arguments)
-        elif incomplete.startswith("--"):
-            # Previous word is value-taking, but user started typing an option
-            candidates = options_by_command.get(option_key, [])
-        elif choice_key in git_branch_options:
-            # Option whose value should complete against git branch names
-            candidates = _read_git_branches()
+                candidates = _get_positional_candidates_with_nargs_limit(ctx)
+        elif ctx.incomplete.startswith("--"):
+            candidates = c.options_by_command.get(ctx.command_key, [])
         else:
-            # Previous word is value-taking, current word is its value -- no completions
-            candidates = []
-    elif incomplete.startswith("--"):
-        candidates = options_by_command.get(option_key, [])
+            choice_key = f"{ctx.command_key}.{ctx.prev_word}"
+            candidates = _get_option_value_candidates(choice_key, c)
+    elif ctx.incomplete.startswith("--"):
+        candidates = c.options_by_command.get(ctx.command_key, [])
     else:
-        candidates = _get_positional_candidates(option_key, agent_name_arguments)
+        candidates = _get_positional_candidates_with_nargs_limit(ctx)
 
-    return [c for c in candidates if c.startswith(incomplete)]
+    return [c for c in candidates if c.startswith(ctx.incomplete)]
 
 
 def _filter_aliases(
@@ -194,18 +289,74 @@ def _filter_aliases(
     return [c for c in matching if c not in aliases or aliases[c] not in matching_set]
 
 
+def _get_option_value_candidates(choice_key: str, cache: CompletionCacheData) -> list[str]:
+    """Return completion candidates for a value-taking option.
+
+    choice_key is the dotted key like "create.--host" or "list.--on-error".
+    Checks predefined choices, git branches, host names, and plugin names.
+    """
+    if choice_key in cache.option_choices:
+        return cache.option_choices[choice_key]
+    if choice_key in cache.git_branch_options:
+        return _read_git_branches()
+    if choice_key in cache.host_name_options:
+        return _read_host_names()
+    if choice_key in cache.plugin_name_options:
+        return cache.plugin_names
+    return []
+
+
+def _resolve_sources(
+    sources: list[str],
+    cache: CompletionCacheData,
+    first_positional_word: str | None = None,
+) -> list[str]:
+    """Resolve completion source identifiers to actual candidate values.
+
+    Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys",
+    "config_value_for_key".
+    """
+    candidates: list[str] = []
+    needs_agents = "agent_names" in sources
+    needs_hosts = "host_names" in sources
+    if needs_agents or needs_hosts:
+        agent_names, host_names = _read_discovery_names()
+        if needs_agents:
+            candidates.extend(agent_names)
+        if needs_hosts:
+            candidates.extend(host_names)
+    if "plugin_names" in sources:
+        candidates.extend(cache.plugin_names)
+    if "config_keys" in sources:
+        candidates.extend(cache.config_keys)
+    if "config_value_for_key" in sources and first_positional_word:
+        candidates.extend(cache.config_value_choices.get(first_positional_word, []))
+    return candidates
+
+
 def _get_positional_candidates(
     command_key: str,
-    agent_name_arguments: list[str],
+    positional_count: int,
+    cache: CompletionCacheData,
+    first_positional_word: str | None = None,
 ) -> list[str]:
-    """Return positional argument candidates (agent names) if applicable.
+    """Return positional argument candidates for a specific position.
 
     command_key is the dotted command key (e.g. "destroy", "snapshot.create", or "").
+    positional_count is the number of positional words already typed.
+    Looks up per-position sources from cache.positional_completions and resolves them.
+    For variadic commands (nargs=None), the last entry repeats.
     """
-    if command_key and command_key in agent_name_arguments:
-        return _read_agent_names()
-    else:
+    if not command_key:
         return []
+    entries = cache.positional_completions.get(command_key)
+    if not entries:
+        return []
+    idx = min(positional_count, len(entries) - 1)
+    sources = entries[idx]
+    if not sources:
+        return []
+    return _resolve_sources(sources, cache, first_positional_word=first_positional_word)
 
 
 def _generate_zsh_script() -> str:

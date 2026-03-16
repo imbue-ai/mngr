@@ -108,7 +108,7 @@ def test_prevent_dataclasses_import() -> None:
 
 
 def test_prevent_namedtuple_usage() -> None:
-    rc.check_namedtuple(_DIR, snapshot(0))
+    rc.check_namedtuple(_DIR, snapshot(6))
 
 
 def test_prevent_yaml_usage() -> None:

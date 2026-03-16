@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import queue
 import socket as socket_module
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
@@ -23,11 +25,14 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
+from imbue.minds.forwarding_server.agent_creator import AgentCreator
+from imbue.minds.forwarding_server.agent_creator import LOG_SENTINEL
 from imbue.minds.forwarding_server.auth import AuthStoreInterface
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.cookie_manager import create_signed_cookie_value
-from imbue.minds.forwarding_server.cookie_manager import get_cookie_name_for_agent
-from imbue.minds.forwarding_server.cookie_manager import verify_signed_cookie_value
+from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
+from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
 from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
 from imbue.minds.forwarding_server.proxy import generate_service_worker_js
 from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
@@ -37,13 +42,47 @@ from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.forwarding_server.ssh_tunnel import parse_url_host_port
 from imbue.minds.forwarding_server.templates import render_agent_servers_page
 from imbue.minds.forwarding_server.templates import render_auth_error_page
+from imbue.minds.forwarding_server.templates import render_create_form
+from imbue.minds.forwarding_server.templates import render_creating_page
 from imbue.minds.forwarding_server.templates import render_landing_page
+from imbue.minds.forwarding_server.templates import render_login_page
 from imbue.minds.forwarding_server.templates import render_login_redirect_page
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+_BACKEND_WAIT_TIMEOUT_SECONDS: Final[float] = 30.0
+_BACKEND_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+
+
+def _split_backend_url(backend_url: str) -> tuple[str, str]:
+    """Split a backend URL into base URL and stored query string.
+
+    Backend URLs may contain query parameters from URL-arg dispatch
+    (e.g. ``http://127.0.0.1:PORT?arg=chat``). This function separates
+    the base URL from the stored query so the proxy can correctly
+    construct the final URL by combining stored and request query parts.
+    """
+    if "?" in backend_url:
+        base, query = backend_url.split("?", 1)
+        return base, query
+    return backend_url, ""
+
+
+def _build_proxy_url(base_url: str, path: str, *query_parts: str) -> str:
+    """Build a proxy URL from base URL, path, and optional query string parts.
+
+    Combines the base URL with the path, then appends any non-empty
+    query parts joined by ``&``.
+    """
+    url = f"{base_url}/{path}"
+    non_empty = [p for p in query_parts if p]
+    if non_empty:
+        url += f"?{'&'.join(non_empty)}"
+    return url
+
 
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {
@@ -72,57 +111,21 @@ BackendResolverDep = Annotated[BackendResolverInterface, Depends(_get_backend_re
 # -- Auth helpers --
 
 
-def _check_auth_cookie(
+def _is_authenticated(
     cookies: Mapping[str, str],
-    agent_id: AgentId,
     auth_store: AuthStoreInterface,
 ) -> bool:
-    """Check whether the given cookies contain a valid auth cookie for the agent."""
-    # mostly just for debugging convenience
+    """Check whether the user has a valid global session cookie."""
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
     signing_key = auth_store.get_signing_key()
-    cookie_name = get_cookie_name_for_agent(agent_id)
-    cookie_value = cookies.get(cookie_name)
+    cookie_value = cookies.get(SESSION_COOKIE_NAME)
     if cookie_value is None:
         return False
-    verified = verify_signed_cookie_value(
+    return verify_session_cookie(
         cookie_value=cookie_value,
         signing_key=signing_key,
     )
-    return verified == agent_id
-
-
-def _get_authenticated_agent_ids(
-    cookies: Mapping[str, str],
-    auth_store: AuthStoreInterface,
-    backend_resolver: BackendResolverInterface,
-) -> list[AgentId]:
-    """Extract agent IDs from valid auth cookies."""
-    signing_key = auth_store.get_signing_key()
-    known_ids = auth_store.list_agent_ids_with_valid_codes()
-    resolver_ids = backend_resolver.list_known_agent_ids()
-
-    all_candidate_ids: set[str] = set()
-    for agent_id in known_ids:
-        all_candidate_ids.add(str(agent_id))
-    for agent_id in resolver_ids:
-        all_candidate_ids.add(str(agent_id))
-
-    authenticated: list[AgentId] = []
-    for candidate_id_str in sorted(all_candidate_ids):
-        candidate_id = AgentId(candidate_id_str)
-        cookie_name = get_cookie_name_for_agent(candidate_id)
-        cookie_value = cookies.get(cookie_name)
-        if cookie_value is not None:
-            verified = verify_signed_cookie_value(
-                cookie_value=cookie_value,
-                signing_key=signing_key,
-            )
-            if verified == candidate_id:
-                authenticated.append(candidate_id)
-
-    return authenticated
 
 
 # -- WebSocket forwarding helpers --
@@ -214,45 +217,40 @@ async def _managed_lifespan(
 
 
 def _handle_login(
-    agent_id: str,
     one_time_code: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    parsed_id = AgentId(agent_id)
     code = OneTimeCode(one_time_code)
 
-    # If user already has a valid cookie, redirect to landing page
-    if _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
+    # If user already has a valid session, redirect to landing page
+    if _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=307, headers={"Location": "/"})
 
     # Render JS redirect to /authenticate (prevents prefetch consumption)
-    html = render_login_redirect_page(agent_id=parsed_id, one_time_code=code)
+    html = render_login_redirect_page(one_time_code=code)
     return HTMLResponse(content=html)
 
 
 def _handle_authenticate(
-    agent_id: str,
     one_time_code: str,
     auth_store: AuthStoreDep,
 ) -> Response:
-    parsed_id = AgentId(agent_id)
     code = OneTimeCode(one_time_code)
 
-    is_valid = auth_store.validate_and_consume_code(agent_id=parsed_id, code=code)
+    is_valid = auth_store.validate_and_consume_code(code=code)
 
     if not is_valid:
         html = render_auth_error_page(message="This login code is invalid or has already been used.")
         return HTMLResponse(content=html, status_code=403)
 
-    # Set signed cookie
+    # Set global session cookie
     signing_key = auth_store.get_signing_key()
-    cookie_value = create_signed_cookie_value(agent_id=parsed_id, signing_key=signing_key)
-    cookie_name = get_cookie_name_for_agent(parsed_id)
+    cookie_value = create_session_cookie(signing_key=signing_key)
 
-    response = Response(status_code=307, headers={"Location": f"/agents/{parsed_id}/"})
+    response = Response(status_code=307, headers={"Location": "/"})
     response.set_cookie(
-        key=cookie_name,
+        key=SESSION_COOKIE_NAME,
         value=cookie_value,
         path="/",
         httponly=True,
@@ -266,12 +264,23 @@ def _handle_landing_page(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    authenticated_ids = _get_authenticated_agent_ids(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-    )
-    html = render_landing_page(accessible_agent_ids=authenticated_ids)
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        html = render_login_page()
+        return HTMLResponse(content=html)
+
+    all_agent_ids = backend_resolver.list_known_mind_ids()
+
+    # If exactly one agent, redirect directly to it
+    if len(all_agent_ids) == 1:
+        return Response(status_code=307, headers={"Location": "/agents/{}/".format(all_agent_ids[0])})
+
+    if all_agent_ids:
+        html = render_landing_page(accessible_agent_ids=all_agent_ids)
+        return HTMLResponse(content=html)
+
+    # No agents exist: show the create form
+    git_url = request.query_params.get("git_url", "")
+    html = render_create_form(git_url=git_url)
     return HTMLResponse(content=html)
 
 
@@ -281,10 +290,8 @@ def _handle_agent_default_redirect(
     auth_store: AuthStoreDep,
 ) -> Response:
     """Redirect to the agent's web server by default."""
-    parsed_id = AgentId(agent_id)
-
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     return Response(status_code=307, headers={"Location": f"/agents/{agent_id}/web/"})
 
@@ -298,8 +305,8 @@ def _handle_agent_servers_page(
     """Show a listing of all available servers for a given agent."""
     parsed_id = AgentId(agent_id)
 
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     server_names = backend_resolver.list_servers_for_agent(parsed_id)
     html = render_agent_servers_page(agent_id=parsed_id, server_names=server_names)
@@ -319,9 +326,8 @@ async def _forward_http_request(
     When http_client is not None, uses it instead of the app's default client. This is
     used for SSH-tunneled connections where the client is configured with UDS transport.
     """
-    proxy_url = f"{backend_url}/{path}"
-    if request.url.query:
-        proxy_url += f"?{request.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
 
     headers = dict(request.headers)
     headers.pop("host", None)
@@ -357,9 +363,8 @@ async def _forward_http_request_streaming(
     Used for SSE (Server-Sent Events) endpoints where the backend sends data
     incrementally and the client needs to receive it as it arrives.
     """
-    proxy_url = f"{backend_url}/{path}"
-    if request.url.query:
-        proxy_url += f"?{request.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    proxy_url = _build_proxy_url(base_url, path, stored_query, request.url.query)
 
     headers = dict(request.headers)
     headers.pop("host", None)
@@ -451,9 +456,8 @@ async def _handle_proxy_http(
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
 
-    # Check auth (per-agent, not per-server)
-    if not _check_auth_cookie(cookies=request.cookies, agent_id=parsed_id, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated for this mind")
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
 
     # Serve the service worker script
     if path == "__sw.js":
@@ -464,10 +468,23 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        return Response(
-            status_code=502,
-            content=f"Backend unavailable for agent {agent_id}, server {server_name}",
-        )
+        # Wait server-side for the backend to become available (handles the
+        # case where the user is redirected to an agent still starting up).
+        wait_seconds: int = request.app.state.backend_wait_timeout_seconds
+        iterations = int(wait_seconds / _BACKEND_POLL_INTERVAL_SECONDS)
+        for _ in range(iterations):
+            await asyncio.sleep(_BACKEND_POLL_INTERVAL_SECONDS)
+            backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
+            if backend_url is not None:
+                break
+        if backend_url is None:
+            return Response(
+                status_code=502,
+                content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
+            )
+
+    assert backend_url is not None
+    resolved_backend_url = backend_url
 
     # Check if SW is installed via cookie (scoped per server)
     sw_cookie = request.cookies.get(f"sw_installed_{agent_id}_{server_name}")
@@ -481,7 +498,7 @@ async def _handle_proxy_http(
     # during SSH handshake which can take several seconds)
     try:
         tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, request.app, parsed_id, backend_url, backend_resolver
+            None, _get_tunnel_http_client, request.app, parsed_id, resolved_backend_url, backend_resolver
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.debug("SSH tunnel setup failed for {} server {}: {}", agent_id, server_name, e)
@@ -491,13 +508,12 @@ async def _handle_proxy_http(
     # If Accept includes text/event-stream, use streaming proxy to avoid
     # buffering the entire response before forwarding.
     accept_header = request.headers.get("accept", "")
-    # FIXME: we should double check if this special handling for "api/chat/send" is actually needed anymore...
     is_likely_sse = "text/event-stream" in accept_header or (request.method == "POST" and "api/chat/send" in path)
 
     if is_likely_sse:
         return await _forward_http_request_streaming(
             request=request,
-            backend_url=backend_url,
+            backend_url=resolved_backend_url,
             path=path,
             agent_id=agent_id,
             server_name=server_name,
@@ -507,7 +523,7 @@ async def _handle_proxy_http(
     # Forward request to backend
     result = await _forward_http_request(
         request=request,
-        backend_url=backend_url,
+        backend_url=resolved_backend_url,
         path=path,
         agent_id=agent_id,
         server_name=server_name,
@@ -537,8 +553,7 @@ async def _handle_proxy_websocket(
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
 
-    # Check auth (per-agent)
-    if not _check_auth_cookie(cookies=websocket.cookies, agent_id=parsed_id, auth_store=auth_store):
+    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
@@ -547,10 +562,9 @@ async def _handle_proxy_websocket(
         await websocket.close(code=4004, reason=f"Unknown server: {agent_id}/{server_name}")
         return
 
-    ws_backend = backend_url.replace("http://", "ws://").replace("https://", "wss://")
-    ws_url = f"{ws_backend}/{path}"
-    if websocket.url.query:
-        ws_url += f"?{websocket.url.query}"
+    base_url, stored_query = _split_backend_url(backend_url)
+    ws_backend = base_url.replace("http://", "ws://").replace("https://", "wss://")
+    ws_url = _build_proxy_url(ws_backend, path, stored_query, websocket.url.query)
 
     # Forward subprotocols from the client to the backend so that
     # protocol-specific servers (e.g. ttyd which requires "tty") work correctly.
@@ -641,10 +655,7 @@ def _get_tunnel_socket_path(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend, or None for local.
-
-    Returns None if the agent is local (no SSH info) or no tunnel manager is configured.
-    """
+    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
     if tunnel_manager is None:
         return None
 
@@ -666,10 +677,7 @@ def _get_tunnel_http_client(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection.
-
-    Caches httpx clients per Unix socket path for reuse across requests.
-    """
+    """Get an httpx client configured for SSH tunneling, or None for direct connection."""
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
     if socket_path is None:
@@ -687,6 +695,190 @@ def _get_tunnel_http_client(
     return clients[key]
 
 
+# -- Agent creation route handlers --
+
+
+async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
+    """Handle form submission to create a new agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    form = await request.form()
+    git_url = str(form.get("git_url", "")).strip()
+    agent_name = str(form.get("agent_name", "")).strip()
+    if not git_url:
+        html = render_create_form(git_url="", agent_name=agent_name)
+        return HTMLResponse(content=html, status_code=400)
+
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name)
+    return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
+
+
+def _handle_create_page(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Show the create form page (GET /create)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    git_url = request.query_params.get("git_url", "")
+    html = render_create_form(git_url=git_url)
+    return HTMLResponse(content=html)
+
+
+async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -> Response:
+    """API endpoint for creating an agent (POST /api/create-agent).
+
+    Accepts JSON body with git_url. Returns JSON with agent_id and status.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid JSON body"}',
+            media_type="application/json",
+        )
+    git_url = str(body.get("git_url", "")).strip()
+    agent_name = str(body.get("agent_name", "")).strip()
+    if not git_url:
+        return Response(
+            status_code=400,
+            content='{"error": "git_url is required"}',
+            media_type="application/json",
+        )
+
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name)
+    return Response(
+        content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
+        media_type="application/json",
+    )
+
+
+def _handle_creation_status_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """API endpoint for checking agent creation status."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_creation_info(parsed_id)
+    if info is None:
+        return Response(
+            status_code=404,
+            content='{"error": "Unknown agent creation"}',
+            media_type="application/json",
+        )
+
+    result = {"agent_id": str(info.agent_id), "status": str(info.status)}
+    if info.redirect_url is not None:
+        result["redirect_url"] = info.redirect_url
+    if info.error is not None:
+        result["error"] = info.error
+    return Response(content=json.dumps(result), media_type="application/json")
+
+
+def _handle_creating_page(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Show the creating progress page (GET /creating/{agent_id})."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    parsed_id = AgentId(agent_id)
+    info = agent_creator.get_creation_info(parsed_id)
+    if info is None:
+        return Response(status_code=404, content="Unknown agent creation")
+
+    if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
+        return Response(status_code=307, headers={"Location": info.redirect_url})
+
+    html = render_creating_page(agent_id=parsed_id, info=info)
+    return HTMLResponse(content=html)
+
+
+async def _stream_creation_logs(
+    log_queue: queue.Queue[str],
+    agent_creator: AgentCreator,
+    agent_id: AgentId,
+) -> AsyncGenerator[str, None]:
+    """Async generator that yields SSE events from a creation log queue."""
+    streaming = True
+    while streaming:
+        try:
+            line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
+        except (queue.Empty, TimeoutError, OSError):
+            yield ": keepalive\n\n"
+            continue
+
+        if line == LOG_SENTINEL:
+            streaming = False
+            info = agent_creator.get_creation_info(agent_id)
+            if info is not None:
+                result = {"status": str(info.status)}
+                if info.redirect_url is not None:
+                    result["redirect_url"] = info.redirect_url
+                if info.error is not None:
+                    result["error"] = info.error
+                yield "event: done\ndata: {}\n\n".format(json.dumps(result))
+        else:
+            yield "data: {}\n\n".format(json.dumps({"log": line}))
+
+
+async def _handle_creation_logs_sse(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """SSE endpoint that streams creation logs for an agent."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+
+    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    if agent_creator is None:
+        return Response(status_code=501, content="Agent creation not configured")
+
+    parsed_id = AgentId(agent_id)
+    log_queue = agent_creator.get_log_queue(parsed_id)
+    if log_queue is None:
+        return Response(status_code=404, content="Unknown agent creation")
+
+    return StreamingResponse(
+        _stream_creation_logs(log_queue, agent_creator, parsed_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # -- App factory --
 
 
@@ -695,11 +887,16 @@ def create_forwarding_server(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
+    agent_creator: AgentCreator | None = None,
+    backend_wait_timeout_seconds: int = int(_BACKEND_WAIT_TIMEOUT_SECONDS),
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
     When tunnel_manager is provided, the server can proxy traffic to remote agents
     by tunneling through SSH. Without it, only local agents are reachable.
+
+    When agent_creator is provided, the server can create new agents from git URLs
+    via the /create form and /api/create-agent API.
     """
     is_externally_managed_client = http_client is not None
 
@@ -713,6 +910,8 @@ def create_forwarding_server(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
+    app.state.agent_creator = agent_creator
+    app.state.backend_wait_timeout_seconds = backend_wait_timeout_seconds
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -720,6 +919,14 @@ def create_forwarding_server(
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
+
+    # Agent creation routes
+    app.get("/create")(_handle_create_page)
+    app.post("/create")(_handle_create_form_submit)
+    app.post("/api/create-agent")(_handle_create_agent_api)
+    app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
+    app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
+    app.get("/creating/{agent_id}")(_handle_creating_page)
 
     # Agent default page: redirect to web server
     app.get("/agents/{agent_id}/")(_handle_agent_default_redirect)

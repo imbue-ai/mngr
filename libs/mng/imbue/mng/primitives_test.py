@@ -4,15 +4,20 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import CertifiedDataError
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
+from imbue.mng.primitives import InvalidAgentName
 from imbue.mng.primitives import Permission
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import default_branch_name
 
 
 def test_host_name_extracts_provider_name_when_present() -> None:
@@ -150,3 +155,79 @@ def test_discovered_agent_labels_returns_values_when_present() -> None:
     """labels should return dict from certified_data when present."""
     ref = _make_discovered_agent({"labels": {"env": "prod", "team": "infra"}})
     assert ref.labels == {"env": "prod", "team": "infra"}
+
+
+# =============================================================================
+# default_branch_name tests
+# =============================================================================
+
+
+def test_default_branch_name_uses_default_prefix() -> None:
+    """default_branch_name should use 'mng/' prefix by default."""
+    result = default_branch_name(AgentName("my-agent"))
+    assert result == "mng/my-agent"
+
+
+def test_default_branch_name_uses_custom_prefix() -> None:
+    """default_branch_name should use the provided prefix."""
+    result = default_branch_name(AgentName("my-agent"), prefix="custom/")
+    assert result == "custom/my-agent"
+
+
+# =============================================================================
+# AgentName validation tests
+# =============================================================================
+
+
+def test_agent_name_rejects_leading_dash() -> None:
+    """AgentName should reject names starting with a dash."""
+    with pytest.raises(InvalidAgentName, match="cannot start or end with a dash"):
+        AgentName("-bad-name")
+
+
+def test_agent_name_rejects_trailing_dash() -> None:
+    """AgentName should reject names ending with a dash."""
+    with pytest.raises(InvalidAgentName, match="cannot start or end with a dash"):
+        AgentName("bad-name-")
+
+
+def test_agent_name_accepts_valid_name() -> None:
+    """AgentName should accept names with internal dashes."""
+    name = AgentName("good-agent-name")
+    assert str(name) == "good-agent-name"
+
+
+# =============================================================================
+# DiscoveredAgent.created_branch_name tests
+# =============================================================================
+
+
+def test_discovered_agent_created_branch_name_returns_none_when_missing() -> None:
+    """created_branch_name should return None when not in certified_data."""
+    ref = _make_discovered_agent()
+    assert ref.created_branch_name is None
+
+
+def test_discovered_agent_created_branch_name_returns_string_when_present() -> None:
+    """created_branch_name should return the string value from certified_data."""
+    ref = _make_discovered_agent({"created_branch_name": "mng/my-agent"})
+    assert ref.created_branch_name == "mng/my-agent"
+
+
+def test_discovered_agent_created_branch_name_returns_none_when_explicitly_none() -> None:
+    """created_branch_name should return None when explicitly set to None."""
+    ref = _make_discovered_agent({"created_branch_name": None})
+    assert ref.created_branch_name is None
+
+
+def test_discovered_agent_start_on_boot_returns_true_when_set() -> None:
+    """start_on_boot should return True when set to True in certified_data."""
+    ref = _make_discovered_agent({"start_on_boot": True})
+    assert ref.start_on_boot is True
+
+
+def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> None:
+    """created_branch_name should raise CertifiedDataError for non-string non-None values."""
+    ref = _make_discovered_agent({"created_branch_name": 42})
+    with pytest.raises(CertifiedDataError, match="Expected str or None"):
+        _ = ref.created_branch_name

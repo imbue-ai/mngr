@@ -21,6 +21,7 @@ from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSnapshot
+from imbue.mng_kanpan.data_types import ColumnData
 from imbue.mng_kanpan.data_types import GitHubData
 from imbue.mng_kanpan.data_types import PrInfo
 from imbue.mng_kanpan.data_types import PrState
@@ -70,6 +71,10 @@ def fetch_agent_snapshot(
                 branch=branch,
                 commits_ahead=commits_ahead,
                 is_muted=agent.name in muted_agents,
+                column_data=ColumnData(
+                    labels=agent.labels,
+                    plugin_data=agent.plugin,
+                ),
             )
         )
 
@@ -197,6 +202,10 @@ def fetch_board_snapshot(
                 commits_ahead=commits_ahead,
                 create_pr_url=create_pr_url,
                 is_muted=agent.name in muted_agents,
+                column_data=ColumnData(
+                    labels=agent.labels,
+                    plugin_data=agent.plugin,
+                ),
             )
         )
 
@@ -286,18 +295,22 @@ def toggle_agent_mute(mng_ctx: MngContext, agent_name: AgentName) -> bool:
 
 
 def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
-    """Load the set of muted agent names from plugin data."""
+    """Load the set of muted agent names from certified data."""
     muted: set[AgentName] = set()
     try:
-        agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
+        agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx)
         for _host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
-                plugin_data: dict[str, Any] = agent_ref.certified_data.get("plugin", {}).get(PLUGIN_NAME, {})
-                if plugin_data.get("muted", False):
+                if _is_agent_muted(agent_ref.certified_data):
                     muted.add(agent_ref.agent_name)
     except Exception as e:
         logger.debug("Failed to load muted agents: {}", e)
     return muted
+
+
+def _is_agent_muted(certified_data: Any) -> bool:
+    """Check if an agent is muted based on its certified data."""
+    return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
 
 
 def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:

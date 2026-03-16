@@ -105,25 +105,30 @@ def _get_all_files_with_extension(
     folder_path: Path,
     extension: FileExtension | None,
 ) -> tuple[Path, ...]:
-    """Get all git-tracked files in a folder (cached).
+    """Get all non-gitignored files that exist on disk in a folder (cached).
 
     If extension is provided, only files matching that extension are returned.
-    If extension is None, all tracked files are returned.
+    If extension is None, all non-ignored files are returned.
+
+    Uses git ls-files with --cached and --others to include both tracked
+    and untracked files while respecting .gitignore rules. Filters the
+    result to only files that actually exist on disk, so deleted files
+    that are still in the git index are excluded.
     """
     glob_pattern = f"*{extension}" if extension is not None else "*"
     try:
         result = subprocess.run(
-            ["git", "ls-files", glob_pattern],
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", glob_pattern],
             cwd=folder_path,
             capture_output=True,
             text=True,
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        raise GitCommandError(f"Failed to list git-tracked files in {folder_path}") from e
+        raise GitCommandError(f"Failed to list files in {folder_path}") from e
 
     file_paths = [folder_path / line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return tuple(file_paths)
+    return tuple(f for f in file_paths if f.exists())
 
 
 def _get_non_ignored_files_with_extension(
@@ -131,10 +136,10 @@ def _get_non_ignored_files_with_extension(
     extension: FileExtension | None,
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[Path, ...]:
-    """Get git-tracked files in a folder, with optional path exclusions.
+    """Get non-gitignored files on disk in a folder, with optional path exclusions.
 
     If extension is provided, only files matching that extension are returned.
-    If extension is None, all tracked files are returned.
+    If extension is None, all non-ignored files are returned.
 
     Each pattern in excluded_path_patterns is matched against file paths using Path.match(),
     which matches from the right for relative patterns (e.g., "test_*.py" matches any file
@@ -259,10 +264,10 @@ def get_ratchet_failures(
     pattern: RegexPattern,
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[RatchetMatchChunk, ...]:
-    """Find all regex matches in git-tracked files and return them sorted by file path and line number.
+    """Find all regex matches in non-gitignored files on disk and return them sorted by file path and line number.
 
     If extension is provided, only files matching that extension are searched.
-    If extension is None, all tracked files are searched.
+    If extension is None, all non-ignored files are searched.
 
     Blame dates are not computed here; they are resolved on demand via _resolve_blame_dates()
     when a failure message needs to be formatted.

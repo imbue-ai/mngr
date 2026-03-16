@@ -240,6 +240,56 @@ def test_fetch_agent_snapshot_passes_filters_to_list_agents() -> None:
     assert call_kwargs.kwargs["exclude_filters"] == ()
 
 
+def test_fetch_board_snapshot_passes_labels_and_plugin_data() -> None:
+    """Labels and plugin data from AgentDetails should be passed to AgentBoardEntry."""
+    agent = make_agent_details(
+        name="agent-1",
+        provider_name="modal",
+        labels={"blocked": "yes"},
+        plugin={"claude": {"waiting_reason": "PERMISSIONS"}},
+    )
+
+    mock_list_result = MagicMock()
+    mock_list_result.agents = [agent]
+    mock_list_result.errors = []
+
+    pr_result = FetchPrsResult(prs=(), error=None)
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with (
+        patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+    ):
+        snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
+
+    assert snapshot.entries[0].column_data.labels == {"blocked": "yes"}
+    assert snapshot.entries[0].column_data.plugin_data == {"claude": {"waiting_reason": "PERMISSIONS"}}
+
+
+def test_fetch_agent_snapshot_passes_labels_and_plugin_data() -> None:
+    """Labels and plugin data should also be passed in agent-only snapshots."""
+    agent = make_agent_details(
+        name="agent-1",
+        provider_name="modal",
+        labels={"project": "mng"},
+        plugin={"kanpan": {"muted": True}},
+    )
+
+    mock_list_result = MagicMock()
+    mock_list_result.agents = [agent]
+    mock_list_result.errors = []
+
+    mng_ctx = MagicMock()
+    mng_ctx.concurrency_group = MagicMock()
+
+    with patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result):
+        snapshot = fetch_agent_snapshot(mng_ctx)
+
+    assert snapshot.entries[0].column_data.labels == {"project": "mng"}
+    assert snapshot.entries[0].column_data.plugin_data == {"kanpan": {"muted": True}}
+
+
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
     init_git_repo_with_config(repo_dir)

@@ -360,7 +360,7 @@ def override_command_options(
             command_class: type,
             params: dict[str, Any],
         ) -> None:
-            if command_name == "create" and params.get("agent_type") == "claude":
+            if command_name == "create" and params.get("type") == "claude":
                 # Override the model for claude agents
                 params["model"] = "opus"
     """

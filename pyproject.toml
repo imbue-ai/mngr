@@ -61,11 +61,15 @@ addopts = [
   "--cov=imbue.mng",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
+  "--cov=imbue.mng_claude",
   "--cov=imbue.mng_opencode",
+  "--cov=imbue.mng_pi_coding",
   "--cov=imbue.mng_pair",
   "--cov=imbue.mng_schedule",
   "--cov=imbue.mng_ttyd",
   "--cov=imbue.mng_tutor",
+  "--cov=imbue.mng_llm",
+  "--cov=imbue.mng_mind",
   "--cov=imbue.mng_claude_mind",
   "--cov=imbue.mng_elena_code",
   "--cov=imbue.mng_kanpan",
@@ -145,8 +149,8 @@ omit = [
     "*/utils/testing.py",
     "*/utils/plugin_testing.py",
     "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
-    # Modal provider requires network access for testing
-    "libs/mng/imbue/mng/providers/modal/*",
+    # Modal provider plugin requires network access for testing
+    "libs/mng_modal/imbue/mng_modal/*",
     # Docker provider requires a Docker daemon for testing
     "libs/mng/imbue/mng/providers/docker/instance.py",
     "libs/mng/imbue/mng/providers/docker/volume.py",
@@ -181,6 +185,7 @@ layers = [
     "imbue.mng.utils",
     "imbue.mng.errors",
     "imbue.mng.primitives",
+    "imbue.mng.resources",
 ]
 
 [[tool.importlinter.contracts]]
@@ -189,7 +194,6 @@ type = "layers"
 layers = [
     "imbue.minds.desktop_client",
     "imbue.minds.cli",
-    "imbue.minds.deployment",
     "imbue.minds.forwarding_server",
     "imbue.minds.core",
     "imbue.minds.interfaces",

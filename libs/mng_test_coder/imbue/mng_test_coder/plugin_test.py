@@ -8,8 +8,8 @@ import pytest
 
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
-from imbue.mng_claude_mind.conftest import StubCommandResult
-from imbue.mng_claude_mind.conftest import StubHost
+from imbue.mng_mind.conftest import StubCommandResult
+from imbue.mng_mind.conftest import StubHost
 from imbue.mng_test_coder.plugin import TestCoderAgent
 from imbue.mng_test_coder.plugin import TestCoderConfig
 from imbue.mng_test_coder.plugin import _LLM_MATCHED_RESPONSES_LOCAL_CHECKOUT

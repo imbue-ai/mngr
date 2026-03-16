@@ -8,7 +8,9 @@ from click_option_group import OptionGroup
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.agents.agent_registry import load_agents_from_plugins
+from imbue.mng.cli.archive import archive
 from imbue.mng.cli.ask import ask
+from imbue.mng.cli.capture import capture
 from imbue.mng.cli.cleanup import cleanup
 from imbue.mng.cli.clone import clone
 from imbue.mng.cli.common_opts import TCommand
@@ -26,6 +28,7 @@ from imbue.mng.cli.gc import gc
 from imbue.mng.cli.help_formatter import get_help_metadata
 from imbue.mng.cli.issue_reporting import handle_not_implemented_error
 from imbue.mng.cli.issue_reporting import handle_unexpected_error
+from imbue.mng.cli.label import label
 from imbue.mng.cli.limit import limit
 from imbue.mng.cli.list import list_command
 from imbue.mng.cli.message import message
@@ -39,6 +42,7 @@ from imbue.mng.cli.rename import rename
 from imbue.mng.cli.snapshot import snapshot
 from imbue.mng.cli.start import start
 from imbue.mng.cli.stop import stop
+from imbue.mng.cli.transcript import transcript
 from imbue.mng.config.loader import block_disabled_plugins
 from imbue.mng.config.pre_readers import read_disabled_plugins
 from imbue.mng.errors import BaseMngError
@@ -297,6 +301,7 @@ def reset_plugin_manager() -> None:
 # Add built-in commands to the CLI group
 BUILTIN_COMMANDS: list[click.Command] = [
     ask,
+    capture,
     create,
     cleanup,
     destroy,
@@ -315,8 +320,10 @@ BUILTIN_COMMANDS: list[click.Command] = [
     snapshot,
     config,
     gc,
+    label,
     plugin_command,
     observe,
+    transcript,
 ]
 
 for cmd in BUILTIN_COMMANDS:
@@ -338,8 +345,9 @@ cli.add_command(rename, name="mv")
 cli.add_command(snapshot, name="snap")
 cli.add_command(stop, name="s")
 
-# Add clone as a standalone command (not in BUILTIN_COMMANDS since it uses
-# UNPROCESSED args and delegates to create, which already has plugin options applied)
+# Add commands that use UNPROCESSED args and delegate to other commands.
+# Not in BUILTIN_COMMANDS since plugin options are applied to the delegate target.
+cli.add_command(archive)
 cli.add_command(clone)
 cli.add_command(migrate)
 

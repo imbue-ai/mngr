@@ -10,6 +10,7 @@ from imbue.imbue_common.ratchet_testing.core import GitCommandError
 from imbue.imbue_common.ratchet_testing.core import LineNumber
 from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
+from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import _read_file_contents
 from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
@@ -154,6 +155,50 @@ def test_get_non_ignored_files_excludes_by_glob_pattern(git_repo: Path) -> None:
     result = _get_non_ignored_files_with_extension(git_repo, FileExtension(".py"), ("*_test.py", "test_*.py"))
     assert len(result) == 1
     assert result[0].name == "main.py"
+
+
+def test_get_all_files_excludes_deleted_but_tracked_files(git_repo: Path) -> None:
+    """Deleted files still in the git index should not be returned."""
+    tracked_file = git_repo / "tracked.py"
+    tracked_file.write_text("print('hello')")
+
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Add tracked file"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Delete the file from disk but don't stage the deletion
+    tracked_file.unlink()
+
+    result = _get_all_files_with_extension(git_repo, FileExtension(".py"))
+    result_names = [p.name for p in result]
+    assert "tracked.py" not in result_names
+
+
+def test_get_all_files_includes_untracked_non_ignored_files(git_repo: Path) -> None:
+    """Untracked files that are not gitignored should be returned."""
+    # Create a committed file
+    committed_file = git_repo / "committed.py"
+    committed_file.write_text("print('committed')")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Create an untracked file (not added to git, not ignored)
+    untracked_file = git_repo / "untracked.py"
+    untracked_file.write_text("print('untracked')")
+
+    result = _get_all_files_with_extension(git_repo, FileExtension(".py"))
+    result_names = [p.name for p in result]
+    assert "committed.py" in result_names
+    assert "untracked.py" in result_names
 
 
 def test_read_file_contents_caches_results(tmp_path: Path) -> None:
