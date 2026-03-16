@@ -12,6 +12,7 @@ injection logic that the plugin provides.
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -976,7 +977,13 @@ def test_chat_script_reply_logs_correct_model_and_conversation(chat_env: ChatScr
 
 @pytest.mark.timeout(30)
 def test_chat_script_reply_outputs_message_id(chat_env: ChatScriptEnv) -> None:
-    """Verify that --reply outputs the message_id of the injected response."""
+    """Verify that --reply outputs the message_id of the injected response.
+
+    Requires llm to be installed (skipped in CI where it is not available).
+    """
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
     chat_env.env["LLM_MATCHED_RESPONSE"] = ""
 
     # Delete existing DB and let llm inject create it fresh through its own
