@@ -147,13 +147,17 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     include_filters = list(opts.include)
     if agent_identifiers:
         # Create a CEL filter that matches any of the provided identifiers.
-        # Parse agent addresses to extract the name/ID part for matching.
+        # Parse agent addresses to extract the name/ID and host/provider parts.
         ref_filters = []
         for ref in agent_identifiers:
-            plain_id, _ = parse_identifier_as_address(ref)
-            ref_filter = f'(name == "{plain_id}" || id == "{plain_id}")'
-            ref_filters.append(ref_filter)
-        combined_filter = " || ".join(ref_filters)
+            plain_id, address = parse_identifier_as_address(ref)
+            parts = [f'(name == "{plain_id}" || id == "{plain_id}")']
+            if address.host_name is not None:
+                parts.append(f'host.name == "{address.host_name}"')
+            if address.provider_name is not None:
+                parts.append(f'host.provider == "{address.provider_name}"')
+            ref_filters.append(" && ".join(parts))
+        combined_filter = " || ".join(f"({f})" for f in ref_filters)
         include_filters.append(combined_filter)
 
     # For JSONL format, use streaming callbacks

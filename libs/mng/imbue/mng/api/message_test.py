@@ -58,7 +58,7 @@ def test_agent_to_cel_context_returns_expected_fields(
         ),
     )
 
-    context = _agent_to_cel_context(agent, "local")
+    context = _agent_to_cel_context(agent, "local", "localhost")
 
     assert context["id"] == str(agent.id)
     assert context["name"] == "cel-test-agent"
@@ -66,6 +66,7 @@ def test_agent_to_cel_context_returns_expected_fields(
     assert context["state"] == AgentLifecycleState.STOPPED.value
     assert context["host"]["provider"] == "local"
     assert context["host"]["id"] == str(agent.host_id)
+    assert context["host"]["name"] == "localhost"
 
 
 def test_send_message_to_agents_returns_empty_result_when_no_agents_match(
