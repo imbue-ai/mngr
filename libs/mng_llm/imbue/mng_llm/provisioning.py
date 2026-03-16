@@ -490,6 +490,6 @@ def create_work_log_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        tags={"name": "Work Log"},
+        tags={"internal": "work_log", "name": "Work Log"},
     )
     logger.info("Created work log conversation: conversation_id={}", conversation_id)

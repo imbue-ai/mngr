@@ -34,6 +34,7 @@ from imbue.mng.utils.testing import wait_for_agent_session
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
 from imbue.mng_claude_mind.conftest import assert_conversation_exists_in_db
+from imbue.mng_claude_mind.conftest import create_mind_conversations_table_only
 from imbue.mng_claude_mind.conftest import parse_chat_output
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
@@ -971,6 +972,106 @@ def test_chat_script_reply_logs_correct_model_and_conversation(chat_env: ChatScr
     assert "conv-reply-test" in log_content
     assert "claude-sonnet-4-6" in log_content
     assert "reply_to_conversation" in log_content
+
+
+@pytest.mark.timeout(30)
+def test_last_response_id_returns_most_recent_response(chat_env: ChatScriptEnv) -> None:
+    """Verify that last_response_id returns the most recent response for a conversation."""
+    import io
+    import sqlite3
+
+    from imbue.mng_llm.resources.conversation_db import last_response_id
+
+    # Create a conversations table and responses table with test data
+    db_path = chat_env.llm_db_path
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS responses ("
+            "id TEXT PRIMARY KEY, model TEXT, prompt TEXT, system TEXT, "
+            "prompt_json TEXT, options_json TEXT, response TEXT, response_json TEXT, "
+            "conversation_id TEXT, duration_ms INTEGER, datetime_utc TEXT, "
+            "input_tokens INTEGER, output_tokens INTEGER, token_details TEXT, "
+            "schema_id TEXT, resolved_model TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-old", "conv-abc", "2026-03-16T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-new", "conv-abc", "2026-03-16T11:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-other", "conv-xyz", "2026-03-16T12:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        last_response_id(str(db_path), "conv-abc")
+        assert sys.stdout.getvalue().strip() == "resp-new"
+    finally:
+        sys.stdout = old_stdout
+
+    # Verify it returns nothing for a conversation with no responses
+    sys.stdout = io.StringIO()
+    try:
+        last_response_id(str(db_path), "conv-nonexistent")
+        assert sys.stdout.getvalue().strip() == ""
+    finally:
+        sys.stdout = old_stdout
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_reply_outputs_message_id(chat_env: ChatScriptEnv) -> None:
+    """Verify that --reply outputs the message_id of the injected response."""
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
+
+    # Delete existing DB and let llm inject create it fresh through its own
+    # migration system, then add our mind_conversations table.
+    chat_env.llm_db_path.unlink()
+
+    # Create a real conversation via llm inject (no --cid)
+    setup_result = subprocess.run(
+        ["llm", "inject", "-m", "matched-responses", "--prompt", "setup", "initial"],
+        capture_output=True,
+        text=True,
+        env=chat_env.env,
+    )
+    assert setup_result.returncode == 0, f"Setup inject failed: {setup_result.stderr}"
+    # Parse conversation_id from "Injected message into conversation <id>"
+    parts = setup_result.stdout.strip().rsplit(" ", 1)
+    assert len(parts) == 2, f"Unexpected llm inject output: {setup_result.stdout!r}"
+    conversation_id = parts[1]
+
+    # Create the mind_conversations table (llm inject doesn't create it)
+    create_mind_conversations_table_only(chat_env.llm_db_path)
+
+    # Reply via chat.sh and verify message_id in output
+    reply_result = chat_env.run("--reply", conversation_id, "follow-up message")
+    assert reply_result.returncode == 0, f"Reply failed: {reply_result.stderr}"
+
+    reply_output = parse_chat_output(reply_result.stdout)
+    assert "message_id" in reply_output, f"Expected message_id in output, got: {reply_result.stdout!r}"
+    assert len(reply_output["message_id"]) > 0
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_new_as_agent_without_message_outputs_conversation_id(chat_env: ChatScriptEnv) -> None:
+    """Verify that --new --as-agent without a message outputs conversation_id."""
+    chat_env.set_default_model("matched-responses")
+
+    result = chat_env.run("--new", "--name", "no-msg-test", "--as-agent")
+    assert result.returncode == 0, f"Failed: {result.stderr}"
+
+    output = parse_chat_output(result.stdout)
+    assert "conversation_id" in output, f"Expected conversation_id in output, got: {result.stdout!r}"
+    assert output["conversation_id"].startswith("conv-")
 
 
 @pytest.mark.timeout(30)

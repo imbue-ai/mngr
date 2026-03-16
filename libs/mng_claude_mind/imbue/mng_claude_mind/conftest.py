@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
@@ -156,10 +157,23 @@ def parse_chat_output(stdout: str) -> dict[str, str]:
     return result
 
 
+def create_mind_conversations_table_only(db_path: Path) -> None:
+    """Create only the mind_conversations table (not llm's conversations table).
+
+    Used in tests that need ``llm inject`` to run its own migrations.
+    The standard ``create_mind_conversations_table_in_test_db`` creates both
+    tables, which conflicts with llm's migration system.
+    """
+    from imbue.mng_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(MIND_CONVERSATIONS_TABLE_SQL)
+        conn.commit()
+
+
 def assert_conversation_exists_in_db(db_path: Path, conversation_id: str) -> None:
     """Assert that a conversation record exists in the mind_conversations table."""
-    import sqlite3
-
     with sqlite3.connect(str(db_path)) as conn:
         rows = conn.execute(
             "SELECT conversation_id FROM mind_conversations WHERE conversation_id = ?",

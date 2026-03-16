@@ -19,6 +19,7 @@ Usage:
     mng mind-conversation-db count <db_path>
     mng mind-conversation-db max-rowid <db_path>
     mng mind-conversation-db poll-new <db_path> <max_rowid>
+    mng mind-conversation-db last-response-id <db_path> <conversation_id>
 
 Environment: None required (all paths passed as arguments).
 """
