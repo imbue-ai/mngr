@@ -431,6 +431,7 @@ class AgentMatch(FrozenModel):
     agent_id: AgentId = Field(description="Unique identifier for the matched agent")
     agent_name: AgentName = Field(description="Human-readable name of the matched agent")
     host_id: HostId = Field(description="Unique identifier for the host the agent runs on")
+    host_name: HostName = Field(description="Human-readable name of the host the agent runs on")
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
 
 
@@ -479,6 +480,7 @@ def find_agents_by_identifiers_or_state(
                         agent_id=agent_ref.agent_id,
                         agent_name=agent_ref.agent_name,
                         host_id=host_ref.host_id,
+                        host_name=host_ref.host_name,
                         provider_name=host_ref.provider_name,
                     )
                 )

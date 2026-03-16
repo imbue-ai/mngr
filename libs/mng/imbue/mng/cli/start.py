@@ -13,9 +13,9 @@ from imbue.mng.api.connect import run_connect_command
 from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.find import ensure_host_started
-from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.cli.agent_addr import find_agents_by_addresses
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -205,8 +205,8 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         raise click.UsageError("--connect can only be used with a single agent")
 
     # Find agents to start (STOPPED agents when using --all)
-    agents_to_start = find_agents_by_identifiers_or_state(
-        agent_identifiers=agent_identifiers,
+    agents_to_start = find_agents_by_addresses(
+        raw_identifiers=agent_identifiers,
         filter_all=opts.start_all,
         target_state=AgentLifecycleState.STOPPED,
         mng_ctx=mng_ctx,

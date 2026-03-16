@@ -4,6 +4,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
+from imbue.mng.cli.agent_addr import find_agent_by_address
 from imbue.mng.cli.connect import select_agent_interactively
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.config.data_types import MngContext
@@ -154,7 +155,7 @@ def find_agent_for_command(
         agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
         if host_filter is not None:
             agents_by_host = filter_agents_by_host(agents_by_host, host_filter)
-        return find_and_maybe_start_agent_by_name_or_id(
+        return find_agent_by_address(
             agent_identifier,
             agents_by_host,
             mng_ctx,

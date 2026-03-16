@@ -46,8 +46,8 @@ clone step fails, the source agent is left untouched. If the destroy step
 fails after a successful clone, the error is reported and the user can
 manually clean up.""",
     examples=(
-        ("Migrate an agent to a Docker container", "mng migrate my-agent --in docker"),
-        ("Migrate with a new name", "mng migrate my-agent new-agent --in modal"),
+        ("Migrate an agent to a Docker container", "mng migrate my-agent --provider docker"),
+        ("Migrate with a new name", "mng migrate my-agent new-agent --provider modal"),
         ("Migrate and pass args to the agent", "mng migrate my-agent -- --model opus"),
     ),
     see_also=(

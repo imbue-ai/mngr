@@ -13,7 +13,7 @@ This is useful for autonomous agents that should run on a recurring schedule -- 
 
 ```bash
 # Add a nightly agent that runs at 2am in modal
-mng schedule add --command create --args "--type claude --message 'review recent PRs' --in modal" --schedule "0 2 * * *" --provider modal
+mng schedule add --command create --args "--type claude --message 'review recent PRs' --provider modal" --schedule "0 2 * * *" --provider modal
 
 # Add a named trigger that runs locally
 mng schedule add nightly-test-checker --command create --args "--message 'make sure all tests are passing'" --schedule "0 3 * * *" --provider local

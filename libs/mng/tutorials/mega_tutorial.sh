@@ -42,7 +42,7 @@ mng create my-task -- --model opus
 # that command launches claude with the "opus" model instead of the default
 
 # you can also launch claude remotely in Modal:
-mng create my-task --in modal
+mng create my-task --provider modal
 # see more details below in "CREATING AGENTS REMOTELY" for relevant options
 
 # you can run *any* literal command instead of a named agent type:
@@ -61,13 +61,13 @@ mng create my-task -w server="npm run dev" -w logs="tail -f app.log"
 ## SENDING MESSAGES ON LAUNCH
 
 # you can send an initial message (so you don't have to wait around, eg, while a Modal container starts)
-mng create my-task --in modal --no-connect --message "Speed up one of my tests and make a PR on github"
+mng create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github"
 # here we disable the default --connect behavior (because presumably you just wanted to launch that in the background and continue on your way)
 # and then we also pass in an explicit message for the agent to start working on immediately
 # the message can also be specified as the contents of a file (by using --message-file instead of --message)
 
 # you can also edit the message *while the agent is starting up*, which is very handy for making it "feel" instant:
-mng create my-task --in modal --edit-message
+mng create my-task --provider modal --edit-message
 
 ## SPECIFYING DATA FOR THE AGENT
 
@@ -117,12 +117,12 @@ mng create my-task --from other-agent
 # (--source, --source-agent, and --source-host are alternative forms for more specific control)
 
 # you can use rsync to transfer extra data as well, beyond just the git data:
-mng create my-task --in modal --rsync --rsync-args "--exclude=node_modules"
+mng create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
 
 ## CREATING AGENTS REMOTELY
 
 # one of the coolest features of mng is the ability to create agents on remote hosts just as easily as you can create them locally:
-mng create my-task --in modal -- --dangerously-skip-permissions --append-system-prompt "Don't ask me any questions!"
+mng create my-task --provider modal -- --dangerously-skip-permissions --append-system-prompt "Don't ask me any questions!"
 # that command passes the "--dangerously-skip-permissions" flag to claude because it's safe to do so:
 # agents running remotely are running in a sandboxed environment where they can't really mess anything up on their local machine (or if they do, it doesn't matter)
 # because it's running remotely, you might also want something like that system prompt (to tell it not to get blocked on you)
@@ -130,54 +130,53 @@ mng create my-task --in modal -- --dangerously-skip-permissions --append-system-
 # running agents remotely is really cool because you can create an unlimited number of them, but it comes with some downsides
 # one of the main downsides is cost--remote hosts aren't free, and if you forget about them, they can rack up a big bill.
 # mng makes it really easy to deal with this by automatically shutting down hosts when their agents are idle:
-mng create my-task --in modal --idle-timeout 60
+mng create my-task --provider modal --idle-timeout 60
 # that command shuts down the Modal host (and agent) after 1 minute of inactivity.
 
 # You can customize what "inactivity" means by using the --idle-mode flag:
-mng create my-task --in modal --idle-mode "ssh"
+mng create my-task --provider modal --idle-mode "ssh"
 # that command will only consider agents as "idle" when you are not connected to them
 # see the idle_detection.md file for more details on idle detection and timeouts
 
-# you can specify which existing host to run on (eg, if you have multiple Modal hosts or SSH servers):
-mng create my-task --host my-dev-box
-# (--target-host is an alternative, more explicit form)
+# you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
+mng create my-task@my-dev-box
 
 # generally though, you'll want to construct a new Modal host for each agent.
 # build arguments let you customize that new remote host (eg, GPU type, memory, base Docker image for Modal):
-mng create my-task --in modal -b cpu=4 -b memory=16 -b image=python:3.12
+mng create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12
 # see "mng create --help" for all provider-specific build args
 # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
 
 # the most important build args for Modal are probably "--file" and "--context-dir",
 # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
 # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
-mng create my-task --in modal -b file=./Dockerfile.agent -b context-dir=./agent-context
+mng create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context
 # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
 # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
 
-# you can name the host separately from the agent:
-mng create my-task --in modal --host-name my-modal-box
+# you can name the host using the address syntax:
+mng create my-task@my-modal-box.modal --new-host
 # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
 
 # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
-mng create my-task --in modal -b volume=my-data:/data
+mng create my-task --provider modal -b volume=my-data:/data
 
 # you can use an existing snapshot instead of building a new host from scratch:
-mng create my-task --in modal --snapshot snap-123abc
+mng create my-task --provider modal --snapshot snap-123abc
 
 # some providers (like docker), take "start" args as well as build args:
-mng create my-task --in docker -s "--gpus all"
+mng create my-task --provider docker -s "--gpus all"
 # these args are passed to "docker run", whereas the build args are passed to "docker build".
 
 # you can specify the target path where the agent's work directory will be mounted:
-mng create my-task --in modal --target-path /workspace
+mng create my-task --provider modal --target-path /workspace
 
 # you can upload files and run custom commands during host provisioning:
-mng create my-task --in modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
+mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
 # (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
 
 # by default, agents are started when a host is booted. This can be disabled:
-mng create my-task --in modal --no-start-on-boot
+mng create my-task --provider modal --no-start-on-boot
 # but it only makes sense to do this if you are running multiple agents on the same host
 # that's because hosts are automatically stopped when they have no more running agents, so you have to have at least one.
 
@@ -193,14 +192,14 @@ mng create my-task --pass-env API_KEY
 # that command passes the API_KEY environment variable from your current shell into the agent's environment, without you having to specify the value on the command line.
 
 # you can also set host-level environment variables (separate from agent env vars):
-mng create my-task --in modal --pass-host-env MY_VAR
+mng create my-task --provider modal --pass-host-env MY_VAR
 # --host-env-file and --pass-host-env work the same as their agent counterparts, and again, you should generally prefer those forms (but if you really need to you can use --host-env to specify host env vars directly)
 
 ## TEMPLATES, ALIASES, AND SHORTCUTS
 
 # you can use templates to quickly apply a set of preconfigured options:
 echo '[create_templates.my_modal_template]' >> .mng/settings.local.toml
-echo 'new_host = "modal"' >> .mng/settings.local.toml
+echo 'provider = "modal"' >> .mng/settings.local.toml
 echo 'build_args = "cpu=4"' >> .mng/settings.local.toml
 mng create my-task --template my_modal_template
 # templates are defined in your config (see the CONFIGURATION section for more) and can be stacked: --template modal --template codex
@@ -222,11 +221,11 @@ mng create my-task --no-ensure-clean
 # it should probably be avoided in general, because it makes it more difficult to merge work later.
 
 # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
-mng create sisyphus --reuse --in modal
+mng create sisyphus --reuse --provider modal
 # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
 
 # you can control connection retries and timeouts:
-mng create my-task --in modal --retry 5 --retry-delay 10s
+mng create my-task --provider modal --retry 5 --retry-delay 10s
 # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
 
 # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -248,7 +247,7 @@ mng config set headless true
 export MNG_HEADLESS=true
 
 # *all* mng options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
-mng config set commands.create.in modal
+mng config set commands.create.provider modal
 # for more on configuration, see the CONFIGURATION section below
 
 # you can control output format for scripting:

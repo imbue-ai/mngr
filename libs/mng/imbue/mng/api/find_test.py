@@ -602,11 +602,13 @@ def test_agent_match_construction() -> None:
         agent_id=agent_id,
         agent_name=AgentName("my-agent"),
         host_id=host_id,
+        host_name=HostName("my-host"),
         provider_name=ProviderInstanceName("local"),
     )
     assert match.agent_id == agent_id
     assert match.agent_name == AgentName("my-agent")
     assert match.host_id == host_id
+    assert match.host_name == HostName("my-host")
     assert match.provider_name == ProviderInstanceName("local")
 
 
@@ -629,12 +631,14 @@ def test_group_agents_by_host_single_host() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("agent-1"),
         host_id=host_id,
+        host_name=HostName("host"),
         provider_name=provider_name,
     )
     match2 = AgentMatch(
         agent_id=AgentId.generate(),
         agent_name=AgentName("agent-2"),
         host_id=host_id,
+        host_name=HostName("host"),
         provider_name=provider_name,
     )
 
@@ -656,12 +660,14 @@ def test_group_agents_by_host_multiple_hosts() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("agent-1"),
         host_id=host_id_1,
+        host_name=HostName("host-1"),
         provider_name=provider_name,
     )
     match2 = AgentMatch(
         agent_id=AgentId.generate(),
         agent_name=AgentName("agent-2"),
         host_id=host_id_2,
+        host_name=HostName("host-2"),
         provider_name=provider_name,
     )
 
@@ -684,6 +690,7 @@ def test_group_agents_by_host_key_format() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("agent"),
         host_id=host_id,
+        host_name=HostName("host"),
         provider_name=provider_name,
     )
 

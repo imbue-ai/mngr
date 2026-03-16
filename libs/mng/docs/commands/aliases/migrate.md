@@ -34,13 +34,13 @@ manually clean up.
 **Migrate an agent to a Docker container**
 
 ```bash
-$ mng migrate my-agent --in docker
+$ mng migrate my-agent --provider docker
 ```
 
 **Migrate with a new name**
 
 ```bash
-$ mng migrate my-agent new-agent --in modal
+$ mng migrate my-agent new-agent --provider modal
 ```
 
 **Migrate and pass args to the agent**

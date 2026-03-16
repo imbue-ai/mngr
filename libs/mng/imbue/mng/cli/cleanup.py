@@ -59,9 +59,9 @@ class CleanupCliOptions(CommonCliOptions):
     exclude: tuple[str, ...]
     older_than: str | None
     idle_for: str | None
-    tag: tuple[str, ...]
+    host_label: tuple[str, ...]
     provider: tuple[str, ...]
-    agent_type: tuple[str, ...]
+    type: tuple[str, ...]
     action: str
     snapshot_before: bool
 
@@ -102,9 +102,9 @@ class CleanupCliOptions(CommonCliOptions):
     help="Select agents idle for at least this duration (e.g., 1h, 30m)",
 )
 @optgroup.option(
-    "--tag",
+    "--host-label",
     multiple=True,
-    help="Select agents/hosts with this tag (repeatable)",
+    help="Select agents/hosts with this host label (repeatable)",
 )
 @optgroup.option(
     "--provider",
@@ -112,7 +112,7 @@ class CleanupCliOptions(CommonCliOptions):
     help="Select hosts from this provider (repeatable)",
 )
 @optgroup.option(
-    "--agent-type",
+    "--type",
     multiple=True,
     help="Select this agent type, e.g., claude, codex (repeatable)",
 )
@@ -246,22 +246,22 @@ def _build_cel_filters_from_options(
         else:
             include_filters.append("(" + " || ".join(provider_conditions) + ")")
 
-    # --agent-type TYPE -> type == "TYPE" (repeatable, OR'd)
-    if opts.agent_type:
-        type_conditions = [f'type == "{t}"' for t in opts.agent_type]
+    # --type TYPE -> type == "TYPE" (repeatable, OR'd)
+    if opts.type:
+        type_conditions = [f'type == "{t}"' for t in opts.type]
         if len(type_conditions) == 1:
             include_filters.append(type_conditions[0])
         else:
             include_filters.append("(" + " || ".join(type_conditions) + ")")
 
-    # --tag TAG -> host.tags (repeatable)
-    if opts.tag:
-        for tag in opts.tag:
-            if "=" in tag:
-                key, value = tag.split("=", 1)
+    # --host-label KEY=VALUE -> host.tags (repeatable)
+    if opts.host_label:
+        for label in opts.host_label:
+            if "=" in label:
+                key, value = label.split("=", 1)
                 include_filters.append(f'host.tags.{key} == "{value}"')
             else:
-                include_filters.append(f'host.tags.{tag} == "true"')
+                include_filters.append(f'host.tags.{label} == "true"')
 
     return include_filters, exclude_filters
 
@@ -659,7 +659,7 @@ CommandHelpMetadata(
     key="cleanup",
     one_line_description="Destroy or stop agents and hosts to free up resources [experimental]",
     synopsis="mng [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] "
-    "[--provider PROVIDER] [--agent-type TYPE] [--tag TAG] [-f|--force|--yes] [--dry-run]",
+    "[--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]",
     description="""When running in a pty, defaults to providing an interactive interface for
 reviewing running agents and hosts and selecting which ones to destroy or stop.
 
@@ -679,7 +679,7 @@ see `mng gc`.""",
         ("Destroy agents older than 7 days", "mng cleanup --older-than 7d --yes"),
         ("Stop idle agents", "mng cleanup --stop --idle-for 1h --yes"),
         ("Destroy Docker agents only", "mng cleanup --provider docker --yes"),
-        ("Destroy by agent type", "mng cleanup --agent-type codex --yes"),
+        ("Destroy by agent type", "mng cleanup --type codex --yes"),
     ),
     see_also=(
         ("destroy", "Destroy specific agents by name"),

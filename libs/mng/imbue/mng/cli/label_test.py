@@ -22,6 +22,7 @@ from imbue.mng.hosts.host import Host
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import HostId
+from imbue.mng.primitives import HostName
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.base_provider import BaseProviderInstance
@@ -321,6 +322,7 @@ def test_apply_labels_offline_updates_persisted_data(
         agent_id=agent_id,
         agent_name=AgentName("offline-agent"),
         host_id=host_id,
+        host_name=HostName("offline-host"),
         provider_name=ProviderInstanceName("docker"),
     )
 
@@ -360,6 +362,7 @@ def test_apply_labels_offline_raises_when_agent_not_found(
         agent_id=agent_id,
         agent_name=AgentName("missing-agent"),
         host_id=host_id,
+        host_name=HostName("offline-host"),
         provider_name=ProviderInstanceName("docker"),
     )
 

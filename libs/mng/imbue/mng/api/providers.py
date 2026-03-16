@@ -71,7 +71,7 @@ def get_provider_instance(
         return instance
 
     # Otherwise, treat the name as a backend name and use defaults
-    # This supports the common case of just specifying "--in local" or "--in docker"
+    # This supports the common case of just specifying "--provider local" or "--provider docker"
     backend_name = ProviderBackendName(str(name))
     config_class = get_config_class(backend_name)
     default_config = config_class(backend=backend_name)

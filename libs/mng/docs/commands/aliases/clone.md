@@ -40,7 +40,7 @@ $ mng clone my-agent new-agent
 **Clone into a Docker container**
 
 ```bash
-$ mng clone my-agent --in docker
+$ mng clone my-agent --provider docker
 ```
 
 **Clone and pass args to the agent**

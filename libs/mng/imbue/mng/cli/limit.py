@@ -9,10 +9,10 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import AgentMatch
-from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.find import resolve_host_reference
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.cli.agent_addr import find_agents_by_addresses
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -410,8 +410,8 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
         return
 
     # Find agents (match all states for limit command)
-    agents = find_agents_by_identifiers_or_state(
-        agent_identifiers=agent_identifiers,
+    agents = find_agents_by_addresses(
+        raw_identifiers=agent_identifiers,
         filter_all=opts.limit_all,
         target_state=None,
         mng_ctx=mng_ctx,
