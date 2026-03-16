@@ -754,7 +754,7 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
 # =============================================================================
 
 
-def testparse_agent_address_empty_string() -> None:
+def test_parse_agent_address_empty_string() -> None:
     """Empty string produces an address with all None fields."""
     result = parse_agent_address("")
 
@@ -763,7 +763,7 @@ def testparse_agent_address_empty_string() -> None:
     assert result.provider_name is None
 
 
-def testparse_agent_address_simple_name() -> None:
+def test_parse_agent_address_simple_name() -> None:
     """A simple name with no @ produces just an agent name."""
     result = parse_agent_address("my-agent")
 
@@ -772,7 +772,7 @@ def testparse_agent_address_simple_name() -> None:
     assert result.provider_name is None
 
 
-def testparse_agent_address_name_and_host() -> None:
+def test_parse_agent_address_name_and_host() -> None:
     """NAME@HOST produces agent name and host name."""
     result = parse_agent_address("my-agent@myhost")
 
@@ -781,7 +781,7 @@ def testparse_agent_address_name_and_host() -> None:
     assert result.provider_name is None
 
 
-def testparse_agent_address_name_host_and_provider() -> None:
+def test_parse_agent_address_name_host_and_provider() -> None:
     """NAME@HOST.PROVIDER produces all three components."""
     result = parse_agent_address("my-agent@myhost.modal")
 
@@ -790,7 +790,7 @@ def testparse_agent_address_name_host_and_provider() -> None:
     assert result.provider_name == ProviderInstanceName("modal")
 
 
-def testparse_agent_address_name_and_provider_only() -> None:
+def test_parse_agent_address_name_and_provider_only() -> None:
     """NAME@.PROVIDER produces agent name and provider (implies new host)."""
     result = parse_agent_address("my-agent@.modal")
 
@@ -799,7 +799,7 @@ def testparse_agent_address_name_and_provider_only() -> None:
     assert result.provider_name == ProviderInstanceName("modal")
 
 
-def testparse_agent_address_no_name_with_host_and_provider() -> None:
+def test_parse_agent_address_no_name_with_host_and_provider() -> None:
     """@HOST.PROVIDER produces host and provider, no agent name."""
     result = parse_agent_address("@myhost.modal")
 
@@ -808,7 +808,7 @@ def testparse_agent_address_no_name_with_host_and_provider() -> None:
     assert result.provider_name == ProviderInstanceName("modal")
 
 
-def testparse_agent_address_no_name_with_provider_only() -> None:
+def test_parse_agent_address_no_name_with_provider_only() -> None:
     """@.PROVIDER produces just provider (implies new host, auto-generate name)."""
     result = parse_agent_address("@.docker")
 
@@ -817,7 +817,7 @@ def testparse_agent_address_no_name_with_provider_only() -> None:
     assert result.provider_name == ProviderInstanceName("docker")
 
 
-def testparse_agent_address_trailing_at_ignored() -> None:
+def test_parse_agent_address_trailing_at_ignored() -> None:
     """NAME@ is treated as just NAME (trailing @ with no host)."""
     result = parse_agent_address("my-agent@")
 
@@ -827,7 +827,7 @@ def testparse_agent_address_trailing_at_ignored() -> None:
     assert result.has_host_component is False
 
 
-def testparse_agent_address_has_host_component() -> None:
+def test_parse_agent_address_has_host_component() -> None:
     """has_host_component is True when any host info is present."""
     assert parse_agent_address("foo").has_host_component is False
     assert parse_agent_address("foo@host").has_host_component is True
@@ -852,7 +852,7 @@ def test_is_creating_new_host() -> None:
     assert _is_creating_new_host(addr, new_host_flag=False) is False
 
 
-def testparse_agent_address_rejects_multiple_dots() -> None:
+def test_parse_agent_address_rejects_multiple_dots() -> None:
     """Addresses with more than one dot in the host part are invalid."""
     with pytest.raises(UserInputError, match="more than one dot"):
         parse_agent_address("foo@host.provider.extra")
@@ -864,7 +864,7 @@ def testparse_agent_address_rejects_multiple_dots() -> None:
         parse_agent_address("@host.provider.extra")
 
 
-def testparse_agent_address_trailing_dot_means_host_only() -> None:
+def test_parse_agent_address_trailing_dot_means_host_only() -> None:
     """A trailing dot 'host.' means host name with no provider."""
     result = parse_agent_address("foo@host.")
 
@@ -873,7 +873,7 @@ def testparse_agent_address_trailing_dot_means_host_only() -> None:
     assert result.provider_name is None
 
 
-def testparse_agent_address_bare_dot_means_nothing() -> None:
+def test_parse_agent_address_bare_dot_means_nothing() -> None:
     """'@.' means no host and no provider (both parts empty)."""
     result = parse_agent_address("foo@.")
 

@@ -114,7 +114,7 @@ class _CachedAgentHostLoader(MutableModel):
 
 
 @pure
-def __is_new_host_implied(address: AgentAddress) -> bool:
+def _is_new_host_implied(address: AgentAddress) -> bool:
     """True when the address implies creating a new host (NAME@.PROVIDER form)."""
     return address.provider_name is not None and address.host_name is None
 
@@ -122,7 +122,7 @@ def __is_new_host_implied(address: AgentAddress) -> bool:
 @pure
 def _is_creating_new_host(address: AgentAddress, new_host_flag: bool) -> bool:
     """Whether this address combined with the --new-host flag means creating a new host."""
-    return new_host_flag or __is_new_host_implied(address)
+    return new_host_flag or _is_new_host_implied(address)
 
 
 @pure
