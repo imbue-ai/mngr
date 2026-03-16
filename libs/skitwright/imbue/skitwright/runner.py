@@ -1,3 +1,5 @@
+import os
+import signal
 import subprocess
 import threading
 from io import TextIOWrapper
@@ -39,6 +41,7 @@ def run_command(
         text=True,
         env=env,
         cwd=str(cwd),
+        process_group=0,
     )
 
     output_lines: list[OutputLine] = []
@@ -56,7 +59,7 @@ def run_command(
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
+        os.killpg(proc.pid, signal.SIGKILL)
 
     stdout_thread.join()
     stderr_thread.join()
