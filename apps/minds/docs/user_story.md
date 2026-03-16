@@ -1,6 +1,6 @@
 This is the primary flow for how a user would create a mind for the first time:
 
-1. User starts the forwarding server: `mind forward`
+1. User starts the forwarding server: `mind`
 2. The server prints a one-time login URL to the terminal
 3. User visits the login URL to authenticate (sets a global session cookie)
 4. Since no agents exist, the landing page shows a creation form with a git URL field (can also be pre-filled via `/?git_url=...`)

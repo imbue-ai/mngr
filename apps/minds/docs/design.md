@@ -1,6 +1,6 @@
 # Overview
 
-See the [README](../README.md) for an overview of what minds are and the terminology used throughout.
+See the [README](../README.md) for an overview of what minds are and see [the glossary](./mind/glossary.md) for terminology used throughout.
 
 # Relationship to mng
 
