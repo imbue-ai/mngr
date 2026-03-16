@@ -1058,6 +1058,24 @@ def _parse_agent_opts(
             "--transfer=git-worktree requires a new branch. Use --branch BASE:NEW instead of --branch BASE."
         )
 
+    # Explicit --transfer=rsync or --transfer=git-push on a local target requires
+    # --target-path, otherwise the agent would run in the source directory (use
+    # --in-place for that). This only applies when the user explicitly chose the
+    # transfer mode; the auto-selected default for local non-git repos is in-place.
+    is_local_target = not address.has_host_component and not opts.new_host
+    if (
+        opts.transfer is not None
+        and transfer_mode in (TransferMode.RSYNC, TransferMode.GIT_PUSH)
+        and is_local_target
+        and not opts.target_path
+    ):
+        raise UserInputError(
+            f"--transfer={opts.transfer} on a local target requires --target-path "
+            "to specify where to copy files. "
+            "Use --in-place to run directly in the source directory, "
+            "or --transfer=git-worktree to create a git worktree."
+        )
+
     # if the user didn't specify whether to include unclean, then infer from ensure_clean
     if opts.include_unclean is None:
         is_include_unclean = False if opts.ensure_clean else True

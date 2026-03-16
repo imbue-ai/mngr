@@ -978,3 +978,109 @@ def test_create_provider_flag_redundant_with_address_is_ok(
     )
 
     assert result.exit_code == 0
+
+
+# =============================================================================
+# --transfer validation tests
+# =============================================================================
+
+
+def test_transfer_rsync_local_without_target_path_raises(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+) -> None:
+    """--transfer=rsync on a local target without --target-path should raise UserInputError."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().transfer, "rsync"),
+    )
+
+    with pytest.raises(UserInputError, match="requires --target-path"):
+        _parse_agent_opts(
+            opts=opts,
+            address=AgentAddress(),
+            initial_message=None,
+            source_location=source_location,
+            mng_ctx=temp_mng_ctx,
+        )
+
+
+def test_transfer_git_push_local_without_target_path_raises(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+) -> None:
+    """--transfer=git-push on a local target without --target-path should raise UserInputError."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().transfer, "git-push"),
+    )
+
+    with pytest.raises(UserInputError, match="requires --target-path"):
+        _parse_agent_opts(
+            opts=opts,
+            address=AgentAddress(),
+            initial_message=None,
+            source_location=source_location,
+            mng_ctx=temp_mng_ctx,
+        )
+
+
+def test_transfer_rsync_local_with_target_path_succeeds(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """--transfer=rsync on a local target with --target-path should succeed."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    target_path = tmp_path / "target"
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().transfer, "rsync"),
+        to_update(default_create_cli_opts.field_ref().target_path, str(target_path)),
+    )
+
+    result, _ = _parse_agent_opts(
+        opts=opts,
+        address=AgentAddress(),
+        initial_message=None,
+        source_location=source_location,
+        mng_ctx=temp_mng_ctx,
+    )
+
+    assert result.target_path == target_path
+
+
+def test_transfer_rsync_remote_target_without_target_path_succeeds(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    temp_mng_ctx: MngContext,
+    temp_work_dir: Path,
+) -> None:
+    """--transfer=rsync targeting a remote host without --target-path should succeed."""
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=temp_work_dir)
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().transfer, "rsync"),
+    )
+    # Address with a host component means targeting a different (potentially remote) host
+    address = AgentAddress(
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+
+    # Should not raise -- remote target auto-generates a work directory
+    result, _ = _parse_agent_opts(
+        opts=opts,
+        address=address,
+        initial_message=None,
+        source_location=source_location,
+        mng_ctx=temp_mng_ctx,
+    )
