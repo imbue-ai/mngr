@@ -75,13 +75,13 @@ def test_vendor_repos_local_creates_commit(tmp_path: Path) -> None:
     config = VendorRepoConfig(name=NonEmptyStr("my-lib"), path=str(source))
     vendor_repos(mind_dir, (config,))
 
-    result = subprocess.run(
-        ["git", "log", "--oneline"],
+    log_output = subprocess.run(
+        ["git", "log", "--format=%b"],
         cwd=mind_dir,
         capture_output=True,
         text=True,
     )
-    assert "Squashed" in result.stdout or "my-lib" in result.stdout or len(result.stdout.strip().splitlines()) > 1
+    assert "git-subtree-dir: vendor/my-lib" in log_output.stdout
 
 
 def test_vendor_repos_local_at_specific_ref(tmp_path: Path) -> None:

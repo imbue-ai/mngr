@@ -29,7 +29,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNG_BINARY
 from imbue.minds.config.data_types import MindPaths
-from imbue.minds.errors import DirtyRepoError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngCommandError
 from imbue.minds.errors import VendorError
@@ -303,7 +302,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (DirtyRepoError, GitCloneError, MngCommandError, VendorError, ValueError, OSError) as e:
+        except (GitCloneError, MngCommandError, VendorError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
