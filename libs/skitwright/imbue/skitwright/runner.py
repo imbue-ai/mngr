@@ -68,12 +68,14 @@ def run_command(
     frozen_lines = tuple(output_lines)
 
     if timed_out:
-        timeout_line = OutputLine(source=OutputSource.STDERR, text=f"Command timed out after {timeout}s")
+        timeout_msg = f"Command timed out after {timeout}s"
+        timeout_line = OutputLine(source=OutputSource.STDERR, text=timeout_msg)
+        real_stderr = _reconstruct(frozen_lines, OutputSource.STDERR)
         return CommandResult(
             command=command,
             exit_code=124,
             stdout=_reconstruct(frozen_lines, OutputSource.STDOUT),
-            stderr=f"Command timed out after {timeout}s",
+            stderr=real_stderr + timeout_msg + "\n",
             output_lines=(*frozen_lines, timeout_line),
         )
 
