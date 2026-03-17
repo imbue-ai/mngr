@@ -76,7 +76,7 @@ AGENT_WORK_DIR: Final[str] = os.environ.get("MNG_AGENT_WORK_DIR", "")
 
 WEB_SERVER_NAME: Final[str] = "web"
 AGENT_LIST_POLL_INTERVAL_SECONDS: Final[int] = 30
-_WS_MAGIC: Final[bytes] = b"258EAFA5-E914-47DA-95CA-5AB5A40E64BE"
+_WS_MAGIC: Final[bytes] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _WS_POLL_INTERVAL_SECONDS: Final[int] = 2
 
 # -- Global state (protected by locks) --
