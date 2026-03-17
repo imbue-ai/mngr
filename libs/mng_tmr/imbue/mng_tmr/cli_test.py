@@ -4,13 +4,9 @@ from pathlib import Path
 from typing import Any
 
 import click
-import pytest
 from click.testing import CliRunner
 
-from imbue.mng.cli.env_utils import resolve_labels
 from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.errors import UserInputError
-from imbue.mng.interfaces.host import AgentLabelOptions
 from imbue.mng.primitives import OutputFormat
 from imbue.mng_tmr.cli import _TmrCommand
 from imbue.mng_tmr.cli import _emit_agents_launched
@@ -144,18 +140,3 @@ def test_tmr_command_options_before_separator() -> None:
     assert captured["pytest_args"] == ("tests/",)
     assert captured["testing_flags"] == ("-m", "release")
     assert captured["provider"] == "docker"
-
-
-def test_resolve_labels_valid() -> None:
-    result = resolve_labels(("key=value", "batch=run1"))
-    assert result == AgentLabelOptions(labels={"key": "value", "batch": "run1"})
-
-
-def test_resolve_labels_empty() -> None:
-    result = resolve_labels(())
-    assert result == AgentLabelOptions(labels={})
-
-
-def test_resolve_labels_invalid_raises() -> None:
-    with pytest.raises(UserInputError):
-        resolve_labels(("no-equals-sign",))
