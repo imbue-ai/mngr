@@ -21,7 +21,6 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import SnapshotNotFoundError
 from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
-from imbue.mng.interfaces.data_types import SnapshotRecord
 from imbue.mng.interfaces.data_types import VolumeFileType
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import HostId
@@ -58,106 +57,16 @@ from imbue.mng_modal.instance import _parse_optional_int
 from imbue.mng_modal.instance import _parse_volume_spec
 from imbue.mng_modal.instance import _substitute_dockerfile_build_args
 from imbue.mng_modal.routes.deployment import deploy_function
+from imbue.mng_modal.testing import make_host_record
+from imbue.mng_modal.testing import make_sandbox_with_tags
+from imbue.mng_modal.testing import make_snapshot
 from imbue.mng_modal.testing import make_testing_modal_interface
 from imbue.mng_modal.testing import make_testing_provider
+from imbue.mng_modal.testing import setup_host_with_sandbox
 from imbue.mng_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.testing import TestingModalInterface
-from imbue.modal_proxy.testing import TestingSandbox
-
-_DEFAULT_SANDBOX_CONFIG = SandboxConfig()
-
-
-def _make_snapshot(snap_id: str = "snap-1", name: str = "s1") -> SnapshotRecord:
-    """Create a SnapshotRecord for testing."""
-    return SnapshotRecord(id=snap_id, name=name, created_at=datetime.now(timezone.utc).isoformat())
-
-
-def _make_host_record(
-    host_id: HostId | None = None,
-    host_name: str = "test-host",
-    snapshots: list[SnapshotRecord] | None = None,
-    failure_reason: str | None = None,
-    user_tags: dict[str, str] | None = None,
-    config: SandboxConfig | None = _DEFAULT_SANDBOX_CONFIG,
-    ssh_host: str | None = "127.0.0.1",
-    ssh_port: int | None = 22222,
-    ssh_host_public_key: str | None = "ssh-ed25519 AAAA...",
-) -> HostRecord:
-    """Create a HostRecord for testing."""
-    if host_id is None:
-        host_id = HostId.generate()
-    now = datetime.now(timezone.utc)
-    certified_data = CertifiedHostData(
-        host_id=str(host_id),
-        host_name=host_name,
-        user_tags=user_tags or {},
-        snapshots=snapshots or [],
-        failure_reason=failure_reason,
-        created_at=now,
-        updated_at=now,
-    )
-    return HostRecord(
-        certified_host_data=certified_data,
-        ssh_host=ssh_host,
-        ssh_port=ssh_port,
-        ssh_host_public_key=ssh_host_public_key,
-        config=config,
-    )
-
-
-def _make_sandbox_with_tags(
-    modal_interface: TestingModalInterface,
-    host_id: HostId,
-    host_name: str,
-    user_tags: dict[str, str] | None = None,
-) -> TestingSandbox:
-    """Create a testing sandbox with mng tags set."""
-    image = modal_interface.image_debian_slim()
-    app = list(modal_interface._apps.values())[0]
-    sandbox = modal_interface.sandbox_create(
-        image=image,
-        app=app,
-        timeout=300,
-        cpu=1.0,
-        memory=1024,
-    )
-    tags = {
-        TAG_HOST_ID: str(host_id),
-        TAG_HOST_NAME: host_name,
-    }
-    if user_tags:
-        for key, value in user_tags.items():
-            tags[TAG_USER_PREFIX + key] = value
-    sandbox.set_tags(tags)
-    assert isinstance(sandbox, TestingSandbox)
-    return sandbox
-
-
-# Fixtures (testing_modal, testing_provider, testing_provider_no_host_volume)
-# are defined in conftest.py per project convention.
-
-
-def _setup_host_with_sandbox(
-    testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
-    host_name: str,
-    user_tags: dict[str, str] | None = None,
-) -> tuple[HostId, HostRecord, TestingSandbox]:
-    """Common setup: create a host record, sandbox with tags, and cache both.
-
-    Returns (host_id, record, sandbox). The host cache is populated with an
-    OfflineHost so that get_host() returns it without SSH.
-    """
-    host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name=host_name, user_tags=user_tags)
-    testing_provider._write_host_record(record)
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, host_name, user_tags=user_tags)
-    testing_provider._cache_sandbox(host_id, HostName(host_name), sandbox)
-    offline = testing_provider._create_host_from_host_record(record)
-    testing_provider._host_by_id_cache[host_id] = offline
-    return host_id, record, sandbox
-
 
 # ---------------------------------------------------------------------------
 # Host Record CRUD Tests
@@ -166,7 +75,7 @@ def _setup_host_with_sandbox(
 
 def test_write_and_read_host_record(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="my-host")
+    record = make_host_record(host_id=host_id, host_name="my-host")
     testing_provider._write_host_record(record)
 
     loaded = testing_provider._read_host_record(host_id)
@@ -182,7 +91,7 @@ def test_read_host_record_not_found(testing_provider: ModalProviderInstance) -> 
 
 def test_read_host_record_uses_cache(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id)
+    record = make_host_record(host_id=host_id)
     testing_provider._write_host_record(record)
 
     # First read populates cache
@@ -196,14 +105,14 @@ def test_read_host_record_uses_cache(testing_provider: ModalProviderInstance) ->
 
 def test_read_host_record_bypass_cache(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="v1")
+    record = make_host_record(host_id=host_id, host_name="v1")
     testing_provider._write_host_record(record)
 
     # Populate cache
     testing_provider._read_host_record(host_id)
 
     # Update record directly on volume (bypassing cache)
-    record2 = _make_host_record(host_id=host_id, host_name="v2")
+    record2 = make_host_record(host_id=host_id, host_name="v2")
     testing_provider._write_host_record(record2)
 
     # Read with cache=False should see the update
@@ -214,7 +123,7 @@ def test_read_host_record_bypass_cache(testing_provider: ModalProviderInstance) 
 
 def test_delete_host_record(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id)
+    record = make_host_record(host_id=host_id)
     testing_provider._write_host_record(record)
 
     testing_provider._delete_host_record(host_id)
@@ -227,8 +136,8 @@ def test_list_all_host_records(testing_provider: ModalProviderInstance) -> None:
 
     host1 = HostId.generate()
     host2 = HostId.generate()
-    testing_provider._write_host_record(_make_host_record(host_id=host1, host_name="h1"))
-    testing_provider._write_host_record(_make_host_record(host_id=host2, host_name="h2"))
+    testing_provider._write_host_record(make_host_record(host_id=host1, host_name="h1"))
+    testing_provider._write_host_record(make_host_record(host_id=host2, host_name="h2"))
 
     records = testing_provider._list_all_host_records(cg)
     assert len(records) == 2
@@ -263,10 +172,10 @@ def test_save_failed_host_record(testing_provider: ModalProviderInstance) -> Non
 def test_clear_snapshots_from_host_record(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
-        _make_snapshot("snap-2", "s2"),
+        make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-2", "s2"),
     ]
-    record = _make_host_record(host_id=host_id, snapshots=snapshots)
+    record = make_host_record(host_id=host_id, snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     testing_provider._clear_snapshots_from_host_record(host_id)
@@ -278,7 +187,7 @@ def test_clear_snapshots_from_host_record(testing_provider: ModalProviderInstanc
 
 def test_clear_snapshots_noop_when_no_snapshots(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, snapshots=[])
+    record = make_host_record(host_id=host_id, snapshots=[])
     testing_provider._write_host_record(record)
 
     testing_provider._clear_snapshots_from_host_record(host_id)
@@ -439,7 +348,7 @@ def test_delete_host_volume(
 
 
 def test_check_host_name_unique_no_conflicts(testing_provider: ModalProviderInstance) -> None:
-    testing_provider._write_host_record(_make_host_record(host_name="other-host"))
+    testing_provider._write_host_record(make_host_record(host_name="other-host"))
     # Should not raise
     testing_provider._check_host_name_is_unique(HostName("new-host"))
 
@@ -447,18 +356,16 @@ def test_check_host_name_unique_no_conflicts(testing_provider: ModalProviderInst
 def test_check_host_name_unique_with_stopped_host(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    testing_provider._write_host_record(
-        _make_host_record(host_id=host_id, host_name="taken-name", snapshots=snapshots)
-    )
+    testing_provider._write_host_record(make_host_record(host_id=host_id, host_name="taken-name", snapshots=snapshots))
     with pytest.raises(HostNameConflictError):
         testing_provider._check_host_name_is_unique(HostName("taken-name"))
 
 
 def test_check_host_name_unique_destroyed_host_ok(testing_provider: ModalProviderInstance) -> None:
     # A destroyed host (no snapshots, not running, not failed) should not block reuse
-    testing_provider._write_host_record(_make_host_record(host_name="reusable-name", snapshots=[]))
+    testing_provider._write_host_record(make_host_record(host_name="reusable-name", snapshots=[]))
     # Should not raise
     testing_provider._check_host_name_is_unique(HostName("reusable-name"))
 
@@ -474,7 +381,7 @@ def test_sandbox_cache_by_id(
 ) -> None:
     host_id = HostId.generate()
     name = HostName("cached")
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "cached")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "cached")
 
     testing_provider._cache_sandbox(host_id, name, sandbox)
 
@@ -489,7 +396,7 @@ def test_sandbox_cache_by_name(
 ) -> None:
     host_id = HostId.generate()
     name = HostName("by-name")
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "by-name")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "by-name")
 
     testing_provider._cache_sandbox(host_id, name, sandbox)
 
@@ -504,7 +411,7 @@ def test_uncache_sandbox(
 ) -> None:
     host_id = HostId.generate()
     name = HostName("to-uncache")
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "to-uncache")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "to-uncache")
 
     testing_provider._cache_sandbox(host_id, name, sandbox)
     testing_provider._uncache_sandbox(host_id, name)
@@ -520,7 +427,7 @@ def test_reset_caches(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "reset-me")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "reset-me")
     testing_provider._cache_sandbox(host_id, HostName("reset-me"), sandbox)
 
     testing_provider.reset_caches()
@@ -539,8 +446,8 @@ def test_list_sandboxes(
 ) -> None:
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
-    _make_sandbox_with_tags(testing_modal, host_id1, "h1")
-    _make_sandbox_with_tags(testing_modal, host_id2, "h2")
+    make_sandbox_with_tags(testing_modal, host_id1, "h1")
+    make_sandbox_with_tags(testing_modal, host_id2, "h2")
 
     # Also create a sandbox WITHOUT mng tags (should be excluded)
     image = testing_modal.image_debian_slim()
@@ -556,7 +463,7 @@ def test_find_sandbox_by_host_id_api_fallback(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    _make_sandbox_with_tags(testing_modal, host_id, "api-lookup")
+    make_sandbox_with_tags(testing_modal, host_id, "api-lookup")
 
     # Don't cache -- should fall back to API
     found = testing_provider._find_sandbox_by_host_id(host_id)
@@ -568,7 +475,7 @@ def test_find_sandbox_by_name_api_fallback(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    _make_sandbox_with_tags(testing_modal, host_id, "api-name-lookup")
+    make_sandbox_with_tags(testing_modal, host_id, "api-name-lookup")
 
     found = testing_provider._find_sandbox_by_name(HostName("api-name-lookup"))
     assert found is not None
@@ -625,10 +532,10 @@ def test_discover_hosts_with_running_sandbox(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    snapshots = [_make_snapshot("snap-run", "s1")]
-    record = _make_host_record(host_id=host_id, host_name="running-host", snapshots=snapshots)
+    snapshots = [make_snapshot("snap-run", "s1")]
+    record = make_host_record(host_id=host_id, host_name="running-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
-    _make_sandbox_with_tags(testing_modal, host_id, "running-host")
+    make_sandbox_with_tags(testing_modal, host_id, "running-host")
 
     cg = testing_provider.mng_ctx.concurrency_group
     # discover_hosts with running sandboxes -- _create_host_from_sandbox will fail
@@ -643,9 +550,9 @@ def test_discover_hosts_stopped_with_snapshots(
 ) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="stopped-host", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="stopped-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     cg = testing_provider.mng_ctx.concurrency_group
@@ -658,7 +565,7 @@ def test_discover_hosts_failed_host(
     testing_provider: ModalProviderInstance,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="failed-host",
         failure_reason="Build failed",
@@ -678,7 +585,7 @@ def test_discover_hosts_destroyed_excluded_by_default(
     testing_provider: ModalProviderInstance,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="destroyed-host", snapshots=[])
+    record = make_host_record(host_id=host_id, host_name="destroyed-host", snapshots=[])
     testing_provider._write_host_record(record)
 
     cg = testing_provider.mng_ctx.concurrency_group
@@ -690,7 +597,7 @@ def test_discover_hosts_destroyed_included_when_requested(
     testing_provider: ModalProviderInstance,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="destroyed-host", snapshots=[])
+    record = make_host_record(host_id=host_id, host_name="destroyed-host", snapshots=[])
     testing_provider._write_host_record(record)
 
     cg = testing_provider.mng_ctx.concurrency_group
@@ -703,9 +610,9 @@ def test_discover_hosts_and_agents(
 ) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="with-agents", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="with-agents", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     # Add agent data with proper AgentId format
@@ -734,7 +641,7 @@ def test_discover_hosts_and_agents_excludes_destroyed(
     testing_provider: ModalProviderInstance,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="destroyed", snapshots=[])
+    record = make_host_record(host_id=host_id, host_name="destroyed", snapshots=[])
     testing_provider._write_host_record(record)
 
     cg = testing_provider.mng_ctx.concurrency_group
@@ -750,9 +657,9 @@ def test_discover_hosts_and_agents_excludes_destroyed(
 def test_get_host_by_id_offline(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="offline-host", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="offline-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     host = testing_provider.get_host(host_id)
@@ -763,9 +670,9 @@ def test_get_host_by_id_offline(testing_provider: ModalProviderInstance) -> None
 def test_get_host_by_name_offline(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="by-name-host", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="by-name-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     host = testing_provider.get_host(HostName("by-name-host"))
@@ -784,7 +691,7 @@ def test_get_host_by_name_not_found(testing_provider: ModalProviderInstance) -> 
 
 def test_to_offline_host(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="offline")
+    record = make_host_record(host_id=host_id, host_name="offline")
     testing_provider._write_host_record(record)
 
     offline = testing_provider.to_offline_host(host_id)
@@ -804,7 +711,7 @@ def test_to_offline_host_not_found(testing_provider: ModalProviderInstance) -> N
 def test_get_host_resources_with_config(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     config = SandboxConfig(cpu=4.0, memory=8.0)
-    record = _make_host_record(host_id=host_id, config=config)
+    record = make_host_record(host_id=host_id, config=config)
     testing_provider._write_host_record(record)
 
     offline = testing_provider.to_offline_host(host_id)
@@ -815,7 +722,7 @@ def test_get_host_resources_with_config(testing_provider: ModalProviderInstance)
 
 def test_get_host_resources_no_config(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         config=None,
         ssh_host=None,
@@ -838,10 +745,10 @@ def test_get_host_resources_no_config(testing_provider: ModalProviderInstance) -
 def test_list_snapshots(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
-        _make_snapshot("snap-2", "s2"),
+        make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-2", "s2"),
     ]
-    record = _make_host_record(host_id=host_id, snapshots=snapshots)
+    record = make_host_record(host_id=host_id, snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     snap_list = testing_provider.list_snapshots(host_id)
@@ -852,7 +759,7 @@ def test_list_snapshots(testing_provider: ModalProviderInstance) -> None:
 
 def test_list_snapshots_empty(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, snapshots=[])
+    record = make_host_record(host_id=host_id, snapshots=[])
     testing_provider._write_host_record(record)
 
     snap_list = testing_provider.list_snapshots(host_id)
@@ -874,10 +781,10 @@ def test_record_snapshot(
     We test the snapshot filesystem + host record logic directly.
     """
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="snap-host")
+    record = make_host_record(host_id=host_id, host_name="snap-host")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "snap-host")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "snap-host")
 
     # Directly call sandbox.snapshot_filesystem to verify the testing sandbox supports it
     snap_image = sandbox.snapshot_filesystem()
@@ -890,7 +797,7 @@ def test_record_snapshot(
 
 def test_create_snapshot_no_sandbox_raises(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id)
+    record = make_host_record(host_id=host_id)
     testing_provider._write_host_record(record)
 
     with pytest.raises(HostNotFoundError):
@@ -907,17 +814,18 @@ def test_stop_host_with_sandbox(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="to-stop")
+    record = make_host_record(host_id=host_id, host_name="to-stop")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "to-stop")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "to-stop")
     testing_provider._cache_sandbox(host_id, HostName("to-stop"), sandbox)
 
     # Use create_snapshot=False since snapshots require SSH (get_host -> set_certified_data)
     testing_provider.stop_host(host_id, create_snapshot=False)
 
     # Sandbox should be terminated
-    assert sandbox._is_terminated
+    with pytest.raises(ModalProxyError, match="terminated"):
+        sandbox.exec("echo", "should fail")
 
     # Host record should have stop_reason
     updated = testing_provider._read_host_record(host_id, use_cache=False)
@@ -925,25 +833,9 @@ def test_stop_host_with_sandbox(
     assert updated.certified_host_data.stop_reason == "STOPPED"
 
 
-def test_stop_host_without_snapshot(
-    testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
-) -> None:
-    host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="no-snap-stop")
-    testing_provider._write_host_record(record)
-
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "no-snap-stop")
-    testing_provider._cache_sandbox(host_id, HostName("no-snap-stop"), sandbox)
-
-    testing_provider.stop_host(host_id, create_snapshot=False)
-
-    assert sandbox._is_terminated
-
-
 def test_stop_host_no_sandbox(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="already-stopped")
+    record = make_host_record(host_id=host_id, host_name="already-stopped")
     testing_provider._write_host_record(record)
 
     # Should not raise even though no sandbox exists
@@ -961,21 +853,22 @@ def test_destroy_host(
 ) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="to-destroy", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="to-destroy", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     # Add agent data
     testing_provider.persist_agent_data(host_id, {"id": str(AgentId.generate()), "name": "agent", "type": "claude"})
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "to-destroy")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "to-destroy")
     testing_provider._cache_sandbox(host_id, HostName("to-destroy"), sandbox)
 
     testing_provider.destroy_host(host_id)
 
     # Sandbox terminated
-    assert sandbox._is_terminated
+    with pytest.raises(ModalProxyError, match="terminated"):
+        sandbox.exec("echo", "should fail")
 
     # Snapshots cleared
     updated = testing_provider._read_host_record(host_id, use_cache=False)
@@ -994,7 +887,7 @@ def test_destroy_host(
 
 def test_delete_host(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="to-delete")
+    record = make_host_record(host_id=host_id, host_name="to-delete")
     testing_provider._write_host_record(record)
     testing_provider.persist_agent_data(host_id, {"id": str(AgentId.generate()), "name": "agent", "type": "claude"})
 
@@ -1014,10 +907,10 @@ def test_on_connection_error_clears_caches(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="conn-err")
+    record = make_host_record(host_id=host_id, host_name="conn-err")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "conn-err")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "conn-err")
     testing_provider._cache_sandbox(host_id, HostName("conn-err"), sandbox)
     testing_provider._host_record_cache_by_id[host_id] = record
 
@@ -1148,7 +1041,7 @@ def test_get_volume_for_app_not_registered(
 
 def test_start_host_no_snapshots_raises(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="no-snaps", snapshots=[])
+    record = make_host_record(host_id=host_id, host_name="no-snaps", snapshots=[])
     testing_provider._write_host_record(record)
 
     with pytest.raises(NoSnapshotsModalMngError):
@@ -1157,7 +1050,7 @@ def test_start_host_no_snapshots_raises(testing_provider: ModalProviderInstance)
 
 def test_start_host_failed_host_raises(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="failed",
         failure_reason="Build failed",
@@ -1206,19 +1099,6 @@ def test_provider_properties(testing_provider: ModalProviderInstance) -> None:
     assert testing_provider.supports_mutable_tags is True
 
 
-def test_provider_app_name(testing_provider: ModalProviderInstance) -> None:
-    assert testing_provider.app_name == "test-app"
-
-
-def test_provider_environment_name(testing_provider: ModalProviderInstance) -> None:
-    assert "test-user" in testing_provider.environment_name
-
-
-# ---------------------------------------------------------------------------
-# Running Host IDs Tests
-# ---------------------------------------------------------------------------
-
-
 def test_list_running_host_ids(
     testing_provider: ModalProviderInstance,
     testing_modal: TestingModalInterface,
@@ -1226,8 +1106,8 @@ def test_list_running_host_ids(
     cg = testing_provider.mng_ctx.concurrency_group
     host_id1 = HostId.generate()
     host_id2 = HostId.generate()
-    _make_sandbox_with_tags(testing_modal, host_id1, "r1")
-    _make_sandbox_with_tags(testing_modal, host_id2, "r2")
+    make_sandbox_with_tags(testing_modal, host_id1, "r1")
+    make_sandbox_with_tags(testing_modal, host_id2, "r2")
 
     running_ids = testing_provider._list_running_host_ids(cg)
     assert host_id1 in running_ids
@@ -1249,7 +1129,7 @@ def test_list_running_host_ids_empty(
 
 def test_on_certified_host_data_updated(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="update-test")
+    record = make_host_record(host_id=host_id, host_name="update-test")
     testing_provider._write_host_record(record)
 
     new_data = record.certified_host_data.model_copy_update(
@@ -1283,9 +1163,9 @@ def test_on_certified_host_data_updated_not_found(testing_provider: ModalProvide
 def test_create_host_from_host_record(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="offline-test", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="offline-test", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     offline = testing_provider._create_host_from_host_record(record)
@@ -1342,13 +1222,13 @@ def test_get_host_tags_from_sandbox(
     testing_modal: TestingModalInterface,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="tagged-host",
         user_tags={"env": "prod"},
     )
     testing_provider._write_host_record(record)
-    sandbox = _make_sandbox_with_tags(
+    sandbox = make_sandbox_with_tags(
         testing_modal,
         host_id,
         "tagged-host",
@@ -1365,7 +1245,7 @@ def test_get_host_tags_from_host_record(
 ) -> None:
     """When no sandbox is running, tags are read from the host record."""
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="offline-tagged",
         user_tags={"version": "1.0"},
@@ -1388,7 +1268,7 @@ def test_set_host_tags_offline(
 ) -> None:
     """set_host_tags on an offline host updates the volume record."""
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="set-tags-host",
         user_tags={"old": "value"},
@@ -1408,7 +1288,7 @@ def test_set_host_tags_sandbox_tags_updated(
     testing_modal: TestingModalInterface,
 ) -> None:
     """set_host_tags updates both sandbox tags and the volume record."""
-    host_id, _, sandbox = _setup_host_with_sandbox(
+    host_id, _, sandbox = setup_host_with_sandbox(
         testing_provider, testing_modal, "set-tags-sb", user_tags={"old": "value"}
     )
 
@@ -1433,7 +1313,7 @@ def test_add_tags_to_host_offline(
 ) -> None:
     """add_tags_to_host on an offline host merges tags in the volume record."""
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="add-tags-host",
         user_tags={"existing": "value"},
@@ -1452,7 +1332,7 @@ def test_add_tags_to_host_sandbox_tags_updated(
     testing_modal: TestingModalInterface,
 ) -> None:
     """add_tags_to_host updates sandbox tags and volume record when sandbox is running."""
-    host_id, _, sandbox = _setup_host_with_sandbox(
+    host_id, _, sandbox = setup_host_with_sandbox(
         testing_provider, testing_modal, "add-tags-sb", user_tags={"existing": "value"}
     )
 
@@ -1472,7 +1352,7 @@ def test_remove_tags_from_host_offline(
 ) -> None:
     """remove_tags_from_host on an offline host removes tags from the volume record."""
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="remove-tags-host",
         user_tags={"keep": "yes", "remove": "me"},
@@ -1491,7 +1371,7 @@ def test_remove_tags_from_host_sandbox_tags_updated(
     testing_modal: TestingModalInterface,
 ) -> None:
     """remove_tags_from_host updates sandbox tags and volume record."""
-    host_id, _, sandbox = _setup_host_with_sandbox(
+    host_id, _, sandbox = setup_host_with_sandbox(
         testing_provider, testing_modal, "remove-tags-sb", user_tags={"keep": "yes", "remove": "me"}
     )
 
@@ -1511,7 +1391,7 @@ def test_rename_host_with_sandbox(
     testing_modal: TestingModalInterface,
 ) -> None:
     """rename_host updates sandbox tags and volume record."""
-    host_id, _, sandbox = _setup_host_with_sandbox(testing_provider, testing_modal, "old-name")
+    host_id, _, sandbox = setup_host_with_sandbox(testing_provider, testing_modal, "old-name")
 
     testing_provider.rename_host(host_id, HostName("new-name"))
 
@@ -1530,7 +1410,7 @@ def test_rename_host_without_sandbox(
 ) -> None:
     """Renaming an offline host (no sandbox) should update the host record."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="offline-old")
+    record = make_host_record(host_id=host_id, host_name="offline-old")
     testing_provider._write_host_record(record)
 
     testing_provider.rename_host(host_id, HostName("offline-new"))
@@ -1551,10 +1431,10 @@ def test_delete_snapshot_removes_from_record(
     host_id = HostId.generate()
     snap_id = "im-snap-abc123"
     snapshots = [
-        _make_snapshot(snap_id, "s1"),
-        _make_snapshot("im-snap-def456", "s2"),
+        make_snapshot(snap_id, "s1"),
+        make_snapshot("im-snap-def456", "s2"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="snap-del-host", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="snap-del-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     testing_provider.delete_snapshot(host_id, SnapshotId(snap_id))
@@ -1570,9 +1450,9 @@ def test_delete_snapshot_not_found_raises(
 ) -> None:
     host_id = HostId.generate()
     snapshots = [
-        _make_snapshot("existing-snap", "s1"),
+        make_snapshot("existing-snap", "s1"),
     ]
-    record = _make_host_record(host_id=host_id, host_name="snap-host", snapshots=snapshots)
+    record = make_host_record(host_id=host_id, host_name="snap-host", snapshots=snapshots)
     testing_provider._write_host_record(record)
 
     with pytest.raises(SnapshotNotFoundError):
@@ -1596,7 +1476,7 @@ def test_get_host_by_id_uses_cache(
 ) -> None:
     """Once a host is fetched, subsequent get_host calls return the cached object."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="cache-test")
+    record = make_host_record(host_id=host_id, host_name="cache-test")
     testing_provider._write_host_record(record)
 
     host1 = testing_provider.get_host(host_id)
@@ -1609,7 +1489,7 @@ def test_get_host_by_name_searches_host_records(
 ) -> None:
     """get_host by name should search through host records when no sandbox matches."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="name-search")
+    record = make_host_record(host_id=host_id, host_name="name-search")
     testing_provider._write_host_record(record)
 
     host = testing_provider.get_host(HostName("name-search"))
@@ -1622,7 +1502,7 @@ def test_get_host_by_name_not_in_records_raises(
 ) -> None:
     """get_host by name raises HostNotFoundError if not found in records or sandboxes."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="other-host")
+    record = make_host_record(host_id=host_id, host_name="other-host")
     testing_provider._write_host_record(record)
 
     with pytest.raises(HostNotFoundError):
@@ -1644,16 +1524,16 @@ def test_discover_hosts_mixed_states(
     # Stopped host (has snapshots, no sandbox)
     stopped_id = HostId.generate()
     stopped_snaps = [
-        _make_snapshot("snap-stopped", "s1"),
+        make_snapshot("snap-stopped", "s1"),
     ]
     testing_provider._write_host_record(
-        _make_host_record(host_id=stopped_id, host_name="stopped", snapshots=stopped_snaps)
+        make_host_record(host_id=stopped_id, host_name="stopped", snapshots=stopped_snaps)
     )
 
     # Failed host (has failure_reason, no sandbox, no snapshots)
     failed_id = HostId.generate()
     testing_provider._write_host_record(
-        _make_host_record(
+        make_host_record(
             host_id=failed_id,
             host_name="failed",
             failure_reason="Build broke",
@@ -1665,7 +1545,7 @@ def test_discover_hosts_mixed_states(
 
     # Destroyed host (no snapshots, no failure, no sandbox)
     destroyed_id = HostId.generate()
-    testing_provider._write_host_record(_make_host_record(host_id=destroyed_id, host_name="destroyed", snapshots=[]))
+    testing_provider._write_host_record(make_host_record(host_id=destroyed_id, host_name="destroyed", snapshots=[]))
 
     # Without include_destroyed, only stopped + failed should appear
     discovered = testing_provider.discover_hosts(cg, include_destroyed=False)
@@ -1691,10 +1571,10 @@ def test_discover_hosts_and_agents_mixed_states(
     # Stopped host with agent
     stopped_id = HostId.generate()
     stopped_snaps = [
-        _make_snapshot("snap-1", "s1"),
+        make_snapshot("snap-1", "s1"),
     ]
     testing_provider._write_host_record(
-        _make_host_record(host_id=stopped_id, host_name="stopped-agents", snapshots=stopped_snaps)
+        make_host_record(host_id=stopped_id, host_name="stopped-agents", snapshots=stopped_snaps)
     )
     agent_id = str(AgentId.generate())
     testing_provider.persist_agent_data(
@@ -1710,7 +1590,7 @@ def test_discover_hosts_and_agents_mixed_states(
     # Failed host (no agents)
     failed_id = HostId.generate()
     testing_provider._write_host_record(
-        _make_host_record(
+        make_host_record(
             host_id=failed_id,
             host_name="failed-no-agents",
             failure_reason="Build error",
@@ -1723,7 +1603,7 @@ def test_discover_hosts_and_agents_mixed_states(
     # Destroyed host (should be excluded by default)
     destroyed_id = HostId.generate()
     testing_provider._write_host_record(
-        _make_host_record(host_id=destroyed_id, host_name="destroyed-no-agents", snapshots=[])
+        make_host_record(host_id=destroyed_id, host_name="destroyed-no-agents", snapshots=[])
     )
 
     result = testing_provider.discover_hosts_and_agents(cg)
@@ -1824,38 +1704,20 @@ def test_proxy_file_entry_type_directory_maps_to_volume_directory() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_optional_int_valid() -> None:
-    assert _parse_optional_int("42") == 42
-    assert _parse_optional_int("  123  ") == 123
-    assert _parse_optional_int("0") == 0
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("42", 42), ("  123  ", 123), ("0", 0), ("", None), ("   ", None), ("not_a_number", None), ("12.5", None)],
+)
+def test_parse_optional_int(value: str, expected: int | None) -> None:
+    assert _parse_optional_int(value) == expected
 
 
-def test_parse_optional_int_empty() -> None:
-    assert _parse_optional_int("") is None
-    assert _parse_optional_int("   ") is None
-
-
-def test_parse_optional_int_invalid() -> None:
-    assert _parse_optional_int("not_a_number") is None
-    assert _parse_optional_int("12.5") is None
-    assert _parse_optional_int("abc123") is None
-
-
-def test_parse_optional_float_valid() -> None:
-    assert _parse_optional_float("3.14") == 3.14
-    assert _parse_optional_float("  42.0  ") == 42.0
-    assert _parse_optional_float("0") == 0.0
-    assert _parse_optional_float("100") == 100.0
-
-
-def test_parse_optional_float_empty() -> None:
-    assert _parse_optional_float("") is None
-    assert _parse_optional_float("   ") is None
-
-
-def test_parse_optional_float_invalid() -> None:
-    assert _parse_optional_float("not_a_float") is None
-    assert _parse_optional_float("abc") is None
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("3.14", 3.14), ("  42.0  ", 42.0), ("0", 0.0), ("100", 100.0), ("", None), ("   ", None), ("abc", None)],
+)
+def test_parse_optional_float(value: str, expected: float | None) -> None:
+    assert _parse_optional_float(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -2104,7 +1966,7 @@ def test_get_connector_failed_host_raises(
     testing_provider: ModalProviderInstance,
 ) -> None:
     host_id = HostId.generate()
-    record = _make_host_record(
+    record = make_host_record(
         host_id=host_id,
         host_name="failed-conn",
         failure_reason="Build failed",
@@ -2279,7 +2141,7 @@ def test_discover_hosts_running_sandbox_without_host_record(
     The sandbox has tags, but no host record on the volume yet. It should NOT appear
     since _create_host_from_sandbox will fail without SSH."""
     host_id = HostId.generate()
-    _make_sandbox_with_tags(testing_modal, host_id, "orphan-sandbox")
+    make_sandbox_with_tags(testing_modal, host_id, "orphan-sandbox")
 
     cg = testing_provider.mng_ctx.concurrency_group
     discovered = testing_provider.discover_hosts(cg)
@@ -2287,67 +2149,6 @@ def test_discover_hosts_running_sandbox_without_host_record(
     # will return None (no SSH info on volume). So it won't appear.
     host_ids = {d.host_id for d in discovered}
     assert host_id not in host_ids
-
-
-def test_discover_hosts_running_sandbox_with_host_record(
-    testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
-) -> None:
-    """A running sandbox WITH a host record should show up in discovery.
-    Even though SSH fails, the host record fallback works."""
-    host_id = HostId.generate()
-    snapshots = [
-        _make_snapshot("snap-1", "s1"),
-    ]
-    record = _make_host_record(host_id=host_id, host_name="running-with-record", snapshots=snapshots)
-    testing_provider._write_host_record(record)
-    _make_sandbox_with_tags(testing_modal, host_id, "running-with-record")
-
-    cg = testing_provider.mng_ctx.concurrency_group
-    discovered = testing_provider.discover_hosts(cg)
-    # The sandbox exists AND there's a host record with snapshots.
-    # _create_host_from_sandbox will fail (no SSH), but the host record fallback
-    # should work, showing the host as stopped.
-    host_ids = {d.host_id for d in discovered}
-    assert host_id in host_ids
-
-
-# ---------------------------------------------------------------------------
-# discover_hosts_and_agents Running Sandbox Tests
-# ---------------------------------------------------------------------------
-
-
-def test_discover_hosts_and_agents_running_sandbox(
-    testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
-) -> None:
-    """discover_hosts_and_agents with a running sandbox shows the host as running."""
-    host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="running-agents")
-    testing_provider._write_host_record(record)
-    _make_sandbox_with_tags(testing_modal, host_id, "running-agents")
-
-    agent_id = str(AgentId.generate())
-    testing_provider.persist_agent_data(
-        host_id,
-        {
-            "id": agent_id,
-            "name": "my-agent",
-            "type": "claude",
-            "command": "claude",
-        },
-    )
-
-    cg = testing_provider.mng_ctx.concurrency_group
-    result = testing_provider.discover_hosts_and_agents(cg)
-    assert len(result) >= 1
-    host_refs = {h.host_id: h for h in result}
-    assert host_id in host_refs
-
-
-# ---------------------------------------------------------------------------
-# Backend Environment Retry Tests
-# ---------------------------------------------------------------------------
 
 
 def test_get_or_create_app_caches_volume(tmp_path: Path) -> None:
@@ -2388,7 +2189,7 @@ def test_backend_get_config_class() -> None:
 def test_get_host_resources_fractional_cpu(testing_provider: ModalProviderInstance) -> None:
     host_id = HostId.generate()
     config = SandboxConfig(cpu=0.25, memory=0.5)
-    record = _make_host_record(host_id=host_id, config=config)
+    record = make_host_record(host_id=host_id, config=config)
     testing_provider._write_host_record(record)
 
     offline = testing_provider.to_offline_host(host_id)
@@ -2454,7 +2255,7 @@ def test_modal_provider_app_full_lifecycle(
 
     # Write a host record
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="lifecycle-test")
+    record = make_host_record(host_id=host_id, host_name="lifecycle-test")
     provider._write_host_record(record)
 
     # Read it back
@@ -2496,10 +2297,10 @@ def test_create_snapshot_with_cached_offline_host(
     This avoids the SSH connection attempt in _record_snapshot -> get_host.
     """
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="snap-offline")
+    record = make_host_record(host_id=host_id, host_name="snap-offline")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "snap-offline")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "snap-offline")
     testing_provider._cache_sandbox(host_id, HostName("snap-offline"), sandbox)
 
     # Pre-populate host cache so get_host returns OfflineHost instead of trying SSH
@@ -2522,10 +2323,10 @@ def test_create_snapshot_auto_name_with_cached_host(
 ) -> None:
     """create_snapshot without a name generates a timestamp-based name."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="auto-snap")
+    record = make_host_record(host_id=host_id, host_name="auto-snap")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "auto-snap")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "auto-snap")
     testing_provider._cache_sandbox(host_id, HostName("auto-snap"), sandbox)
 
     offline = testing_provider._create_host_from_host_record(record)
@@ -2546,10 +2347,10 @@ def test_stop_host_with_snapshot_using_cached_host(
 ) -> None:
     """stop_host with create_snapshot=True should create a snapshot before terminating."""
     host_id = HostId.generate()
-    record = _make_host_record(host_id=host_id, host_name="stop-snap")
+    record = make_host_record(host_id=host_id, host_name="stop-snap")
     testing_provider._write_host_record(record)
 
-    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "stop-snap")
+    sandbox = make_sandbox_with_tags(testing_modal, host_id, "stop-snap")
     testing_provider._cache_sandbox(host_id, HostName("stop-snap"), sandbox)
 
     offline = testing_provider._create_host_from_host_record(record)
@@ -2557,7 +2358,8 @@ def test_stop_host_with_snapshot_using_cached_host(
 
     testing_provider.stop_host(host_id, create_snapshot=True)
 
-    assert sandbox._is_terminated
+    with pytest.raises(ModalProxyError, match="terminated"):
+        sandbox.exec("echo", "should fail")
 
     updated = testing_provider._read_host_record(host_id, use_cache=False)
     assert updated is not None
@@ -2587,31 +2389,6 @@ def test_discover_hosts_handles_sandbox_without_valid_tags(
     discovered = testing_provider.discover_hosts(cg)
     # Should not crash, and should not include this sandbox
     assert len(discovered) == 0
-
-
-def test_discover_hosts_includes_running_sandbox_with_record(
-    testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
-) -> None:
-    """A running sandbox with a matching host record that has snapshots
-    should appear in discovery (as offline since SSH won't work)."""
-    host_id = HostId.generate()
-    snapshots = [
-        _make_snapshot("snap-x", "sx"),
-    ]
-    record = _make_host_record(host_id=host_id, host_name="run-with-rec", snapshots=snapshots)
-    testing_provider._write_host_record(record)
-    _make_sandbox_with_tags(testing_modal, host_id, "run-with-rec")
-
-    cg = testing_provider.mng_ctx.concurrency_group
-    discovered = testing_provider.discover_hosts(cg, include_destroyed=False)
-    host_ids = {d.host_id for d in discovered}
-    assert host_id in host_ids
-
-
-# ---------------------------------------------------------------------------
-# _build_modal_image with context_dir Test
-# ---------------------------------------------------------------------------
 
 
 def test_build_modal_image_from_dockerfile_with_context(

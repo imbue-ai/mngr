@@ -216,6 +216,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         environment_name: str,
         is_persistent: bool,
         modal_interface: ModalInterface,
+        is_testing: bool = False,
     ) -> tuple[AppInterface, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
@@ -240,10 +241,8 @@ class ModalProviderBackend(ProviderBackendInterface):
             return cls._app_registry[app_name]
 
         with log_span("Creating ephemeral Modal app with output capture: {} (env: {})", app_name, environment_name):
-            # Enter the output capture context first -- for testing mode we skip
-            # modal's output manager since it depends on modal internals
-            is_testing = isinstance(modal_interface, TestingModalInterface)
-
+            # Testing mode uses a null context instead of Modal output capture,
+            # which requires Modal SDK internals not available in testing.
             if is_testing:
                 output_buffer = StringIO()
                 loguru_writer: ModalLoguruWriter | None = None
@@ -460,7 +459,11 @@ Supported build arguments for the modal provider:
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
             app, context_handle = ModalProviderBackend._get_or_create_app(
-                app_name, environment_name, config.is_persistent, modal_interface
+                app_name,
+                environment_name,
+                config.is_persistent,
+                modal_interface,
+                is_testing=config.mode == ModalMode.TESTING,
             )
             volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 
