@@ -1200,6 +1200,16 @@ def test_get_command_basename_single_word(
     assert agent._get_command_basename(CommandString("python3")) == "python3"
 
 
+def test_get_command_basename_strips_leading_subshell_syntax(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """_get_command_basename should strip leading '(' from subshell-wrapped commands."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
+
+    assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
+
+
 # =========================================================================
 # get_reported_activity_record tests
 # =========================================================================
