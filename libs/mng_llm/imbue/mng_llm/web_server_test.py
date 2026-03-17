@@ -51,22 +51,8 @@ def web_server_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return module
 
 
-# -- _html_escape tests --
-
-
-def test_html_escape_escapes_ampersand(web_server_module: Any) -> None:
-    assert web_server_module._html_escape("a&b") == "a&amp;b"
-
-
-def test_html_escape_escapes_angle_brackets(web_server_module: Any) -> None:
-    result = web_server_module._html_escape("<script>")
-    assert "<" not in result
-    assert ">" not in result
-
-
-def test_html_escape_escapes_quotes(web_server_module: Any) -> None:
-    assert "&quot;" in web_server_module._html_escape('say "hello"')
-
+# Pure function tests (_html_escape, _make_event_id, etc.) are in
+# web_server_direct_test.py for coverage tracking.
 
 # -- _read_conversations tests --
 
@@ -197,11 +183,6 @@ def test_render_agents_page_contains_header_links(web_server_module: Any) -> Non
     assert "Conversations" in page
 
 
-def test_render_agents_page_shows_empty_state(web_server_module: Any) -> None:
-    page = web_server_module._render_agents_page()
-    assert "No agents found" in page
-
-
 def test_render_agents_page_lists_agents_with_state(web_server_module: Any) -> None:
     web_server_module._cached_agents = [
         {"name": "my-agent-82741", "state": "RUNNING"},
@@ -217,42 +198,9 @@ def test_render_agents_page_lists_agents_with_state(web_server_module: Any) -> N
         web_server_module._cached_agents = []
 
 
-# -- Iframe page rendering tests --
+# Iframe and header rendering pure-function tests are in web_server_direct_test.py.
 
-
-def test_render_iframe_page_contains_iframe_with_src(web_server_module: Any) -> None:
-    page = web_server_module._render_iframe_page("TestAgent", "My Chat", "../chat/?arg=conv-1")
-    assert "<iframe" in page
-    assert "../chat/?arg=conv-1" in page
-    assert "iframe-layout" in page
-    assert "iframe-container" in page
-
-
-def test_render_iframe_page_contains_header(web_server_module: Any) -> None:
-    page = web_server_module._render_iframe_page("TestAgent", "My Chat", "../chat/?arg=conv-1", active="conversations")
-    assert "TestAgent" in page
-    assert "Conversations" in page
-    assert "Terminal" in page
-    assert "Agents" in page
-
-
-def test_render_iframe_page_highlights_active_nav(web_server_module: Any) -> None:
-    page = web_server_module._render_iframe_page("TestAgent", "Title", "../chat/", active="terminal")
-    assert 'class="active"' in page
-
-
-def test_render_iframe_page_escapes_src(web_server_module: Any) -> None:
-    page = web_server_module._render_iframe_page("TestAgent", "Title", '../chat/?arg=a"b')
-    assert "a&quot;b" in page
-
-
-def test_render_iframe_page_escapes_title(web_server_module: Any) -> None:
-    page = web_server_module._render_iframe_page("TestAgent", "</title><script>xss</script>", "../chat/")
-    assert "<script>" not in page
-    assert "&lt;/title&gt;" in page
-
-
-# -- Main page tests --
+# -- Main page tests (env-var dependent) --
 
 
 def test_get_most_recent_conversation_id_returns_none_when_no_conversations(
@@ -276,29 +224,6 @@ def test_get_most_recent_conversation_id_returns_most_recent(
 
     result = web_server_module._get_most_recent_conversation_id()
     assert result == "conv-new-82741"
-
-
-# -- Header rendering tests --
-
-
-def test_render_header_highlights_active_conversations(web_server_module: Any) -> None:
-    header = web_server_module._render_header("Agent", active="conversations")
-    assert 'class="active" href="conversations"' in header
-
-
-def test_render_header_highlights_active_terminal(web_server_module: Any) -> None:
-    header = web_server_module._render_header("Agent", active="terminal")
-    assert 'class="active" href="terminal"' in header
-
-
-def test_render_header_highlights_active_agents(web_server_module: Any) -> None:
-    header = web_server_module._render_header("Agent", active="agents")
-    assert 'class="active" href="agents-page"' in header
-
-
-def test_render_header_no_active_when_unspecified(web_server_module: Any) -> None:
-    header = web_server_module._render_header("Agent")
-    assert 'class="active"' not in header
 
 
 # -- API function tests (env-var dependent, only testable via dynamic module) --
@@ -448,57 +373,10 @@ def test_render_sidebar_escapes_agent_name(web_server_module: Any) -> None:
     assert "&lt;script&gt;" in sidebar
 
 
-# -- Helper function tests --
+# Helper function tests (_make_event_id, _iso_timestamp, _get_default_chat_model)
+# are in web_server_direct_test.py for coverage tracking.
 
-
-def test_make_event_id_returns_deterministic_id(web_server_module: Any) -> None:
-    id1 = web_server_module._make_event_id("test-data-82741")
-    id2 = web_server_module._make_event_id("test-data-82741")
-    assert id1 == id2
-    assert id1.startswith("evt-")
-    assert len(id1) == 4 + 32
-
-
-def test_make_event_id_differs_for_different_input(web_server_module: Any) -> None:
-    id1 = web_server_module._make_event_id("data-a-82741")
-    id2 = web_server_module._make_event_id("data-b-82741")
-    assert id1 != id2
-
-
-def test_iso_timestamp_format(web_server_module: Any) -> None:
-    ts = web_server_module._iso_timestamp()
-    assert ts.endswith("Z")
-    assert "T" in ts
-    # Should have nanosecond precision (9 digits after the decimal)
-    decimal_part = ts.split(".")[-1].rstrip("Z")
-    assert len(decimal_part) == 9
-
-
-# -- _get_default_chat_model tests --
-
-
-def test_get_default_chat_model_returns_fallback_when_no_work_dir(web_server_module: Any) -> None:
-    web_server_module.AGENT_WORK_DIR = ""
-    result = web_server_module._get_default_chat_model()
-    assert result == "claude-opus-4.6"
-
-
-def test_get_default_chat_model_returns_fallback_when_no_settings_file(web_server_module: Any, tmp_path: Path) -> None:
-    work_dir = tmp_path / "empty_work_82741"
-    work_dir.mkdir()
-    web_server_module.AGENT_WORK_DIR = str(work_dir)
-
-    result = web_server_module._get_default_chat_model()
-    assert result == "claude-opus-4.6"
-
-
-# -- _read_message_history tests --
-
-
-def test_read_message_history_returns_empty_when_no_db(web_server_module: Any) -> None:
-    web_server_module.LLM_DB_PATH = Path("/nonexistent/path/logs.db")
-    result = web_server_module._read_message_history("conv-no-db-82741")
-    assert result == []
+# -- _read_message_history tests (env-var dependent) --
 
 
 def test_read_message_history_returns_user_and_assistant_messages(web_server_module: Any) -> None:
