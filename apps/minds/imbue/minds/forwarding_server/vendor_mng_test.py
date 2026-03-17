@@ -6,7 +6,6 @@ import pytest
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import DirtyRepoError
 from imbue.minds.errors import VendorError
-from imbue.minds.forwarding_server.conftest import make_git_repo
 from imbue.minds.forwarding_server.vendor_mng import VENDOR_DIR_NAME
 from imbue.minds.forwarding_server.vendor_mng import check_repo_is_clean
 from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
@@ -15,6 +14,7 @@ from imbue.minds.forwarding_server.vendor_mng import update_vendor_repos
 from imbue.minds.forwarding_server.vendor_mng import vendor_repos
 from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
+from imbue.minds.testing import make_git_repo
 from imbue.mng_claude_mind.data_types import VendorRepoConfig
 
 

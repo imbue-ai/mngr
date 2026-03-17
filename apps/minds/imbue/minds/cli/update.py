@@ -68,7 +68,7 @@ def find_mind_agent(agent_name: str) -> MindAgentRecord:
             )
         )
 
-    agents = _parse_agents_from_output(result.stdout)
+    agents = parse_agents_from_mng_output(result.stdout)
     if not agents:
         raise MindError("No mind found with name '{}'".format(agent_name))
 
@@ -85,7 +85,7 @@ def find_mind_agent(agent_name: str) -> MindAgentRecord:
     return MindAgentRecord(agent_id=AgentId(str(raw_id)), work_dir=Path(str(raw_work_dir)))
 
 
-def _parse_agents_from_output(stdout: str) -> list[dict[str, object]]:
+def parse_agents_from_mng_output(stdout: str) -> list[dict[str, object]]:
     """Parse agent records from ``mng list --format json`` output.
 
     Handles the case where stdout may contain non-JSON lines

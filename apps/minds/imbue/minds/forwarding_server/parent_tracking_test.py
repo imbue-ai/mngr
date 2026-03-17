@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.errors import VendorError
-from imbue.minds.forwarding_server.conftest import make_git_repo
 from imbue.minds.forwarding_server.parent_tracking import MIND_BRANCH_PREFIX
 from imbue.minds.forwarding_server.parent_tracking import PARENT_FILE_NAME
 from imbue.minds.forwarding_server.parent_tracking import ParentInfo
@@ -20,6 +19,7 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitCommitHash
 from imbue.minds.primitives import GitUrl
 from imbue.minds.testing import add_and_commit_git_repo
+from imbue.minds.testing import make_git_repo
 
 
 def test_get_current_branch_returns_branch_name(tmp_path: Path) -> None:

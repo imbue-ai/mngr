@@ -10,7 +10,6 @@ from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
-from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredAgent
@@ -87,15 +86,3 @@ def make_resolver_with_data(
             resolver.update_servers(AgentId(agent_id_str), servers)
 
     return resolver
-
-
-def make_git_repo(tmp_path: Path, name: str = "repo") -> Path:
-    """Create a minimal git repo with a committed file.
-
-    Shared helper for tests that need a local git repo to operate on.
-    """
-    repo = tmp_path / name
-    repo.mkdir()
-    (repo / "hello.txt").write_text("hello")
-    init_and_commit_git_repo(repo, tmp_path)
-    return repo
