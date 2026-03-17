@@ -113,7 +113,7 @@ def run_mng(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subpr
 def parse_mng_list_json(stdout: str) -> list[dict[str, object]]:
     """Extract agent records from mng list --format json stdout.
 
-    Delegates to the production implementation in cli.update. Kept here
+    Delegates to the shared implementation in config.data_types. Kept here
     for backward compatibility with existing test callers.
     """
     return parse_agents_from_mng_output(stdout)
