@@ -1,6 +1,6 @@
 ---
 argument-hint: <script_file> <test_directory>
-description: Match tutorial script blocks to pytest functions and add missing tests
+description: Match tutorial script blocks to e2e pytest functions and add missing tests
 ---
 
 Your task is to ensure that every command block in a tutorial shell script has a corresponding pytest function.
@@ -40,7 +40,8 @@ After step 3, some script blocks may still lack tests. For each one:
 2. Write one or more pytest functions that test the behavior demonstrated by that block. A single block may warrant multiple tests if it demonstrates multiple behaviors or has interesting edge cases.
 3. Each function's docstring MUST contain the exact text of the script block (indented to match Python syntax). The docstring may contain additional content beyond the block.
 4. The function name should be descriptive of what the block does (e.g., `test_create_task` for a block that runs `mng create ...`).
-5. Follow the existing test patterns in the directory for style, fixtures, and assertions.
+5. Decorate each new test function with `@pytest.mark.release`, since these are e2e tests.
+6. Follow the existing test patterns in the directory for style, fixtures, and assertions.
 
 ## Step 5: Verify
 
@@ -50,4 +51,4 @@ Re-run the matcher to confirm everything is matched:
 uv run python scripts/tutorial_matcher.py $ARGUMENTS
 ```
 
-Then run the tests in the test directory to make sure all tests pass.
+Do NOT run the tests locally -- these are e2e tests and may be too expensive to run locally. They will be validated in CI.
