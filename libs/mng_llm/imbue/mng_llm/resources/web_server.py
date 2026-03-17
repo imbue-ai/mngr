@@ -1122,7 +1122,9 @@ def _handle_websocket(handler: BaseHTTPRequestHandler, conversation_id: str) -> 
         handler.end_headers()
         return
     accept = _ws_accept_key(key)
-    handler.send_response(101, "Switching Protocols")
+    # Write the status line manually as HTTP/1.1 -- BaseHTTPRequestHandler
+    # defaults to HTTP/1.0, which the websockets library rejects.
+    handler.wfile.write(b"HTTP/1.1 101 Switching Protocols\r\n")
     handler.send_header("Upgrade", "websocket")
     handler.send_header("Connection", "Upgrade")
     handler.send_header("Sec-WebSocket-Accept", accept)
