@@ -10,8 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.cli.agent_addr import parse_agent_address
 from imbue.mng.cli.create import _create_agent
-from imbue.mng.cli.create import _parse_agent_address
 from imbue.mng.cli.create import _setup_create
 from imbue.mng.cli.create import create
 from imbue.mng.config.data_types import CreateCliOptions
@@ -149,7 +149,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     """
     agent_name = f"test-connect-local-{int(time.time())}"
     session_name = f"{mng_test_prefix}{agent_name}"
-    address = _parse_agent_address(agent_name)
+    address = parse_agent_address(agent_name)
 
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().command, "sleep 397265"),

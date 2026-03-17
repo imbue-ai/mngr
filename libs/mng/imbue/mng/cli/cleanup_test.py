@@ -37,9 +37,9 @@ def _make_opts(
     exclude: tuple[str, ...] = (),
     older_than: str | None = None,
     idle_for: str | None = None,
-    tag: tuple[str, ...] = (),
+    host_label: tuple[str, ...] = (),
     provider: tuple[str, ...] = (),
-    agent_type: tuple[str, ...] = (),
+    type: tuple[str, ...] = (),
     action: str = "destroy",
     snapshot_before: bool = False,
 ) -> CleanupCliOptions:
@@ -51,9 +51,9 @@ def _make_opts(
         exclude=exclude,
         older_than=older_than,
         idle_for=idle_for,
-        tag=tag,
+        host_label=host_label,
         provider=provider,
-        agent_type=agent_type,
+        type=type,
         action=action,
         snapshot_before=snapshot_before,
         output_format="human",
@@ -101,26 +101,26 @@ def test_build_cel_filters_multiple_providers() -> None:
     assert any("docker" in f and "modal" in f for f in include_filters)
 
 
-def test_build_cel_filters_single_agent_type() -> None:
-    opts = _make_opts(agent_type=("claude",))
+def test_build_cel_filters_single_type() -> None:
+    opts = _make_opts(type=("claude",))
     include_filters, exclude_filters = _build_cel_filters_from_options(opts)
     assert 'type == "claude"' in include_filters
 
 
-def test_build_cel_filters_multiple_agent_types() -> None:
-    opts = _make_opts(agent_type=("claude", "codex"))
+def test_build_cel_filters_multiple_types() -> None:
+    opts = _make_opts(type=("claude", "codex"))
     include_filters, exclude_filters = _build_cel_filters_from_options(opts)
     assert any("claude" in f and "codex" in f for f in include_filters)
 
 
-def test_build_cel_filters_tag_with_value() -> None:
-    opts = _make_opts(tag=("env=prod",))
+def test_build_cel_filters_host_label_with_value() -> None:
+    opts = _make_opts(host_label=("env=prod",))
     include_filters, exclude_filters = _build_cel_filters_from_options(opts)
     assert 'host.tags.env == "prod"' in include_filters
 
 
-def test_build_cel_filters_tag_without_value() -> None:
-    opts = _make_opts(tag=("ephemeral",))
+def test_build_cel_filters_host_label_without_value() -> None:
+    opts = _make_opts(host_label=("ephemeral",))
     include_filters, exclude_filters = _build_cel_filters_from_options(opts)
     assert 'host.tags.ephemeral == "true"' in include_filters
 
@@ -133,7 +133,7 @@ def test_build_cel_filters_include_and_exclude_passthrough() -> None:
 
 
 def test_build_cel_filters_combined() -> None:
-    opts = _make_opts(older_than="7d", provider=("docker",), agent_type=("claude",))
+    opts = _make_opts(older_than="7d", provider=("docker",), type=("claude",))
     include_filters, exclude_filters = _build_cel_filters_from_options(opts)
     assert len(include_filters) == 3
     assert "age > 604800.0" in include_filters
@@ -190,9 +190,9 @@ def test_cleanup_cli_options_fields() -> None:
     assert opts.action == "destroy"
     assert opts.older_than is None
     assert opts.idle_for is None
-    assert opts.tag == ()
+    assert opts.host_label == ()
     assert opts.provider == ()
-    assert opts.agent_type == ()
+    assert opts.type == ()
     assert opts.snapshot_before is False
 
 

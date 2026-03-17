@@ -252,3 +252,62 @@ def test_destroy_output_result_format_template(capsys: pytest.CaptureFixture[str
     _output_result([AgentName("my-agent")], output_opts)
     captured = capsys.readouterr()
     assert "my-agent" in captured.out
+
+
+# =============================================================================
+# Agent address support in destroy
+# =============================================================================
+
+
+def test_destroy_accepts_address_syntax(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Destroy should parse agent addresses without crashing.
+
+    When given NAME@HOST.PROVIDER, the address is parsed and the agent name
+    is extracted for matching. The command fails because the agent doesn't exist,
+    not because of a parsing error.
+    """
+    result = cli_runner.invoke(
+        destroy,
+        ["my-agent@somehost.docker"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    # Should report agent not found (address was parsed, name extracted for matching)
+    assert "my-agent" in result.output
+
+
+def test_destroy_address_force_nonexistent_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Destroy with --force should not crash when address doesn't match any agent."""
+    result = cli_runner.invoke(
+        destroy,
+        ["nonexistent@host.modal", "--force"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    # --force swallows AgentNotFoundError and returns 0
+    assert result.exit_code == 0
+
+
+def test_destroy_plain_name_still_works(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Plain agent names (no @) continue to work with the address-aware destroy."""
+    result = cli_runner.invoke(
+        destroy,
+        ["plain-agent-name", "--force"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    # --force swallows the not-found error
+    assert result.exit_code == 0

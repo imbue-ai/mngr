@@ -33,6 +33,9 @@ SOURCE_STOP: Final[EventSource] = EventSource("stop")
 SOURCE_MONITOR: Final[EventSource] = EventSource("monitor")
 SOURCE_DELIVERY_FAILURES: Final[EventSource] = EventSource("delivery_failures")
 SOURCE_COMMON_TRANSCRIPT: Final[EventSource] = EventSource("claude/common_transcript")
+SOURCE_MIND_IDLE: Final[EventSource] = EventSource("mind/idle")
+SOURCE_MIND_SCHEDULE: Final[EventSource] = EventSource("mind/schedule")
+SOURCE_MIND_ONBOARDING: Final[EventSource] = EventSource("mind/onboarding")
 
 
 class MessageEvent(EventEnvelope):
@@ -103,4 +106,21 @@ class WatcherSettings(FrozenModel):
         default=PositiveInt(20),
         description="Maximum number of events from the same source in a single delivery batch. "
         "If exceeded, all events from that source are aggregated into a single file reference.",
+    )
+    idle_event_delay_minutes_schedule: tuple[int, ...] = Field(
+        default=(),
+        description="Schedule of delays (in minutes) between consecutive idle events. "
+        "For example, [1, 10, 60] means: send the first idle event after 1 minute of "
+        "inactivity, then after 11 minutes total, then every 60 minutes thereafter. "
+        "An empty tuple disables idle events.",
+    )
+    scheduled_events: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of event names to time-of-day strings (e.g. '13:37:30', '15:00') "
+        "in the user's timezone. Each event fires once per day at the specified time.",
+    )
+    user_timezone: str = Field(
+        default="UTC",
+        description="IANA timezone name (e.g. 'America/New_York', 'Europe/London'). "
+        "Used for scheduled events and local time reporting in idle events.",
     )

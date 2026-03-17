@@ -36,7 +36,7 @@ mng list [OPTIONS]
 | `--provider` | text | Show only agents using specified provider (repeatable) | None |
 | `--project` | text | Show only agents with this project label (repeatable) | None |
 | `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
-| `--tag` | text | Show only agents on hosts with this tag (format: KEY=VALUE, repeatable) | None |
+| `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
 | `--stdin` | boolean | Read agent and host IDs or names from stdin (one per line) | `False` |
 
 ## Output Format
@@ -142,7 +142,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
-- `host.tags` - Metadata tags for the host
+- `host.tags` - Host labels (metadata key-value pairs)
 - `host.ssh_activity_time` - Timestamp of the last SSH connection to the host
 - `host.boot_time` - When the host was last started
 - `host.uptime_seconds` - How long the host has been running
@@ -213,10 +213,10 @@ $ mng list --project mng
 $ mng list --label env=prod
 ```
 
-**List agents with a specific host tag**
+**List agents with a specific host label**
 
 ```bash
-$ mng list --tag env=prod
+$ mng list --host-label env=prod
 ```
 
 **List agents as JSON**

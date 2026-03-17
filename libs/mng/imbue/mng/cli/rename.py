@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.discovery_events import emit_discovery_events_for_host
-from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mng.cli.agent_addr import find_agent_by_address
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -97,7 +97,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 
     # Resolve the agent (without requiring the agent process to be running)
     agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
-    agent, host = find_and_maybe_start_agent_by_name_or_id(
+    agent, host = find_agent_by_address(
         opts.current,
         agents_by_host,
         mng_ctx,

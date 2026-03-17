@@ -23,6 +23,7 @@ from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
+from imbue.mng.cli.agent_addr import find_agent_by_address
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
@@ -418,7 +419,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     host: OnlineHostInterface
 
     if opts.agent is not None:
-        agent, host = find_and_maybe_start_agent_by_name_or_id(
+        agent, host = find_agent_by_address(
             opts.agent,
             agents_by_host,
             mng_ctx,

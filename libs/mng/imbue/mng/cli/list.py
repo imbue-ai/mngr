@@ -70,7 +70,7 @@ _HEADER_LABELS: Final[dict[str, str]] = {
     "host.name": "HOST",
     "host.provider_name": "PROVIDER",
     "host.state": "HOST STATE",
-    "host.tags": "TAGS",
+    "host.tags": "HOST LABELS",
     "labels": "LABELS",
     "host.ssh.host": "SSH HOST",
     "idle_timeout_seconds": "IDLE TIMEOUT",
@@ -125,7 +125,7 @@ class ListCliOptions(CommonCliOptions):
     provider: tuple[str, ...]
     project: tuple[str, ...]
     label: tuple[str, ...]
-    tag: tuple[str, ...]
+    host_label: tuple[str, ...]
     stdin: bool
     fields: str | None
     sort: str
@@ -183,9 +183,9 @@ class ListCliOptions(CommonCliOptions):
     help="Show only agents with this label (format: KEY=VALUE, repeatable) [experimental]",
 )
 @optgroup.option(
-    "--tag",
+    "--host-label",
     multiple=True,
-    help="Show only agents on hosts with this tag (format: KEY=VALUE, repeatable)",
+    help="Show only agents on hosts with this host label (format: KEY=VALUE, repeatable)",
 )
 @optgroup.option(
     "--stdin",
@@ -317,16 +317,18 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             label_parts.append(f'labels.{key} == "{value}"')
         include_filters.append(" || ".join(label_parts))
 
-    # --tag K=V: alias for --include 'host.tags.K == "V"'
+    # --host-label K=V: alias for --include 'host.tags.K == "V"'
     # Multiple values are OR'd together
-    if opts.tag:
-        tag_parts = []
-        for tag_spec in opts.tag:
-            if "=" not in tag_spec:
-                raise click.BadParameter(f"Tag must be in KEY=VALUE format, got: {tag_spec}", param_hint="--tag")
-            key, value = tag_spec.split("=", 1)
-            tag_parts.append(f'host.tags.{key} == "{value}"')
-        include_filters.append(" || ".join(tag_parts))
+    if opts.host_label:
+        host_label_parts = []
+        for label_spec in opts.host_label:
+            if "=" not in label_spec:
+                raise click.BadParameter(
+                    f"Host label must be in KEY=VALUE format, got: {label_spec}", param_hint="--host-label"
+                )
+            key, value = label_spec.split("=", 1)
+            host_label_parts.append(f'host.tags.{key} == "{value}"')
+        include_filters.append(" || ".join(host_label_parts))
 
     # Build list of exclude filters
     exclude_filters = list(opts.exclude)
@@ -357,7 +359,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
             raise click.UsageError(
                 "--stream emits unfiltered snapshots and cannot be combined with "
                 "--include, --exclude, --running, --stopped, --local, --remote, "
-                "--provider, --project, --label, --tag, or --limit"
+                "--provider, --project, --label, --host-label, or --limit"
             )
         if opts.watch:
             raise click.UsageError("--stream and --watch cannot be used together")
@@ -1100,7 +1102,7 @@ Supports filtering, sorting, and multiple output formats.""",
         ("List agents on Docker hosts", "mng list --provider docker"),
         ("List agents for a project", "mng list --project mng"),
         ("List agents with a specific label", "mng list --label env=prod"),
-        ("List agents with a specific host tag", "mng list --tag env=prod"),
+        ("List agents with a specific host label", "mng list --host-label env=prod"),
         ("List agents as JSON", "mng list --format json"),
         ("Filter with CEL expression", "mng list --include 'name.contains(\"prod\")'"),
         ("Sort by name descending", "mng list --sort 'name desc'"),
@@ -1171,7 +1173,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `host.provider_name` - Host provider (local, docker, modal, etc.) (in CEL filters, use `host.provider`)
 - `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
 - `host.image` - Host image (Docker image name, Modal image ID, etc.)
-- `host.tags` - Metadata tags for the host
+- `host.tags` - Host labels (metadata key-value pairs)
 - `host.ssh_activity_time` - Timestamp of the last SSH connection to the host
 - `host.boot_time` - When the host was last started
 - `host.uptime_seconds` - How long the host has been running

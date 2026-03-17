@@ -6,10 +6,10 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mng.api.discover import discover_all_hosts_and_agents
-from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.cli.agent_addr import find_agents_by_addresses
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.default_command_group import DefaultCommandGroup
@@ -179,8 +179,8 @@ def _resolve_snapshot_hosts(
 
     # Resolve from agent identifiers
     if agent_identifiers or all_agents:
-        agents = find_agents_by_identifiers_or_state(
-            agent_identifiers=agent_identifiers,
+        agents = find_agents_by_addresses(
+            raw_identifiers=agent_identifiers,
             filter_all=all_agents,
             target_state=AgentLifecycleState.RUNNING,
             mng_ctx=mng_ctx,

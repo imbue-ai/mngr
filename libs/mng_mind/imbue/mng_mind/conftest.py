@@ -2,6 +2,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import types
 from collections.abc import Generator
 from pathlib import Path
@@ -146,6 +148,43 @@ def create_fake_mng_binary(bin_dir: Path) -> Path:
     mng_bin.write_text('#!/bin/bash\nexec mng "$@"\n')
     mng_bin.chmod(0o755)
     return mng_bin
+
+
+class SyntheticLoopEnv:
+    """Pre-built environment for _run_synthetic_events_loop tests.
+
+    Use the ``synthetic_loop_env`` fixture to create instances.
+    """
+
+    mind_state_dir: Path
+    event_buffer: list[str]
+    buffer_lock: threading.Lock
+    stop_event: threading.Event
+    last_real_event_monotonic: list[float]
+
+
+def _create_synthetic_loop_env(mind_state_dir: Path) -> SyntheticLoopEnv:
+    """Create a SyntheticLoopEnv with fresh mutable state."""
+    env = SyntheticLoopEnv()
+    env.mind_state_dir = mind_state_dir
+    env.event_buffer = []
+    env.buffer_lock = threading.Lock()
+    env.stop_event = threading.Event()
+    env.last_real_event_monotonic = [time.monotonic()]
+    return env
+
+
+@pytest.fixture()
+def synthetic_loop_env(tmp_path: Path) -> SyntheticLoopEnv:
+    """Create an environment for synthetic events loop tests.
+
+    Creates the mind state dir with the onboarding marker already present
+    (so tests don't need to handle onboarding unless explicitly testing it).
+    """
+    mind_state_dir = tmp_path / "mind"
+    mind_state_dir.mkdir(parents=True)
+    (mind_state_dir / ".onboarding_sent").touch()
+    return _create_synthetic_loop_env(mind_state_dir)
 
 
 class EventWatcherSubprocessCapture:

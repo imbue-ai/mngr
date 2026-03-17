@@ -101,8 +101,8 @@ LESSON_REMOTE_AGENTS = Lesson(
         LessonStep(
             heading="Create a remote agent",
             details=dedent("""\
-                cd into any git repo and run `mng create morpheus --in modal`.
-                The --in modal flag tells mng to launch the agent on Modal instead of
+                cd into any git repo and run `mng create morpheus --provider modal`.
+                The --provider modal flag tells mng to launch the agent on Modal instead of
                 locally. This will take a bit longer as it builds a remote sandbox."""),
             check=AgentExistsCheck(agent_name=AgentName("morpheus")),
         ),

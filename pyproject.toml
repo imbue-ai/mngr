@@ -76,6 +76,7 @@ addopts = [
   "--cov=imbue.mng_recursive",
   "--cov=imbue.mng_mind_chat",
   "--cov=imbue.mng_test_coder",
+  "--cov=imbue.mng_tmr",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
   "--cov-report=term-missing",

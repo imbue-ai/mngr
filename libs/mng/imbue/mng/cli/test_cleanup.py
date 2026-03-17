@@ -110,14 +110,14 @@ def test_cleanup_with_provider_filter(
     assert result.exit_code == 0
 
 
-def test_cleanup_with_agent_type_filter(
+def test_cleanup_with_type_filter(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --agent-type filter is accepted."""
+    """Test that --type filter is accepted."""
     result = cli_runner.invoke(
         cleanup,
-        ["--agent-type", "claude", "--dry-run", "--yes"],
+        ["--type", "claude", "--dry-run", "--yes"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -131,7 +131,7 @@ def test_cleanup_with_combined_filters(
     """Test that multiple filters can be combined."""
     result = cli_runner.invoke(
         cleanup,
-        ["--older-than", "7d", "--provider", "local", "--agent-type", "claude", "--dry-run", "--yes"],
+        ["--older-than", "7d", "--provider", "local", "--type", "claude", "--dry-run", "--yes"],
         obj=plugin_manager,
         catch_exceptions=False,
     )

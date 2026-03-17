@@ -16,6 +16,10 @@ to the ``mng events`` command (run as a subprocess). This script handles:
 - Token-bucket rate limiting (burst + sustained rate)
 - File-based event delivery (events written to event_batches/)
 - Subprocess lifecycle (restart on exit)
+- Synthetic event generation:
+  - ``mind/idle``: periodic idle notifications when no events arrive
+  - ``mind/schedule``: time-of-day events in the user's timezone
+  - ``mind/onboarding``: one-time event on first run
 
 Usage: mng mind-event-watcher
 
@@ -43,6 +47,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -80,6 +85,17 @@ _BACKOFF_MAX_SECONDS: Final[float] = 60.0
 
 _IGNORED_SOURCES_FILENAME: Final[str] = "ignored_sources.txt"
 
+# How often the synthetic events loop checks for idle/schedule/onboarding events
+_SYNTHETIC_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+
+_ONBOARDING_MARKER_FILENAME: Final[str] = ".onboarding_sent"
+_SCHEDULED_STATE_FILENAME: Final[str] = ".scheduled_events_state.json"
+
+# Synthetic event source names (must match SOURCE_MIND_* in data_types.py)
+_SOURCE_MIND_IDLE: Final[str] = "mind/idle"
+_SOURCE_MIND_SCHEDULE: Final[str] = "mind/schedule"
+_SOURCE_MIND_ONBOARDING: Final[str] = "mind/onboarding"
+
 
 # -- Settings --
 
@@ -95,6 +111,9 @@ class _EventWatcherSettings:
     max_delivery_retries: int = _DEFAULT_MAX_DELIVERY_RETRIES
     max_event_length: int = _DEFAULT_MAX_EVENT_LENGTH
     max_same_source_events_per_batch: int = _DEFAULT_MAX_SAME_SOURCE_EVENTS_PER_BATCH
+    idle_event_delay_minutes_schedule: tuple[int, ...] = ()
+    scheduled_events: tuple[tuple[str, str], ...] = ()
+    user_timezone: str = "UTC"
 
 
 def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
@@ -102,6 +121,7 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
     watchers = load_watchers_section(agent_work_dir)
     if not watchers:
         return _EventWatcherSettings()
+    raw_scheduled = watchers.get("scheduled_events", {})
     return _EventWatcherSettings(
         cel_filter=watchers.get("event_cel_filter", DEFAULT_CEL_FILTER),
         event_exclude_sources=tuple(watchers.get("event_exclude_sources", ())),
@@ -112,6 +132,9 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
         max_same_source_events_per_batch=watchers.get(
             "max_same_source_events_per_batch", _DEFAULT_MAX_SAME_SOURCE_EVENTS_PER_BATCH
         ),
+        idle_event_delay_minutes_schedule=tuple(watchers.get("idle_event_delay_minutes_schedule", ())),
+        scheduled_events=tuple((k, v) for k, v in raw_scheduled.items()),
+        user_timezone=watchers.get("user_timezone", "UTC"),
     )
 
 
@@ -482,8 +505,13 @@ def _read_events_from_subprocess(
     event_buffer: list[str],
     buffer_lock: threading.Lock,
     stop_event: threading.Event,
+    last_real_event_monotonic: list[float] | None = None,
 ) -> None:
-    """Read JSONL lines from subprocess stdout into the event buffer (thread target)."""
+    """Read JSONL lines from subprocess stdout into the event buffer (thread target).
+
+    If last_real_event_monotonic is provided, updates it (under buffer_lock)
+    whenever a real event is received, enabling idle detection.
+    """
     assert process.stdout is not None
     try:
         for line in process.stdout:
@@ -494,6 +522,8 @@ def _read_events_from_subprocess(
                 continue
             with buffer_lock:
                 event_buffer.append(stripped)
+                if last_real_event_monotonic is not None:
+                    last_real_event_monotonic[0] = time.monotonic()
     except Exception as exc:
         if not stop_event.is_set():
             logger.error("Error reading from events subprocess: {}", exc)
@@ -608,6 +638,277 @@ def _separate_chat_events(
             held_user_messages[conversation_id] = (user_lines, now)
 
     return ready
+
+
+# -- Synthetic event helpers --
+
+
+class InvalidTimeFormatError(Exception):
+    """Raised when a time-of-day string cannot be parsed."""
+
+
+def _format_utc_timestamp_now() -> str:
+    """Format the current UTC time as an ISO 8601 timestamp with nanosecond precision."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond * 1000:09d}Z"
+
+
+def _resolve_user_timezone(timezone_name: str) -> ZoneInfo:
+    """Resolve a timezone name to a ZoneInfo object, falling back to UTC on error."""
+    try:
+        return ZoneInfo(timezone_name)
+    except KeyError:
+        logger.warning("Unknown timezone '{}', falling back to UTC", timezone_name)
+        return ZoneInfo("UTC")
+
+
+def _make_synthetic_event_line(
+    event_type: str,
+    source: str,
+    extra_fields: dict[str, Any] | None = None,
+) -> str:
+    """Create a JSONL line for a synthetic event with standard envelope fields."""
+    event: dict[str, Any] = {
+        "timestamp": _format_utc_timestamp_now(),
+        "type": event_type,
+        "event_id": f"evt-{uuid4().hex}",
+        "source": source,
+    }
+    if extra_fields:
+        event.update(extra_fields)
+    return json.dumps(event, separators=(",", ":"))
+
+
+def _cumulative_idle_delay_minutes(schedule: tuple[int, ...], event_index: int) -> int:
+    """Calculate the cumulative delay in minutes for the nth idle event (0-indexed).
+
+    For schedule [1, 10, 60] and event_index=2, returns 1+10+60=71.
+    For event_index >= len(schedule), the last value repeats.
+    """
+    total = 0
+    for i in range(event_index + 1):
+        if i < len(schedule):
+            total += schedule[i]
+        else:
+            total += schedule[-1]
+    return total
+
+
+def _parse_time_of_day(time_str: str) -> tuple[int, int, int]:
+    """Parse a time-of-day string like '13:37:30' or '15:00' into (hour, minute, second).
+
+    Raises InvalidTimeFormatError if the format is invalid or contains
+    non-numeric values.
+    """
+    parts = time_str.strip().split(":")
+    if len(parts) < 2 or len(parts) > 3:
+        raise InvalidTimeFormatError(f"Invalid time format '{time_str}', expected HH:MM or HH:MM:SS")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(parts[2]) if len(parts) == 3 else 0
+    except ValueError as exc:
+        raise InvalidTimeFormatError(f"Non-numeric value in time '{time_str}'") from exc
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+        raise InvalidTimeFormatError(f"Time values out of range in '{time_str}'")
+    return hour, minute, second
+
+
+def _load_scheduled_events_state(state_file: Path) -> tuple[str, set[str]]:
+    """Load the scheduled events state: (date_str, set of fired event names).
+
+    Returns ("", empty set) if the file doesn't exist or is corrupt.
+    """
+    try:
+        if not state_file.is_file():
+            return "", set()
+        raw = json.loads(state_file.read_text())
+        return raw.get("date", ""), set(raw.get("fired_events", []))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load scheduled events state: {}", exc)
+        return "", set()
+
+
+def _save_scheduled_events_state(state_file: Path, date_str: str, fired_events: set[str]) -> None:
+    """Persist which scheduled events have fired today."""
+    data = {"date": date_str, "fired_events": sorted(fired_events)}
+    tmp_file = state_file.with_suffix(".tmp")
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file.write_text(json.dumps(data))
+        tmp_file.rename(state_file)
+    except OSError as exc:
+        logger.error("Failed to save scheduled events state: {}", exc)
+
+
+def _maybe_send_onboarding(
+    mind_state_dir: Path,
+    event_buffer: list[str],
+    buffer_lock: threading.Lock,
+) -> None:
+    """Send a mind/onboarding event if none has ever been sent (marker file absent)."""
+    onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
+    if onboarding_marker.exists():
+        return
+    logger.info("Sending mind/onboarding event (first run)")
+    line = _make_synthetic_event_line("onboarding", _SOURCE_MIND_ONBOARDING)
+    with buffer_lock:
+        event_buffer.append(line)
+    try:
+        mind_state_dir.mkdir(parents=True, exist_ok=True)
+        onboarding_marker.touch()
+    except OSError as exc:
+        logger.error("Failed to create onboarding marker: {}", exc)
+
+
+def _maybe_send_idle_event(
+    settings: _EventWatcherSettings,
+    elapsed_minutes: float,
+    idle_events_sent: int,
+    user_tz: ZoneInfo,
+    event_buffer: list[str],
+    buffer_lock: threading.Lock,
+) -> int:
+    """Send a mind/idle event if the idle threshold has been reached.
+
+    Returns the updated idle_events_sent count.
+    """
+    cumulative_minutes = _cumulative_idle_delay_minutes(settings.idle_event_delay_minutes_schedule, idle_events_sent)
+    if elapsed_minutes < cumulative_minutes:
+        return idle_events_sent
+
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(user_tz)
+    line = _make_synthetic_event_line(
+        "idle",
+        _SOURCE_MIND_IDLE,
+        {
+            "current_time_utc": now_utc.isoformat(),
+            "current_time_local": now_local.isoformat(),
+            "minutes_since_last_event": round(elapsed_minutes, 1),
+            "idle_event_number": idle_events_sent + 1,
+        },
+    )
+    logger.info(
+        "Sending mind/idle event {} after {:.1f} minutes of inactivity",
+        idle_events_sent + 1,
+        elapsed_minutes,
+    )
+    with buffer_lock:
+        event_buffer.append(line)
+    return idle_events_sent + 1
+
+
+def _check_scheduled_events(
+    settings: _EventWatcherSettings,
+    user_tz: ZoneInfo,
+    saved_date: str,
+    fired_today: set[str],
+    scheduled_state_file: Path,
+    event_buffer: list[str],
+    buffer_lock: threading.Lock,
+) -> tuple[str, set[str]]:
+    """Fire any scheduled events whose time has passed today.
+
+    Returns the updated (saved_date, fired_today) tuple.
+    """
+    now_local = datetime.now(user_tz)
+    today_str = now_local.strftime("%Y-%m-%d")
+
+    if today_str != saved_date:
+        fired_today = set()
+        saved_date = today_str
+
+    for event_name, time_str in settings.scheduled_events:
+        if event_name in fired_today:
+            continue
+        try:
+            hour, minute, second = _parse_time_of_day(time_str)
+        except InvalidTimeFormatError as exc:
+            logger.warning("Skipping scheduled event '{}': {}", event_name, exc)
+            fired_today.add(event_name)
+            continue
+
+        scheduled_time = now_local.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        if now_local >= scheduled_time:
+            now_utc = datetime.now(timezone.utc)
+            line = _make_synthetic_event_line(
+                "schedule",
+                _SOURCE_MIND_SCHEDULE,
+                {
+                    "event_name": event_name,
+                    "scheduled_time": time_str,
+                    "current_time_utc": now_utc.isoformat(),
+                    "current_time_local": now_local.isoformat(),
+                },
+            )
+            logger.info("Sending mind/schedule event '{}' (scheduled for {})", event_name, time_str)
+            with buffer_lock:
+                event_buffer.append(line)
+            fired_today.add(event_name)
+            _save_scheduled_events_state(scheduled_state_file, today_str, fired_today)
+
+    return saved_date, fired_today
+
+
+def _run_synthetic_events_loop(
+    settings: _EventWatcherSettings,
+    event_buffer: list[str],
+    buffer_lock: threading.Lock,
+    stop_event: threading.Event,
+    last_real_event_monotonic: list[float],
+    mind_state_dir: Path,
+    time_source: Callable[[], float] = time.monotonic,
+    poll_interval_seconds: float = _SYNTHETIC_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Generate synthetic events: idle, scheduled, and onboarding.
+
+    Runs as a daemon thread alongside the delivery loop. Injects events
+    directly into the shared event_buffer for delivery to the agent.
+    """
+    user_tz = _resolve_user_timezone(settings.user_timezone)
+    _maybe_send_onboarding(mind_state_dir, event_buffer, buffer_lock)
+
+    idle_events_sent = 0
+    last_seen_real_event_time = last_real_event_monotonic[0]
+
+    scheduled_state_file = mind_state_dir / _SCHEDULED_STATE_FILENAME
+    saved_date, fired_today = _load_scheduled_events_state(scheduled_state_file)
+
+    while not stop_event.is_set():
+        stop_event.wait(timeout=poll_interval_seconds)
+        if stop_event.is_set():
+            break
+
+        now_monotonic = time_source()
+
+        with buffer_lock:
+            current_real_event_time = last_real_event_monotonic[0]
+        if current_real_event_time > last_seen_real_event_time:
+            idle_events_sent = 0
+            last_seen_real_event_time = current_real_event_time
+
+        if settings.idle_event_delay_minutes_schedule:
+            elapsed_minutes = (now_monotonic - last_seen_real_event_time) / 60.0
+            idle_events_sent = _maybe_send_idle_event(
+                settings,
+                elapsed_minutes,
+                idle_events_sent,
+                user_tz,
+                event_buffer,
+                buffer_lock,
+            )
+
+        if settings.scheduled_events:
+            saved_date, fired_today = _check_scheduled_events(
+                settings,
+                user_tz,
+                saved_date,
+                fired_today,
+                scheduled_state_file,
+                event_buffer,
+                buffer_lock,
+            )
 
 
 # -- Delivery loop helpers --
@@ -1017,6 +1318,9 @@ def main(
     logger.info("  State file: {}", state_file)
     logger.info("  Event batches dir: {}", event_batches_dir)
     logger.info("  Event lists dir: {}", event_lists_dir)
+    logger.info("  Idle schedule: {}", settings.idle_event_delay_minutes_schedule)
+    logger.info("  Scheduled events: {}", settings.scheduled_events)
+    logger.info("  User timezone: {}", settings.user_timezone)
 
     # Resolve the ignored_sources.txt path: $MNG_AGENT_WORK_DIR/$ROLE/ignored_sources.txt
     role = os.environ.get("ROLE", "")
@@ -1030,6 +1334,29 @@ def main(
     event_buffer: list[str] = []
     buffer_lock = threading.Lock()
     active_process: subprocess.Popen[str] | None = None
+
+    # Shared monotonic timestamp of the last real event from the subprocess.
+    # Updated by the reader thread, read by the synthetic events thread.
+    last_real_event_monotonic: list[float] = [time.monotonic()]
+
+    # Directory for synthetic event state files (onboarding marker, scheduled state)
+    mind_state_dir = agent_state_dir / "mind"
+    mind_state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start the synthetic events thread (idle, scheduled, onboarding)
+    synthetic_thread = threading.Thread(
+        target=_run_synthetic_events_loop,
+        args=(
+            settings,
+            event_buffer,
+            buffer_lock,
+            stop_event,
+            last_real_event_monotonic,
+            mind_state_dir,
+        ),
+        daemon=True,
+    )
+    synthetic_thread.start()
 
     # Start the long-lived delivery thread
     delivery_thread = threading.Thread(
@@ -1058,7 +1385,7 @@ def main(
             # Reader thread feeds subprocess stdout into the shared buffer
             reader_thread = threading.Thread(
                 target=_read_events_from_subprocess,
-                args=(active_process, event_buffer, buffer_lock, stop_event),
+                args=(active_process, event_buffer, buffer_lock, stop_event, last_real_event_monotonic),
                 daemon=True,
             )
             reader_thread.start()

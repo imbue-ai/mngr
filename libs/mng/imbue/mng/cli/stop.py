@@ -9,9 +9,9 @@ from click_option_group import optgroup
 
 from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.find import AgentMatch
-from imbue.mng.api.find import find_agents_by_identifiers_or_state
 from imbue.mng.api.find import group_agents_by_host
 from imbue.mng.api.providers import get_provider_instance
+from imbue.mng.cli.agent_addr import find_agents_by_addresses
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.destroy import get_agent_name_from_session
@@ -190,8 +190,8 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         raise click.UsageError("Cannot specify both agent names and --all")
 
     # Find agents to stop (RUNNING agents when using --all)
-    agents_to_stop = find_agents_by_identifiers_or_state(
-        agent_identifiers=agent_identifiers,
+    agents_to_stop = find_agents_by_addresses(
+        raw_identifiers=agent_identifiers,
         filter_all=opts.stop_all,
         target_state=AgentLifecycleState.RUNNING,
         mng_ctx=mng_ctx,

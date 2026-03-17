@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] [--provider PROVIDER] [--agent-type TYPE] [--tag TAG] [-f|--force|--yes] [--dry-run]
+mng [cleanup|clean] [--destroy|--stop] [--older-than DURATION] [--idle-for DURATION] [--provider PROVIDER] [--type TYPE] [--host-label KEY=VALUE] [-f|--force|--yes] [--dry-run]
 ```
 
 Destroy or stop agents and hosts to free up resources [experimental].
@@ -48,9 +48,9 @@ mng cleanup [OPTIONS]
 | `--exclude` | text | Exclude agents matching this CEL filter (repeatable) | None |
 | `--older-than` | text | Select agents older than specified duration (e.g., 7d, 24h) | None |
 | `--idle-for` | text | Select agents idle for at least this duration (e.g., 1h, 30m) | None |
-| `--tag` | text | Select agents/hosts with this tag (repeatable) | None |
+| `--host-label` | text | Select agents/hosts with this host label (repeatable) | None |
 | `--provider` | text | Select hosts from this provider (repeatable) | None |
-| `--agent-type` | text | Select this agent type, e.g., claude, codex (repeatable) | None |
+| `--type` | text | Select this agent type, e.g., claude, codex (repeatable) | None |
 
 ## Actions
 
@@ -120,5 +120,5 @@ $ mng cleanup --provider docker --yes
 **Destroy by agent type**
 
 ```bash
-$ mng cleanup --agent-type codex --yes
+$ mng cleanup --type codex --yes
 ```

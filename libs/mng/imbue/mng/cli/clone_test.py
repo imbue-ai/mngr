@@ -93,10 +93,10 @@ def test_build_create_args_without_double_dash() -> None:
     """Without -- in argv, remaining args are passed through directly."""
     result = _build_create_args(
         source_agent="my-agent",
-        remaining=["--in", "docker"],
-        original_argv=["mng", "clone", "my-agent", "--in", "docker"],
+        remaining=["--provider", "docker"],
+        original_argv=["mng", "clone", "my-agent", "--provider", "docker"],
     )
-    assert result == ["--from-agent", "my-agent", "--in", "docker"]
+    assert result == ["--from-agent", "my-agent", "--provider", "docker"]
 
 
 def test_build_create_args_with_double_dash() -> None:
@@ -113,13 +113,13 @@ def test_build_create_args_with_create_options_and_double_dash() -> None:
     """Create options before -- and agent args after -- are split correctly."""
     result = _build_create_args(
         source_agent="my-agent",
-        remaining=["new-agent", "--in", "docker", "--model", "opus"],
+        remaining=["new-agent", "--provider", "docker", "--model", "opus"],
         original_argv=[
             "mng",
             "clone",
             "my-agent",
             "new-agent",
-            "--in",
+            "--provider",
             "docker",
             "--",
             "--model",
@@ -130,7 +130,7 @@ def test_build_create_args_with_create_options_and_double_dash() -> None:
         "--from-agent",
         "my-agent",
         "new-agent",
-        "--in",
+        "--provider",
         "docker",
         "--",
         "--model",
@@ -153,14 +153,14 @@ def test_build_create_args_with_double_dash_and_empty_remaining() -> None:
 
 def test_args_before_dd_count_no_dd() -> None:
     """Returns None when -- is not in original_argv."""
-    assert _args_before_dd_count(["--in", "docker"], ["mng", "clone", "a", "--in", "docker"]) is None
+    assert _args_before_dd_count(["--provider", "docker"], ["mng", "clone", "a", "--provider", "docker"]) is None
 
 
 def test_args_before_dd_count_with_dd() -> None:
     """Returns count of args before -- boundary."""
     count = _args_before_dd_count(
-        ["--in", "docker", "--model", "opus"],
-        ["mng", "clone", "a", "--in", "docker", "--", "--model", "opus"],
+        ["--provider", "docker", "--model", "opus"],
+        ["mng", "clone", "a", "--provider", "docker", "--", "--model", "opus"],
     )
     assert count == 2
 
@@ -168,8 +168,8 @@ def test_args_before_dd_count_with_dd() -> None:
 def test_args_before_dd_count_trailing_dd() -> None:
     """Returns full length when -- has nothing after it."""
     count = _args_before_dd_count(
-        ["--in", "docker"],
-        ["mng", "clone", "a", "--in", "docker", "--"],
+        ["--provider", "docker"],
+        ["mng", "clone", "a", "--provider", "docker", "--"],
     )
     assert count == 2
 

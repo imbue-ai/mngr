@@ -8,7 +8,7 @@ Each agent has a name, a unique identifier (`agent-id`), and is a particular ["a
 
 Each agent can have **labels** -- key-value string pairs that provide metadata about the agent. The most common label is `project`, which is automatically set based on the git remote origin or folder name. Labels are used for filtering and organizing agents (e.g., `mng list --project mng` or `mng list --label env=prod`).
 
-Labels are distinct from host **tags**: labels are agent-level metadata, while tags are host-level metadata. Use `--label KEY=VALUE` when creating an agent to attach custom labels, and `--tag KEY=VALUE` for host-level tags.
+Labels are distinct from **host labels**: labels are agent-level metadata, while host labels are host-level metadata. Use `--label KEY=VALUE` when creating an agent to attach custom labels, and `--host-label KEY=VALUE` for host-level labels.
 
 Nothing stops you from creating additional invocations of agent programs inside the tmux session (e.g. launching multiple Claude Code's), but only the main agent process for a given tmux session is considered by `mng` for the purposes of detecting the agent's state.
 

@@ -1134,7 +1134,7 @@ def test_get_header_label_returns_custom_label_for_known_fields() -> None:
     """_get_header_label should return custom labels for configured fields."""
     assert _get_header_label("host.name") == "HOST"
     assert _get_header_label("host.provider_name") == "PROVIDER"
-    assert _get_header_label("host.tags") == "TAGS"
+    assert _get_header_label("host.tags") == "HOST LABELS"
     assert _get_header_label("labels") == "LABELS"
 
 
@@ -1164,7 +1164,7 @@ def test_get_field_value_returns_empty_for_empty_tags() -> None:
 
 
 # =============================================================================
-# Tests for --project and --tag CLI option parsing
+# Tests for --project and --host-label CLI option parsing
 # =============================================================================
 
 
@@ -1185,14 +1185,14 @@ def test_project_option_generates_cel_filter(
     assert "No agents found" in result.output
 
 
-def test_tag_option_generates_cel_filter(
+def test_host_label_option_generates_cel_filter(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--tag should filter to agents with the specified tag key=value."""
+    """--host-label should filter to agents with the specified host label key=value."""
     result = cli_runner.invoke(
         list_command,
-        ["--tag", "env=nonexistent-849213"],
+        ["--host-label", "env=nonexistent-849213"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1200,14 +1200,14 @@ def test_tag_option_generates_cel_filter(
     assert "No agents found" in result.output
 
 
-def test_tag_option_rejects_invalid_format(
+def test_host_label_option_rejects_invalid_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--tag should reject values not in KEY=VALUE format."""
+    """--host-label should reject values not in KEY=VALUE format."""
     result = cli_runner.invoke(
         list_command,
-        ["--tag", "invalid-no-equals"],
+        ["--host-label", "invalid-no-equals"],
         obj=plugin_manager,
         catch_exceptions=True,
     )

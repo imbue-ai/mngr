@@ -133,7 +133,7 @@ passed through to the create command.""",
     examples=(
         ("Clone an agent with auto-generated name", "mng clone my-agent"),
         ("Clone with a specific name", "mng clone my-agent new-agent"),
-        ("Clone into a Docker container", "mng clone my-agent --in docker"),
+        ("Clone into a Docker container", "mng clone my-agent --provider docker"),
         ("Clone and pass args to the agent", "mng clone my-agent -- --model opus"),
     ),
     see_also=(
