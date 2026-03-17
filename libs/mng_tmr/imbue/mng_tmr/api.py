@@ -194,10 +194,10 @@ def _copy_mode_for_provider(provider_name: ProviderInstanceName) -> WorkDirCopyM
 
     WORKTREE only works when source and target are on the same host, so it is
     only usable with the local provider. Remote providers (docker, modal, etc.)
-    must use COPY.
+    use CLONE to transfer git history efficiently.
     """
     is_local = provider_name.lower() == LOCAL_PROVIDER_NAME
-    return WorkDirCopyMode.WORKTREE if is_local else WorkDirCopyMode.COPY
+    return WorkDirCopyMode.WORKTREE if is_local else WorkDirCopyMode.CLONE
 
 
 def launch_test_agent(
@@ -254,6 +254,46 @@ def launch_test_agent(
     )
 
 
+def _create_snapshot_from_first_agent(
+    test_node_ids: list[str],
+    source_dir: Path,
+    source_host: OnlineHostInterface,
+    mng_ctx: MngContext,
+    agent_type: AgentTypeName,
+    pytest_flags: tuple[str, ...],
+    provider_name: ProviderInstanceName,
+    env_options: AgentEnvironmentOptions,
+    label_options: AgentLabelOptions,
+    prompt_suffix: str,
+) -> tuple[TestAgentInfo, OnlineHostInterface, SnapshotName]:
+    """Launch the first agent, snapshot its host, and return the snapshot name.
+
+    Used by launch_all_test_agents when --use-snapshot is enabled. The first
+    agent is launched with full build + provisioning, then its host is
+    snapshotted so remaining agents can start from the snapshot.
+    """
+    logger.info("Launching first agent to create snapshot...")
+    first_info, first_host = launch_test_agent(
+        test_node_ids[0],
+        source_dir,
+        source_host,
+        mng_ctx,
+        agent_type,
+        pytest_flags,
+        provider_name,
+        env_options,
+        label_options,
+        prompt_suffix,
+    )
+
+    provider = get_provider_instance(provider_name, mng_ctx)
+    snapshot_id = provider.create_snapshot(first_host)
+    snapshot_name = SnapshotName(str(snapshot_id))
+    logger.info("Created snapshot '{}' from first agent's host", snapshot_name)
+
+    return first_info, first_host, snapshot_name
+
+
 def launch_all_test_agents(
     test_node_ids: list[str],
     source_dir: Path,
@@ -281,7 +321,7 @@ def launch_all_test_agents(
     agent_hosts: dict[str, OnlineHostInterface] = {}
     snapshot_name: SnapshotName | None = None
 
-    # Determine whether to use the snapshot optimization
+    # Optionally build a snapshot from the first agent before launching the rest
     should_snapshot = use_snapshot and len(test_node_ids) > 1
     if should_snapshot:
         provider = get_provider_instance(provider_name, mng_ctx)
@@ -291,11 +331,10 @@ def launch_all_test_agents(
             )
             should_snapshot = False
 
+    remaining_ids = test_node_ids
     if should_snapshot:
-        # Launch first agent without snapshot (full build + provisioning)
-        logger.info("Launching first agent to create snapshot...")
-        first_info, first_host = launch_test_agent(
-            test_node_ids[0],
+        first_info, first_host, snapshot_name = _create_snapshot_from_first_agent(
+            test_node_ids,
             source_dir,
             source_host,
             mng_ctx,
@@ -308,68 +347,35 @@ def launch_all_test_agents(
         )
         agents.append(first_info)
         agent_hosts[str(first_info.agent_id)] = first_host
-
-        # Snapshot the first agent's host
-        provider = get_provider_instance(provider_name, mng_ctx)
-        snapshot_id = provider.create_snapshot(first_host)
-        snapshot_name = SnapshotName(str(snapshot_id))
-        logger.info("Created snapshot '{}' from first agent's host", snapshot_name)
-
-        # Launch remaining agents from the snapshot
         remaining_ids = test_node_ids[1:]
-        with ConcurrencyGroupExecutor(
-            parent_cg=mng_ctx.concurrency_group,
-            name="tmr_launch",
-            max_workers=8,
-        ) as executor:
-            futures = [
-                executor.submit(
-                    launch_test_agent,
-                    test_node_id,
-                    source_dir,
-                    source_host,
-                    mng_ctx,
-                    agent_type,
-                    pytest_flags,
-                    provider_name,
-                    env_options,
-                    label_options,
-                    prompt_suffix,
-                    snapshot_name,
-                )
-                for test_node_id in remaining_ids
-            ]
-            for future in futures:
-                info, host = future.result()
-                agents.append(info)
-                agent_hosts[str(info.agent_id)] = host
-    else:
-        # Launch all agents without snapshot
-        with ConcurrencyGroupExecutor(
-            parent_cg=mng_ctx.concurrency_group,
-            name="tmr_launch",
-            max_workers=8,
-        ) as executor:
-            futures = [
-                executor.submit(
-                    launch_test_agent,
-                    test_node_id,
-                    source_dir,
-                    source_host,
-                    mng_ctx,
-                    agent_type,
-                    pytest_flags,
-                    provider_name,
-                    env_options,
-                    label_options,
-                    prompt_suffix,
-                )
-                for test_node_id in test_node_ids
-            ]
-            for future in futures:
-                info, host = future.result()
-                agents.append(info)
-                agent_hosts[str(info.agent_id)] = host
+
+    # Launch remaining (or all) agents, using the snapshot if one was created
+    with ConcurrencyGroupExecutor(
+        parent_cg=mng_ctx.concurrency_group,
+        name="tmr_launch",
+        max_workers=8,
+    ) as executor:
+        futures = [
+            executor.submit(
+                launch_test_agent,
+                test_node_id,
+                source_dir,
+                source_host,
+                mng_ctx,
+                agent_type,
+                pytest_flags,
+                provider_name,
+                env_options,
+                label_options,
+                prompt_suffix,
+                snapshot_name,
+            )
+            for test_node_id in remaining_ids
+        ]
+        for future in futures:
+            info, host = future.result()
+            agents.append(info)
+            agent_hosts[str(info.agent_id)] = host
 
     logger.info("Launched {} agent(s)", len(agents))
     return agents, agent_hosts, snapshot_name

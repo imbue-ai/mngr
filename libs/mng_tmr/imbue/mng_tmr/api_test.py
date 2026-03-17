@@ -75,9 +75,9 @@ def test_copy_mode_local_provider_uses_worktree() -> None:
     assert _copy_mode_for_provider(ProviderInstanceName("local")) == WorkDirCopyMode.WORKTREE
 
 
-def test_copy_mode_remote_provider_uses_copy() -> None:
-    assert _copy_mode_for_provider(ProviderInstanceName("docker")) == WorkDirCopyMode.COPY
-    assert _copy_mode_for_provider(ProviderInstanceName("modal")) == WorkDirCopyMode.COPY
+def test_copy_mode_remote_provider_uses_clone() -> None:
+    assert _copy_mode_for_provider(ProviderInstanceName("docker")) == WorkDirCopyMode.CLONE
+    assert _copy_mode_for_provider(ProviderInstanceName("modal")) == WorkDirCopyMode.CLONE
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
