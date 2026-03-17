@@ -2580,3 +2580,149 @@ def test_modal_provider_app_full_lifecycle(
     # Clean up
     provider.destroy_host(host_id)
     modal.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Snapshot with Pre-populated Host Cache Tests
+# ---------------------------------------------------------------------------
+
+
+def test_create_snapshot_with_cached_offline_host(
+    testing_provider: ModalProviderInstance,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """Test create_snapshot by pre-populating the host cache with an OfflineHost.
+    This avoids the SSH connection attempt in _record_snapshot -> get_host.
+    """
+    host_id = HostId.generate()
+    record = _make_host_record(host_id=host_id, host_name="snap-offline")
+    testing_provider._write_host_record(record)
+
+    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "snap-offline")
+    testing_provider._cache_sandbox(host_id, HostName("snap-offline"), sandbox)
+
+    # Pre-populate host cache so get_host returns OfflineHost instead of trying SSH
+    offline = testing_provider._create_host_from_host_record(record)
+    testing_provider._host_by_id_cache[host_id] = offline
+
+    snap_id = testing_provider.create_snapshot(host_id, SnapshotName("my-snap"))
+    assert str(snap_id).startswith("snap-")
+
+    # Verify the snapshot was recorded in the host record
+    updated = testing_provider._read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    assert len(updated.certified_host_data.snapshots) == 1
+    assert updated.certified_host_data.snapshots[0].name == "my-snap"
+
+
+def test_create_snapshot_auto_name_with_cached_host(
+    testing_provider: ModalProviderInstance,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """create_snapshot without a name generates a timestamp-based name."""
+    host_id = HostId.generate()
+    record = _make_host_record(host_id=host_id, host_name="auto-snap")
+    testing_provider._write_host_record(record)
+
+    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "auto-snap")
+    testing_provider._cache_sandbox(host_id, HostName("auto-snap"), sandbox)
+
+    offline = testing_provider._create_host_from_host_record(record)
+    testing_provider._host_by_id_cache[host_id] = offline
+
+    snap_id = testing_provider.create_snapshot(host_id)
+    assert str(snap_id).startswith("snap-")
+
+    updated = testing_provider._read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    assert len(updated.certified_host_data.snapshots) == 1
+    assert updated.certified_host_data.snapshots[0].name.startswith("snapshot-")
+
+
+def test_stop_host_with_snapshot_using_cached_host(
+    testing_provider: ModalProviderInstance,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """stop_host with create_snapshot=True should create a snapshot before terminating."""
+    host_id = HostId.generate()
+    record = _make_host_record(host_id=host_id, host_name="stop-snap")
+    testing_provider._write_host_record(record)
+
+    sandbox = _make_sandbox_with_tags(testing_modal, host_id, "stop-snap")
+    testing_provider._cache_sandbox(host_id, HostName("stop-snap"), sandbox)
+
+    offline = testing_provider._create_host_from_host_record(record)
+    testing_provider._host_by_id_cache[host_id] = offline
+
+    testing_provider.stop_host(host_id, create_snapshot=True)
+
+    assert sandbox._is_terminated
+
+    updated = testing_provider._read_host_record(host_id, use_cache=False)
+    assert updated is not None
+    # Should have a "stop" snapshot
+    assert len(updated.certified_host_data.snapshots) == 1
+    assert updated.certified_host_data.snapshots[0].name == "stop"
+    assert updated.certified_host_data.stop_reason == "STOPPED"
+
+
+# ---------------------------------------------------------------------------
+# discover_hosts Detailed Coverage Tests
+# ---------------------------------------------------------------------------
+
+
+def test_discover_hosts_handles_sandbox_without_valid_tags(
+    testing_provider: ModalProviderInstance,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """Sandboxes without valid mng tags should be skipped during discovery."""
+    image = testing_modal.image_debian_slim()
+    app = list(testing_modal._apps.values())[0]
+    sandbox = testing_modal.sandbox_create(image=image, app=app, timeout=300, cpu=1.0, memory=1024)
+    # Set invalid tags (missing TAG_HOST_ID)
+    sandbox.set_tags({"random_key": "random_value"})
+
+    cg = testing_provider.mng_ctx.concurrency_group
+    discovered = testing_provider.discover_hosts(cg)
+    # Should not crash, and should not include this sandbox
+    assert len(discovered) == 0
+
+
+def test_discover_hosts_includes_running_sandbox_with_record(
+    testing_provider: ModalProviderInstance,
+    testing_modal: TestingModalInterface,
+) -> None:
+    """A running sandbox with a matching host record that has snapshots
+    should appear in discovery (as offline since SSH won't work)."""
+    host_id = HostId.generate()
+    snapshots = [
+        SnapshotRecord(id="snap-x", name="sx", created_at=datetime.now(timezone.utc).isoformat()),
+    ]
+    record = _make_host_record(host_id=host_id, host_name="run-with-rec", snapshots=snapshots)
+    testing_provider._write_host_record(record)
+    _make_sandbox_with_tags(testing_modal, host_id, "run-with-rec")
+
+    cg = testing_provider.mng_ctx.concurrency_group
+    discovered = testing_provider.discover_hosts(cg, include_destroyed=False)
+    host_ids = {d.host_id for d in discovered}
+    assert host_id in host_ids
+
+
+# ---------------------------------------------------------------------------
+# _build_modal_image with context_dir Test
+# ---------------------------------------------------------------------------
+
+
+def test_build_modal_image_from_dockerfile_with_context(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    image = testing_provider._build_modal_image(
+        dockerfile=dockerfile,
+        context_dir=context_dir,
+    )
+    assert image.get_object_id() is not None
