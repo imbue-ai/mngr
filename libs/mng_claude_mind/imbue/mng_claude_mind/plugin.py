@@ -272,8 +272,8 @@ class ClaudeMindAgent(ClaudeAgent):
         # approve the API key so that the agent doesnt get blocked
         user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
         env_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        conf_key = user_claude_json_data.get("primaryApiKey", os.environ.get("ANTHROPIC_API_KEY", ""))
-        api_key = user_claude_json_data.get("primaryApiKey", os.environ.get("ANTHROPIC_API_KEY", ""))
+        conf_key = user_claude_json_data.get("primaryApiKey", "")
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if env_key or conf_key:
             approved_section = data.setdefault("customApiKeyResponses", {})
             approved_list = approved_section.get("approved", [])
