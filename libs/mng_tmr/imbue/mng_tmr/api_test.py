@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng_tmr.api import CollectTestsError
@@ -92,6 +91,22 @@ def test_build_agent_prompt_includes_pytest_flags() -> None:
 def test_build_agent_prompt_requests_markdown() -> None:
     prompt = _build_agent_prompt("t::t", ())
     assert "markdown" in prompt.lower()
+
+
+def test_build_agent_prompt_with_suffix() -> None:
+    prompt = _build_agent_prompt("t::t", (), prompt_suffix="Always run with --verbose flag.")
+    assert "Always run with --verbose flag." in prompt
+
+
+def test_build_agent_prompt_no_suffix_by_default() -> None:
+    prompt = _build_agent_prompt("t::t", ())
+    assert prompt.endswith("FIX_UNCERTAIN.\n")
+
+
+def test_build_agent_prompt_empty_suffix_ignored() -> None:
+    prompt_no_suffix = _build_agent_prompt("t::t", ())
+    prompt_empty_suffix = _build_agent_prompt("t::t", (), prompt_suffix="")
+    assert prompt_no_suffix == prompt_empty_suffix
 
 
 def test_render_markdown_bold() -> None:
@@ -327,7 +342,6 @@ def test_build_grouped_tables_pending_first() -> None:
 
 def test_build_current_results_pending_agents() -> None:
     """Agents not in final_details should get PENDING outcome."""
-    no_host: OnlineHostInterface = None  # ty: ignore[invalid-assignment]
     agents = [
         TestAgentInfo(
             test_node_id="tests/test_a.py::test_one",
@@ -344,7 +358,7 @@ def test_build_current_results_pending_agents() -> None:
         agents=agents,
         final_details={},
         timed_out_ids=set(),
-        host=no_host,
+        hosts={},
     )
     assert len(results) == 2
     assert results[0].outcome == TestOutcome.PENDING
@@ -354,7 +368,6 @@ def test_build_current_results_pending_agents() -> None:
 
 def test_build_current_results_timed_out_agents() -> None:
     """Timed-out agents should get TIMED_OUT outcome."""
-    no_host: OnlineHostInterface = None  # ty: ignore[invalid-assignment]
     agent_id = AgentId.generate()
     agents = [
         TestAgentInfo(
@@ -367,7 +380,7 @@ def test_build_current_results_timed_out_agents() -> None:
         agents=agents,
         final_details={},
         timed_out_ids={str(agent_id)},
-        host=no_host,
+        hosts={},
     )
     assert len(results) == 1
     assert results[0].outcome == TestOutcome.TIMED_OUT

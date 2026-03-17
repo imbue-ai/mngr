@@ -14,16 +14,21 @@ from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.cli.common_opts import CommonCliOptions
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
+from imbue.mng.cli.env_utils import resolve_env_vars
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import OutputOptions
+from imbue.mng.errors import UserInputError
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import AgentLabelOptions
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import OutputFormat
+from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import gather_results
@@ -43,7 +48,12 @@ class TmrCliOptions(CommonCliOptions):
     """Options passed from the CLI to the tmr command."""
 
     pytest_args: tuple[str, ...]
+    testing_flags: tuple[str, ...]
     agent_type: str
+    provider: str
+    env: tuple[str, ...]
+    label: tuple[str, ...]
+    prompt_suffix: str | None
     poll_interval: float
     timeout: float
     integrator_timeout: float
@@ -51,18 +61,37 @@ class TmrCliOptions(CommonCliOptions):
     source: str | None
 
 
-def _split_pytest_args(raw_args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split raw pytest args into (positional, flags) at the first '--'.
+class _TmrCommand(click.Command):
+    """Custom Command that handles -- separator for testing flags.
 
-    Everything before '--' is treated as positional args (test paths/patterns).
-    Everything after '--' is treated as flags shared between pytest discovery
-    and individual test invocations. If there is no '--', all args are positional.
+    Everything before -- is treated as positional args (test paths/patterns).
+    Everything after -- is captured as testing_flags and shared between
+    pytest discovery and individual test runs.
+
+    This is the same trick used by _CreateCommand in the mng create CLI.
     """
-    args_list = list(raw_args)
-    if "--" in args_list:
-        sep_idx = args_list.index("--")
-        return tuple(args_list[:sep_idx]), tuple(args_list[sep_idx + 1 :])
-    return tuple(args_list), ()
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if "--" in args:
+            idx = args.index("--")
+            after_dash = tuple(args[idx + 1 :])
+            args = args[:idx]
+        else:
+            after_dash = ()
+        result = super().parse_args(ctx, args)
+        ctx.params["testing_flags"] = after_dash
+        return result
+
+
+def _parse_label_options(label_strings: tuple[str, ...]) -> AgentLabelOptions:
+    """Parse KEY=VALUE label strings into AgentLabelOptions."""
+    labels_dict: dict[str, str] = {}
+    for label_string in label_strings:
+        if "=" not in label_string:
+            raise UserInputError(f"Label must be in KEY=VALUE format, got: {label_string}")
+        key, value = label_string.split("=", 1)
+        labels_dict[key.strip()] = value.strip()
+    return AgentLabelOptions(labels=labels_dict)
 
 
 def _emit_test_count(count: int, output_opts: OutputOptions) -> None:
@@ -98,13 +127,34 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
-@click.command("tmr", context_settings={"ignore_unknown_options": True})
+@click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
 @click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
     "--agent-type",
     default="claude",
     show_default=True,
     help="Type of agent to launch for each test",
+)
+@click.option(
+    "--provider",
+    default="local",
+    show_default=True,
+    help="Provider for agent hosts (e.g. local, docker, modal)",
+)
+@click.option(
+    "--env",
+    multiple=True,
+    help="Environment variable KEY=VALUE to pass to agents [repeatable]",
+)
+@click.option(
+    "--label",
+    multiple=True,
+    help="Agent label KEY=VALUE to attach to all launched agents [repeatable]",
+)
+@click.option(
+    "--prompt-suffix",
+    default=None,
+    help="Additional text to append to the agent prompt",
 )
 @click.option(
     "--poll-interval",
@@ -150,31 +200,43 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
     agent_type = AgentTypeName(opts.agent_type)
+    provider_name = ProviderInstanceName(opts.provider)
 
-    # Split args: positional paths before --, pytest flags after --
-    pos_args, pytest_flags = _split_pytest_args(opts.pytest_args)
+    # Parse environment variables
+    env_vars = resolve_env_vars((), opts.env)
+    env_options = AgentEnvironmentOptions(env_vars=env_vars)
 
-    # Step 1: Collect tests (both positional args and flags go to discovery)
+    # Parse labels
+    label_options = _parse_label_options(opts.label)
+
+    # testing_flags come from _TmrCommand's parse_args (args after --)
+    testing_flags = opts.testing_flags
+
+    # Step 1: Collect tests (positional paths + testing flags go to discovery)
     test_node_ids = collect_tests(
-        pytest_args=pos_args + pytest_flags,
+        pytest_args=opts.pytest_args + testing_flags,
         source_dir=source_dir,
         cg=mng_ctx.concurrency_group,
     )
     _emit_test_count(len(test_node_ids), output_opts)
 
-    # Step 2: Get the local host (same pattern as `mng create`)
-    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
-    host = provider.get_host(HostName("localhost"))
-    local_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
+    # Step 2: Get the local host for source_location (tests are collected locally)
+    local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
+    local_host_ref = local_provider.get_host(HostName("localhost"))
+    source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
 
-    # Step 3: Launch agents (flags are passed to individual pytest invocations)
-    agent_infos = launch_all_test_agents(
+    # Step 3: Launch agents (testing flags are passed to individual pytest invocations)
+    agent_infos, agent_hosts = launch_all_test_agents(
         test_node_ids=test_node_ids,
         source_dir=source_dir,
-        local_host=local_host,
+        source_host=source_host,
         mng_ctx=mng_ctx,
         agent_type=agent_type,
-        pytest_flags=pytest_flags,
+        pytest_flags=testing_flags,
+        provider_name=provider_name,
+        env_options=env_options,
+        label_options=label_options,
+        prompt_suffix=opts.prompt_suffix or "",
     )
     _emit_agents_launched(len(agent_infos), output_opts)
 
@@ -186,7 +248,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         html_path = Path(f"tmr-report-{timestamp}.html")
 
     # Step 5: Write initial report (all PENDING)
-    initial_results = build_current_results(agent_infos, {}, set(), local_host)
+    initial_results = build_current_results(agent_infos, {}, set(), agent_hosts)
     generate_html_report(initial_results, html_path)
 
     # Step 6: Poll until all agents are done (or timeout), updating report continuously
@@ -195,7 +257,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         agents=agent_infos,
         mng_ctx=mng_ctx,
         poll_interval_seconds=opts.poll_interval,
-        host=local_host,
+        hosts=agent_hosts,
         deadline=deadline,
         report_path=html_path,
     )
@@ -205,7 +267,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         agents=agent_infos,
         final_details=final_details,
         timed_out_ids=timed_out_ids,
-        host=local_host,
+        hosts=agent_hosts,
         source_dir=source_dir,
         cg=mng_ctx.concurrency_group,
     )
@@ -222,12 +284,15 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     integrator_branch: str | None = None
     if fix_branches:
-        integrator = launch_integrator_agent(
+        integrator, integrator_host = launch_integrator_agent(
             fix_branches=fix_branches,
             source_dir=source_dir,
-            local_host=local_host,
+            source_host=source_host,
             mng_ctx=mng_ctx,
             agent_type=agent_type,
+            provider_name=provider_name,
+            env_options=env_options,
+            label_options=label_options,
         )
 
         # Step 10: Wait for integrator
@@ -236,7 +301,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             integrator=integrator,
             mng_ctx=mng_ctx,
             poll_interval_seconds=opts.poll_interval,
-            host=local_host,
+            host=integrator_host,
             deadline=integrator_deadline,
         )
 
@@ -256,7 +321,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             if integrator_detail is not None:
                 pull_agent_branch(
                     integrator_detail,
-                    local_host,
+                    integrator_host,
                     source_dir,
                     mng_ctx.concurrency_group,
                 )
@@ -281,7 +346,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 CommandHelpMetadata(
     key="tmr",
     one_line_description="Run and fix tests in parallel using agents (test map-reduce)",
-    synopsis="mng tmr [TEST_PATHS...] [-- PYTEST_FLAGS...] [--timeout <SECS>] [--integrator-timeout <SECS>] [--agent-type <TYPE>]",
+    synopsis="mng tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--prompt-suffix <TEXT>] [--timeout <SECS>] [--agent-type <TYPE>]",
     description="""This command implements a map-reduce pattern for tests:
 
 1. Collects tests using pytest --collect-only, passing through all arguments.
@@ -297,12 +362,16 @@ CommandHelpMetadata(
    summaries, including the integrated branch name if applicable.
 
 Arguments before -- are test paths/patterns (positional). Arguments after -- are
-pytest flags shared between discovery and individual test runs. For example:
+pytest testing flags shared between discovery and individual test runs. For example:
 
   mng tmr tests/e2e -- -m release
 
 This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
+
+Use --provider to run agents on a specific provider (e.g. docker, modal).
+Use --env to pass environment variables and --label to tag all agents.
+Use --prompt-suffix to append custom instructions to the agent prompt.
 
 Each agent writes its result to $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
 with an outcome enum and a markdown summary.""",
@@ -310,6 +379,8 @@ with an outcome enum and a markdown summary.""",
         ("Run all tests in current directory", "mng tmr"),
         ("Run tests in a specific file", "mng tmr tests/test_foo.py"),
         ("Run tests with a marker", "mng tmr tests/e2e -- -m release"),
+        ("Use Docker provider", "mng tmr --provider docker tests/"),
+        ("Pass env vars and labels", "mng tmr --env API_KEY=xxx --label batch=run1"),
         ("Custom poll interval", "mng tmr --poll-interval 30"),
         ("Specify output location", "mng tmr --output-html report.html"),
     ),
