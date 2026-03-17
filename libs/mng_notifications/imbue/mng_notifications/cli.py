@@ -7,6 +7,7 @@ from loguru import logger
 
 from imbue.mng.api.observe import ObserveLockError
 from imbue.mng.api.observe import acquire_observe_lock
+from imbue.mng.api.observe import get_default_events_base_dir
 from imbue.mng.api.observe import release_observe_lock
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
@@ -35,7 +36,7 @@ def _get_plugin_config(mng_ctx: MngContext) -> NotificationsPluginConfig:
 def _is_observe_running(mng_ctx: MngContext) -> bool:
     """Check if mng observe is already running by trying to acquire its lock."""
     try:
-        fd = acquire_observe_lock(mng_ctx.config)
+        fd = acquire_observe_lock(get_default_events_base_dir(mng_ctx.config))
         release_observe_lock(fd)
         return False
     except ObserveLockError:
