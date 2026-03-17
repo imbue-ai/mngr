@@ -20,6 +20,7 @@ from imbue.mng.errors import HostNameConflictError
 from imbue.mng.errors import HostNotFoundError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import SnapshotNotFoundError
+from imbue.mng.hosts.offline_host import OfflineHost
 from imbue.mng.interfaces.data_types import CertifiedHostData
 from imbue.mng.interfaces.data_types import SnapshotRecord
 from imbue.mng.interfaces.data_types import VolumeFileType
@@ -51,6 +52,7 @@ from imbue.mng_modal.instance import TAG_HOST_ID
 from imbue.mng_modal.instance import TAG_HOST_NAME
 from imbue.mng_modal.instance import TAG_USER_PREFIX
 from imbue.mng_modal.instance import _build_image_from_dockerfile_contents
+from imbue.mng_modal.instance import _build_listing_collection_script
 from imbue.mng_modal.instance import _build_modal_secrets_from_env
 from imbue.mng_modal.instance import _build_modal_volumes
 from imbue.mng_modal.instance import _parse_optional_float
@@ -62,6 +64,9 @@ from imbue.mng_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.testing import TestingModalInterface
 from imbue.modal_proxy.testing import TestingSandbox
+
+_DEFAULT_SANDBOX_CONFIG = SandboxConfig()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -133,7 +138,7 @@ def _make_host_record(
     snapshots: list[SnapshotRecord] | None = None,
     failure_reason: str | None = None,
     user_tags: dict[str, str] | None = None,
-    config: SandboxConfig | None = None,
+    config: SandboxConfig | None = _DEFAULT_SANDBOX_CONFIG,
     ssh_host: str | None = "127.0.0.1",
     ssh_port: int | None = 22222,
     ssh_host_public_key: str | None = "ssh-ed25519 AAAA...",
@@ -156,7 +161,7 @@ def _make_host_record(
         ssh_host=ssh_host,
         ssh_port=ssh_port,
         ssh_host_public_key=ssh_host_public_key,
-        config=config or SandboxConfig(),
+        config=config,
     )
 
 
@@ -2726,3 +2731,97 @@ def test_build_modal_image_from_dockerfile_with_context(
         context_dir=context_dir,
     )
     assert image.get_object_id() is not None
+
+
+# ---------------------------------------------------------------------------
+# get_host_resources with Missing Record Tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_host_resources_missing_record(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """get_host_resources returns defaults when no host record exists on volume."""
+
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    # Create an OfflineHost directly without a host record on the volume
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="no-record",
+        created_at=now,
+        updated_at=now,
+    )
+    offline = OfflineHost(
+        id=host_id,
+        certified_host_data=certified,
+        provider_instance=testing_provider,
+        mng_ctx=testing_provider.mng_ctx,
+        on_updated_host_data=lambda _hid, _data: None,
+    )
+
+    resources = testing_provider.get_host_resources(offline)
+    assert resources.cpu.count == 1
+    assert resources.memory_gb == 1.0
+    assert resources.cpu.frequency_ghz is None
+
+
+# ---------------------------------------------------------------------------
+# _build_modal_image with docker_build_args Test
+# ---------------------------------------------------------------------------
+
+
+def test_build_modal_image_from_dockerfile_with_build_args(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text('FROM debian:bookworm-slim\nARG VERSION="1.0"\nRUN echo $VERSION\n')
+    image = testing_provider._build_modal_image(
+        dockerfile=dockerfile,
+        docker_build_args=["VERSION=2.0"],
+    )
+    assert image.get_object_id() is not None
+
+
+# ---------------------------------------------------------------------------
+# discover_hosts with Empty Result Test
+# ---------------------------------------------------------------------------
+
+
+def test_discover_hosts_empty_volume_and_no_sandboxes(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    cg = testing_provider.mng_ctx.concurrency_group
+    discovered = testing_provider.discover_hosts(cg)
+    assert discovered == []
+
+
+# ---------------------------------------------------------------------------
+# HostRecord with failed host -- ensure we handle the None config case
+# ---------------------------------------------------------------------------
+
+
+def test_host_record_failed_has_no_config() -> None:
+    host_id = HostId.generate()
+    record = _make_host_record(
+        host_id=host_id,
+        failure_reason="Build failed",
+        ssh_host=None,
+        ssh_port=None,
+        ssh_host_public_key=None,
+        config=None,
+    )
+    assert record.config is None
+    assert record.certified_host_data.failure_reason == "Build failed"
+
+
+# ---------------------------------------------------------------------------
+# _build_listing_collection_script Tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_listing_script_uses_host_dir() -> None:
+    script = _build_listing_collection_script("/custom/host/dir", "test-prefix-")
+    assert "/custom/host/dir" in script
+    assert "test-prefix-" in script
