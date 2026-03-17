@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mng_llm.resources.web_server import _WebSocketSession
 from imbue.mng_llm.resources.web_server import _WsOutputCallback
 from imbue.mng_llm.resources.web_server import _get_default_chat_model
 from imbue.mng_llm.resources.web_server import _get_most_recent_conversation_id
@@ -31,7 +32,6 @@ from imbue.mng_llm.resources.web_server import _render_iframe_page
 from imbue.mng_llm.resources.web_server import _render_web_chat_page
 from imbue.mng_llm.resources.web_server import _ws_accept_key
 from imbue.mng_llm.resources.web_server import _ws_encode_frame
-from imbue.mng_llm.resources.web_server import _ws_poll_loop
 from imbue.mng_llm.resources.web_server import _ws_read_frame
 from imbue.mng_llm.resources.web_server import _ws_send_json
 
@@ -449,17 +449,10 @@ def test_poll_db_empty_when_no_db() -> None:
         ws.LLM_DB_PATH = original
 
 
-def test_ws_poll_loop_exits_immediately_when_stopped() -> None:
-    stop = threading.Event()
-    stop.set()
-    _ws_poll_loop(
-        io.BytesIO(),
-        threading.Lock(),
-        stop,
-        [0],
-        ["c"],
-        set(),
-    )
+def test_ws_session_poll_loop_exits_when_stopped() -> None:
+    session = _WebSocketSession.create(io.BytesIO(), io.BytesIO(), "conv-test")
+    session.stop_event.set()
+    session.run_poll_loop()
 
 
 def test_ws_endpoint_rejects_non_websocket(

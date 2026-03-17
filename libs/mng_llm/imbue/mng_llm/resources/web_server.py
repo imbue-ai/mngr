@@ -1071,49 +1071,174 @@ def _poll_db_for_new_messages(
 # -- WebSocket handler --
 
 
-def _ws_poll_loop(
-    wfile: Any,
-    ws_lock: threading.Lock,
-    stop_event: threading.Event,
-    last_polled_rowid: list[int],
-    current_cid: list[str],
-    sent_ids: set[str],
-) -> None:
-    """Background thread: poll the DB for new messages and push via WebSocket.
+class _WebSocketSession:
+    """Manages a single WebSocket connection for real-time chat with DB polling.
 
-    Polls continuously even during active streaming. The ``sent_ids`` set
-    prevents duplicate delivery of messages that were already streamed to
-    the client, while ensuring injected messages (from ``llm inject``) are
-    never missed regardless of when they arrive.
+    Encapsulates all shared state (wfile, lock, stop event, polling cursor,
+    conversation ID, sent IDs) and provides methods for the handshake, recv
+    loop, message sending, and DB polling.
+
+    Use the ``create`` classmethod to construct instances.
     """
-    while not stop_event.is_set():
-        stop_event.wait(_WS_POLL_INTERVAL_SECONDS)
-        if stop_event.is_set():
-            break
-        cid = current_cid[0]
-        if not cid or cid == "NEW":
-            continue
-        new_msgs, new_max = _poll_db_for_new_messages(cid, last_polled_rowid[0], sent_ids)
-        for msg in new_msgs:
-            rid = msg.get("response_id", "")
-            if rid:
-                sent_ids.add(rid)
-            if not _ws_send_json(wfile, ws_lock, msg):
-                stop_event.set()
-                return
-        if new_max > last_polled_rowid[0]:
-            last_polled_rowid[0] = new_max
+
+    wfile: Any
+    rfile: Any
+    ws_lock: threading.Lock
+    stop_event: threading.Event
+    last_polled_rowid: int
+    current_cid: str
+    sent_ids: set[str]
+
+    @classmethod
+    def create(cls, wfile: Any, rfile: Any, conversation_id: str) -> "_WebSocketSession":
+        """Create a new WebSocket session."""
+        session = cls()
+        session.wfile = wfile
+        session.rfile = rfile
+        session.ws_lock = threading.Lock()
+        session.stop_event = threading.Event()
+        session.last_polled_rowid = _get_max_response_rowid()
+        session.current_cid = conversation_id
+        session.sent_ids = set()
+        return session
+
+    def send(self, data: dict[str, Any]) -> bool:
+        """Thread-safe JSON send. Returns False on failure and sets stop."""
+        ok = _ws_send_json(self.wfile, self.ws_lock, data)
+        if not ok:
+            self.stop_event.set()
+        return ok
+
+    def run_recv_loop(self) -> None:
+        """Read WebSocket frames and dispatch messages until close/error."""
+        try:
+            while not self.stop_event.is_set():
+                frame = _ws_read_frame(self.rfile)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 0x8:
+                    try:
+                        with self.ws_lock:
+                            self.wfile.write(_ws_encode_frame(b"", 0x8))
+                            self.wfile.flush()
+                    except OSError:
+                        pass
+                    break
+                if opcode == 0x9:
+                    try:
+                        with self.ws_lock:
+                            self.wfile.write(_ws_encode_frame(payload, 0xA))
+                            self.wfile.flush()
+                    except OSError:
+                        break
+                if opcode != 0x1:
+                    continue
+                try:
+                    msg = json.loads(payload.decode())
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    _log(f"[ws] malformed message: {e}")
+                    continue
+                if msg.get("type") == "send":
+                    self._handle_send(msg)
+        finally:
+            self.stop_event.set()
+            _log("[ws] connection closed")
+
+    def run_poll_loop(self) -> None:
+        """Background thread: poll the DB for new messages and push via WebSocket.
+
+        Polls continuously even during active streaming. The ``sent_ids`` set
+        prevents duplicate delivery of messages that were already streamed to
+        the client, while ensuring injected messages (from ``llm inject``) are
+        never missed regardless of when they arrive.
+        """
+        while not self.stop_event.is_set():
+            self.stop_event.wait(_WS_POLL_INTERVAL_SECONDS)
+            if self.stop_event.is_set():
+                break
+            cid = self.current_cid
+            if not cid or cid == "NEW":
+                continue
+            new_msgs, new_max = _poll_db_for_new_messages(cid, self.last_polled_rowid, self.sent_ids)
+            for msg in new_msgs:
+                rid = msg.get("response_id", "")
+                if rid:
+                    self.sent_ids.add(rid)
+                if not self.send(msg):
+                    return
+            if new_max > self.last_polled_rowid:
+                self.last_polled_rowid = new_max
+
+    def _handle_send(self, msg: dict[str, Any]) -> None:
+        """Process a 'send' message: run llm prompt and stream the response."""
+        cid = msg.get("conversation_id", self.current_cid)
+        message = msg.get("message", "")
+        if not cid or not message:
+            self.send({"type": "error", "error": "Missing conversation_id or message"})
+            return
+
+        is_new = cid == "NEW"
+        rowid_before = _get_max_response_rowid() if is_new else 0
+        callback = _WsOutputCallback(self.wfile, self.ws_lock, [])
+
+        result = _run_llm_prompt(cid, message, callback, "ws-chat-send")
+
+        if result.error:
+            self.send({"type": "error", "error": result.error})
+            return
+
+        full_cb = "".join(result.collected_lines)
+        if len(result.stdout) > len(full_cb):
+            self.send({"type": "chunk", "chunk": result.stdout[len(full_cb) :]})
+
+        if is_new:
+            real_cid = _finalize_new_conversation(rowid_before)
+            if real_cid:
+                cid = real_cid
+                self.current_cid = real_cid
+
+        self._mark_response_as_sent(cid)
+        self.send({"type": "done", "conversation_id": cid, "full_text": result.stdout})
+
+    def _mark_response_as_sent(self, cid: str) -> None:
+        """Add the latest response ID for this conversation to the sent set."""
+        if not LLM_DB_PATH or not LLM_DB_PATH.is_file():
+            return
+        try:
+            conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT id FROM responses WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1",
+                    (cid,),
+                ).fetchone()
+                if row:
+                    self.sent_ids.add(f"{row[0]}-user")
+                    self.sent_ids.add(f"{row[0]}-assistant")
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            _log(f"[ws-send] failed to look up response ID for sent tracking: {e}")
+
+
+class _WsOutputCallback:
+    """Callable that streams stdout lines as WebSocket chunk events and collects them."""
+
+    def __init__(self, wfile: Any, ws_lock: threading.Lock, lines: list[str]) -> None:
+        self.wfile = wfile
+        self.ws_lock = ws_lock
+        self.lines = lines
+
+    def __call__(self, line: str, is_stdout: bool) -> None:
+        if not is_stdout:
+            _log(f"[ws-stream] stderr: {line.rstrip()}")
+            return
+        self.lines.append(line)
+        _ws_send_json(self.wfile, self.ws_lock, {"type": "chunk", "chunk": line})
 
 
 def _handle_websocket(handler: BaseHTTPRequestHandler, conversation_id: str) -> None:
-    """Handle a WebSocket connection for real-time chat with DB polling.
-
-    Performs the WebSocket upgrade handshake, then enters a loop that:
-    - Receives messages from the client (type=send)
-    - Streams LLM responses back as chunk/done/error events
-    - Polls the database for new messages (e.g. from ``llm inject``) and
-      pushes them to the client as new_message events
-    """
+    """Perform the WebSocket handshake and run the session."""
     key = handler.headers.get("Sec-WebSocket-Key", "")
     if not key:
         handler.send_error(400, "Missing Sec-WebSocket-Key")
@@ -1134,151 +1259,16 @@ def _handle_websocket(handler: BaseHTTPRequestHandler, conversation_id: str) -> 
     handler.end_headers()
     handler.close_connection = True
 
-    wfile = handler.wfile
-    rfile = handler.rfile
-    ws_lock = threading.Lock()
+    session = _WebSocketSession.create(handler.wfile, handler.rfile, conversation_id)
 
-    stop_event = threading.Event()
-    last_polled_rowid = [_get_max_response_rowid()]
-    current_cid = [conversation_id]
-    sent_ids: set[str] = set()
+    if conversation_id and conversation_id != "NEW":
+        messages = _read_message_history(conversation_id)
+        session.send({"type": "history", "messages": messages, "conversation_id": conversation_id})
+        session.last_polled_rowid = _get_max_response_rowid()
 
-    # Send initial history
-    if current_cid[0] and current_cid[0] != "NEW":
-        messages = _read_message_history(current_cid[0])
-        _ws_send_json(wfile, ws_lock, {"type": "history", "messages": messages, "conversation_id": current_cid[0]})
-        last_polled_rowid[0] = _get_max_response_rowid()
-
-    poller_thread = threading.Thread(
-        target=_ws_poll_loop,
-        args=(wfile, ws_lock, stop_event, last_polled_rowid, current_cid, sent_ids),
-        daemon=True,
-    )
-    poller_thread.start()
-
-    try:
-        while not stop_event.is_set():
-            frame = _ws_read_frame(rfile)
-            if frame is None:
-                break
-            opcode, payload = frame
-            if opcode == 0x8:
-                try:
-                    with ws_lock:
-                        wfile.write(_ws_encode_frame(b"", 0x8))
-                        wfile.flush()
-                except OSError:
-                    pass
-                break
-            if opcode == 0x9:
-                try:
-                    with ws_lock:
-                        wfile.write(_ws_encode_frame(payload, 0xA))
-                        wfile.flush()
-                except OSError:
-                    break
-            if opcode != 0x1:
-                continue
-            try:
-                msg = json.loads(payload.decode())
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                _log(f"[ws] malformed message: {e}")
-                continue
-            if msg.get("type") != "send":
-                continue
-            _ws_handle_send(
-                msg,
-                wfile,
-                ws_lock,
-                stop_event,
-                current_cid,
-                last_polled_rowid,
-                sent_ids,
-            )
-    finally:
-        stop_event.set()
-        _log("[ws] connection closed")
-
-
-class _WsOutputCallback:
-    """Callable that streams stdout lines as WebSocket chunk events and collects them."""
-
-    def __init__(self, wfile: Any, ws_lock: threading.Lock, lines: list[str]) -> None:
-        self.wfile = wfile
-        self.ws_lock = ws_lock
-        self.lines = lines
-
-    def __call__(self, line: str, is_stdout: bool) -> None:
-        if not is_stdout:
-            _log(f"[ws-stream] stderr: {line.rstrip()}")
-            return
-        self.lines.append(line)
-        _ws_send_json(self.wfile, self.ws_lock, {"type": "chunk", "chunk": line})
-
-
-def _ws_mark_response_as_sent(cid: str, sent_ids: set[str]) -> None:
-    """Add the latest response ID for this conversation to the sent set."""
-    if not LLM_DB_PATH or not LLM_DB_PATH.is_file():
-        return
-    try:
-        conn = sqlite3.connect(f"file:{LLM_DB_PATH}?mode=ro", uri=True)
-        try:
-            row = conn.execute(
-                "SELECT id FROM responses WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1",
-                (cid,),
-            ).fetchone()
-            if row:
-                sent_ids.add(f"{row[0]}-user")
-                sent_ids.add(f"{row[0]}-assistant")
-        finally:
-            conn.close()
-    except sqlite3.Error as e:
-        _log(f"[ws-send] failed to look up response ID for sent tracking: {e}")
-
-
-def _ws_handle_send(
-    msg: dict[str, Any],
-    wfile: Any,
-    ws_lock: threading.Lock,
-    stop_event: threading.Event,
-    current_cid: list[str],
-    last_polled_rowid: list[int],
-    sent_ids: set[str],
-) -> None:
-    """Process a 'send' message from the WebSocket client.
-
-    Uses the shared ``_run_llm_prompt`` to execute the LLM and streams
-    the response back via the WebSocket. Updates shared state to keep
-    the polling thread in sync.
-    """
-    cid = msg.get("conversation_id", current_cid[0])
-    message = msg.get("message", "")
-    if not cid or not message:
-        _ws_send_json(wfile, ws_lock, {"type": "error", "error": "Missing conversation_id or message"})
-        return
-
-    is_new = cid == "NEW"
-    rowid_before = _get_max_response_rowid() if is_new else 0
-    callback = _WsOutputCallback(wfile, ws_lock, [])
-
-    result = _run_llm_prompt(cid, message, callback, "ws-chat-send")
-
-    if result.error:
-        _ws_send_json(wfile, ws_lock, {"type": "error", "error": result.error})
-        return
-
-    full_cb = "".join(result.collected_lines)
-    if len(result.stdout) > len(full_cb):
-        _ws_send_json(wfile, ws_lock, {"type": "chunk", "chunk": result.stdout[len(full_cb) :]})
-
-    if is_new:
-        real_cid = _finalize_new_conversation(rowid_before)
-        if real_cid:
-            cid = real_cid
-            current_cid[0] = real_cid
-
-    _ws_mark_response_as_sent(cid, sent_ids)
-    _ws_send_json(wfile, ws_lock, {"type": "done", "conversation_id": cid, "full_text": result.stdout})
+    poller = threading.Thread(target=session.run_poll_loop, daemon=True)
+    poller.start()
+    session.run_recv_loop()
 
 
 # -- Web chat page rendering --
