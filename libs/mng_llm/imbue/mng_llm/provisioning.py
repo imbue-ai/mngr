@@ -338,9 +338,8 @@ def _inject_conversation(
     env_prefix = f"LLM_USER_PATH={shlex.quote(str(llm_user_path))} " if llm_user_path else ""
     if env_vars:
         env_prefix += " ".join(f"{key}={shlex.quote(value)}" for key, value in env_vars.items()) + " "
-    inject_cmd = (
-        f"{env_prefix}llm inject -m {shlex.quote(model)} --prompt {shlex.quote(prompt)} {shlex.quote(response)}"
-    )
+    prompt_arg = f" --prompt {shlex.quote(prompt)}" if prompt else ""
+    inject_cmd = f"{env_prefix}llm inject -m {shlex.quote(model)}{prompt_arg} {shlex.quote(response)}"
     result = execute_with_timing(
         host,
         inject_cmd,
