@@ -242,19 +242,46 @@ def _export_single_channel(
     existing_state = state_by_channel_id.get(channel_id)
 
     oldest_datetime = channel_config.oldest or settings.default_oldest
-    oldest_ts = _datetime_to_slack_timestamp(oldest_datetime)
+    requested_oldest_ts = _datetime_to_slack_timestamp(oldest_datetime)
 
+    # Forward fetch: get new messages since last export (or from requested oldest on first run)
     if existing_state and existing_state.latest_message_timestamp:
-        oldest_ts = existing_state.latest_message_timestamp
-        logger.info("  Resuming from timestamp %s for channel %s", oldest_ts, channel_config.name)
+        forward_oldest = existing_state.latest_message_timestamp
+        forward_inclusive = False
+        logger.info("  Resuming from timestamp %s for channel %s", forward_oldest, channel_config.name)
+    else:
+        forward_oldest = requested_oldest_ts
+        forward_inclusive = True
 
     all_fetched = _fetch_all_messages_for_channel(
         channel_id=channel_id,
         channel_name=channel_config.name,
-        oldest_ts=oldest_ts,
-        is_inclusive=existing_state is None or existing_state.latest_message_timestamp is None,
+        oldest_ts=forward_oldest,
+        is_inclusive=forward_inclusive,
         api_caller=api_caller,
     )
+
+    # Backfill: fetch older messages if --since goes further back than previous exports
+    if (
+        existing_state
+        and existing_state.oldest_message_timestamp
+        and requested_oldest_ts < existing_state.oldest_message_timestamp
+    ):
+        logger.info(
+            "  Backfilling from %s to %s for channel %s",
+            requested_oldest_ts,
+            existing_state.oldest_message_timestamp,
+            channel_config.name,
+        )
+        backfill_messages = _fetch_all_messages_for_channel(
+            channel_id=channel_id,
+            channel_name=channel_config.name,
+            oldest_ts=requested_oldest_ts,
+            is_inclusive=True,
+            api_caller=api_caller,
+            latest_ts=existing_state.oldest_message_timestamp,
+        )
+        all_fetched = all_fetched + backfill_messages
 
     new_messages = [m for m in all_fetched if (m.channel_id, m.message_ts) not in known_message_keys]
     if new_messages:
@@ -373,18 +400,25 @@ def _fetch_all_messages_for_channel(
     oldest_ts: SlackMessageTimestamp,
     is_inclusive: bool,
     api_caller: SlackApiCaller,
+    latest_ts: SlackMessageTimestamp | None = None,
 ) -> list[MessageEvent]:
-    """Fetch all messages from a channel newer than oldest_ts, handling pagination."""
+    """Fetch all messages from a channel newer than oldest_ts, handling pagination.
+
+    If latest_ts is provided, only messages older than latest_ts are returned (for backfill).
+    """
+    base_params: dict[str, str] = {
+        "channel": channel_id,
+        "oldest": oldest_ts,
+        "inclusive": "true" if is_inclusive else "false",
+        "include_all_metadata": "true",
+        "limit": "200",
+    }
+    if latest_ts is not None:
+        base_params["latest"] = latest_ts
     raw_messages = fetch_paginated(
         api_caller=api_caller,
         method="conversations.history",
-        base_params={
-            "channel": channel_id,
-            "oldest": oldest_ts,
-            "inclusive": "true" if is_inclusive else "false",
-            "include_all_metadata": "true",
-            "limit": "200",
-        },
+        base_params=base_params,
         response_key="messages",
     )
     return [

@@ -71,6 +71,7 @@ def test_load_existing_message_state_tracks_latest_timestamp(temp_output_dir: Pa
 
     assert SlackChannelId("C123") in state
     assert state[SlackChannelId("C123")].latest_message_timestamp == SlackMessageTimestamp("1700000000.000009")
+    assert state[SlackChannelId("C123")].oldest_message_timestamp == SlackMessageTimestamp("1700000000.000001")
     assert len(keys) == 2
 
 

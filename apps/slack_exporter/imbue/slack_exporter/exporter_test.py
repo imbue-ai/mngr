@@ -521,3 +521,94 @@ def test_run_export_fetches_replies_when_latest_reply_changed(default_settings: 
     reply_lines = reply_path.read_text().strip().splitlines()
     reply_timestamps = sorted(json.loads(line)["reply_ts"] for line in reply_lines)
     assert "1700000000.000003" in reply_timestamps
+
+
+def test_run_export_backfills_older_messages_when_since_is_earlier(temp_output_dir: Path) -> None:
+    """When --since is earlier than the oldest exported message, backfill older messages."""
+    # First run: export with default_oldest=2024-06-01, producing messages from that range
+    initial_settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 6, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        cache_ttl_seconds=0,
+    )
+    caller1, _ = _tracking_api_caller(
+        message_data=[{"ts": "1717200000.000001", "text": "june msg"}],
+    )
+    run_export(initial_settings, api_caller=caller1)
+
+    # Verify first run saved one message
+    msg_path = temp_output_dir / "messages" / "created" / "events.jsonl"
+    assert len(msg_path.read_text().strip().splitlines()) == 1
+
+    # Second run: earlier --since date; track the conversations.history calls
+    backfill_settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        cache_ttl_seconds=0,
+    )
+    history_params: list[dict[str, str] | None] = []
+
+    def tracking_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+        if method == "auth.test":
+            return _DEFAULT_AUTH_RESPONSE
+        elif method == "conversations.list":
+            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
+        elif method == "users.list":
+            return make_slack_response("members", [])
+        elif method == "conversations.history":
+            history_params.append(query_params)
+            # Return a backfill message for calls with a "latest" param, empty for forward
+            if query_params and "latest" in query_params:
+                return make_slack_response("messages", [{"ts": "1704200000.000001", "text": "jan msg"}])
+            return make_slack_response("messages", [])
+        elif method == "reactions.list":
+            return make_slack_response("items", [])
+        else:
+            return {"ok": True}
+
+    run_export(backfill_settings, api_caller=tracking_caller)
+
+    # Should have made two conversations.history calls: forward + backfill
+    assert len(history_params) == 2
+
+    # Forward call: resumes from latest known message
+    forward_params = history_params[0]
+    assert forward_params is not None
+    assert forward_params["oldest"] == "1717200000.000001"
+    assert forward_params["inclusive"] == "false"
+    assert "latest" not in forward_params
+
+    # Backfill call: from the new --since date up to the oldest known message
+    backfill_params = history_params[1]
+    assert backfill_params is not None
+    assert backfill_params["oldest"] == _datetime_to_slack_timestamp(datetime(2024, 1, 1, tzinfo=timezone.utc))
+    assert backfill_params["inclusive"] == "true"
+    assert backfill_params["latest"] == "1717200000.000001"
+
+    # Backfilled message should be saved
+    msg_lines = msg_path.read_text().strip().splitlines()
+    assert len(msg_lines) == 2
+
+
+def test_run_export_no_backfill_when_since_is_same_or_later(temp_output_dir: Path) -> None:
+    """When --since is not earlier than the oldest message, no backfill call is made."""
+    since_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    since_ts = _datetime_to_slack_timestamp(since_date)
+    settings = ExporterSettings(
+        channels=(ChannelConfig(name=SlackChannelName("general")),),
+        default_oldest=since_date,
+        output_dir=temp_output_dir,
+        cache_ttl_seconds=0,
+    )
+    # Use a message at exactly the --since timestamp so oldest_message_timestamp == requested_oldest_ts
+    caller1, _ = _tracking_api_caller(
+        message_data=[{"ts": since_ts, "text": "jan msg"}],
+    )
+    run_export(settings, api_caller=caller1)
+
+    # Second run with the same --since: should only do forward fetch
+    caller2, counts2 = _tracking_api_caller()
+    run_export(settings, api_caller=caller2)
+    assert counts2.get("conversations.history", 0) == 1

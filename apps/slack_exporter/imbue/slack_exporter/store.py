@@ -101,17 +101,27 @@ def load_existing_message_state(
             known_message_keys.add((event.channel_id, event.message_ts))
 
             existing = state_by_channel_id.get(event.channel_id)
-            is_newer = (
-                existing is None
-                or existing.latest_message_timestamp is None
-                or event.message_ts > existing.latest_message_timestamp
-            )
-            if is_newer:
+            if existing is None:
                 state_by_channel_id[event.channel_id] = ChannelExportState(
                     channel_id=event.channel_id,
                     channel_name=event.channel_name,
                     latest_message_timestamp=event.message_ts,
+                    oldest_message_timestamp=event.message_ts,
                 )
+            else:
+                is_newer = (
+                    existing.latest_message_timestamp is None or event.message_ts > existing.latest_message_timestamp
+                )
+                is_older = (
+                    existing.oldest_message_timestamp is None or event.message_ts < existing.oldest_message_timestamp
+                )
+                if is_newer or is_older:
+                    state_by_channel_id[event.channel_id] = ChannelExportState(
+                        channel_id=event.channel_id,
+                        channel_name=event.channel_name,
+                        latest_message_timestamp=(event.message_ts if is_newer else existing.latest_message_timestamp),
+                        oldest_message_timestamp=(event.message_ts if is_older else existing.oldest_message_timestamp),
+                    )
 
     logger.info("Loaded %d known messages from store", len(known_message_keys))
     return state_by_channel_id, known_message_keys

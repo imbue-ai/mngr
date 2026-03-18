@@ -45,7 +45,7 @@ slack-exporter -v
 3. Fetches the channel list from Slack (via `conversations.list`) and saves only new or changed channels -- cached for `SLACK_EXPORTER_CACHE_TTL_SECONDS`
 4. Extracts unread markers (`last_read` position) from channel data and saves when changed
 5. Fetches the user list from Slack (via `users.list`) and saves only new users -- cached for `SLACK_EXPORTER_CACHE_TTL_SECONDS`
-6. For each configured channel, fetches new messages (via `conversations.history`) starting from either the configured oldest date or the most recent message already in the file
+6. For each configured channel, fetches new messages (via `conversations.history`) starting from the most recent message already exported (or the configured oldest date on first run). If the configured oldest date is earlier than the oldest message already exported, also backfills older messages down to that date
 7. For messages with threads (reply_count > 0), uses the `latest_reply` field to skip threads with no new replies, then fetches replies (via `conversations.replies`) only for threads that have changed
 8. Fetches all items the authenticated user has reacted to (via `reactions.list`) and saves new or changed items -- cached for `SLACK_EXPORTER_CACHE_TTL_SECONDS`
 
