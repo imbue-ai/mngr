@@ -24,6 +24,7 @@ from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.api.pull import pull_git
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
+from imbue.mng.errors import HostError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.host import HostLocation
@@ -71,6 +72,7 @@ _OUTCOME_COLORS: dict[TestOutcome, str] = {
     TestOutcome.TIMED_OUT: "rgb(121, 85, 72)",
     TestOutcome.RUN_SUCCEEDED: "rgb(76, 175, 80)",
     TestOutcome.AGENT_ERROR: "rgb(158, 158, 158)",
+    TestOutcome.REMOTE_AGENT_ERROR: "rgb(189, 147, 249)",
 }
 
 _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
@@ -82,6 +84,7 @@ _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
     TestOutcome.FIX_UNCERTAIN,
     TestOutcome.TIMED_OUT,
     TestOutcome.AGENT_ERROR,
+    TestOutcome.REMOTE_AGENT_ERROR,
     TestOutcome.RUN_SUCCEEDED,
 ]
 
@@ -202,23 +205,17 @@ def _copy_mode_for_provider(provider_name: ProviderInstanceName) -> WorkDirCopyM
     return WorkDirCopyMode.WORKTREE if is_local else WorkDirCopyMode.CLONE
 
 
-def _create_tmr_agent(
+def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
     config: TmrLaunchConfig,
-    mng_ctx: MngContext,
-    initial_message: str | None = None,
-) -> CreateAgentResult:
-    """Create an agent on the configured provider.
-
-    Shared helper for test agents, the integrator agent, and the snapshotter.
-    """
+) -> CreateAgentOptions:
+    """Build CreateAgentOptions for a tmr agent."""
     copy_mode = _copy_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-    agent_options = CreateAgentOptions(
+    return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
-        initial_message=initial_message,
         git=AgentGitOptions(
             copy_mode=copy_mode,
             new_branch_name=branch_name,
@@ -229,17 +226,41 @@ def _create_tmr_agent(
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
+
+def _create_tmr_agent(
+    agent_name: AgentName,
+    branch_name: str,
+    config: TmrLaunchConfig,
+    mng_ctx: MngContext,
+    message: str | None = None,
+) -> CreateAgentResult:
+    """Create an agent on the configured provider and optionally send a message.
+
+    If message is provided, it is sent after agent creation. SendMessageError
+    is caught and logged (the signal detection can fail on remote hosts even
+    when the message is actually delivered).
+    """
+    agent_options = _build_agent_options(agent_name, branch_name, config)
+
     source_location = HostLocation(host=config.source_host, path=config.source_dir)
     snapshot = config.snapshot
     build = NewHostBuildOptions(snapshot=snapshot) if snapshot is not None else NewHostBuildOptions()
     target_host = NewHostOptions(provider=config.provider_name, name=HostName(str(agent_name)), build=build)
 
-    return api_create(
+    result = api_create(
         source_location=source_location,
         target_host=target_host,
         agent_options=agent_options,
         mng_ctx=mng_ctx,
     )
+
+    if message is not None:
+        try:
+            result.agent.send_message(message)
+        except SendMessageError as exc:
+            logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
+
+    return result
 
 
 def launch_test_agent(
@@ -249,17 +270,10 @@ def launch_test_agent(
     pytest_flags: tuple[str, ...],
     prompt_suffix: str = "",
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test.
-
-    The agent is created without an initial message, then the prompt is
-    sent separately. If the send signal detection times out (common on
-    remote hosts), the error is logged but not raised -- the polling loop
-    will eventually notice if the agent never starts working.
-    """
+    """Launch a single agent to run and optionally fix one test."""
     agent_name_suffix = _sanitize_test_name_for_agent(test_node_id)
     short_id = _short_random_id()
     agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
-    prompt = _build_agent_prompt(test_node_id, pytest_flags, prompt_suffix)
 
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
     create_result = _create_tmr_agent(
@@ -267,12 +281,8 @@ def launch_test_agent(
         branch_name=f"mng-tmr/{agent_name_suffix}-{short_id}",
         config=config,
         mng_ctx=mng_ctx,
+        message=_build_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
     )
-
-    try:
-        create_result.agent.send_message(prompt)
-    except SendMessageError as exc:
-        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(
@@ -474,7 +484,7 @@ def _stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except MngError as exc:
+    except (MngError, HostError) as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -492,6 +502,12 @@ def read_agent_result(
         return TestResult(
             outcome=TestOutcome(data["outcome"]),
             summary=data.get("summary", ""),
+        )
+    except HostError as exc:
+        logger.warning("Lost connection to agent {}: {}", agent_detail.name, exc)
+        return TestResult(
+            outcome=TestOutcome.REMOTE_AGENT_ERROR,
+            summary=f"Lost connection to agent host: {exc}",
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
@@ -529,7 +545,7 @@ def pull_agent_branch(
         )
         logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_detail.name)
         return branch_name
-    except MngError as exc:
+    except (MngError, HostError) as exc:
         logger.warning("Failed to pull branch from agent '{}': {}", agent_detail.name, exc)
         return None
 
@@ -538,7 +554,11 @@ def _get_agent_from_host(
     host: OnlineHostInterface,
     agent_id: AgentId,
 ) -> AgentInterface:
-    """Look up an agent on a host by ID."""
+    """Look up an agent on a host by ID.
+
+    Raises AgentNotFoundOnHostError if not found, or HostError if the host
+    is unreachable (callers should catch both).
+    """
     for agent in host.get_agents():
         if agent.id == agent_id:
             return agent
@@ -799,12 +819,8 @@ If merging fails, use outcome FIX_IMPL_FAILED.
         branch_name=f"mng-tmr/integrated-{short_id}",
         config=config,
         mng_ctx=mng_ctx,
+        message=prompt,
     )
-
-    try:
-        create_result.agent.send_message(prompt)
-    except SendMessageError as exc:
-        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(

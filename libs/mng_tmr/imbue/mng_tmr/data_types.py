@@ -28,6 +28,7 @@ class TestOutcome(str, Enum):
     FIX_UNCERTAIN = "FIX_UNCERTAIN"
     TIMED_OUT = "TIMED_OUT"
     AGENT_ERROR = "AGENT_ERROR"
+    REMOTE_AGENT_ERROR = "REMOTE_AGENT_ERROR"
 
 
 class TestResult(FrozenModel):
