@@ -213,6 +213,7 @@ def _create_tmr_agent(
     Shared helper for test agents, the integrator agent, and the snapshotter.
     """
     copy_mode = _copy_mode_for_provider(config.provider_name)
+    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     agent_options = CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
@@ -224,6 +225,7 @@ def _create_tmr_agent(
         data_options=AgentDataOptions(is_rsync_enabled=False),
         environment=config.env_options,
         label_options=config.label_options,
+        ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
     source_location = HostLocation(host=config.source_host, path=config.source_dir)
