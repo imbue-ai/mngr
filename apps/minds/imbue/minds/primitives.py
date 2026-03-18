@@ -37,3 +37,9 @@ class GitBranch(NonEmptyStr):
     """A git branch name to clone."""
 
     ...
+
+
+class GitCommitHash(NonEmptyStr):
+    """A full git commit hash (40 hex characters)."""
+
+    ...

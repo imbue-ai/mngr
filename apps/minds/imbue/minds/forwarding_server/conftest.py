@@ -10,7 +10,6 @@ from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
-from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredAgent
@@ -18,24 +17,6 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import ProviderInstanceName
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
-
-
-@pytest.fixture
-def vendor_test_repos(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a source git repo and vendor target directory for vendoring tests.
-
-    Returns (source_dir, vendor_mng_dir). The source directory is initialized
-    as a git repo with an empty commit. Tests can add files to the source
-    (and re-commit if needed) before calling the vendoring functions.
-    """
-    source = tmp_path / "source"
-    source.mkdir()
-    init_and_commit_git_repo(source, tmp_path, allow_empty=True)
-
-    vendor_mng_dir = tmp_path / "dest" / "vendor" / "mng"
-    vendor_mng_dir.parent.mkdir(parents=True)
-
-    return source, vendor_mng_dir
 
 
 @pytest.fixture

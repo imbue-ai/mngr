@@ -1,6 +1,6 @@
 # Overview
 
-See the [README](../README.md) for an overview of what minds are and the terminology used throughout.
+See the [README](../README.md) for an overview of what minds are and see [the glossary](./mind/glossary.md) for terminology used throughout.
 
 # Relationship to mng
 
@@ -29,6 +29,29 @@ The agent type is passed directly to `mng create --type <type>` during creation.
 agent_type = "elena-code"
 ```
 
+## Vendor repos
+
+During agent creation, external repositories can be added as git subtrees under `vendor/` in the mind's directory. This is configured via `[[vendor]]` entries in `minds.toml`. Each entry must specify either a remote `url` or a local `path`, and can optionally pin a specific git `ref` (defaults to the current HEAD).
+
+Local repos must be "clean" (no uncommitted changes or untracked files) before they can be vendored.
+
+When no `[[vendor]]` section exists, the system falls back to vendoring the `mng` repo (using the local checkout in development mode, or the GitHub URL otherwise).
+
+```toml
+# minds.toml
+
+# Vendor the mng repo from GitHub at a specific commit
+[[vendor]]
+name = "mng"
+url = "https://github.com/imbue-ai/mng.git"
+ref = "abc123"
+
+# Vendor a local repo (must be clean)
+[[vendor]]
+name = "my-lib"
+path = "/path/to/local/repo"
+```
+
 ## Settings
 
 Minds read per-mind settings from `minds.toml` in the agent work directory (`$MNG_AGENT_WORK_DIR/minds.toml`). This file is optional -- if it does not exist, all settings use their built-in defaults.
@@ -54,8 +77,9 @@ See [the forwarding server design doc](../imbue/minds/forwarding_server/README.m
 When a user visits the forwarding server and no agents exist, they are shown a creation form where they can provide a git repository URL. The forwarding server:
 
 1. Clones the repository to `~/.minds/<agent-id>/`
-2. Resolves the agent type from `minds.toml` (or uses `claude-mind` as default)
-3. Runs `mng create --type <type> --id <id> --in-place --label mind=true` to start the agent
+2. Loads settings from `minds.toml` (agent type, vendor repos, etc.)
+3. Adds configured vendor repos as git subtrees (or defaults to vendoring mng)
+4. Runs `mng create --type <type> --id <id> --in-place --label mind=true` to start the agent
 4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 
 Agent creation is also available via the `/api/create-agent` API endpoint, which accepts a JSON body with `git_url` and returns the agent ID for status polling.

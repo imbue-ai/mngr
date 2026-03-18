@@ -1,6 +1,7 @@
 import click
 
 from imbue.minds.cli.forward import forward
+from imbue.minds.cli.update import update
 from imbue.minds.utils.logging import console_level_from_verbose_and_quiet
 from imbue.minds.utils.logging import setup_logging
 
@@ -18,3 +19,4 @@ def cli(ctx: click.Context, verbose: int, quiet: bool) -> None:
 
 
 cli.add_command(forward)
+cli.add_command(update)

@@ -19,6 +19,7 @@ Usage:
     mng mind-conversation-db count <db_path>
     mng mind-conversation-db max-rowid <db_path>
     mng mind-conversation-db poll-new <db_path> <max_rowid>
+    mng mind-conversation-db last-response-id <db_path> <conversation_id>
 
 Environment: None required (all paths passed as arguments).
 """
@@ -126,6 +127,27 @@ def lookup_by_name(db_path: str, name: str) -> None:
         _warn(f"lookup-by-name failed: {e}")
 
 
+def last_response_id(db_path: str, conversation_id: str) -> None:
+    """Look up the most recently inserted response ID for a conversation.
+
+    Queries the llm tool's ``responses`` table for the response with the
+    latest ``datetime_utc`` belonging to the given conversation.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT id FROM responses WHERE conversation_id = ? ORDER BY datetime_utc DESC LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            if row:
+                _write_stdout(row[0])
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        _warn(f"last-response-id failed: {e}")
+
+
 def poll_new(db_path: str, max_rowid: str) -> None:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -163,6 +185,8 @@ def main() -> None:
             max_rowid(db_path)
         case "poll-new":
             poll_new(db_path, sys.argv[3])
+        case "last-response-id":
+            last_response_id(db_path, sys.argv[3])
         case _ as unreachable:
             _warn(f"Unknown subcommand: {unreachable}")
             sys.exit(1)

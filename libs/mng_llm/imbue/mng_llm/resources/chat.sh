@@ -73,6 +73,15 @@ insert_conversation_record() {
     log "Inserted conversation record: conversation_id=$conversation_id tags=$tags"
 }
 
+# Look up the most recently inserted response ID for a conversation.
+# Prints the response_id if found, or nothing if not found.
+get_last_response_id() {
+    local conversation_id="$1"
+    if [ -f "$_LLM_DB" ]; then
+        mng llmdb last-response-id "$_LLM_DB" "$conversation_id"
+    fi
+}
+
 build_tool_args() {
     local args=""
     if [ -f "$LLM_TOOLS_DIR/context_tool.py" ]; then
@@ -193,8 +202,15 @@ new_conversation() {
                 log "Injecting agent message into existing conversation $existing_id"
                 llm inject --cid "$existing_id" -m "$model" "$message"
                 log "Agent message injected successfully"
+                local message_id
+                message_id=$(get_last_response_id "$existing_id")
+                echo "conversation_id=$existing_id"
+                if [ -n "$message_id" ]; then
+                    echo "message_id=$message_id"
+                fi
+            else
+                echo "conversation_id=$existing_id"
             fi
-            echo "$existing_id"
         else
             resume_conversation "$existing_id"
         fi
@@ -215,8 +231,15 @@ new_conversation() {
             log "Injecting agent message into new conversation $conversation_id"
             llm inject --cid "$conversation_id" -m "$model" "$message"
             log "Agent message injected successfully"
+            local message_id
+            message_id=$(get_last_response_id "$conversation_id")
+            echo "conversation_id=$conversation_id"
+            if [ -n "$message_id" ]; then
+                echo "message_id=$message_id"
+            fi
+        else
+            echo "conversation_id=$conversation_id"
         fi
-        echo "$conversation_id"
     else
         local tool_args
         tool_args=$(build_tool_args)
@@ -300,6 +323,12 @@ reply_to_conversation() {
 
     llm inject --cid "$conversation_id" -m "$model" "$message"
     log "Reply injected successfully"
+
+    local message_id
+    message_id=$(get_last_response_id "$conversation_id")
+    if [ -n "$message_id" ]; then
+        echo "message_id=$message_id"
+    fi
 }
 
 list_conversations() {
@@ -395,6 +424,10 @@ show_help() {
     echo "  chat --help                                  Show this help message"
     echo ""
     echo "With no arguments, lists conversations (same as --list)."
+    echo ""
+    echo "Output (when injecting messages):"
+    echo "  conversation_id=<id>   Conversation that was created or injected into"
+    echo "  message_id=<id>        Response ID of the injected message"
     echo ""
     echo "Environment:"
     echo "  MNG_LLM_MODEL   Model for llm commands (default: claude-opus-4.6)"

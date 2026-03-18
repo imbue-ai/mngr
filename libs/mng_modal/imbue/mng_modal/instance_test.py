@@ -9,8 +9,6 @@ from typing import cast
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import modal
-import modal.exception
 import pytest
 
 from imbue.mng.config.data_types import MngContext
@@ -41,6 +39,9 @@ from imbue.mng_modal.instance import _substitute_dockerfile_build_args
 from imbue.mng_modal.instance import build_sandbox_tags
 from imbue.mng_modal.instance import check_host_name_is_unique
 from imbue.mng_modal.instance import parse_sandbox_tags
+from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyNotFoundError
+from imbue.modal_proxy.interface import AppInterface
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions
@@ -143,8 +144,8 @@ class ExpiredCredentialsModalProviderInstance(ModalProviderInstance):
     Used for testing the @handle_modal_auth_error decorator behavior.
     """
 
-    def _get_modal_app(self) -> modal.App:
-        raise modal.exception.AuthError("Token missing or expired")
+    def _get_modal_app(self) -> AppInterface:
+        raise ModalProxyAuthError("Token missing or expired")
 
 
 _T = TypeVar("_T", bound=ModalProviderInstance)
@@ -169,6 +170,8 @@ def _make_modal_provider_with_mocks(
     output_buffer = StringIO()
     mock_environment_name = f"test-env-{app_name}"
 
+    mock_modal_interface = MagicMock()
+
     modal_app = ModalProviderApp.model_construct(
         app_name=app_name,
         environment_name=mock_environment_name,
@@ -176,6 +179,7 @@ def _make_modal_provider_with_mocks(
         volume=mock_volume,
         close_callback=MagicMock(),
         get_output_callback=output_buffer.getvalue,
+        modal_interface=mock_modal_interface,
     )
 
     config = ModalProviderConfig(
@@ -383,7 +387,7 @@ def test_list_all_host_records_returns_empty_when_hosts_dir_missing(
 ) -> None:
     """_list_all_host_records should return empty list when /hosts/ directory does not exist."""
     mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.listdir.side_effect = modal.exception.NotFoundError("Not found")
+    mock_volume.listdir.side_effect = ModalProxyNotFoundError("Not found")
 
     host_records = modal_provider._list_all_host_records(modal_provider.mng_ctx.concurrency_group)
 
@@ -989,6 +993,8 @@ def make_modal_provider_with_config_defaults(
     # Create a mock environment name for testing
     mock_environment_name = f"test-env-{app_name}"
 
+    mock_modal_interface = MagicMock()
+
     modal_app = ModalProviderApp.model_construct(
         app_name=app_name,
         environment_name=mock_environment_name,
@@ -996,6 +1002,7 @@ def make_modal_provider_with_config_defaults(
         volume=mock_volume,
         close_callback=MagicMock(),
         get_output_callback=output_buffer.getvalue,
+        modal_interface=mock_modal_interface,
     )
 
     config = ModalProviderConfig(
@@ -1126,7 +1133,8 @@ def test_modal_provider_config_user_id_can_be_set() -> None:
 
 def test_build_modal_secrets_from_env_empty_list() -> None:
     """Empty list of env vars should return empty list of secrets."""
-    result = _build_modal_secrets_from_env([])
+    mock_iface = MagicMock()
+    result = _build_modal_secrets_from_env([], mock_iface)
     assert result == []
 
 
@@ -1135,19 +1143,22 @@ def test_build_modal_secrets_from_env_with_set_vars(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("TEST_SECRET_1", "value1")
     monkeypatch.setenv("TEST_SECRET_2", "value2")
 
-    result = _build_modal_secrets_from_env(["TEST_SECRET_1", "TEST_SECRET_2"])
+    mock_iface = MagicMock()
+    mock_iface.secret_from_dict.return_value = MagicMock()
+    result = _build_modal_secrets_from_env(["TEST_SECRET_1", "TEST_SECRET_2"], mock_iface)
 
     # All vars are combined into one Secret
     assert len(result) == 1
+    mock_iface.secret_from_dict.assert_called_once()
 
 
 def test_build_modal_secrets_from_env_missing_var_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Should raise MngError when an environment variable is not set."""
-    # Ensure the variable is not set
     monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
 
+    mock_iface = MagicMock()
     with pytest.raises(MngError) as exc_info:
-        _build_modal_secrets_from_env(["NONEXISTENT_VAR"])
+        _build_modal_secrets_from_env(["NONEXISTENT_VAR"], mock_iface)
 
     assert "Environment variable(s) not set for secrets" in str(exc_info.value)
     assert "NONEXISTENT_VAR" in str(exc_info.value)
@@ -1158,8 +1169,9 @@ def test_build_modal_secrets_from_env_multiple_missing_vars(monkeypatch: pytest.
     monkeypatch.delenv("MISSING_VAR_1", raising=False)
     monkeypatch.delenv("MISSING_VAR_2", raising=False)
 
+    mock_iface = MagicMock()
     with pytest.raises(MngError) as exc_info:
-        _build_modal_secrets_from_env(["MISSING_VAR_1", "MISSING_VAR_2"])
+        _build_modal_secrets_from_env(["MISSING_VAR_1", "MISSING_VAR_2"], mock_iface)
 
     error_message = str(exc_info.value)
     assert "MISSING_VAR_1" in error_message
@@ -1171,8 +1183,9 @@ def test_build_modal_secrets_from_env_partial_missing_vars(monkeypatch: pytest.M
     monkeypatch.setenv("SET_VAR", "value")
     monkeypatch.delenv("MISSING_VAR", raising=False)
 
+    mock_iface = MagicMock()
     with pytest.raises(MngError) as exc_info:
-        _build_modal_secrets_from_env(["SET_VAR", "MISSING_VAR"])
+        _build_modal_secrets_from_env(["SET_VAR", "MISSING_VAR"], mock_iface)
 
     error_message = str(exc_info.value)
     assert "MISSING_VAR" in error_message
@@ -1202,9 +1215,9 @@ def test_create_shutdown_script_generates_correct_content(
 
     mock_host = MockHost()
 
-    # Create a mock sandbox with an object_id
+    # Create a mock sandbox with get_object_id()
     mock_sandbox = MagicMock()
-    mock_sandbox.object_id = "sb-test-sandbox-123"
+    mock_sandbox.get_object_id.return_value = "sb-test-sandbox-123"
 
     # Call the method with a test URL
     host_id = HostId.generate()
@@ -1252,33 +1265,20 @@ def test_persist_agent_data_writes_to_volume(
         "command": "echo hello",
     }
 
-    # Track what was uploaded to the volume
-    uploaded_files: dict[str, bytes] = {}
-
-    class MockBatchUpload:
-        def __init__(self) -> None:
-            pass
-
-        def __enter__(self) -> "MockBatchUpload":
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            pass
-
-        def put_file(self, file_obj: Any, path: str) -> None:
-            uploaded_files[path] = file_obj.read()
+    # Track what was written to the volume via write_files
+    written_files: dict[str, bytes] = {}
 
     mock_volume = cast(Any, modal_provider.modal_app.volume)
-    mock_volume.batch_upload.return_value = MockBatchUpload()
+    mock_volume.write_files.side_effect = lambda files: written_files.update(files)
 
     modal_provider.persist_agent_data(host_id, agent_data)
 
     # Verify the file was written to the correct path
     expected_path = f"/hosts/{host_id}/{agent_id}.json"
-    assert expected_path in uploaded_files
+    assert expected_path in written_files
 
     # Verify the content is valid JSON with expected fields
-    uploaded_content = json.loads(uploaded_files[expected_path].decode("utf-8"))
+    uploaded_content = json.loads(written_files[expected_path].decode("utf-8"))
     assert uploaded_content["id"] == str(agent_id)
     assert uploaded_content["name"] == "test-agent"
     assert uploaded_content["type"] == "test"
@@ -1301,7 +1301,7 @@ def test_persist_agent_data_without_id_logs_warning_and_returns(
     modal_provider.persist_agent_data(host_id, agent_data)
 
     # Verify the volume was never accessed
-    mock_volume.batch_upload.assert_not_called()
+    mock_volume.write_files.assert_not_called()
 
 
 def test_remove_persisted_agent_data_removes_file(
@@ -1355,6 +1355,8 @@ def _make_modal_provider_without_host_volume(
     output_buffer = StringIO()
     mock_environment_name = f"test-env-{app_name}"
 
+    mock_modal_interface = MagicMock()
+
     modal_app = ModalProviderApp.model_construct(
         app_name=app_name,
         environment_name=mock_environment_name,
@@ -1362,6 +1364,7 @@ def _make_modal_provider_without_host_volume(
         volume=mock_volume,
         close_callback=MagicMock(),
         get_output_callback=output_buffer.getvalue,
+        modal_interface=mock_modal_interface,
     )
 
     config = ModalProviderConfig(
@@ -1587,9 +1590,9 @@ def test_list_running_host_ids_returns_empty_when_no_sandboxes(
     modal_provider: ModalProviderInstance,
 ) -> None:
     """_list_running_host_ids returns empty set when no sandboxes exist."""
-    with patch.object(modal, "Sandbox") as mock_sandbox_cls:
-        mock_sandbox_cls.list.return_value = []
-        result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
+    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
+    mock_iface.sandbox_list.return_value = []
+    result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
 
     assert result == set()
 
@@ -1606,9 +1609,9 @@ def test_list_running_host_ids_fetches_tags_in_parallel(
     sandbox_2 = MagicMock()
     sandbox_2.get_tags.return_value = {TAG_HOST_ID: str(host_id_2), TAG_HOST_NAME: "host-2"}
 
-    with patch.object(modal, "Sandbox") as mock_sandbox_cls:
-        mock_sandbox_cls.list.return_value = [sandbox_1, sandbox_2]
-        result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
+    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
+    mock_iface.sandbox_list.return_value = [sandbox_1, sandbox_2]
+    result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
 
     assert result == {host_id_1, host_id_2}
 
@@ -1624,9 +1627,9 @@ def test_list_running_host_ids_skips_sandboxes_without_host_id_tag(
     sandbox_without_tag = MagicMock()
     sandbox_without_tag.get_tags.return_value = {"some_other_tag": "value"}
 
-    with patch.object(modal, "Sandbox") as mock_sandbox_cls:
-        mock_sandbox_cls.list.return_value = [sandbox_with_tag, sandbox_without_tag]
-        result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
+    mock_iface = cast(Any, modal_provider.modal_app.modal_interface)
+    mock_iface.sandbox_list.return_value = [sandbox_with_tag, sandbox_without_tag]
+    result = modal_provider._list_running_host_ids(modal_provider.mng_ctx.concurrency_group)
 
     assert result == {host_id}
 

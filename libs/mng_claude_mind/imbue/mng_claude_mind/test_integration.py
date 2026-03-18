@@ -12,6 +12,7 @@ injection logic that the plugin provides.
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -34,6 +35,8 @@ from imbue.mng.utils.testing import wait_for_agent_session
 from imbue.mng_claude_mind.conftest import ChatScriptEnv
 from imbue.mng_claude_mind.conftest import LocalShellHost
 from imbue.mng_claude_mind.conftest import assert_conversation_exists_in_db
+from imbue.mng_claude_mind.conftest import create_mind_conversations_table_only
+from imbue.mng_claude_mind.conftest import parse_chat_output
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import setup_memory_directory
 from imbue.mng_llm.conftest import create_test_llm_db
@@ -385,7 +388,8 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
 
     assert result.returncode == 0, f"chat.sh failed: stdout={result.stdout!r} stderr={result.stderr!r}"
 
-    conversation_id = result.stdout.strip()
+    output = parse_chat_output(result.stdout)
+    conversation_id = output["conversation_id"]
     assert conversation_id.startswith("conv-"), f"Expected conversation ID, got: {conversation_id!r}"
 
     assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
@@ -400,7 +404,8 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
     for i in range(3):
         result = chat_env.run("--new", "--name", f"test-conv-{i}", "--as-agent")
         assert result.returncode == 0
-        conversation_ids.append(result.stdout.strip())
+        output = parse_chat_output(result.stdout)
+        conversation_ids.append(output["conversation_id"])
 
     assert len(set(conversation_ids)) == 3, f"Expected 3 unique conversation IDs, got: {conversation_ids}"
 
@@ -420,8 +425,8 @@ def test_chat_model_read_from_env_var(chat_env: ChatScriptEnv) -> None:
     result = chat_env.run("--new", "--name", "model-test", "--as-agent")
     assert result.returncode == 0
 
-    conversation_id = result.stdout.strip()
-    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+    output = parse_chat_output(result.stdout)
+    assert_conversation_exists_in_db(chat_env.llm_db_path, output["conversation_id"])
 
     # Verify the model from env var was used (visible in log output)
     log_file = log_dir / "chat" / "events.jsonl"
@@ -857,8 +862,8 @@ def test_chat_script_uses_hardcoded_default_when_no_env_var(chat_env: ChatScript
     result = chat_env.run("--new", "--name", "default-model-test", "--as-agent")
     assert result.returncode == 0
 
-    conversation_id = result.stdout.strip()
-    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+    output = parse_chat_output(result.stdout)
+    assert_conversation_exists_in_db(chat_env.llm_db_path, output["conversation_id"])
 
     # Verify the hardcoded default model was used (visible in log output)
     log_file = log_dir / "chat" / "events.jsonl"
@@ -968,6 +973,59 @@ def test_chat_script_reply_logs_correct_model_and_conversation(chat_env: ChatScr
     assert "conv-reply-test" in log_content
     assert "claude-sonnet-4-6" in log_content
     assert "reply_to_conversation" in log_content
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_reply_outputs_message_id(chat_env: ChatScriptEnv) -> None:
+    """Verify that --reply outputs the message_id of the injected response.
+
+    Requires llm to be installed (skipped in CI where it is not available).
+    """
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
+
+    # Delete existing DB and let llm inject create it fresh through its own
+    # migration system, then add our mind_conversations table.
+    chat_env.llm_db_path.unlink()
+
+    # Create a real conversation via llm inject (no --cid)
+    setup_result = subprocess.run(
+        ["llm", "inject", "-m", "matched-responses", "--prompt", "setup", "initial"],
+        capture_output=True,
+        text=True,
+        env=chat_env.env,
+    )
+    assert setup_result.returncode == 0, f"Setup inject failed: {setup_result.stderr}"
+    # Parse conversation_id from "Injected message into conversation <id>"
+    parts = setup_result.stdout.strip().rsplit(" ", 1)
+    assert len(parts) == 2, f"Unexpected llm inject output: {setup_result.stdout!r}"
+    conversation_id = parts[1]
+
+    # Create the mind_conversations table (llm inject doesn't create it)
+    create_mind_conversations_table_only(chat_env.llm_db_path)
+
+    # Reply via chat.sh and verify message_id in output
+    reply_result = chat_env.run("--reply", conversation_id, "follow-up message")
+    assert reply_result.returncode == 0, f"Reply failed: {reply_result.stderr}"
+
+    reply_output = parse_chat_output(reply_result.stdout)
+    assert "message_id" in reply_output, f"Expected message_id in output, got: {reply_result.stdout!r}"
+    assert len(reply_output["message_id"]) > 0
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_new_as_agent_without_message_outputs_conversation_id(chat_env: ChatScriptEnv) -> None:
+    """Verify that --new --as-agent without a message outputs conversation_id."""
+    chat_env.set_default_model("matched-responses")
+
+    result = chat_env.run("--new", "--name", "no-msg-test", "--as-agent")
+    assert result.returncode == 0, f"Failed: {result.stderr}"
+
+    output = parse_chat_output(result.stdout)
+    assert "conversation_id" in output, f"Expected conversation_id in output, got: {result.stdout!r}"
+    assert output["conversation_id"].startswith("conv-")
 
 
 @pytest.mark.timeout(30)

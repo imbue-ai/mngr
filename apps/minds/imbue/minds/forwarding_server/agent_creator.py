@@ -30,13 +30,16 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNG_BINARY
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngCommandError
-from imbue.minds.errors import VendorError
+from imbue.minds.forwarding_server.parent_tracking import setup_mind_branch_and_parent
+from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
 from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
-from imbue.minds.forwarding_server.vendor_mng import vendor_mng
+from imbue.minds.forwarding_server.vendor_mng import vendor_repos
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitUrl
 from imbue.mng.primitives import AgentId
+from imbue.mng_claude_mind.data_types import ClaudeMindSettings
 from imbue.mng_claude_mind.settings import load_settings_from_path
 from imbue.mng_llm.settings import SETTINGS_FILENAME
 
@@ -115,23 +118,20 @@ def clone_git_repo(
         )
 
 
-def resolve_agent_type(repo_dir: Path) -> str:
-    """Resolve agent type from minds.toml in the repo, falling back to DEFAULT_AGENT_TYPE.
+def load_creation_settings(repo_dir: Path) -> ClaudeMindSettings:
+    """Load ClaudeMindSettings from minds.toml in the repo, falling back to defaults.
 
-    If the repo contains a minds.toml with an agent_type field, uses that value.
-    Otherwise returns DEFAULT_AGENT_TYPE ('claude-mind').
+    Returns the parsed settings (with defaults for any missing values).
+    Used during agent creation to read both agent_type and vendor config.
     """
     settings_path = repo_dir / SETTINGS_FILENAME
     try:
-        settings = load_settings_from_path(settings_path)
+        return load_settings_from_path(settings_path)
     except FileNotFoundError:
-        return DEFAULT_AGENT_TYPE
+        return ClaudeMindSettings()
     except (tomllib.TOMLDecodeError, ValidationError, OSError) as e:
-        logger.warning("Failed to parse {}, using default agent type: {}", settings_path, e)
-        return DEFAULT_AGENT_TYPE
-    if settings.agent_type is not None:
-        return settings.agent_type
-    return DEFAULT_AGENT_TYPE
+        logger.warning("Failed to parse {}, using defaults: {}", settings_path, e)
+        return ClaudeMindSettings()
 
 
 def run_mng_create(
@@ -158,8 +158,10 @@ def run_mng_create(
         agent_type,
         "--env",
         "ROLE=thinking",
+        "--env",
+        f"MIND_NAME={agent_name}",
         "--label",
-        "mind=true",
+        f"mind={agent_name}",
         "--disable-plugin",
         "ttyd",
         "--yes",
@@ -273,11 +275,18 @@ class AgentCreator(MutableModel):
                 log_queue.put("[minds] Cloning {}...".format(git_url))
                 clone_git_repo(GitUrl(git_url), mind_dir, on_output=emit_log)
 
-                log_queue.put("[minds] Vendoring mng...")
-                mng_repo_root = find_mng_repo_root()
-                vendor_mng(mind_dir, mng_repo_root, on_output=emit_log)
+                log_queue.put("[minds] Setting up branch and parent tracking...")
+                setup_mind_branch_and_parent(mind_dir, AgentName(agent_name), GitUrl(git_url), on_output=emit_log)
 
-                agent_type = resolve_agent_type(mind_dir)
+                settings = load_creation_settings(mind_dir)
+
+                mng_repo_root = find_mng_repo_root()
+                vendor_configs = settings.vendor if settings.vendor else default_vendor_configs(mng_repo_root)
+
+                log_queue.put("[minds] Vendoring {} repo(s)...".format(len(vendor_configs)))
+                vendor_repos(mind_dir, vendor_configs, on_output=emit_log)
+
+                agent_type = settings.agent_type if settings.agent_type is not None else DEFAULT_AGENT_TYPE
                 parsed_name = AgentName(agent_name)
 
                 with self._lock:
@@ -299,7 +308,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (GitCloneError, MngCommandError, VendorError, ValueError, OSError) as e:
+        except (GitCloneError, MngCommandError, GitOperationError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
