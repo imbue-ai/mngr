@@ -24,6 +24,7 @@ from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.api.pull import pull_git
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
+from imbue.mng.errors import HostError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.host import HostLocation
@@ -71,6 +72,7 @@ _OUTCOME_COLORS: dict[TestOutcome, str] = {
     TestOutcome.TIMED_OUT: "rgb(121, 85, 72)",
     TestOutcome.RUN_SUCCEEDED: "rgb(76, 175, 80)",
     TestOutcome.AGENT_ERROR: "rgb(158, 158, 158)",
+    TestOutcome.REMOTE_AGENT_ERROR: "rgb(189, 147, 249)",
 }
 
 _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
@@ -82,6 +84,7 @@ _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
     TestOutcome.FIX_UNCERTAIN,
     TestOutcome.TIMED_OUT,
     TestOutcome.AGENT_ERROR,
+    TestOutcome.REMOTE_AGENT_ERROR,
     TestOutcome.RUN_SUCCEEDED,
 ]
 
@@ -481,7 +484,7 @@ def _stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except MngError as exc:
+    except (MngError, HostError) as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -499,6 +502,12 @@ def read_agent_result(
         return TestResult(
             outcome=TestOutcome(data["outcome"]),
             summary=data.get("summary", ""),
+        )
+    except HostError as exc:
+        logger.warning("Lost connection to agent {}: {}", agent_detail.name, exc)
+        return TestResult(
+            outcome=TestOutcome.REMOTE_AGENT_ERROR,
+            summary=f"Lost connection to agent host: {exc}",
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
@@ -536,7 +545,7 @@ def pull_agent_branch(
         )
         logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_detail.name)
         return branch_name
-    except MngError as exc:
+    except (MngError, HostError) as exc:
         logger.warning("Failed to pull branch from agent '{}': {}", agent_detail.name, exc)
         return None
 
@@ -545,7 +554,11 @@ def _get_agent_from_host(
     host: OnlineHostInterface,
     agent_id: AgentId,
 ) -> AgentInterface:
-    """Look up an agent on a host by ID."""
+    """Look up an agent on a host by ID.
+
+    Raises AgentNotFoundOnHostError if not found, or HostError if the host
+    is unreachable (callers should catch both).
+    """
     for agent in host.get_agents():
         if agent.id == agent_id:
             return agent
