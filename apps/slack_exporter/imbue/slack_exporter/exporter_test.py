@@ -580,12 +580,12 @@ def test_run_export_backfills_older_messages_when_since_is_earlier(temp_output_d
     assert forward_params["inclusive"] == "false"
     assert "latest" not in forward_params
 
-    # Backfill call: from the new --since date up to the oldest known message
+    # Backfill call: from the new --since date up to the first run's searched-from point
     backfill_params = history_params[1]
     assert backfill_params is not None
     assert backfill_params["oldest"] == _datetime_to_slack_timestamp(datetime(2024, 1, 1, tzinfo=timezone.utc))
     assert backfill_params["inclusive"] == "true"
-    assert backfill_params["latest"] == "1717200000.000001"
+    assert backfill_params["latest"] == _datetime_to_slack_timestamp(datetime(2024, 6, 1, tzinfo=timezone.utc))
 
     # Backfilled message should be saved
     msg_lines = msg_path.read_text().strip().splitlines()
@@ -593,22 +593,21 @@ def test_run_export_backfills_older_messages_when_since_is_earlier(temp_output_d
 
 
 def test_run_export_no_backfill_when_since_is_same_or_later(temp_output_dir: Path) -> None:
-    """When --since is not earlier than the oldest message, no backfill call is made."""
-    since_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    since_ts = _datetime_to_slack_timestamp(since_date)
+    """When --since is the same as a previous run, no backfill call is made, even if the oldest
+    message is later than --since (i.e. there were no messages in the early part of the range)."""
     settings = ExporterSettings(
         channels=(ChannelConfig(name=SlackChannelName("general")),),
-        default_oldest=since_date,
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
         output_dir=temp_output_dir,
         cache_ttl_seconds=0,
     )
-    # Use a message at exactly the --since timestamp so oldest_message_timestamp == requested_oldest_ts
+    # Message is much later than --since -- there's a gap with no messages
     caller1, _ = _tracking_api_caller(
-        message_data=[{"ts": since_ts, "text": "jan msg"}],
+        message_data=[{"ts": "1717200000.000001", "text": "june msg"}],
     )
     run_export(settings, api_caller=caller1)
 
-    # Second run with the same --since: should only do forward fetch
+    # Second run with the same --since: should only do forward fetch (no backfill into the gap)
     caller2, counts2 = _tracking_api_caller()
     run_export(settings, api_caller=caller2)
     assert counts2.get("conversations.history", 0) == 1

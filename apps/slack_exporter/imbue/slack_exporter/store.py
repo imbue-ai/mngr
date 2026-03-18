@@ -230,6 +230,47 @@ def save_reaction_events(output_dir: Path, stream: StreamType, events: Sequence[
     _append_events(_events_path(output_dir, DataType.REACTIONS, stream), events)
 
 
+def _channel_export_metadata_path(output_dir: Path) -> Path:
+    return output_dir / ".channel_export_metadata.json"
+
+
+def load_channel_export_metadata(output_dir: Path) -> dict[SlackChannelId, SlackMessageTimestamp]:
+    """Load the per-channel searched-oldest timestamps.
+
+    Returns a mapping from channel_id to the oldest Slack timestamp we have
+    already searched from for that channel.
+    """
+    path = _channel_export_metadata_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("Malformed channel export metadata at %s, treating as empty", path)
+        return {}
+    return {SlackChannelId(k): SlackMessageTimestamp(v) for k, v in raw.items()}
+
+
+def save_channel_searched_oldest(
+    output_dir: Path,
+    channel_id: SlackChannelId,
+    searched_oldest_ts: SlackMessageTimestamp,
+) -> None:
+    """Persist the oldest timestamp we have searched from for a channel.
+
+    Only updates the value if the new timestamp is older (earlier) than the
+    existing one, so repeated runs with the same --since are no-ops.
+    """
+    metadata = load_channel_export_metadata(output_dir)
+    existing = metadata.get(channel_id)
+    if existing is not None and existing <= searched_oldest_ts:
+        return
+    metadata[channel_id] = searched_oldest_ts
+    path = _channel_export_metadata_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({str(k): str(v) for k, v in metadata.items()}))
+
+
 def _fetch_metadata_path(output_dir: Path) -> Path:
     return output_dir / ".fetch_metadata.json"
 

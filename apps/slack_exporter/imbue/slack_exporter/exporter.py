@@ -30,6 +30,7 @@ from imbue.slack_exporter.primitives import SlackMessageTimestamp
 from imbue.slack_exporter.store import DataType
 from imbue.slack_exporter.store import StreamType
 from imbue.slack_exporter.store import derive_reaction_item_key
+from imbue.slack_exporter.store import load_channel_export_metadata
 from imbue.slack_exporter.store import load_existing_channels
 from imbue.slack_exporter.store import load_existing_message_state
 from imbue.slack_exporter.store import load_existing_reactions
@@ -39,6 +40,7 @@ from imbue.slack_exporter.store import load_existing_unread_markers
 from imbue.slack_exporter.store import load_existing_users
 from imbue.slack_exporter.store import load_fetch_metadata
 from imbue.slack_exporter.store import save_channel_events
+from imbue.slack_exporter.store import save_channel_searched_oldest
 from imbue.slack_exporter.store import save_fetch_timestamp
 from imbue.slack_exporter.store import save_message_events
 from imbue.slack_exporter.store import save_reaction_events
@@ -195,6 +197,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
 
     # Export messages and replies per channel
     latest_reply_by_thread = _build_latest_reply_by_thread(known_reply_keys)
+    channel_export_metadata = load_channel_export_metadata(settings.output_dir)
     for channel_config in settings.channels:
         channel_id = resolve_channel_id(channel_config.name, fresh_channels, channel_id_by_name)
         _export_single_channel(
@@ -204,6 +207,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
             known_message_keys=known_message_keys,
             known_reply_keys=known_reply_keys,
             latest_reply_by_thread=latest_reply_by_thread,
+            channel_export_metadata=channel_export_metadata,
             settings=settings,
             api_caller=api_caller,
         )
@@ -233,6 +237,7 @@ def _export_single_channel(
     known_message_keys: set[tuple[SlackChannelId, SlackMessageTimestamp]],
     known_reply_keys: set[tuple[SlackChannelId, SlackMessageTimestamp, SlackMessageTimestamp]],
     latest_reply_by_thread: dict[tuple[SlackChannelId, SlackMessageTimestamp], SlackMessageTimestamp],
+    channel_export_metadata: dict[SlackChannelId, SlackMessageTimestamp],
     settings: ExporterSettings,
     api_caller: SlackApiCaller,
 ) -> None:
@@ -261,16 +266,13 @@ def _export_single_channel(
         api_caller=api_caller,
     )
 
-    # Backfill: fetch older messages if --since goes further back than previous exports
-    if (
-        existing_state
-        and existing_state.oldest_message_timestamp
-        and requested_oldest_ts < existing_state.oldest_message_timestamp
-    ):
+    # Backfill: fetch older messages if --since goes further back than what we've already searched
+    searched_oldest = channel_export_metadata.get(channel_id)
+    if searched_oldest is not None and requested_oldest_ts < searched_oldest:
         logger.info(
             "  Backfilling from %s to %s for channel %s",
             requested_oldest_ts,
-            existing_state.oldest_message_timestamp,
+            searched_oldest,
             channel_config.name,
         )
         backfill_messages = _fetch_all_messages_for_channel(
@@ -279,9 +281,11 @@ def _export_single_channel(
             oldest_ts=requested_oldest_ts,
             is_inclusive=True,
             api_caller=api_caller,
-            latest_ts=existing_state.oldest_message_timestamp,
+            latest_ts=searched_oldest,
         )
         all_fetched = all_fetched + backfill_messages
+
+    save_channel_searched_oldest(settings.output_dir, channel_id, requested_oldest_ts)
 
     new_messages = [m for m in all_fetched if (m.channel_id, m.message_ts) not in known_message_keys]
     if new_messages:

@@ -10,6 +10,7 @@ from imbue.slack_exporter.primitives import SlackMessageTimestamp
 from imbue.slack_exporter.primitives import SlackUserId
 from imbue.slack_exporter.store import StreamType
 from imbue.slack_exporter.store import derive_reaction_item_key
+from imbue.slack_exporter.store import load_channel_export_metadata
 from imbue.slack_exporter.store import load_existing_channels
 from imbue.slack_exporter.store import load_existing_message_state
 from imbue.slack_exporter.store import load_existing_reactions
@@ -18,6 +19,7 @@ from imbue.slack_exporter.store import load_existing_unread_markers
 from imbue.slack_exporter.store import load_existing_users
 from imbue.slack_exporter.store import load_fetch_metadata
 from imbue.slack_exporter.store import save_channel_events
+from imbue.slack_exporter.store import save_channel_searched_oldest
 from imbue.slack_exporter.store import save_fetch_timestamp
 from imbue.slack_exporter.store import save_message_events
 from imbue.slack_exporter.store import save_reaction_events
@@ -240,6 +242,30 @@ def test_save_reaction_events_creates_directory_structure(temp_output_dir: Path)
     assert expected_path.exists()
     parsed = json.loads(expected_path.read_text().strip())
     assert parsed["source"] == "reactions"
+
+
+def test_load_channel_export_metadata_returns_empty_when_missing(temp_output_dir: Path) -> None:
+    result = load_channel_export_metadata(temp_output_dir)
+    assert result == {}
+
+
+def test_save_and_load_channel_searched_oldest(temp_output_dir: Path) -> None:
+    save_channel_searched_oldest(temp_output_dir, SlackChannelId("C123"), SlackMessageTimestamp("1700000000.000000"))
+    result = load_channel_export_metadata(temp_output_dir)
+    assert result[SlackChannelId("C123")] == SlackMessageTimestamp("1700000000.000000")
+
+
+def test_save_channel_searched_oldest_only_moves_earlier(temp_output_dir: Path) -> None:
+    save_channel_searched_oldest(temp_output_dir, SlackChannelId("C123"), SlackMessageTimestamp("1700000000.000000"))
+    # Attempting to save a later timestamp should be a no-op
+    save_channel_searched_oldest(temp_output_dir, SlackChannelId("C123"), SlackMessageTimestamp("1800000000.000000"))
+    result = load_channel_export_metadata(temp_output_dir)
+    assert result[SlackChannelId("C123")] == SlackMessageTimestamp("1700000000.000000")
+
+    # Saving an earlier timestamp should update
+    save_channel_searched_oldest(temp_output_dir, SlackChannelId("C123"), SlackMessageTimestamp("1600000000.000000"))
+    result = load_channel_export_metadata(temp_output_dir)
+    assert result[SlackChannelId("C123")] == SlackMessageTimestamp("1600000000.000000")
 
 
 def test_load_fetch_metadata_returns_empty_when_missing(temp_output_dir: Path) -> None:
