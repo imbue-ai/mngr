@@ -73,13 +73,20 @@ def derive_project_name_from_path(path: Path, cg: ConcurrencyGroup) -> str:
     """Derive a project name from a path.
 
     Attempts to extract the project name from the git remote origin URL if available.
-    Falls back to the folder name if there is no git repository or the URL structure
-    is not recognized.
+    For worktrees without an origin remote, tries the source repository's origin.
+    Falls back to the source repository's directory name (for worktrees) or the
+    given path's directory name.
     """
-    # Try to get the git remote origin URL
+    # Try to get the project name from the git remote origin URL
     git_project_name = _get_project_name_from_git_remote(path, cg)
     if git_project_name is not None:
         return git_project_name
+
+    # For worktrees, use the source repo's directory name instead of the worktree's
+    # (which is often a generated name like "branch-name-<hash>")
+    source_repo = find_source_repo_of_worktree(path)
+    if source_repo is not None:
+        return source_repo.resolve().name
 
     # Fallback to the folder name
     return path.resolve().name

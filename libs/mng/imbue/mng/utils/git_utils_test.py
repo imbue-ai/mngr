@@ -129,6 +129,45 @@ def test_derive_from_git_remote_ssh(tmp_path: Path, cg: ConcurrencyGroup) -> Non
     assert derive_project_name_from_path(project_dir, cg) == "remote-project"
 
 
+def test_derive_from_source_repo_name_for_worktree_without_origin(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """Test that worktrees without an origin remote use the source repo's directory name."""
+    worktree_path = tmp_path / "ugly-worktree-name-abc123"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "test-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # temp_git_repo has no origin remote, so should fall back to source repo dir name
+    assert derive_project_name_from_path(worktree_path, cg) == temp_git_repo.name
+
+
+def test_derive_from_origin_for_worktree_with_origin(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """Test that worktrees with an origin remote use the remote project name."""
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/remote-project.git"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    worktree_path = tmp_path / "ugly-worktree-name-abc123"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "test-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Should use origin's project name, not the worktree or source repo dir name
+    assert derive_project_name_from_path(worktree_path, cg) == "remote-project"
+
+
 def test_is_git_repository_returns_false_for_nonexistent_path(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that is_git_repository returns False for a non-existent path."""
     nonexistent = tmp_path / "does_not_exist"
