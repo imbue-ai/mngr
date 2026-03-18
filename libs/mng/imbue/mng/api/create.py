@@ -8,12 +8,16 @@ from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.discovery_events import emit_discovery_events_for_host
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import MngError
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import HostEnvironmentOptions
 from imbue.mng.interfaces.host import NewHostOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
+from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mng.primitives import HostName
+from imbue.mng.primitives import HostNameStyle
 from imbue.mng.utils.env_utils import parse_env_file
 
 
@@ -186,6 +190,47 @@ def _write_host_env_vars(
             host.set_env_vars(env_vars)
 
 
+_MAX_AUTO_NAME_ATTEMPTS: int = 20
+
+
+def _generate_unique_host_name(
+    provider: ProviderInstanceInterface,
+    style: HostNameStyle,
+    mng_ctx: MngContext,
+) -> HostName:
+    """Generate a host name that does not collide with any existing host on the provider.
+
+    Discovers existing hosts, then generates names until a unique one is found.
+    If the provider returns a fixed name (e.g. "localhost" for the local provider),
+    accepts it even if it matches an existing host, since such providers are designed
+    to reuse the same host.
+
+    Raises MngError if no unique name can be generated after _MAX_AUTO_NAME_ATTEMPTS attempts.
+    """
+    with log_span("Discovering existing hosts for unique name generation"):
+        existing_hosts = provider.discover_hosts(cg=mng_ctx.concurrency_group)
+    existing_names = {h.host_name for h in existing_hosts}
+
+    first_candidate = provider.get_host_name(style)
+    if first_candidate not in existing_names:
+        return first_candidate
+
+    for _ in range(_MAX_AUTO_NAME_ATTEMPTS - 1):
+        candidate = provider.get_host_name(style)
+        if candidate not in existing_names:
+            return candidate
+        if candidate == first_candidate:
+            # The provider returns a fixed name (e.g. "localhost") rather than
+            # a random one. Accept it as-is -- such providers are designed to
+            # reuse the same host.
+            return candidate
+
+    raise MngError(
+        f"Failed to generate a unique host name after {_MAX_AUTO_NAME_ATTEMPTS} attempts. "
+        f"There are {len(existing_names)} existing hosts on provider '{provider.name}'."
+    )
+
+
 def resolve_target_host(
     target_host: OnlineHostInterface | NewHostOptions,
     mng_ctx: MngContext,
@@ -195,7 +240,9 @@ def resolve_target_host(
         # Create a new host using the specified provider
         provider = get_provider_instance(target_host.provider, mng_ctx)
         host_name = (
-            target_host.name if target_host.name is not None else provider.get_host_name(target_host.name_style)
+            target_host.name
+            if target_host.name is not None
+            else _generate_unique_host_name(provider, target_host.name_style, mng_ctx)
         )
 
         with log_span("Calling on_before_host_create hooks"):
