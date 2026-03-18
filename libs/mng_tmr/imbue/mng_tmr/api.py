@@ -453,7 +453,7 @@ def poll_until_all_done(
                 is_streaming=False,
                 error_behavior=ErrorBehavior.CONTINUE,
             )
-        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+        except (MngError, HostError, ConcurrencyGroupError, OSError, Exception) as exc:
             logger.warning("Polling failed (will retry next cycle): {}", exc)
             time.sleep(poll_interval_seconds)
             continue
@@ -908,7 +908,7 @@ def wait_for_integrator(
                 is_streaming=False,
                 error_behavior=ErrorBehavior.CONTINUE,
             )
-        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+        except (MngError, HostError, ConcurrencyGroupError, OSError, Exception) as exc:
             logger.warning("Integrator polling failed (will retry next cycle): {}", exc)
             time.sleep(poll_interval_seconds)
             continue

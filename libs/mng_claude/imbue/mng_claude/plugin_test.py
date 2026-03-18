@@ -610,6 +610,19 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "permissions_waiting" in hook["command"]
 
 
+def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> None:
+    """Every command in readiness hooks should exit early when MAIN_CLAUDE_SESSION_ID is unset."""
+    config = build_readiness_hooks_config()
+    guard = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+
+    for event_name, event_hooks in config["hooks"].items():
+        for hook_group in event_hooks:
+            for hook in hook_group["hooks"]:
+                assert hook["command"].startswith(guard), (
+                    f"{event_name} hook command does not start with session guard: {hook['command'][:80]}"
+                )
+
+
 def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
 ) -> None:
