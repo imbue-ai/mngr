@@ -35,6 +35,12 @@ def test_create_bare(e2e: Session, agent_name: str) -> None:
     assert len(parsed["agents"]) == 1
     assert parsed["agents"][0]["name"] == agent_name
 
+    # Verify the agent runs in a worktree (different directory from the main repo)
+    exec_result = e2e.run(f"mng exec {agent_name} pwd")
+    expect(exec_result).to_succeed()
+    cwd_result = e2e.run("pwd")
+    assert exec_result.stdout.strip() != cwd_result.stdout.strip()
+
 
 @pytest.mark.release
 @pytest.mark.tmux
@@ -85,10 +91,12 @@ def test_create_different_agent_type(e2e: Session, agent_name: str) -> None:
         e2e.run(f"mng create {agent_name} codex --no-connect --command 'sleep 99999' --no-ensure-clean")
     ).to_succeed()
 
+    # Verify the agent was created with the codex agent type
     list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert len(parsed["agents"]) == 1
+    assert parsed["agents"][0]["agent_type"] == "codex"
 
 
 @pytest.mark.release
@@ -182,17 +190,22 @@ def test_create_source_path(e2e: Session) -> None:
     # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
     mng create my-task --source-path /path/to/some/other/project
     """
-    e2e.run("mkdir -p /tmp/mng-e2e-source-test && git init /tmp/mng-e2e-source-test")
     name = f"e2e-source-{get_short_random_string()}"
+    source_dir = f"/tmp/mng-e2e-source-{name}"
+    e2e.run(f"mkdir -p {source_dir} && git init {source_dir}")
     result = e2e.run(
-        f"mng create {name} --source-path /tmp/mng-e2e-source-test"
-        " --no-connect --command 'sleep 99999' --no-ensure-clean",
+        f"mng create {name} --source-path {source_dir} --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = e2e.run("mng list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(name)
+    # Verify the agent's working directory is derived from the source path
+    exec_result = e2e.run(f"mng exec {name} pwd")
+    expect(exec_result).to_succeed()
+    cwd_result = e2e.run("pwd")
+    # The agent should NOT be in the original repo directory
+    assert exec_result.stdout.strip() != cwd_result.stdout.strip()
+
+    e2e.run(f"rm -rf {source_dir}")
 
 
 @pytest.mark.release
@@ -224,18 +237,20 @@ def test_create_no_git(e2e: Session) -> None:
     echo "print('hello world')" > /tmp/my_random_folder/script.py
     mng create my-task --source-path /tmp/my_random_folder --command python -- script.py
     """
-    e2e.run("mkdir -p /tmp/mng-e2e-nogit")
-    e2e.run("echo 'import time; time.sleep(99999)' > /tmp/mng-e2e-nogit/script.py")
     name = f"e2e-nogit-{get_short_random_string()}"
+    nogit_dir = f"/tmp/mng-e2e-nogit-{name}"
+    e2e.run(f"mkdir -p {nogit_dir}")
+    e2e.run(f"echo 'import time; time.sleep(99999)' > {nogit_dir}/script.py")
     result = e2e.run(
-        f"mng create {name} --source-path /tmp/mng-e2e-nogit --command python -- script.py"
-        " --no-connect --no-ensure-clean",
+        f"mng create {name} --source-path {nogit_dir} --command python -- script.py --no-connect --no-ensure-clean",
     )
     expect(result).to_succeed()
 
     list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
+
+    e2e.run(f"rm -rf {nogit_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -345,13 +360,23 @@ def test_create_copy_with_branch(e2e: Session, agent_name: str) -> None:
     # you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
     mng create my-task --copy --branch main
     """
+    # Record branches before creating
+    before_branches = e2e.run("git branch")
+    expect(before_branches).to_succeed()
+
     expect(
         e2e.run(f"mng create {agent_name} --copy --branch main --no-connect --command 'sleep 99999' --no-ensure-clean")
     ).to_succeed()
 
-    list_result = e2e.run("mng list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    # Verify no new branch was created (--copy --branch main means use existing main, no new branch)
+    after_branches = e2e.run("git branch")
+    expect(after_branches).to_succeed()
+    assert before_branches.stdout.strip() == after_branches.stdout.strip()
+
+    # Verify the agent is on the main branch
+    head_result = e2e.run(f"mng exec {agent_name} git branch --show-current")
+    expect(head_result).to_succeed()
+    expect(head_result.stdout.strip()).to_equal("main")
 
 
 @pytest.mark.release
@@ -383,9 +408,10 @@ def test_create_shallow_clone(e2e: Session, agent_name: str) -> None:
         e2e.run(f"mng create {agent_name} --depth 1 --no-connect --command 'sleep 99999' --no-ensure-clean")
     ).to_succeed()
 
-    list_result = e2e.run("mng list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    # Verify the clone is shallow (only 1 commit)
+    depth_result = e2e.run(f"mng exec {agent_name} git rev-list --count HEAD")
+    expect(depth_result).to_succeed()
+    assert depth_result.stdout.strip() == "1"
 
 
 @pytest.mark.release
@@ -410,6 +436,13 @@ def test_create_from_agent(e2e: Session) -> None:
     names = [a["name"] for a in parsed["agents"]]
     assert src in names
     assert tgt in names
+
+    # Verify the target has the same git HEAD as the source
+    src_head = e2e.run(f"mng exec {src} git rev-parse HEAD")
+    expect(src_head).to_succeed()
+    tgt_head = e2e.run(f"mng exec {tgt} git rev-parse HEAD")
+    expect(tgt_head).to_succeed()
+    expect(tgt_head.stdout.strip()).to_equal(src_head.stdout.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -483,9 +516,11 @@ def test_create_template(e2e: Session) -> None:
     )
     expect(result).to_succeed()
 
-    list_result = e2e.run("mng list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(name)
+    # Verify the template's in_place=true was applied (agent pwd matches main repo)
+    exec_result = e2e.run(f"mng exec {name} pwd")
+    expect(exec_result).to_succeed()
+    cwd_result = e2e.run("pwd")
+    expect(exec_result.stdout.strip()).to_equal(cwd_result.stdout.strip())
 
 
 @pytest.mark.release
@@ -499,8 +534,13 @@ def test_create_plugins(e2e: Session) -> None:
     result = e2e.run(
         f"mng create {name} --plugin nonexistent-plugin --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
-    # Plugins may not exist; verify the flags are at least parsed
-    if result.exit_code != 0:
+    if result.exit_code == 0:
+        # Plugin was silently accepted; verify the agent was created
+        list_result = e2e.run("mng list")
+        expect(list_result).to_succeed()
+        expect(list_result.stdout).to_contain(name)
+    else:
+        # Plugin not found; verify the error is plugin-related
         expect(result.stderr + result.stdout).to_contain("plugin")
 
 
@@ -565,9 +605,13 @@ def test_create_connect_command(e2e: Session, agent_name: str) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mng list")
+    # Verify the connect command is stored
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    parsed = json.loads(list_result.stdout)
+    matching = [a for a in parsed["agents"] if a["name"] == agent_name]
+    assert len(matching) == 1
+    assert matching[0].get("connect_command") == "echo connected"
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +825,9 @@ def test_create_with_disabled_provider(e2e: Session, create_args: str) -> None:
     name = f"e2e-provider-{get_short_random_string()}"
     result = e2e.run(f"mng create {name} --no-connect --no-ensure-clean {create_args}")
     expect(result).to_fail()
+    # Verify the failure is provider-related, not a flag-parsing error
+    output = result.stderr + result.stdout
+    expect(output).to_match(r"(?i)(provider|modal|docker|disabled|not.*(enabled|available))")
 
 
 # ---------------------------------------------------------------------------
