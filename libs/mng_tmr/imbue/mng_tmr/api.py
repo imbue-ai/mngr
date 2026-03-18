@@ -202,23 +202,17 @@ def _copy_mode_for_provider(provider_name: ProviderInstanceName) -> WorkDirCopyM
     return WorkDirCopyMode.WORKTREE if is_local else WorkDirCopyMode.CLONE
 
 
-def _create_tmr_agent(
+def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
     config: TmrLaunchConfig,
-    mng_ctx: MngContext,
-    initial_message: str | None = None,
-) -> CreateAgentResult:
-    """Create an agent on the configured provider.
-
-    Shared helper for test agents, the integrator agent, and the snapshotter.
-    """
+) -> CreateAgentOptions:
+    """Build CreateAgentOptions for a tmr agent."""
     copy_mode = _copy_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-    agent_options = CreateAgentOptions(
+    return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
-        initial_message=initial_message,
         git=AgentGitOptions(
             copy_mode=copy_mode,
             new_branch_name=branch_name,
@@ -229,17 +223,41 @@ def _create_tmr_agent(
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
+
+def _create_tmr_agent(
+    agent_name: AgentName,
+    branch_name: str,
+    config: TmrLaunchConfig,
+    mng_ctx: MngContext,
+    message: str | None = None,
+) -> CreateAgentResult:
+    """Create an agent on the configured provider and optionally send a message.
+
+    If message is provided, it is sent after agent creation. SendMessageError
+    is caught and logged (the signal detection can fail on remote hosts even
+    when the message is actually delivered).
+    """
+    agent_options = _build_agent_options(agent_name, branch_name, config)
+
     source_location = HostLocation(host=config.source_host, path=config.source_dir)
     snapshot = config.snapshot
     build = NewHostBuildOptions(snapshot=snapshot) if snapshot is not None else NewHostBuildOptions()
     target_host = NewHostOptions(provider=config.provider_name, name=HostName(str(agent_name)), build=build)
 
-    return api_create(
+    result = api_create(
         source_location=source_location,
         target_host=target_host,
         agent_options=agent_options,
         mng_ctx=mng_ctx,
     )
+
+    if message is not None:
+        try:
+            result.agent.send_message(message)
+        except SendMessageError as exc:
+            logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
+
+    return result
 
 
 def launch_test_agent(
@@ -249,17 +267,10 @@ def launch_test_agent(
     pytest_flags: tuple[str, ...],
     prompt_suffix: str = "",
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test.
-
-    The agent is created without an initial message, then the prompt is
-    sent separately. If the send signal detection times out (common on
-    remote hosts), the error is logged but not raised -- the polling loop
-    will eventually notice if the agent never starts working.
-    """
+    """Launch a single agent to run and optionally fix one test."""
     agent_name_suffix = _sanitize_test_name_for_agent(test_node_id)
     short_id = _short_random_id()
     agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
-    prompt = _build_agent_prompt(test_node_id, pytest_flags, prompt_suffix)
 
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
     create_result = _create_tmr_agent(
@@ -267,12 +278,8 @@ def launch_test_agent(
         branch_name=f"mng-tmr/{agent_name_suffix}-{short_id}",
         config=config,
         mng_ctx=mng_ctx,
+        message=_build_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
     )
-
-    try:
-        create_result.agent.send_message(prompt)
-    except SendMessageError as exc:
-        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(
@@ -799,12 +806,8 @@ If merging fails, use outcome FIX_IMPL_FAILED.
         branch_name=f"mng-tmr/integrated-{short_id}",
         config=config,
         mng_ctx=mng_ctx,
+        message=prompt,
     )
-
-    try:
-        create_result.agent.send_message(prompt)
-    except SendMessageError as exc:
-        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(

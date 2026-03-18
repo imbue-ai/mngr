@@ -5,12 +5,18 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mng.config.data_types import EnvVar
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import AgentLabelOptions
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng_tmr.api import CollectTestsError
 from imbue.mng_tmr.api import PLUGIN_NAME
+from imbue.mng_tmr.api import _build_agent_options
 from imbue.mng_tmr.api import _build_agent_prompt
 from imbue.mng_tmr.api import _build_grouped_tables
 from imbue.mng_tmr.api import _build_stacked_bar
@@ -24,6 +30,7 @@ from imbue.mng_tmr.api import generate_html_report
 from imbue.mng_tmr.data_types import TestAgentInfo
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TestOutcome
+from imbue.mng_tmr.data_types import TmrLaunchConfig
 
 
 def test_short_random_id_length() -> None:
@@ -78,6 +85,68 @@ def test_copy_mode_local_provider_uses_worktree() -> None:
 def test_copy_mode_remote_provider_uses_clone() -> None:
     assert _copy_mode_for_provider(ProviderInstanceName("docker")) == WorkDirCopyMode.CLONE
     assert _copy_mode_for_provider(ProviderInstanceName("modal")) == WorkDirCopyMode.CLONE
+
+
+def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:
+    """Build a TmrLaunchConfig for unit testing.
+
+    Uses model_construct to skip validation of the source_host field,
+    which requires a real OnlineHostInterface that these unit tests don't need.
+    """
+    return TmrLaunchConfig.model_construct(
+        source_dir=Path("/tmp/src"),
+        source_host=None,
+        agent_type=AgentTypeName("claude"),
+        provider_name=ProviderInstanceName(provider),
+        env_options=AgentEnvironmentOptions(),
+        label_options=AgentLabelOptions(),
+        snapshot=snapshot,
+    )
+
+
+def test_build_agent_options_rsync_disabled() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config())
+    assert opts.data_options.is_rsync_enabled is False
+
+
+def test_build_agent_options_local_uses_worktree() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
+    assert opts.git is not None
+    assert opts.git.copy_mode == WorkDirCopyMode.WORKTREE
+
+
+def test_build_agent_options_remote_uses_clone() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"))
+    assert opts.git is not None
+    assert opts.git.copy_mode == WorkDirCopyMode.CLONE
+
+
+def test_build_agent_options_local_ready_timeout() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
+    assert opts.ready_timeout_seconds == 10.0
+
+
+def test_build_agent_options_remote_ready_timeout() -> None:
+    opts = _build_agent_options(AgentName("test"), "branch", _make_config("docker"))
+    assert opts.ready_timeout_seconds == 60.0
+
+
+def test_build_agent_options_passes_env_and_labels() -> None:
+    config = _make_config()
+    env = AgentEnvironmentOptions(env_vars=(EnvVar(key="FOO", value="bar"),))
+    labels = AgentLabelOptions(labels={"batch": "1"})
+    updated = config.model_construct(
+        **{**config.__dict__, "env_options": env, "label_options": labels},
+    )
+    opts = _build_agent_options(AgentName("test"), "branch", updated)
+    assert opts.environment.env_vars == (EnvVar(key="FOO", value="bar"),)
+    assert opts.label_options.labels == {"batch": "1"}
+
+
+def test_build_agent_options_sets_host_name_to_agent_name() -> None:
+    """Verify _build_agent_options sets agent name (used as host name by callers)."""
+    opts = _build_agent_options(AgentName("tmr-my-test-abc123"), "mng-tmr/my-test", _make_config())
+    assert opts.name == AgentName("tmr-my-test-abc123")
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
