@@ -372,28 +372,47 @@ def _make_cached_settings(temp_output_dir: Path, cache_ttl_seconds: int = 3600) 
     )
 
 
-def test_run_export_caches_channels_and_users_within_ttl(temp_output_dir: Path) -> None:
-    settings = _make_cached_settings(temp_output_dir)
+def _tracking_api_caller(
+    channel_data: list[dict[str, Any]] | None = None,
+    user_data: list[dict[str, Any]] | None = None,
+    message_data: list[dict[str, Any]] | None = None,
+    reply_data: list[dict[str, Any]] | None = None,
+    reaction_data: list[dict[str, Any]] | None = None,
+) -> tuple[Any, dict[str, int]]:
+    """Build a fake API caller that also tracks call counts per method.
 
-    # First run: fetches everything
+    Unlike _standard_api_caller (which uses indexed responses), this returns the
+    same response every time a method is called, making it safe for multi-run tests.
+    """
     call_counts: dict[str, int] = {}
 
-    def counting_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
+    def caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
         call_counts[method] = call_counts.get(method, 0) + 1
         if method == "auth.test":
             return _DEFAULT_AUTH_RESPONSE
         elif method == "conversations.list":
-            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
+            return make_slack_response("channels", channel_data or [{"id": "C123", "name": "general"}])
         elif method == "users.list":
-            return make_slack_response("members", [{"id": "U001", "name": "alice"}])
+            return make_slack_response("members", user_data or [])
         elif method == "conversations.history":
-            return make_slack_response("messages", [])
+            return make_slack_response("messages", message_data or [])
+        elif method == "conversations.replies":
+            return make_slack_response("messages", reply_data or [])
         elif method == "reactions.list":
-            return make_slack_response("items", [])
+            return make_slack_response("items", reaction_data or [])
         else:
             return {"ok": True}
 
-    run_export(settings, api_caller=counting_caller)
+    return caller, call_counts
+
+
+def test_run_export_caches_channels_and_users_within_ttl(temp_output_dir: Path) -> None:
+    settings = _make_cached_settings(temp_output_dir)
+    caller, call_counts = _tracking_api_caller(
+        user_data=[{"id": "U001", "name": "alice"}],
+    )
+
+    run_export(settings, api_caller=caller)
     assert call_counts["conversations.list"] == 1
     assert call_counts["users.list"] == 1
     assert call_counts["auth.test"] == 1
@@ -401,7 +420,7 @@ def test_run_export_caches_channels_and_users_within_ttl(temp_output_dir: Path) 
 
     # Second run: should use cached data for channels, users, self identity, reactions
     call_counts.clear()
-    run_export(settings, api_caller=counting_caller)
+    run_export(settings, api_caller=caller)
     assert "conversations.list" not in call_counts
     assert "users.list" not in call_counts
     assert "auth.test" not in call_counts
@@ -412,26 +431,10 @@ def test_run_export_caches_channels_and_users_within_ttl(temp_output_dir: Path) 
 
 def test_run_export_refresh_forces_refetch(temp_output_dir: Path) -> None:
     settings = _make_cached_settings(temp_output_dir)
-
-    call_counts: dict[str, int] = {}
-
-    def counting_caller(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
-        call_counts[method] = call_counts.get(method, 0) + 1
-        if method == "auth.test":
-            return _DEFAULT_AUTH_RESPONSE
-        elif method == "conversations.list":
-            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
-        elif method == "users.list":
-            return make_slack_response("members", [])
-        elif method == "conversations.history":
-            return make_slack_response("messages", [])
-        elif method == "reactions.list":
-            return make_slack_response("items", [])
-        else:
-            return {"ok": True}
+    caller, call_counts = _tracking_api_caller()
 
     # First run populates cache
-    run_export(settings, api_caller=counting_caller)
+    run_export(settings, api_caller=caller)
 
     # Second run with refresh=True should re-fetch everything
     call_counts.clear()
@@ -442,7 +445,7 @@ def test_run_export_refresh_forces_refetch(temp_output_dir: Path) -> None:
         cache_ttl_seconds=settings.cache_ttl_seconds,
         refresh=True,
     )
-    run_export(refresh_settings, api_caller=counting_caller)
+    run_export(refresh_settings, api_caller=caller)
     assert call_counts["conversations.list"] == 1
     assert call_counts["users.list"] == 1
     assert call_counts["auth.test"] == 1
@@ -451,126 +454,69 @@ def test_run_export_refresh_forces_refetch(temp_output_dir: Path) -> None:
 
 def test_run_export_skips_replies_when_latest_reply_unchanged(default_settings: ExporterSettings) -> None:
     """When a thread's latest_reply matches what we already have, skip fetching replies."""
-    threaded_message = {
-        "ts": "1700000000.000001",
-        "text": "parent",
-        "reply_count": 1,
-        "latest_reply": "1700000000.000002",
-    }
+    caller, call_counts = _tracking_api_caller(
+        message_data=[
+            {
+                "ts": "1700000000.000001",
+                "text": "parent",
+                "reply_count": 1,
+                "latest_reply": "1700000000.000002",
+            }
+        ],
+        reply_data=[
+            {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
+            {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply"},
+        ],
+    )
 
-    reply_call_count = 0
-
-    def tracking_caller_run1(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
-        nonlocal reply_call_count
-        if method == "auth.test":
-            return _DEFAULT_AUTH_RESPONSE
-        elif method == "conversations.list":
-            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
-        elif method == "users.list":
-            return make_slack_response("members", [])
-        elif method == "conversations.history":
-            return make_slack_response("messages", [threaded_message])
-        elif method == "conversations.replies":
-            reply_call_count += 1
-            return make_slack_response(
-                "messages",
-                [
-                    {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
-                    {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply"},
-                ],
-            )
-        elif method == "reactions.list":
-            return make_slack_response("items", [])
-        else:
-            return {"ok": True}
-
-    # First run: fetches replies
-    run_export(default_settings, api_caller=tracking_caller_run1)
-    assert reply_call_count == 1
+    run_export(default_settings, api_caller=caller)
+    assert call_counts.get("conversations.replies", 0) == 1
 
     # Second run with same latest_reply: should skip the thread
-    reply_call_count = 0
-    run_export(default_settings, api_caller=tracking_caller_run1)
-    assert reply_call_count == 0
+    call_counts.clear()
+    run_export(default_settings, api_caller=caller)
+    assert call_counts.get("conversations.replies", 0) == 0
 
 
 def test_run_export_fetches_replies_when_latest_reply_changed(default_settings: ExporterSettings) -> None:
     """When a thread's latest_reply is newer than what we have, fetch replies."""
-    threaded_msg_run1 = {
-        "ts": "1700000000.000001",
-        "text": "parent",
-        "reply_count": 1,
-        "latest_reply": "1700000000.000002",
-    }
-    threaded_msg_run2 = {
-        "ts": "1700000000.000001",
-        "text": "parent",
-        "reply_count": 2,
-        "latest_reply": "1700000000.000003",
-    }
+    # Run 1: thread with one reply
+    caller1, counts1 = _tracking_api_caller(
+        message_data=[
+            {
+                "ts": "1700000000.000001",
+                "text": "parent",
+                "reply_count": 1,
+                "latest_reply": "1700000000.000002",
+            }
+        ],
+        reply_data=[
+            {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
+            {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
+        ],
+    )
+    run_export(default_settings, api_caller=caller1)
+    assert counts1.get("conversations.replies", 0) == 1
 
-    reply_call_count = 0
+    # Run 2: thread has a new reply (latest_reply changed)
+    caller2, counts2 = _tracking_api_caller(
+        message_data=[
+            {
+                "ts": "1700000000.000001",
+                "text": "parent",
+                "reply_count": 2,
+                "latest_reply": "1700000000.000003",
+            }
+        ],
+        reply_data=[
+            {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
+            {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
+            {"ts": "1700000000.000003", "thread_ts": "1700000000.000001", "text": "reply 2"},
+        ],
+    )
+    run_export(default_settings, api_caller=caller2)
+    assert counts2.get("conversations.replies", 0) == 1
 
-    def caller_run1(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
-        nonlocal reply_call_count
-        if method == "auth.test":
-            return _DEFAULT_AUTH_RESPONSE
-        elif method == "conversations.list":
-            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
-        elif method == "users.list":
-            return make_slack_response("members", [])
-        elif method == "conversations.history":
-            return make_slack_response("messages", [threaded_msg_run1])
-        elif method == "conversations.replies":
-            reply_call_count += 1
-            return make_slack_response(
-                "messages",
-                [
-                    {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
-                    {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
-                ],
-            )
-        elif method == "reactions.list":
-            return make_slack_response("items", [])
-        else:
-            return {"ok": True}
-
-    # First run: fetches replies
-    run_export(default_settings, api_caller=caller_run1)
-    assert reply_call_count == 1
-
-    # Second run with newer latest_reply: should fetch replies again
-    reply_call_count = 0
-
-    def caller_run2(method: str, query_params: dict[str, str] | None = None) -> dict[str, Any]:
-        nonlocal reply_call_count
-        if method == "auth.test":
-            return _DEFAULT_AUTH_RESPONSE
-        elif method == "conversations.list":
-            return make_slack_response("channels", [{"id": "C123", "name": "general"}])
-        elif method == "users.list":
-            return make_slack_response("members", [])
-        elif method == "conversations.history":
-            return make_slack_response("messages", [threaded_msg_run2])
-        elif method == "conversations.replies":
-            reply_call_count += 1
-            return make_slack_response(
-                "messages",
-                [
-                    {"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "text": "parent"},
-                    {"ts": "1700000000.000002", "thread_ts": "1700000000.000001", "text": "reply 1"},
-                    {"ts": "1700000000.000003", "thread_ts": "1700000000.000001", "text": "reply 2"},
-                ],
-            )
-        elif method == "reactions.list":
-            return make_slack_response("items", [])
-        else:
-            return {"ok": True}
-
-    run_export(default_settings, api_caller=caller_run2)
-    assert reply_call_count == 1
-
-    # Verify the new reply was saved
     reply_path = default_settings.output_dir / "replies" / "created" / "events.jsonl"
     reply_lines = reply_path.read_text().strip().splitlines()
     reply_timestamps = sorted(json.loads(line)["reply_ts"] for line in reply_lines)
