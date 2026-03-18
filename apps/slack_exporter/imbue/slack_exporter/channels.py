@@ -102,15 +102,20 @@ def fetch_self_identity(api_caller: SlackApiCaller) -> SelfIdentityEvent:
     )
 
 
-def extract_unread_markers(channel_events: list[ChannelEvent]) -> list[UnreadMarkerEvent]:
-    """Extract unread markers from fetched channel events.
+def fetch_unread_markers(
+    api_caller: SlackApiCaller,
+    channel_events: list[ChannelEvent],
+) -> list[UnreadMarkerEvent]:
+    """Fetch unread markers for each channel via conversations.info.
 
-    Only channels with a non-empty last_read field are included (i.e. channels the
-    authenticated user has joined).
+    The conversations.list API does not reliably include last_read, so we
+    fetch it per channel via conversations.info.
     """
     markers: list[UnreadMarkerEvent] = []
     for event in channel_events:
-        last_read = event.raw.get("last_read")
+        data = api_caller("conversations.info", {"channel": str(event.channel_id)})
+        channel_info = data.get("channel", {})
+        last_read = channel_info.get("last_read")
         if not last_read:
             continue
         markers.append(
@@ -125,7 +130,7 @@ def extract_unread_markers(channel_events: list[ChannelEvent]) -> list[UnreadMar
                 raw={"channel_id": str(event.channel_id), "last_read": last_read},
             )
         )
-    logger.info("Extracted %d unread markers from channel data", len(markers))
+    logger.info("Fetched %d unread markers from Slack", len(markers))
     return markers
 
 

@@ -85,12 +85,15 @@ def _standard_api_caller(
     Provides two conversations.history responses: one for the forward fetch and
     one for the reaction scan (both return the same message_data).
     """
+    channels = channel_data or [{"id": "C123", "name": "general", "is_member": True}]
     msg_response = make_slack_response("messages", message_data or [])
     return make_fake_api_caller(
         {
             "auth.test": [_DEFAULT_AUTH_RESPONSE],
-            "conversations.list": [
-                make_slack_response("channels", channel_data or [{"id": "C123", "name": "general", "is_member": True}])
+            "conversations.list": [make_slack_response("channels", channels)],
+            "conversations.info": [
+                {"ok": True, "channel": {"id": ch["id"], "last_read": ch.get("last_read", "1700000000.000000")}}
+                for ch in channels
             ],
             "users.list": [make_slack_response("members", user_data or [])],
             "conversations.history": [msg_response, msg_response],
@@ -147,6 +150,9 @@ def test_run_export_changed_channels_go_to_updated_stream(default_settings: Expo
                         "channels", [{"id": "C123", "name": "general", "is_member": True, "topic": "new topic"}]
                     ),
                 ],
+                "conversations.info": [
+                    {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000000"}},
+                ],
                 "users.list": [make_slack_response("members", [])],
                 "conversations.history": [
                     make_slack_response("messages", []),
@@ -198,6 +204,9 @@ def test_run_export_fetches_replies_for_threaded_messages(default_settings: Expo
             "conversations.list": [
                 make_slack_response("channels", [{"id": "C123", "name": "general", "is_member": True}])
             ],
+            "conversations.info": [
+                {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000000"}},
+            ],
             "users.list": [make_slack_response("members", [])],
             "conversations.history": [
                 make_slack_response("messages", [threaded_message]),
@@ -235,6 +244,9 @@ def test_run_export_fetches_paginated_replies(default_settings: ExporterSettings
             "auth.test": [_DEFAULT_AUTH_RESPONSE],
             "conversations.list": [
                 make_slack_response("channels", [{"id": "C123", "name": "general", "is_member": True}])
+            ],
+            "conversations.info": [
+                {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000000"}},
             ],
             "users.list": [make_slack_response("members", [])],
             "conversations.history": [
@@ -386,6 +398,8 @@ def _tracking_api_caller(
             )
         elif method == "users.list":
             return make_slack_response("members", user_data or [])
+        elif method == "conversations.info":
+            return {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000000"}}
         elif method == "conversations.history":
             return make_slack_response("messages", message_data or [])
         elif method == "conversations.replies":

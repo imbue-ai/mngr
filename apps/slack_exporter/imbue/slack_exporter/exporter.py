@@ -9,9 +9,9 @@ from typing import TypeVar
 
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
-from imbue.slack_exporter.channels import extract_unread_markers
 from imbue.slack_exporter.channels import fetch_channel_list
 from imbue.slack_exporter.channels import fetch_self_identity
+from imbue.slack_exporter.channels import fetch_unread_markers
 from imbue.slack_exporter.channels import fetch_user_list
 from imbue.slack_exporter.channels import resolve_channel_id
 from imbue.slack_exporter.data_types import ChannelConfig
@@ -258,8 +258,8 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
             entity_name="channels",
         )
 
-        # Unread markers are extracted from channel data (no extra API call)
-        fresh_markers = extract_unread_markers(fresh_channels)
+        # Fetch unread markers per channel via conversations.info
+        fresh_markers = fetch_unread_markers(api_caller, fresh_channels)
         existing_markers = load_existing_unread_markers(settings.output_dir)
         _diff_and_save(
             fresh_items=fresh_markers,
