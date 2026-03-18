@@ -9,8 +9,6 @@ import json
 
 import pytest
 
-from imbue.mng.e2e.conftest import CreateAgentFn
-from imbue.mng.e2e.conftest import MngRunFn
 from imbue.mng.utils.testing import get_short_random_string
 from imbue.skitwright.expect import expect
 from imbue.skitwright.session import Session
@@ -22,16 +20,16 @@ from imbue.skitwright.session import Session
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_bare(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_bare(e2e: Session, agent_name: str) -> None:
     """
     # running mng create is strictly better than running claude! It's less letters to type :-D
     # running this command launches claude (Claude Code) immediately *in a new worktree*
     mng create
     # the defaults are the following: agent=claude, provider=local, project=current dir
     """
-    agent_name = create_agent("e2e-bare")
+    expect(e2e.run(f"mng create {agent_name} --no-connect --command 'sleep 99999' --no-ensure-clean")).to_succeed()
 
-    list_result = mng("list --format json")
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert len(parsed["agents"]) == 1
@@ -40,17 +38,19 @@ def test_create_bare(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_in_place(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_in_place(e2e: Session, agent_name: str) -> None:
     """
     # if you want the default behavior of claude (starting in-place), you can specify that:
     mng create --in-place
     # mng defaults to creating a new worktree for each agent because the whole point of mng is to let you run multiple agents in parallel.
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """
-    agent_name = create_agent("e2e-inplace", extra_args="--in-place")
+    expect(
+        e2e.run(f"mng create {agent_name} --in-place --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
     # Verify the agent is running in the same directory (in-place, not a worktree)
-    exec_result = mng(f"exec {agent_name} pwd")
+    exec_result = e2e.run(f"mng exec {agent_name} pwd")
     expect(exec_result).to_succeed()
     cwd_result = e2e.run("pwd")
     expect(exec_result.stdout.strip()).to_equal(cwd_result.stdout.strip())
@@ -58,7 +58,7 @@ def test_create_in_place(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Sessio
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_short_form(mng: MngRunFn) -> None:
+def test_create_short_form(e2e: Session) -> None:
     """
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
     mng create my-task claude
@@ -66,24 +66,26 @@ def test_create_short_form(mng: MngRunFn) -> None:
     """
     name = f"e2e-short-{get_short_random_string()}"
     # Use the short form 'c' to create an agent
-    result = mng(f"c {name} --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean")
+    result = e2e.run(f"mng c {name} --no-connect --command 'sleep 99999' --no-ensure-clean")
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_different_agent_type(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_different_agent_type(e2e: Session, agent_name: str) -> None:
     """
     # you can also specify a different agent (ex: codex)
     mng create my-task codex
     """
-    agent_name = create_agent("e2e-codex", extra_args="codex")
+    expect(
+        e2e.run(f"mng create {agent_name} codex --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    list_result = mng("list --format json")
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert len(parsed["agents"]) == 1
@@ -91,7 +93,7 @@ def test_create_different_agent_type(mng: MngRunFn, create_agent: CreateAgentFn)
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_agent_args(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_with_agent_args(e2e: Session, agent_name: str) -> None:
     """
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mng)
     # by using `--` to separate the agent arguments from the mng arguments:
@@ -99,35 +101,37 @@ def test_create_with_agent_args(mng: MngRunFn, create_agent: CreateAgentFn) -> N
     # that command launches claude with the "opus" model instead of the default
     """
     # The -- separator passes remaining args to the agent process
-    agent_name = create_agent("e2e-agentargs", extra_args="-- extra-arg")
+    expect(
+        e2e.run(f"mng create {agent_name} --no-connect --command 'sleep 99999' --no-ensure-clean -- extra-arg")
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_custom_command(mng: MngRunFn) -> None:
+def test_create_custom_command(e2e: Session) -> None:
     """
     # you can run *any* literal command instead of a named agent type:
     mng create my-task --command python -- my_script.py
     # remember that the arguments to the "agent" (or command) come after the `--` separator
     """
     name = f"e2e-cmd-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --command 'echo hello && sleep 99999' --no-connect --await-ready --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --command 'echo hello && sleep 99999' --no-connect --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_command_with_idle(mng: MngRunFn) -> None:
+def test_create_command_with_idle(e2e: Session) -> None:
     """
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
@@ -135,13 +139,12 @@ def test_create_command_with_idle(mng: MngRunFn) -> None:
     # see "RUNNING NON-AGENT PROCESSES" below for more details
     """
     name = f"e2e-idle-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --command 'sleep 99999' --idle-mode run --idle-timeout 60"
-        " --no-connect --await-ready --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --command 'sleep 99999' --idle-mode run --idle-timeout 60 --no-connect --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list --format json")
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert len(parsed["agents"]) == 1
@@ -150,15 +153,19 @@ def test_create_command_with_idle(mng: MngRunFn) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_extra_windows(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_extra_windows(e2e: Session, agent_name: str) -> None:
     """
     # alternatively, you can simply add extra tmux windows that run alongside your agent:
     mng create my-task -w server="npm run dev" -w logs="tail -f app.log"
     # that command automatically starts two tmux windows named "server" and "logs" that run those commands (in addition to the main window that runs the agent)
     """
-    agent_name = create_agent("e2e-windows", extra_args="-w extra='sleep 99999'")
+    expect(
+        e2e.run(
+            f"mng create {agent_name} --command 'sleep 99999' -w extra='sleep 99999' --no-connect --no-ensure-clean"
+        )
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
@@ -170,35 +177,36 @@ def test_create_extra_windows(mng: MngRunFn, create_agent: CreateAgentFn) -> Non
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_source_path(mng: MngRunFn, e2e: Session) -> None:
+def test_create_source_path(e2e: Session) -> None:
     """
     # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
     mng create my-task --source-path /path/to/some/other/project
     """
-    # Create a separate directory to use as source
     e2e.run("mkdir -p /tmp/mng-e2e-source-test && git init /tmp/mng-e2e-source-test")
     name = f"e2e-source-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --source-path /tmp/mng-e2e-source-test"
-        " --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --source-path /tmp/mng-e2e-source-test"
+        " --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_project(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_project(e2e: Session, agent_name: str) -> None:
     """
     # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
     mng create my-task --project my-project
     """
-    agent_name = create_agent("e2e-proj", extra_args="--project my-project")
+    expect(
+        e2e.run(f"mng create {agent_name} --project my-project --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    list_result = mng("list --format json")
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
@@ -209,7 +217,7 @@ def test_create_project(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_no_git(mng: MngRunFn, e2e: Session) -> None:
+def test_create_no_git(e2e: Session) -> None:
     """
     # mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
@@ -219,13 +227,13 @@ def test_create_no_git(mng: MngRunFn, e2e: Session) -> None:
     e2e.run("mkdir -p /tmp/mng-e2e-nogit")
     e2e.run("echo 'import time; time.sleep(99999)' > /tmp/mng-e2e-nogit/script.py")
     name = f"e2e-nogit-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --source-path /tmp/mng-e2e-nogit --command python -- script.py"
-        " --no-connect --await-ready --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --source-path /tmp/mng-e2e-nogit --command python -- script.py"
+        " --no-connect --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
@@ -237,16 +245,15 @@ def test_create_no_git(mng: MngRunFn, e2e: Session) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_auto_branch(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_auto_branch(e2e: Session, agent_name: str) -> None:
     """
     # however, if you do use git, mng makes that convenient
     # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
     mng create my-task
     git branch | grep mng/my-task
     """
-    agent_name = create_agent("e2e-branch")
+    expect(e2e.run(f"mng create {agent_name} --no-connect --command 'sleep 99999' --no-ensure-clean")).to_succeed()
 
-    # Verify the mng/{agent_name} branch was created
     branch_result = e2e.run("git branch --all")
     expect(branch_result).to_succeed()
     expect(branch_result.stdout).to_contain(f"mng/{agent_name}")
@@ -254,14 +261,18 @@ def test_create_auto_branch(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Ses
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_custom_branch_pattern(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_custom_branch_pattern(e2e: Session, agent_name: str) -> None:
     """
     # --branch controls branch creation. the default is :mng/* which creates a new branch named mng/{agent_name}
     # you can change the pattern (the * is replaced by the agent name):
     mng create my-task --branch ":feature/*"
     git branch | grep feature/my-task
     """
-    agent_name = create_agent("e2e-feat", extra_args='--branch ":feature/*"')
+    expect(
+        e2e.run(
+            f"mng create {agent_name} --branch \":feature/*\" --no-connect --command 'sleep 99999' --no-ensure-clean"
+        )
+    ).to_succeed()
 
     branch_result = e2e.run("git branch --all")
     expect(branch_result).to_succeed()
@@ -270,16 +281,19 @@ def test_create_custom_branch_pattern(mng: MngRunFn, create_agent: CreateAgentFn
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_base_branch(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_base_branch(e2e: Session, agent_name: str) -> None:
     """
     # you can also specify a different base branch (instead of the current branch):
     mng create my-task --branch "main:mng/*"
     """
-    # Ensure a 'main' branch exists for the base
     e2e.run("git checkout -b main || true")
     e2e.run("git checkout -")
 
-    agent_name = create_agent("e2e-base", extra_args='--branch "main:mng/*"')
+    expect(
+        e2e.run(
+            f"mng create {agent_name} --branch \"main:mng/*\" --no-connect --command 'sleep 99999' --no-ensure-clean"
+        )
+    ).to_succeed()
 
     branch_result = e2e.run("git branch --all")
     expect(branch_result).to_succeed()
@@ -288,16 +302,15 @@ def test_create_base_branch(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Ses
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_explicit_branch(mng: MngRunFn, e2e: Session) -> None:
+def test_create_explicit_branch(e2e: Session) -> None:
     """
     # or set the new branch name explicitly:
     mng create my-task --branch ":feature/my-task"
     """
     name = f"e2e-explicit-{get_short_random_string()}"
     branch_name = f"feature/{name}"
-    result = mng(
-        f'create {name} --branch ":{branch_name}"'
-        " --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --branch \":{branch_name}\" --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
@@ -308,16 +321,18 @@ def test_create_explicit_branch(mng: MngRunFn, e2e: Session) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_copy(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_copy(e2e: Session, agent_name: str) -> None:
     """
     # you can create a copy instead of a worktree:
     mng create my-task --copy
     # that is used by default if you're not in a git repo
     """
-    agent_name = create_agent("e2e-copy", extra_args="--copy")
+    expect(
+        e2e.run(f"mng create {agent_name} --copy --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
     # Verify the agent's working dir is different from the main repo (it's a copy)
-    exec_result = mng(f"exec {agent_name} pwd")
+    exec_result = e2e.run(f"mng exec {agent_name} pwd")
     expect(exec_result).to_succeed()
     cwd_result = e2e.run("pwd")
     assert exec_result.stdout.strip() != cwd_result.stdout.strip()
@@ -325,29 +340,32 @@ def test_create_copy(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_copy_with_branch(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_copy_with_branch(e2e: Session, agent_name: str) -> None:
     """
     # you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
     mng create my-task --copy --branch main
     """
-    agent_name = create_agent("e2e-copybr", extra_args="--copy --branch main")
+    expect(
+        e2e.run(f"mng create {agent_name} --copy --branch main --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_clone(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_clone(e2e: Session, agent_name: str) -> None:
     """
     # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
     mng create my-task --clone
     """
-    agent_name = create_agent("e2e-clone", extra_args="--clone")
+    expect(
+        e2e.run(f"mng create {agent_name} --clone --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    # Verify the agent's working dir is different from the main repo
-    exec_result = mng(f"exec {agent_name} pwd")
+    exec_result = e2e.run(f"mng exec {agent_name} pwd")
     expect(exec_result).to_succeed()
     cwd_result = e2e.run("pwd")
     assert exec_result.stdout.strip() != cwd_result.stdout.strip()
@@ -355,36 +373,43 @@ def test_create_clone(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_shallow_clone(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_shallow_clone(e2e: Session, agent_name: str) -> None:
     """
     # you can make a shallow clone for faster setup:
     mng create my-task --depth 1
     # (--shallow-since clones since a specific date instead)
     """
-    agent_name = create_agent("e2e-shallow", extra_args="--depth 1")
+    expect(
+        e2e.run(f"mng create {agent_name} --depth 1 --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_from_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_from_agent(e2e: Session) -> None:
     """
     # you can clone from an existing agent's work directory:
     mng create my-task --from other-agent
     # (--source, --source-agent, and --source-host are alternative forms for more specific control)
     """
-    source_name = create_agent("e2e-from-src")
-    target_name = create_agent("e2e-from-tgt", extra_args=f"--from {source_name}")
+    src = f"e2e-from-src-{get_short_random_string()}"
+    expect(e2e.run(f"mng create {src} --no-connect --command 'sleep 99999' --no-ensure-clean")).to_succeed()
 
-    list_result = mng("list --format json")
+    tgt = f"e2e-from-tgt-{get_short_random_string()}"
+    expect(
+        e2e.run(f"mng create {tgt} --from {src} --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
+
+    list_result = e2e.run("mng list --format json")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     names = [a["name"] for a in parsed["agents"]]
-    assert source_name in names
-    assert target_name in names
+    assert src in names
+    assert tgt in names
 
 
 # ---------------------------------------------------------------------------
@@ -394,23 +419,24 @@ def test_create_from_agent(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_env(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_env(e2e: Session, agent_name: str) -> None:
     """
     # you can set environment variables for the agent:
     mng create my-task --env DEBUG=true
     # (--env-file loads from a file, --pass-env forwards a variable from your current shell)
     """
-    agent_name = create_agent("e2e-env", extra_args="--env DEBUG=true")
+    expect(
+        e2e.run(f"mng create {agent_name} --env DEBUG=true --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    # Verify the env var is set in the agent's environment
-    exec_result = mng(f"exec {agent_name} printenv DEBUG")
+    exec_result = e2e.run(f"mng exec {agent_name} printenv DEBUG")
     expect(exec_result).to_succeed()
     expect(exec_result.stdout.strip()).to_equal("true")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_pass_env(mng: MngRunFn, e2e: Session) -> None:
+def test_create_pass_env(e2e: Session) -> None:
     """
     # it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
     export API_KEY=abc123
@@ -419,8 +445,7 @@ def test_create_pass_env(mng: MngRunFn, e2e: Session) -> None:
     """
     name = f"e2e-passenv-{get_short_random_string()}"
     result = e2e.run(
-        f"API_KEY=abc123 mng create {name} --pass-env API_KEY"
-        " --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean",
+        f"API_KEY=abc123 mng create {name} --pass-env API_KEY --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
@@ -436,7 +461,7 @@ def test_create_pass_env(mng: MngRunFn, e2e: Session) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_template(mng: MngRunFn, e2e: Session) -> None:
+def test_create_template(e2e: Session) -> None:
     """
     # you can use templates to quickly apply a set of preconfigured options:
     echo '[create_templates.my_modal_template]' >> .mng/settings.local.toml
@@ -453,47 +478,46 @@ def test_create_template(mng: MngRunFn, e2e: Session) -> None:
     e2e.run("echo 'in_place = true' >> .mng/settings.local.toml")
 
     name = f"e2e-tmpl-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --template my_local_template"
-        " --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --template my_local_template --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_plugins(mng: MngRunFn) -> None:
+def test_create_plugins(e2e: Session) -> None:
     """
     # you can enable or disable specific plugins:
     mng create my-task --plugin my-plugin --disable-plugin other-plugin
     """
     name = f"e2e-plugin-{get_short_random_string()}"
-    # Plugins may not exist, but the flags should be accepted by the parser
-    result = mng(
-        f"create {name} --plugin nonexistent-plugin --no-connect --command 'sleep 99999' --no-ensure-clean",
+    result = e2e.run(
+        f"mng create {name} --plugin nonexistent-plugin --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
-    # This may fail if the plugin doesn't exist; verify the flags are at least parsed
-    # (the error should be about the plugin, not about unknown flags)
+    # Plugins may not exist; verify the flags are at least parsed
     if result.exit_code != 0:
         expect(result.stderr + result.stdout).to_contain("plugin")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_aliases(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session) -> None:
+def test_create_aliases(e2e: Session, agent_name: str) -> None:
     """
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
     echo "alias mc='mng create --in-place'" >> ~/.bashrc && source ~/.bashrc
     # or use a more sophisticated tool, like Espanso
     """
     # Test the command that the alias would expand to: mng create --in-place
-    agent_name = create_agent("e2e-alias", extra_args="--in-place")
+    expect(
+        e2e.run(f"mng create {agent_name} --in-place --no-connect --command 'sleep 99999' --no-ensure-clean")
+    ).to_succeed()
 
-    exec_result = mng(f"exec {agent_name} pwd")
+    exec_result = e2e.run(f"mng exec {agent_name} pwd")
     expect(exec_result).to_succeed()
     cwd_result = e2e.run("pwd")
     expect(exec_result.stdout.strip()).to_equal(cwd_result.stdout.strip())
@@ -506,7 +530,7 @@ def test_create_aliases(mng: MngRunFn, create_agent: CreateAgentFn, e2e: Session
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_no_ensure_clean(mng: MngRunFn, e2e: Session) -> None:
+def test_create_no_ensure_clean(e2e: Session) -> None:
     """
     # by default, mng aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
     mng create my-task --no-ensure-clean
@@ -517,26 +541,31 @@ def test_create_no_ensure_clean(mng: MngRunFn, e2e: Session) -> None:
     e2e.run("echo 'dirty' >> README.md")
 
     name = f"e2e-noclean-{get_short_random_string()}"
-    result = mng(
-        f"create {name} --no-ensure-clean --no-connect --await-ready --command 'sleep 99999'",
+    result = e2e.run(
+        f"mng create {name} --no-ensure-clean --no-connect --command 'sleep 99999'",
     )
     expect(result).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(name)
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_connect_command(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_connect_command(e2e: Session, agent_name: str) -> None:
     """
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
     mng create my-task --connect-command "my_script.sh"
     """
-    agent_name = create_agent("e2e-conncmd", extra_args="--connect-command 'echo connected'")
+    expect(
+        e2e.run(
+            f"mng create {agent_name} --connect-command 'echo connected'"
+            " --no-connect --command 'sleep 99999' --no-ensure-clean"
+        )
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
@@ -547,30 +576,29 @@ def test_create_connect_command(mng: MngRunFn, create_agent: CreateAgentFn) -> N
 
 
 @pytest.mark.release
-def test_config_set_headless(mng: MngRunFn) -> None:
+def test_config_set_headless(e2e: Session) -> None:
     """
     # or you can set that option in your config so that it always applies:
     mng config set headless true
     """
-    result = mng("config set headless true")
+    result = e2e.run("mng config set headless true")
     expect(result).to_succeed()
 
-    # Verify the config was set
-    get_result = mng("config get headless")
+    get_result = e2e.run("mng config get headless")
     expect(get_result).to_succeed()
     expect(get_result.stdout).to_contain("true")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_headless_env_var(mng: MngRunFn, e2e: Session) -> None:
+def test_headless_env_var(e2e: Session) -> None:
     """
     # or you can set it as an environment variable:
     export MNG_HEADLESS=true
     """
     name = f"e2e-headenv-{get_short_random_string()}"
     result = e2e.run(
-        f"MNG_HEADLESS=true mng create {name} --no-connect --await-ready --command 'sleep 99999' --no-ensure-clean",
+        f"MNG_HEADLESS=true mng create {name} --no-connect --command 'sleep 99999' --no-ensure-clean",
     )
     expect(result).to_succeed()
 
@@ -580,30 +608,35 @@ def test_headless_env_var(mng: MngRunFn, e2e: Session) -> None:
 
 
 @pytest.mark.release
-def test_config_set_provider(mng: MngRunFn) -> None:
+def test_config_set_provider(e2e: Session) -> None:
     """
     # *all* mng options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
     mng config set commands.create.provider modal
     # for more on configuration, see the CONFIGURATION section below
     """
-    result = mng("config set commands.create.provider modal")
+    result = e2e.run("mng config set commands.create.provider modal")
     expect(result).to_succeed()
 
-    get_result = mng("config get commands.create.provider")
+    get_result = e2e.run("mng config get commands.create.provider")
     expect(get_result).to_succeed()
     expect(get_result.stdout).to_contain("modal")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_message(mng: MngRunFn, create_agent: CreateAgentFn) -> None:
+def test_create_with_message(e2e: Session, agent_name: str) -> None:
     """
     # you can send a message when starting the agent (great for scripting):
     mng create my-task --no-connect --message "Do the thing"
     """
-    agent_name = create_agent("e2e-msg", extra_args='--message "Do the thing"')
+    expect(
+        e2e.run(
+            f'mng create {agent_name} --no-connect --message "Do the thing"'
+            " --command 'sleep 99999' --no-ensure-clean"
+        )
+    ).to_succeed()
 
-    list_result = mng("list")
+    list_result = e2e.run("mng list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain(agent_name)
 
@@ -659,7 +692,7 @@ _DISABLED_PROVIDER_CREATE_ARGS = [
 
 @pytest.mark.release
 @pytest.mark.parametrize("create_args", _DISABLED_PROVIDER_CREATE_ARGS)
-def test_create_with_disabled_provider(mng: MngRunFn, create_args: str) -> None:
+def test_create_with_disabled_provider(e2e: Session, create_args: str) -> None:
     """
     These tests exercise tutorial blocks that use --provider modal or --provider docker.
     The providers are disabled in the test environment, so the commands fail. This verifies
@@ -746,7 +779,7 @@ def test_create_with_disabled_provider(mng: MngRunFn, create_args: str) -> None:
     # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
     """
     name = f"e2e-provider-{get_short_random_string()}"
-    result = mng(f"create {name} --no-connect --no-ensure-clean {create_args}")
+    result = e2e.run(f"mng create {name} --no-connect --no-ensure-clean {create_args}")
     expect(result).to_fail()
 
 
@@ -756,25 +789,25 @@ def test_create_with_disabled_provider(mng: MngRunFn, create_args: str) -> None:
 
 
 @pytest.mark.release
-def test_create_address_syntax(mng: MngRunFn) -> None:
+def test_create_address_syntax(e2e: Session) -> None:
     """
     # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
     mng create my-task@my-dev-box
     """
     name = f"e2e-addr-{get_short_random_string()}"
-    result = mng(f"create {name}@my-dev-box --no-connect --no-ensure-clean")
+    result = e2e.run(f"mng create {name}@my-dev-box --no-connect --no-ensure-clean")
     # Address syntax requires the host to exist; expect failure
     expect(result).to_fail()
 
 
 @pytest.mark.release
-def test_create_named_host(mng: MngRunFn) -> None:
+def test_create_named_host(e2e: Session) -> None:
     """
     # you can name the host using the address syntax:
     mng create my-task@my-modal-box.modal --new-host
     # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
     """
     name = f"e2e-named-{get_short_random_string()}"
-    result = mng(f"create {name}@my-modal-box.modal --new-host --no-connect --no-ensure-clean")
+    result = e2e.run(f"mng create {name}@my-modal-box.modal --new-host --no-connect --no-ensure-clean")
     # Modal is disabled; expect failure
     expect(result).to_fail()
