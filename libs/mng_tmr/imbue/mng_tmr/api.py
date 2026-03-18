@@ -16,6 +16,7 @@ from markdown_it import MarkdownIt
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.imbue_common.model_update import to_update
 from imbue.mng.api.create import create as api_create
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.list import list_agents
@@ -24,13 +25,12 @@ from imbue.mng.api.pull import pull_git
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import MngError
+from imbue.mng.errors import SendMessageError
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.host import AgentDataOptions
-from imbue.mng.interfaces.host import AgentEnvironmentOptions
 from imbue.mng.interfaces.host import AgentGitOptions
-from imbue.mng.interfaces.host import AgentLabelOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NewHostBuildOptions
 from imbue.mng.interfaces.host import NewHostOptions
@@ -38,7 +38,6 @@ from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
@@ -50,6 +49,7 @@ from imbue.mng_tmr.data_types import TestAgentInfo
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TestOutcome
 from imbue.mng_tmr.data_types import TestResult
+from imbue.mng_tmr.data_types import TmrLaunchConfig
 
 PLUGIN_NAME = "test-map-reduce"
 
@@ -205,23 +205,18 @@ def _copy_mode_for_provider(provider_name: ProviderInstanceName) -> WorkDirCopyM
 def _create_tmr_agent(
     agent_name: AgentName,
     branch_name: str,
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
-    agent_type: AgentTypeName,
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
     initial_message: str | None = None,
-    snapshot: SnapshotName | None = None,
 ) -> CreateAgentResult:
     """Create an agent on the configured provider.
 
     Shared helper for test agents, the integrator agent, and the snapshotter.
     """
-    copy_mode = _copy_mode_for_provider(provider_name)
+    copy_mode = _copy_mode_for_provider(config.provider_name)
+    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     agent_options = CreateAgentOptions(
-        agent_type=agent_type,
+        agent_type=config.agent_type,
         name=agent_name,
         initial_message=initial_message,
         git=AgentGitOptions(
@@ -229,13 +224,15 @@ def _create_tmr_agent(
             new_branch_name=branch_name,
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),
-        environment=env_options,
-        label_options=label_options,
+        environment=config.env_options,
+        label_options=config.label_options,
+        ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
-    source_location = HostLocation(host=source_host, path=source_dir)
+    source_location = HostLocation(host=config.source_host, path=config.source_dir)
+    snapshot = config.snapshot
     build = NewHostBuildOptions(snapshot=snapshot) if snapshot is not None else NewHostBuildOptions()
-    target_host = NewHostOptions(provider=provider_name, name=HostName(str(agent_name)), build=build)
+    target_host = NewHostOptions(provider=config.provider_name, name=HostName(str(agent_name)), build=build)
 
     return api_create(
         source_location=source_location,
@@ -247,36 +244,35 @@ def _create_tmr_agent(
 
 def launch_test_agent(
     test_node_id: str,
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
-    agent_type: AgentTypeName,
     pytest_flags: tuple[str, ...],
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
     prompt_suffix: str = "",
-    snapshot: SnapshotName | None = None,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test."""
+    """Launch a single agent to run and optionally fix one test.
+
+    The agent is created without an initial message, then the prompt is
+    sent separately. If the send signal detection times out (common on
+    remote hosts), the error is logged but not raised -- the polling loop
+    will eventually notice if the agent never starts working.
+    """
     agent_name_suffix = _sanitize_test_name_for_agent(test_node_id)
     short_id = _short_random_id()
     agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
+    prompt = _build_agent_prompt(test_node_id, pytest_flags, prompt_suffix)
 
     logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=f"mng-tmr/{agent_name_suffix}-{short_id}",
-        source_dir=source_dir,
-        source_host=source_host,
+        config=config,
         mng_ctx=mng_ctx,
-        agent_type=agent_type,
-        provider_name=provider_name,
-        env_options=env_options,
-        label_options=label_options,
-        initial_message=_build_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
-        snapshot=snapshot,
     )
+
+    try:
+        create_result.agent.send_message(prompt)
+    except SendMessageError as exc:
+        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(
@@ -289,13 +285,8 @@ def launch_test_agent(
 
 
 def _create_snapshot_host(
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
-    agent_type: AgentTypeName,
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
 ) -> SnapshotName:
     """Launch a dedicated snapshotter agent, snapshot its host, then stop it.
 
@@ -310,20 +301,15 @@ def _create_snapshot_host(
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=f"mng-tmr/snapshotter-{short_id}",
-        source_dir=source_dir,
-        source_host=source_host,
+        config=config,
         mng_ctx=mng_ctx,
-        agent_type=agent_type,
-        provider_name=provider_name,
-        env_options=env_options,
-        label_options=label_options,
     )
 
     snapshotter_host = create_result.host
     snapshotter_agent_id = create_result.agent.id
 
     try:
-        provider = get_provider_instance(provider_name, mng_ctx)
+        provider = get_provider_instance(config.provider_name, mng_ctx)
         snapshot_id = provider.create_snapshot(snapshotter_host)
         snapshot_name = SnapshotName(str(snapshot_id))
         logger.info("Created snapshot '{}' from snapshotter host", snapshot_name)
@@ -334,14 +320,9 @@ def _create_snapshot_host(
 
 def launch_all_test_agents(
     test_node_ids: list[str],
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
-    agent_type: AgentTypeName,
     pytest_flags: tuple[str, ...],
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
     prompt_suffix: str = "",
     use_snapshot: bool = False,
 ) -> tuple[list[TestAgentInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
@@ -358,28 +339,19 @@ def launch_all_test_agents(
     """
     agents: list[TestAgentInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
-    snapshot_name: SnapshotName | None = None
 
     # Optionally create a snapshot before launching any test agents
-    should_snapshot = use_snapshot
-    if should_snapshot:
-        provider = get_provider_instance(provider_name, mng_ctx)
-        if not provider.supports_snapshots:
+    launch_config = config
+    if use_snapshot:
+        provider = get_provider_instance(config.provider_name, mng_ctx)
+        if provider.supports_snapshots:
+            snapshot_name = _create_snapshot_host(config, mng_ctx)
+            launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
+        else:
             logger.warning(
-                "Provider '{}' does not support snapshots, launching all agents without snapshot", provider_name
+                "Provider '{}' does not support snapshots, launching all agents without snapshot",
+                config.provider_name,
             )
-            should_snapshot = False
-
-    if should_snapshot:
-        snapshot_name = _create_snapshot_host(
-            source_dir,
-            source_host,
-            mng_ctx,
-            agent_type,
-            provider_name,
-            env_options,
-            label_options,
-        )
 
     # Launch all test agents, using the snapshot if one was created
     with ConcurrencyGroupExecutor(
@@ -391,16 +363,10 @@ def launch_all_test_agents(
             executor.submit(
                 launch_test_agent,
                 test_node_id,
-                source_dir,
-                source_host,
+                launch_config,
                 mng_ctx,
-                agent_type,
                 pytest_flags,
-                provider_name,
-                env_options,
-                label_options,
                 prompt_suffix,
-                snapshot_name,
             )
             for test_node_id in test_node_ids
         ]
@@ -410,7 +376,7 @@ def launch_all_test_agents(
             agent_hosts[str(info.agent_id)] = host
 
     logger.info("Launched {} agent(s)", len(agents))
-    return agents, agent_hosts, snapshot_name
+    return agents, agent_hosts, launch_config.snapshot
 
 
 def poll_until_all_done(
@@ -809,14 +775,8 @@ def _html_report_css() -> str:
 
 def launch_integrator_agent(
     fix_branches: list[str],
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
-    agent_type: AgentTypeName,
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
-    snapshot: SnapshotName | None = None,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
     """Launch an integrator agent that merges all fix branches into one."""
     short_id = _short_random_id()
@@ -837,16 +797,14 @@ If merging fails, use outcome FIX_IMPL_FAILED.
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=f"mng-tmr/integrated-{short_id}",
-        source_dir=source_dir,
-        source_host=source_host,
+        config=config,
         mng_ctx=mng_ctx,
-        agent_type=agent_type,
-        provider_name=provider_name,
-        env_options=env_options,
-        label_options=label_options,
-        initial_message=prompt,
-        snapshot=snapshot,
     )
+
+    try:
+        create_result.agent.send_message(prompt)
+    except SendMessageError as exc:
+        logger.warning("Send signal detection failed for '{}' (message likely delivered): {}", agent_name, exc)
 
     return (
         TestAgentInfo(

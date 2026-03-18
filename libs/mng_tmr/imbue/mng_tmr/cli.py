@@ -8,6 +8,7 @@ from typing import assert_never
 
 import click
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.list import list_agents
 from imbue.mng.api.providers import get_provider_instance
@@ -23,15 +24,12 @@ from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
-from imbue.mng.interfaces.host import AgentLabelOptions
-from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import SnapshotName
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import gather_results
@@ -43,6 +41,7 @@ from imbue.mng_tmr.api import pull_agent_branch
 from imbue.mng_tmr.api import wait_for_integrator
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TestOutcome
+from imbue.mng_tmr.data_types import TmrLaunchConfig
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
@@ -123,15 +122,9 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
 
 def _run_integrator_phase(
     results: list[TestMapReduceResult],
-    source_dir: Path,
-    source_host: OnlineHostInterface,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
     opts: TmrCliOptions,
-    agent_type: AgentTypeName,
-    provider_name: ProviderInstanceName,
-    env_options: AgentEnvironmentOptions,
-    label_options: AgentLabelOptions,
-    snapshot_name: SnapshotName | None,
 ) -> str | None:
     """Launch an integrator agent to merge fix branches, if any exist."""
     fix_branches = [
@@ -144,14 +137,8 @@ def _run_integrator_phase(
 
     integrator, integrator_host = launch_integrator_agent(
         fix_branches=fix_branches,
-        source_dir=source_dir,
-        source_host=source_host,
+        config=config,
         mng_ctx=mng_ctx,
-        agent_type=agent_type,
-        provider_name=provider_name,
-        env_options=env_options,
-        label_options=label_options,
-        snapshot=snapshot_name,
     )
 
     integrator_deadline = time.monotonic() + opts.integrator_timeout
@@ -171,7 +158,7 @@ def _run_integrator_phase(
         )
         for agent_detail in list_result.agents:
             if str(agent_detail.id) == str(integrator.agent_id):
-                pull_agent_branch(agent_detail, integrator_host, source_dir, mng_ctx.concurrency_group)
+                pull_agent_branch(agent_detail, integrator_host, config.source_dir, mng_ctx.concurrency_group)
                 break
 
     return integrator_branch
@@ -270,17 +257,6 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     )
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
-    agent_type = AgentTypeName(opts.agent_type)
-    provider_name = ProviderInstanceName(opts.provider)
-
-    # Parse environment variables
-    env_vars = resolve_env_vars((), opts.env)
-    env_options = AgentEnvironmentOptions(env_vars=env_vars)
-
-    # Parse labels
-    label_options = resolve_labels(opts.label)
-
-    # testing_flags come from _TmrCommand's parse_args (args after --)
     testing_flags = opts.testing_flags
 
     # Step 1: Collect tests (positional paths + testing flags go to discovery)
@@ -296,21 +272,27 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     local_host_ref = local_provider.get_host(HostName("localhost"))
     source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
 
-    # Step 3: Launch agents (testing flags are passed to individual pytest invocations)
-    agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
-        test_node_ids=test_node_ids,
+    # Step 3: Build launch config and launch agents
+    config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        agent_type=AgentTypeName(opts.agent_type),
+        provider_name=ProviderInstanceName(opts.provider),
+        env_options=AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env)),
+        label_options=resolve_labels(opts.label),
+    )
+    agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
+        test_node_ids=test_node_ids,
+        config=config,
         mng_ctx=mng_ctx,
-        agent_type=agent_type,
         pytest_flags=testing_flags,
-        provider_name=provider_name,
-        env_options=env_options,
-        label_options=label_options,
         prompt_suffix=opts.prompt_suffix or "",
         use_snapshot=opts.use_snapshot,
     )
     _emit_agents_launched(len(agent_infos), output_opts)
+    # Update config with snapshot for integrator phase
+    if snapshot_name is not None:
+        config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
 
     # Step 4: Compute html_path before polling
     if opts.output_html is not None:
@@ -348,18 +330,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     generate_html_report(results, html_path)
 
     # Step 9: Integrate fix branches and write final report
-    integrator_branch = _run_integrator_phase(
-        results,
-        source_dir,
-        source_host,
-        mng_ctx,
-        opts,
-        agent_type,
-        provider_name,
-        env_options,
-        label_options,
-        snapshot_name,
-    )
+    integrator_branch = _run_integrator_phase(results, config, mng_ctx, opts)
     generate_html_report(results, html_path, integrator_branch=integrator_branch)
     _emit_report_path(html_path, output_opts)
     _emit_summary(results, output_opts)

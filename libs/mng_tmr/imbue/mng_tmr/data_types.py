@@ -1,12 +1,19 @@
 """Data types for the test-mapreduce plugin."""
 
 from enum import Enum
+from pathlib import Path
 
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import AgentLabelOptions
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import AgentTypeName
+from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SnapshotName
 
 
 class TestOutcome(str, Enum):
@@ -36,6 +43,27 @@ class TestAgentInfo(FrozenModel):
     test_node_id: str = Field(description="The pytest node ID for the test (e.g. tests/test_foo.py::test_bar)")
     agent_id: AgentId = Field(description="The ID of the launched agent")
     agent_name: AgentName = Field(description="The name of the launched agent")
+
+
+class TmrLaunchConfig(FrozenModel):
+    """Common configuration for launching tmr agents."""
+
+    source_dir: Path = Field(description="Source directory for agent work dirs")
+    source_host: OnlineHostInterface = Field(description="Local host where source code lives")
+    agent_type: AgentTypeName = Field(description="Type of agent to run (claude, codex, etc.)")
+    provider_name: ProviderInstanceName = Field(description="Provider for agent hosts (local, docker, modal)")
+    env_options: AgentEnvironmentOptions = Field(
+        default_factory=AgentEnvironmentOptions,
+        description="Environment variables to pass to agents",
+    )
+    label_options: AgentLabelOptions = Field(
+        default_factory=AgentLabelOptions,
+        description="Labels to attach to agents",
+    )
+    snapshot: SnapshotName | None = Field(
+        default=None,
+        description="Snapshot to use for host creation (None means build from scratch)",
+    )
 
 
 class TestMapReduceResult(FrozenModel):
