@@ -30,7 +30,25 @@ class MngCommandError(MindError):
     ...
 
 
-class VendorError(MindError):
-    """Raised when vendoring mng into a mind repo fails."""
+class GitOperationError(MindError):
+    """Raised when a git operation fails during mind management."""
+
+    ...
+
+
+class VendorError(GitOperationError):
+    """Raised when vendoring a repo into a mind fails."""
+
+    ...
+
+
+class ParentTrackingError(GitOperationError):
+    """Raised when a parent tracking git operation fails."""
+
+    ...
+
+
+class DirtyRepoError(VendorError):
+    """Raised when a local vendor repo has uncommitted changes or untracked files."""
 
     ...

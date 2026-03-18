@@ -7,11 +7,10 @@ from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
-from imbue.minds.forwarding_server.agent_creator import DEFAULT_AGENT_TYPE
 from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import extract_repo_name
+from imbue.minds.forwarding_server.agent_creator import load_creation_settings
 from imbue.minds.forwarding_server.agent_creator import make_log_callback
-from imbue.minds.forwarding_server.agent_creator import resolve_agent_type
 from imbue.minds.primitives import GitUrl
 from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mng.primitives import AgentId
@@ -43,23 +42,34 @@ def test_extract_repo_name_falls_back_to_mind() -> None:
     assert extract_repo_name(".git") == "mind"
 
 
-def test_resolve_agent_type_returns_default_when_no_toml(tmp_path: Path) -> None:
-    assert resolve_agent_type(tmp_path) == DEFAULT_AGENT_TYPE
+def test_load_creation_settings_returns_defaults_when_no_toml(tmp_path: Path) -> None:
+    settings = load_creation_settings(tmp_path)
+    assert settings.agent_type is None
 
 
-def test_resolve_agent_type_reads_from_minds_toml(tmp_path: Path) -> None:
+def test_load_creation_settings_reads_agent_type(tmp_path: Path) -> None:
     (tmp_path / "minds.toml").write_text('agent_type = "custom-type"\n')
-    assert resolve_agent_type(tmp_path) == "custom-type"
+    settings = load_creation_settings(tmp_path)
+    assert settings.agent_type == "custom-type"
 
 
-def test_resolve_agent_type_returns_default_for_toml_without_agent_type(tmp_path: Path) -> None:
-    (tmp_path / "minds.toml").write_text("[some_section]\nkey = 1\n")
-    assert resolve_agent_type(tmp_path) == DEFAULT_AGENT_TYPE
+def test_load_creation_settings_returns_defaults_for_toml_without_agent_type(tmp_path: Path) -> None:
+    (tmp_path / "minds.toml").write_text('[chat]\nmodel = "claude-sonnet-4-6"\n')
+    settings = load_creation_settings(tmp_path)
+    assert settings.agent_type is None
 
 
-def test_resolve_agent_type_returns_default_for_malformed_toml(tmp_path: Path) -> None:
+def test_load_creation_settings_returns_defaults_for_malformed_toml(tmp_path: Path) -> None:
     (tmp_path / "minds.toml").write_text("not valid toml {{{")
-    assert resolve_agent_type(tmp_path) == DEFAULT_AGENT_TYPE
+    settings = load_creation_settings(tmp_path)
+    assert settings.agent_type is None
+
+
+def test_load_creation_settings_reads_vendor_config(tmp_path: Path) -> None:
+    (tmp_path / "minds.toml").write_text('[[vendor]]\nname = "mng"\nurl = "https://github.com/imbue-ai/mng.git"\n')
+    settings = load_creation_settings(tmp_path)
+    assert len(settings.vendor) == 1
+    assert settings.vendor[0].name == "mng"
 
 
 # -- clone_git_repo tests --

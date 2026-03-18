@@ -72,7 +72,7 @@ User messages always arrive paired with the auto-generated assistant response fr
 Use `chat.sh` to add a message to a known conversation:
 
 ```bash
-$MNG_AGENT_STATE_DIR/commands/chat.sh chat --reply <conversation-id> "Your message here"
+$MNG_AGENT_STATE_DIR/commands/chat.sh --reply <conversation-id> "Your message here"
 ```
 
 ### Starting a new conversation

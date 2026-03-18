@@ -7,23 +7,33 @@ belong here.
 """
 
 import http.client
+import io
 import json
+import struct
+import threading
 from pathlib import Path
 
 import pytest
 
+from imbue.mng_llm.resources.web_server import _WsOutputCallback
 from imbue.mng_llm.resources.web_server import _get_default_chat_model
 from imbue.mng_llm.resources.web_server import _get_most_recent_conversation_id
 from imbue.mng_llm.resources.web_server import _html_escape
 from imbue.mng_llm.resources.web_server import _iso_timestamp
 from imbue.mng_llm.resources.web_server import _log
 from imbue.mng_llm.resources.web_server import _make_event_id
+from imbue.mng_llm.resources.web_server import _poll_db_for_new_messages
 from imbue.mng_llm.resources.web_server import _read_message_history
 from imbue.mng_llm.resources.web_server import _render_agents_page
 from imbue.mng_llm.resources.web_server import _render_conversations_page
 from imbue.mng_llm.resources.web_server import _render_header
 from imbue.mng_llm.resources.web_server import _render_iframe_page
 from imbue.mng_llm.resources.web_server import _render_web_chat_page
+from imbue.mng_llm.resources.web_server import _ws_accept_key
+from imbue.mng_llm.resources.web_server import _ws_encode_frame
+from imbue.mng_llm.resources.web_server import _ws_poll_loop
+from imbue.mng_llm.resources.web_server import _ws_read_frame
+from imbue.mng_llm.resources.web_server import _ws_send_json
 
 
 def test_html_escape_escapes_ampersand() -> None:
@@ -324,4 +334,141 @@ def test_handler_post_404(
     conn.request("POST", "/nonexistent")
     resp = conn.getresponse()
     assert resp.status == 404
+    conn.close()
+
+
+# -- WebSocket protocol direct tests (coverage-tracked) --
+
+
+def test_ws_accept_key_produces_base64() -> None:
+    result = _ws_accept_key("test-key-12345")
+    assert len(result) > 0
+    assert result.endswith("=") or result[-1].isalnum()
+
+
+def test_ws_encode_frame_small() -> None:
+    frame = _ws_encode_frame(b"hi", 0x1)
+    assert frame[0] == 0x81
+    assert frame[1] == 2
+    assert frame[2:] == b"hi"
+
+
+def test_ws_encode_frame_medium() -> None:
+    data = b"a" * 130
+    frame = _ws_encode_frame(data, 0x1)
+    assert frame[1] == 126
+    length = struct.unpack(">H", frame[2:4])[0]
+    assert length == 130
+
+
+def test_ws_encode_frame_large() -> None:
+    data = b"b" * 70000
+    frame = _ws_encode_frame(data, 0x1)
+    assert frame[1] == 127
+    length = struct.unpack(">Q", frame[2:10])[0]
+    assert length == 70000
+
+
+def test_ws_read_frame_text() -> None:
+    frame = bytes([0x81, 0x03]) + b"hey"
+    result = _ws_read_frame(io.BytesIO(frame))
+    assert result is not None
+    assert result == (0x1, b"hey")
+
+
+def test_ws_read_frame_masked() -> None:
+    mask = b"\x11\x22\x33\x44"
+    raw = b"test"
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(raw))
+    frame = bytes([0x81, 0x84]) + mask + masked
+    result = _ws_read_frame(io.BytesIO(frame))
+    assert result is not None
+    assert result[1] == b"test"
+
+
+def test_ws_read_frame_empty_input() -> None:
+    assert _ws_read_frame(io.BytesIO(b"")) is None
+
+
+def test_ws_read_frame_close() -> None:
+    result = _ws_read_frame(io.BytesIO(bytes([0x88, 0x00])))
+    assert result is not None
+    assert result[0] == 0x8
+
+
+def test_ws_send_json_success() -> None:
+    wfile = io.BytesIO()
+    lock = threading.Lock()
+    ok = _ws_send_json(wfile, lock, {"hello": "world"})
+    assert ok is True
+    assert len(wfile.getvalue()) > 0
+
+
+def test_ws_send_json_failure() -> None:
+    class BadWriter:
+        def write(self, data: bytes) -> None:
+            raise OSError("broken")
+
+        def flush(self) -> None:
+            pass
+
+    ok = _ws_send_json(BadWriter(), threading.Lock(), {"x": 1})
+    assert ok is False
+
+
+def test_ws_output_callback_sends_chunk() -> None:
+    wfile = io.BytesIO()
+    lock = threading.Lock()
+    lines: list[str] = []
+    cb = _WsOutputCallback(wfile, lock, lines)
+    cb("hello\n", is_stdout=True)
+    assert lines == ["hello\n"]
+    assert len(wfile.getvalue()) > 0
+
+
+def test_ws_output_callback_ignores_stderr() -> None:
+    wfile = io.BytesIO()
+    lock = threading.Lock()
+    lines: list[str] = []
+    cb = _WsOutputCallback(wfile, lock, lines)
+    cb("error", is_stdout=False)
+    assert lines == []
+    assert wfile.getvalue() == b""
+
+
+def test_poll_db_empty_when_no_db() -> None:
+    import imbue.mng_llm.resources.web_server as ws
+
+    original = ws.LLM_DB_PATH
+    ws.LLM_DB_PATH = Path("/nonexistent/db.db")
+    try:
+        msgs, rowid = _poll_db_for_new_messages("conv-1", 0, set())
+        assert msgs == []
+        assert rowid == 0
+    finally:
+        ws.LLM_DB_PATH = original
+
+
+def test_ws_poll_loop_exits_immediately_when_stopped() -> None:
+    stop = threading.Event()
+    stop.set()
+    _ws_poll_loop(
+        io.BytesIO(),
+        threading.Lock(),
+        stop,
+        [False],
+        [0],
+        ["c"],
+        set(),
+    )
+
+
+def test_ws_endpoint_rejects_non_websocket(
+    web_server_test_server: tuple[object, int],
+) -> None:
+    _, port = web_server_test_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/ws?cid=test")
+    resp = conn.getresponse()
+    assert resp.status == 400
     conn.close()

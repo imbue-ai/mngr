@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -33,3 +35,22 @@ class MindPaths(FrozenModel):
 def get_default_data_dir() -> Path:
     """Return the default data directory for minds (~/.minds)."""
     return Path.home() / DEFAULT_DATA_DIR_NAME
+
+
+def parse_agents_from_mng_output(stdout: str) -> list[dict[str, object]]:
+    """Extract agent records from ``mng list --format json`` stdout.
+
+    The stdout may contain non-JSON lines (e.g. SSH error tracebacks)
+    mixed with the JSON. Finds the first line starting with ``{`` and
+    parses the ``agents`` array from it.
+    """
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                data = json.loads(stripped)
+                return list(data.get("agents", []))
+            except json.JSONDecodeError:
+                logger.trace("Failed to parse JSON from mng list output line: {}", stripped[:200])
+                continue
+    return []

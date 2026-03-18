@@ -254,44 +254,60 @@ def launch_test_agent(
     )
 
 
-def _create_snapshot_from_first_agent(
-    test_node_ids: list[str],
+def _create_snapshot_host(
     source_dir: Path,
     source_host: OnlineHostInterface,
     mng_ctx: MngContext,
     agent_type: AgentTypeName,
-    pytest_flags: tuple[str, ...],
     provider_name: ProviderInstanceName,
     env_options: AgentEnvironmentOptions,
     label_options: AgentLabelOptions,
-    prompt_suffix: str,
-) -> tuple[TestAgentInfo, OnlineHostInterface, SnapshotName]:
-    """Launch the first agent, snapshot its host, and return the snapshot name.
+) -> SnapshotName:
+    """Launch a dedicated snapshotter agent, snapshot its host, then stop it.
 
-    Used by launch_all_test_agents when --use-snapshot is enabled. The first
-    agent is launched with full build + provisioning, then its host is
-    snapshotted so remaining agents can start from the snapshot.
+    Creates a headless agent (no initial message) purely to trigger host
+    provisioning, snapshots the resulting host, and immediately stops the
+    agent. All real test agents are then launched from the snapshot.
     """
-    logger.info("Launching first agent to create snapshot...")
-    first_info, first_host = launch_test_agent(
-        test_node_ids[0],
-        source_dir,
-        source_host,
-        mng_ctx,
-        agent_type,
-        pytest_flags,
-        provider_name,
-        env_options,
-        label_options,
-        prompt_suffix,
+    short_id = _short_random_id()
+    agent_name = AgentName(f"tmr-snapshotter-{short_id}")
+
+    copy_mode = _copy_mode_for_provider(provider_name)
+    agent_options = CreateAgentOptions(
+        agent_type=agent_type,
+        name=agent_name,
+        git=AgentGitOptions(
+            copy_mode=copy_mode,
+            new_branch_name=f"mng-tmr/snapshotter-{short_id}",
+        ),
+        environment=env_options,
+        label_options=label_options,
     )
 
-    provider = get_provider_instance(provider_name, mng_ctx)
-    snapshot_id = provider.create_snapshot(first_host)
-    snapshot_name = SnapshotName(str(snapshot_id))
-    logger.info("Created snapshot '{}' from first agent's host", snapshot_name)
+    source_location = HostLocation(host=source_host, path=source_dir)
+    target_host = NewHostOptions(provider=provider_name)
 
-    return first_info, first_host, snapshot_name
+    logger.info("Launching snapshotter agent '{}' for provisioning...", agent_name)
+    create_result: CreateAgentResult = api_create(
+        source_location=source_location,
+        target_host=target_host,
+        agent_options=agent_options,
+        mng_ctx=mng_ctx,
+    )
+
+    snapshotter_host = create_result.host
+    snapshotter_agent_id = create_result.agent.id
+
+    # Snapshot the fully provisioned host
+    provider = get_provider_instance(provider_name, mng_ctx)
+    snapshot_id = provider.create_snapshot(snapshotter_host)
+    snapshot_name = SnapshotName(str(snapshot_id))
+    logger.info("Created snapshot '{}' from snapshotter host", snapshot_name)
+
+    # Stop the snapshotter agent -- it has served its purpose
+    _stop_agent_on_host(snapshotter_host, snapshotter_agent_id, agent_name)
+
+    return snapshot_name
 
 
 def launch_all_test_agents(
@@ -313,16 +329,17 @@ def launch_all_test_agents(
     agent_id strings to the host each agent was created on, and snapshot_name
     is the snapshot used (if use_snapshot was True and the provider supports it).
 
-    When use_snapshot is True and there are multiple tests, the first agent is
-    launched normally (full host build + provisioning), its host is snapshotted,
-    and remaining agents are launched from the snapshot for faster startup.
+    When use_snapshot is True, a dedicated snapshotter agent is launched first
+    (without an initial message) purely to trigger provisioning. Its host is
+    snapshotted and the snapshotter is stopped. All test agents are then
+    launched from the snapshot for faster startup.
     """
     agents: list[TestAgentInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
     snapshot_name: SnapshotName | None = None
 
-    # Optionally build a snapshot from the first agent before launching the rest
-    should_snapshot = use_snapshot and len(test_node_ids) > 1
+    # Optionally create a snapshot before launching any test agents
+    should_snapshot = use_snapshot
     if should_snapshot:
         provider = get_provider_instance(provider_name, mng_ctx)
         if not provider.supports_snapshots:
@@ -331,25 +348,18 @@ def launch_all_test_agents(
             )
             should_snapshot = False
 
-    remaining_ids = test_node_ids
     if should_snapshot:
-        first_info, first_host, snapshot_name = _create_snapshot_from_first_agent(
-            test_node_ids,
+        snapshot_name = _create_snapshot_host(
             source_dir,
             source_host,
             mng_ctx,
             agent_type,
-            pytest_flags,
             provider_name,
             env_options,
             label_options,
-            prompt_suffix,
         )
-        agents.append(first_info)
-        agent_hosts[str(first_info.agent_id)] = first_host
-        remaining_ids = test_node_ids[1:]
 
-    # Launch remaining (or all) agents, using the snapshot if one was created
+    # Launch all test agents, using the snapshot if one was created
     with ConcurrencyGroupExecutor(
         parent_cg=mng_ctx.concurrency_group,
         name="tmr_launch",
@@ -370,7 +380,7 @@ def launch_all_test_agents(
                 prompt_suffix,
                 snapshot_name,
             )
-            for test_node_id in remaining_ids
+            for test_node_id in test_node_ids
         ]
         for future in futures:
             info, host = future.result()

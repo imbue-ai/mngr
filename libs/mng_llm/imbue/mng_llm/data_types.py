@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Final
+
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -58,6 +60,9 @@ class ExtraContextSettings(FrozenModel):
     )
 
 
+DEFAULT_WELCOME_MESSAGE: Final[NonEmptyStr] = NonEmptyStr("Hi! How can I help?")
+
+
 class ChatSettings(FrozenModel):
     """Settings for the [chat] TOML section."""
 
@@ -65,6 +70,11 @@ class ChatSettings(FrozenModel):
         default=None,
         description="Default model for new conversation threads. "
         "When None, chat.sh falls back to the hardcoded default (claude-opus-4.6).",
+    )
+    welcome_message: NonEmptyStr = Field(
+        default=DEFAULT_WELCOME_MESSAGE,
+        description="Initial welcome message displayed in the first daily conversation. "
+        "Configurable in minds.toml under [chat].welcome_message.",
     )
     context: ContextSettings = Field(
         default_factory=ContextSettings,

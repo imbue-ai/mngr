@@ -4,6 +4,7 @@ Tests the pure/near-pure functions by loading the resource module via exec().
 """
 
 import json
+import sqlite3
 import types
 from pathlib import Path
 from typing import Any
@@ -817,3 +818,162 @@ def test_read_conversations_handles_malformed_message_events(web_server_module: 
 
     result = web_server_module._read_conversations()
     assert len(result) == 1
+
+
+# -- _poll_db_for_new_messages tests (env-var dependent, via dynamic module) --
+# WebSocket protocol pure-function tests are in web_server_direct_test.py
+# to ensure coverage tracking (exec-loaded modules are invisible to pytest-cov).
+
+
+def _create_responses_table(db_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS responses ("
+        "id TEXT PRIMARY KEY, prompt TEXT, response TEXT, "
+        "model TEXT, datetime_utc TEXT, conversation_id TEXT)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_poll_db_returns_empty_when_no_db(web_server_module: Any) -> None:
+    web_server_module.LLM_DB_PATH = Path("/nonexistent/path/logs.db")
+    msgs, rowid = web_server_module._poll_db_for_new_messages("conv-82741", 0, set())
+    assert msgs == []
+    assert rowid == 0
+
+
+def test_poll_db_returns_empty_when_no_new_rows(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    msgs, rowid = web_server_module._poll_db_for_new_messages("conv-82741", 0, set())
+    assert msgs == []
+    assert rowid == 0
+
+
+def test_poll_db_finds_injected_assistant_message(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-inject-82741", "...", "Hello from thinking agent", "model", "2026-01-01T00:00:00Z", "conv-inject-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs, rowid = web_server_module._poll_db_for_new_messages("conv-inject-82741", 0, set())
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "new_message"
+    assert msgs[0]["role"] == "assistant"
+    assert msgs[0]["content"] == "Hello from thinking agent"
+    assert rowid >= 1
+
+
+def test_poll_db_skips_sent_response_ids(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-sent-82741", "...", "Already sent", "model", "2026-01-01T00:00:00Z", "conv-sent-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    sent = {"r-sent-82741-assistant"}
+    msgs, _ = web_server_module._poll_db_for_new_messages("conv-sent-82741", 0, sent)
+    assert len(msgs) == 0
+
+
+def test_poll_db_skips_preliminary_rows(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-prelim-82741", "user prompt", "", "model", "2026-01-01T00:00:00Z", "conv-prelim-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs, _ = web_server_module._poll_db_for_new_messages("conv-prelim-82741", 0, set())
+    assert len(msgs) == 0
+
+
+def test_poll_db_includes_user_and_assistant_messages(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-both-82741", "user question", "assistant answer", "model", "2026-01-01T00:00:00Z", "conv-both-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs, _ = web_server_module._poll_db_for_new_messages("conv-both-82741", 0, set())
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "user question"
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == "assistant answer"
+
+
+def test_poll_db_only_returns_messages_after_rowid(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-old-82741", "...", "Old message", "model", "2026-01-01T00:00:00Z", "conv-rowid-82741"),
+    )
+    conn.commit()
+    # Get rowid of inserted row
+    max_rowid = conn.execute("SELECT MAX(rowid) FROM responses").fetchone()[0]
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-new-82741", "...", "New message", "model", "2026-01-02T00:00:00Z", "conv-rowid-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs, _ = web_server_module._poll_db_for_new_messages("conv-rowid-82741", max_rowid, set())
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "New message"
+
+
+def test_poll_db_filters_by_conversation_id(web_server_module: Any) -> None:
+    db_path = web_server_module.LLM_DB_PATH
+    _create_responses_table(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-other-82741", "...", "Other conversation", "model", "2026-01-01T00:00:00Z", "conv-other-82741"),
+    )
+    conn.execute(
+        "INSERT INTO responses VALUES (?, ?, ?, ?, ?, ?)",
+        ("r-mine-82741", "...", "My conversation", "model", "2026-01-01T00:00:00Z", "conv-mine-82741"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs, _ = web_server_module._poll_db_for_new_messages("conv-mine-82741", 0, set())
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "My conversation"
+
+
+# -- Web chat page WebSocket tests --
+
+
+def test_render_web_chat_page_contains_websocket_code(web_server_module: Any) -> None:
+    page = web_server_module._render_web_chat_page("TestAgent", "conv-ws-82741")
+    assert "WebSocket" in page
+    assert "connectWebSocket" in page
+    assert "ws.send" in page
+
+
+def test_render_web_chat_page_no_longer_uses_sse_fetch(web_server_module: Any) -> None:
+    page = web_server_module._render_web_chat_page("TestAgent", "conv-ws-82741")
+    assert "api/chat/send" not in page
+    assert "text/event-stream" not in page

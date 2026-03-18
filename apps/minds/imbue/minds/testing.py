@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -7,6 +6,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import parse_agents_from_mng_output
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -49,6 +49,20 @@ def init_and_commit_git_repo(repo_dir: Path, tmp_path: Path, allow_empty: bool =
             cwd=repo_dir,
             env=_git_test_env(tmp_path),
         )
+
+
+def make_git_repo(tmp_path: Path, name: str = "repo") -> Path:
+    """Create a minimal git repo with a committed file.
+
+    Shared helper for tests that need a local git repo to operate on.
+    Creates a directory under tmp_path with a single ``hello.txt`` file,
+    initializes a git repo, and commits the file.
+    """
+    repo = tmp_path / name
+    repo.mkdir()
+    (repo / "hello.txt").write_text("hello")
+    init_and_commit_git_repo(repo, tmp_path)
+    return repo
 
 
 def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "update") -> None:
@@ -99,20 +113,10 @@ def run_mng(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subpr
 def parse_mng_list_json(stdout: str) -> list[dict[str, object]]:
     """Extract agent records from mng list --format json stdout.
 
-    The stdout may contain non-JSON lines (e.g. SSH error tracebacks)
-    mixed with the JSON. We find the first line starting with '{' and
-    parse from there.
+    Delegates to the shared implementation in config.data_types. Kept here
+    for backward compatibility with existing test callers.
     """
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("{"):
-            try:
-                data = json.loads(stripped)
-                return list(data.get("agents", []))
-            except json.JSONDecodeError:
-                logger.trace("Failed to parse JSON from mng list output line: {}", stripped[:200])
-                continue
-    return []
+    return parse_agents_from_mng_output(stdout)
 
 
 def find_agent(agent_name: str) -> dict[str, object] | None:

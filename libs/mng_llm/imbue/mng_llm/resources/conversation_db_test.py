@@ -8,11 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mng_llm.conftest import LLM_RESPONSES_SCHEMA
 from imbue.mng_llm.conftest import create_mind_conversations_table_in_test_db
 from imbue.mng_llm.resources.conversation_db import _warn
 from imbue.mng_llm.resources.conversation_db import _write_stdout
 from imbue.mng_llm.resources.conversation_db import count
 from imbue.mng_llm.resources.conversation_db import insert
+from imbue.mng_llm.resources.conversation_db import last_response_id
 from imbue.mng_llm.resources.conversation_db import lookup_by_name
 from imbue.mng_llm.resources.conversation_db import lookup_model
 from imbue.mng_llm.resources.conversation_db import main
@@ -249,6 +251,54 @@ def test_lookup_by_name_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture
     assert captured.out == ""
 
 
+def _create_db_with_responses(db_path: Path) -> None:
+    """Create a test database with mind_conversations, conversations, and responses tables."""
+    _create_db(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(LLM_RESPONSES_SCHEMA)
+        conn.commit()
+
+
+def test_last_response_id_found(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "test.db"
+    _create_db_with_responses(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-old", "conv-abc", "2026-03-16T10:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-new", "conv-abc", "2026-03-16T11:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-other", "conv-xyz", "2026-03-16T12:00:00Z"),
+        )
+        conn.commit()
+
+    last_response_id(str(db_path), "conv-abc")
+    captured = capsys.readouterr()
+    assert captured.out == "resp-new\n"
+
+
+def test_last_response_id_not_found(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "test.db"
+    _create_db_with_responses(db_path)
+
+    last_response_id(str(db_path), "nonexistent")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_last_response_id_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "missing.db"
+    last_response_id(str(db_path), "conv-1")
+    captured = capsys.readouterr()
+    assert "WARNING:" in captured.err
+    assert captured.out == ""
+
+
 @contextmanager
 def _override_argv(new_argv: list[str]) -> Iterator[None]:
     """Temporarily replace sys.argv, restoring on exit."""
@@ -296,6 +346,23 @@ def test_main_lookup_by_name(tmp_path: Path, capsys: pytest.CaptureFixture[str])
 
     captured = capsys.readouterr()
     assert captured.out == "conv-via-main\n"
+
+
+def test_main_last_response_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "test.db"
+    _create_db_with_responses(db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO responses (id, conversation_id, datetime_utc) VALUES (?, ?, ?)",
+            ("resp-main", "conv-main", "2026-03-16T10:00:00Z"),
+        )
+        conn.commit()
+
+    with _override_argv(["conversation_db", "last-response-id", str(db_path), "conv-main"]):
+        main()
+
+    captured = capsys.readouterr()
+    assert captured.out == "resp-main\n"
 
 
 def test_main_unknown_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
