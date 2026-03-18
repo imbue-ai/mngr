@@ -27,6 +27,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
+from imbue.mng.interfaces.host import AgentDataOptions
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
 from imbue.mng.interfaces.host import AgentGitOptions
 from imbue.mng.interfaces.host import AgentLabelOptions
@@ -227,6 +228,7 @@ def _create_tmr_agent(
             copy_mode=copy_mode,
             new_branch_name=branch_name,
         ),
+        data_options=AgentDataOptions(is_rsync_enabled=False),
         environment=env_options,
         label_options=label_options,
     )
