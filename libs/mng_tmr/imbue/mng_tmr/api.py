@@ -101,6 +101,12 @@ class CollectTestsError(MngError, RuntimeError):
     ...
 
 
+def get_base_commit(source_dir: Path, cg: ConcurrencyGroup) -> str:
+    """Get the current HEAD commit hash, used as the base for all agent branches."""
+    result = cg.run_process_to_completion(["git", "rev-parse", "HEAD"], cwd=source_dir)
+    return result.stdout.strip()
+
+
 def _short_random_id() -> str:
     """Generate a short random hex suffix for agent name uniqueness."""
     return secrets.token_hex(_SHORT_ID_LENGTH // 2)
@@ -522,8 +528,13 @@ def pull_agent_branch(
     host: OnlineHostInterface,
     destination: Path,
     cg: ConcurrencyGroup,
+    base_commit: str | None = None,
 ) -> str | None:
     """Pull the agent's git branch into the local repo.
+
+    If base_commit is provided, a new local branch is created from that commit
+    before pulling. This is needed for remote agents where the branch doesn't
+    exist locally yet.
 
     Returns the branch name if successful, None otherwise.
     """
@@ -533,6 +544,9 @@ def pull_agent_branch(
         return None
 
     try:
+        if base_commit is not None:
+            _create_local_branch(destination, branch_name, base_commit, cg)
+
         pull_git(
             agent=_get_agent_from_host(host, agent_detail.id),
             host=host,
@@ -548,6 +562,13 @@ def pull_agent_branch(
     except (MngError, HostError) as exc:
         logger.warning("Failed to pull branch from agent '{}': {}", agent_detail.name, exc)
         return None
+
+
+def _create_local_branch(destination: Path, branch_name: str, base_commit: str, cg: ConcurrencyGroup) -> None:
+    """Create a local git branch from a base commit and switch to it."""
+    cg.run_process_to_completion(["git", "branch", branch_name, base_commit], cwd=destination)
+    cg.run_process_to_completion(["git", "checkout", branch_name], cwd=destination)
+    logger.info("Created local branch '{}' from commit {}", branch_name, base_commit[:8])
 
 
 def _get_agent_from_host(
@@ -629,8 +650,14 @@ def gather_results(
     hosts: dict[str, OnlineHostInterface],
     source_dir: Path,
     cg: ConcurrencyGroup,
+    base_commit: str | None = None,
 ) -> list[TestMapReduceResult]:
-    """Gather results from all finished agents, pulling branches where appropriate."""
+    """Gather results from all finished agents, pulling branches where appropriate.
+
+    If base_commit is provided, a local branch is created from that commit before
+    pulling each agent's changes. This is needed for remote agents whose branches
+    don't exist locally.
+    """
     results = _collect_agent_results(
         agents=agents,
         final_details=final_details,
@@ -646,7 +673,7 @@ def gather_results(
             agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
             detail = final_details.get(agent_id_str)
             if detail is not None:
-                pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg)
+                pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
 
     return results
 

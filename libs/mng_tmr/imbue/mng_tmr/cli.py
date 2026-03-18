@@ -8,7 +8,6 @@ from typing import assert_never
 
 import click
 
-from imbue.imbue_common.model_update import to_update
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.list import list_agents
 from imbue.mng.api.providers import get_provider_instance
@@ -34,6 +33,7 @@ from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import gather_results
 from imbue.mng_tmr.api import generate_html_report
+from imbue.mng_tmr.api import get_base_commit
 from imbue.mng_tmr.api import launch_all_test_agents
 from imbue.mng_tmr.api import launch_integrator_agent
 from imbue.mng_tmr.api import poll_until_all_done
@@ -54,6 +54,7 @@ class TmrCliOptions(CommonCliOptions):
     testing_flags: tuple[str, ...]
     agent_type: str
     provider: str
+    integrator_provider: str
     env: tuple[str, ...]
     label: tuple[str, ...]
     prompt_suffix: str | None
@@ -194,6 +195,12 @@ def _emit_summary(results: list[TestMapReduceResult], output_opts: OutputOptions
     help="Provider for agent hosts (e.g. local, docker, modal)",
 )
 @click.option(
+    "--integrator-provider",
+    default="local",
+    show_default=True,
+    help="Provider for the integrator agent (defaults to local since there is only one)",
+)
+@click.option(
     "--env",
     multiple=True,
     help="Environment variable KEY=VALUE to pass to agents [repeatable]",
@@ -259,7 +266,10 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
     testing_flags = opts.testing_flags
 
-    # Step 1: Collect tests (positional paths + testing flags go to discovery)
+    # Step 1: Remember the base commit so we can create local branches for remote agents
+    base_commit = get_base_commit(source_dir, mng_ctx.concurrency_group)
+
+    # Step 2: Collect tests (positional paths + testing flags go to discovery)
     test_node_ids = collect_tests(
         pytest_args=opts.pytest_args + testing_flags,
         source_dir=source_dir,
@@ -267,19 +277,21 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     )
     _emit_test_count(len(test_node_ids), output_opts)
 
-    # Step 2: Get the local host for source_location (tests are collected locally)
+    # Step 3: Get the local host for source_location (tests are collected locally)
     local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
     local_host_ref = local_provider.get_host(HostName("localhost"))
     source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
 
-    # Step 3: Build launch config and launch agents
+    # Step 4: Build launch config and launch agents
+    env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
+    label_options = resolve_labels(opts.label)
     config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
         agent_type=AgentTypeName(opts.agent_type),
         provider_name=ProviderInstanceName(opts.provider),
-        env_options=AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env)),
-        label_options=resolve_labels(opts.label),
+        env_options=env_options,
+        label_options=label_options,
     )
     agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
         test_node_ids=test_node_ids,
@@ -290,9 +302,6 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         use_snapshot=opts.use_snapshot,
     )
     _emit_agents_launched(len(agent_infos), output_opts)
-    # Update config with snapshot for integrator phase
-    if snapshot_name is not None:
-        config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
 
     # Step 4: Compute html_path before polling
     if opts.output_html is not None:
@@ -324,13 +333,22 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         hosts=agent_hosts,
         source_dir=source_dir,
         cg=mng_ctx.concurrency_group,
+        base_commit=base_commit,
     )
 
     # Step 8: Write report with final results
     generate_html_report(results, html_path)
 
-    # Step 9: Integrate fix branches and write final report
-    integrator_branch = _run_integrator_phase(results, config, mng_ctx, opts)
+    # Step 9: Build integrator config (defaults to local provider) and integrate
+    integrator_config = TmrLaunchConfig(
+        source_dir=source_dir,
+        source_host=source_host,
+        agent_type=AgentTypeName(opts.agent_type),
+        provider_name=ProviderInstanceName(opts.integrator_provider),
+        env_options=env_options,
+        label_options=label_options,
+    )
+    integrator_branch = _run_integrator_phase(results, integrator_config, mng_ctx, opts)
     generate_html_report(results, html_path, integrator_branch=integrator_branch)
     _emit_report_path(html_path, output_opts)
     _emit_summary(results, output_opts)
