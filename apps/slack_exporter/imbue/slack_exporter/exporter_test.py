@@ -429,6 +429,7 @@ def test_run_export_refresh_forces_refetch(temp_output_dir: Path) -> None:
         channels=settings.channels,
         default_oldest=settings.default_oldest,
         output_dir=settings.output_dir,
+        reaction_lookback=settings.reaction_lookback,
         cache_ttl_seconds=settings.cache_ttl_seconds,
         refresh=True,
     )
@@ -688,3 +689,25 @@ def test_run_export_reaction_lookback_rechecks_relevant_threads(temp_output_dir:
     reply_reactions = [r for r in reaction_records if r.get("thread_ts") is not None]
     assert len(reply_reactions) == 1
     assert reply_reactions[0]["raw"]["reactions"][0]["name"] == "heart"
+
+
+def test_run_export_all_channels_when_channels_is_none(temp_output_dir: Path) -> None:
+    """When channels is None, all channels from the fetched channel list are exported."""
+    settings = ExporterSettings(
+        channels=None,
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        reaction_lookback=0,
+        cache_ttl_seconds=0,
+    )
+    caller, counts = _tracking_api_caller(
+        channel_data=[
+            {"id": "C123", "name": "general", "is_member": True},
+            {"id": "C456", "name": "random", "is_member": True},
+        ],
+        message_data=[{"ts": "1700000000.000001", "text": "hello"}],
+    )
+    run_export(settings, api_caller=caller)
+
+    # Should have fetched messages for both channels (forward fetch + reaction scan per channel)
+    assert counts.get("conversations.history", 0) == 4
