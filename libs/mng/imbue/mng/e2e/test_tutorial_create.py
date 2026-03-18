@@ -242,7 +242,7 @@ def test_create_no_git(e2e: Session) -> None:
     e2e.run(f"mkdir -p {nogit_dir}")
     e2e.run(f"echo 'import time; time.sleep(99999)' > {nogit_dir}/script.py")
     result = e2e.run(
-        f"mng create {name} --source-path {nogit_dir} --command python -- script.py --no-connect --no-ensure-clean",
+        f"mng create {name} --source-path {nogit_dir} --command python --no-connect --no-ensure-clean -- script.py",
     )
     expect(result).to_succeed()
 
