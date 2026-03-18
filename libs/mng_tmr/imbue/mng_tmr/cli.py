@@ -29,6 +29,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import SnapshotName
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import gather_results
@@ -59,6 +60,7 @@ class TmrCliOptions(CommonCliOptions):
     label: tuple[str, ...]
     prompt_suffix: str | None
     use_snapshot: bool
+    snapshot: str | None
     poll_interval: float
     timeout: float
     integrator_timeout: float
@@ -230,6 +232,11 @@ def _emit_summary(results: list[TestMapReduceResult], output_opts: OutputOptions
     help="Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers)",
 )
 @click.option(
+    "--snapshot",
+    default=None,
+    help="Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior)",
+)
+@click.option(
     "--poll-interval",
     default=10.0,
     show_default=True,
@@ -293,6 +300,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     # Step 4: Build launch config and launch agents
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     label_options = resolve_labels(opts.label)
+    provided_snapshot = SnapshotName(opts.snapshot) if opts.snapshot is not None else None
     config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
@@ -300,14 +308,16 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
         label_options=label_options,
+        snapshot=provided_snapshot,
     )
+    # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
     agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
         test_node_ids=test_node_ids,
         config=config,
         mng_ctx=mng_ctx,
         pytest_flags=testing_flags,
         prompt_suffix=opts.prompt_suffix or "",
-        use_snapshot=opts.use_snapshot,
+        use_snapshot=opts.use_snapshot and provided_snapshot is None,
     )
     _emit_agents_launched(len(agent_infos), output_opts)
 
