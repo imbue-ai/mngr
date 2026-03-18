@@ -126,6 +126,7 @@ def _run_integrator_phase(
     config: TmrLaunchConfig,
     mng_ctx: MngContext,
     opts: TmrCliOptions,
+    base_commit: str | None = None,
 ) -> str | None:
     """Launch an integrator agent to merge fix branches, if any exist."""
     fix_branches = [
@@ -152,6 +153,7 @@ def _run_integrator_phase(
     )
 
     if integrator_branch is not None:
+        is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
         list_result = list_agents(
             mng_ctx=mng_ctx,
             is_streaming=False,
@@ -159,7 +161,13 @@ def _run_integrator_phase(
         )
         for agent_detail in list_result.agents:
             if str(agent_detail.id) == str(integrator.agent_id):
-                pull_agent_branch(agent_detail, integrator_host, config.source_dir, mng_ctx.concurrency_group)
+                pull_agent_branch(
+                    agent_detail,
+                    integrator_host,
+                    config.source_dir,
+                    mng_ctx.concurrency_group,
+                    base_commit=base_commit if is_remote else None,
+                )
                 break
 
     return integrator_branch
@@ -350,7 +358,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         env_options=env_options,
         label_options=label_options,
     )
-    integrator_branch = _run_integrator_phase(results, integrator_config, mng_ctx, opts)
+    integrator_branch = _run_integrator_phase(results, integrator_config, mng_ctx, opts, base_commit=base_commit)
     generate_html_report(results, html_path, integrator_branch=integrator_branch)
     _emit_report_path(html_path, output_opts)
     _emit_summary(results, output_opts)
