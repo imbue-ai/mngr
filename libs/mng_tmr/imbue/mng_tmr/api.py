@@ -896,11 +896,16 @@ def wait_for_integrator(
     agent_id_str = str(integrator.agent_id)
 
     while time.monotonic() < deadline:
-        list_result = list_agents(
-            mng_ctx=mng_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.CONTINUE,
-        )
+        try:
+            list_result = list_agents(
+                mng_ctx=mng_ctx,
+                is_streaming=False,
+                error_behavior=ErrorBehavior.CONTINUE,
+            )
+        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+            logger.warning("Integrator polling failed (will retry next cycle): {}", exc)
+            time.sleep(poll_interval_seconds)
+            continue
 
         for agent_detail in list_result.agents:
             if str(agent_detail.id) != agent_id_str:

@@ -311,7 +311,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         snapshot=provided_snapshot,
     )
     # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
-    agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
+    agent_infos, agent_hosts, _snapshot_name = launch_all_test_agents(
         test_node_ids=test_node_ids,
         config=config,
         mng_ctx=mng_ctx,
