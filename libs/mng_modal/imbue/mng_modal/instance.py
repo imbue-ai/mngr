@@ -1715,7 +1715,7 @@ log "=== Shutdown script completed ==="
         dockerfile_path = Path(config.dockerfile) if config.dockerfile else None
         context_dir_path = Path(config.context_dir) if config.context_dir else None
 
-        if not base_image and not dockerfile_path:
+        if not base_image and not dockerfile_path and snapshot is None:
             logger.warning(
                 "No image or Dockerfile specified -- building from mng default Dockerfile. "
                 "Consider using your own Dockerfile (-b --file=<path>) to include "

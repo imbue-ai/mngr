@@ -4,6 +4,7 @@ import threading
 import pytest
 
 from imbue.mng.api.observe import get_agent_states_events_path
+from imbue.mng.api.observe import get_default_events_base_dir
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.utils.polling import wait_for
 from imbue.mng_notifications.config import NotificationsPluginConfig
@@ -15,7 +16,7 @@ from imbue.mng_notifications.watcher import watch_for_waiting_agents
 def test_watcher_detects_running_to_waiting_via_observe_events(
     temp_mng_ctx: MngContext,
 ) -> None:
-    events_path = get_agent_states_events_path(temp_mng_ctx.config)
+    events_path = get_agent_states_events_path(get_default_events_base_dir(temp_mng_ctx.config))
     events_path.parent.mkdir(parents=True, exist_ok=True)
 
     notifier = RecordingNotifier()
