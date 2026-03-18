@@ -15,6 +15,7 @@ from loguru import logger
 from markdown_it import MarkdownIt
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.model_update import to_update
@@ -440,11 +441,16 @@ def poll_until_all_done(
             return final_details, set(pending_ids)
 
         logger.info("Polling {} pending agent(s)...", len(pending_ids))
-        list_result = list_agents(
-            mng_ctx=mng_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.CONTINUE,
-        )
+        try:
+            list_result = list_agents(
+                mng_ctx=mng_ctx,
+                is_streaming=False,
+                error_behavior=ErrorBehavior.CONTINUE,
+            )
+        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+            logger.warning("Polling failed (will retry next cycle): {}", exc)
+            time.sleep(poll_interval_seconds)
+            continue
 
         seen_ids: set[str] = set()
         changed = False
