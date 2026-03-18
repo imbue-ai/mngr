@@ -440,7 +440,8 @@ def poll_until_all_done(
                 generate_html_report(current_results, report_path)
             return final_details, set(pending_ids)
 
-        logger.info("Polling {} pending agent(s)...", len(pending_ids))
+        pending_names = [agent_id_to_info[aid].agent_name for aid in pending_ids]
+        logger.info("Polling {} pending agent(s): {}", len(pending_ids), ", ".join(str(n) for n in pending_names))
         try:
             list_result = list_agents(
                 mng_ctx=mng_ctx,
