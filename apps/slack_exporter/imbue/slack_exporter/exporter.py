@@ -5,8 +5,10 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import TypeVar
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.slack_exporter.channels import fetch_channel_info
@@ -15,6 +17,7 @@ from imbue.slack_exporter.channels import fetch_self_identity
 from imbue.slack_exporter.channels import fetch_user_list
 from imbue.slack_exporter.channels import resolve_channel_id
 from imbue.slack_exporter.data_types import ChannelConfig
+from imbue.slack_exporter.data_types import ChannelEvent
 from imbue.slack_exporter.data_types import ChannelExportState
 from imbue.slack_exporter.data_types import ExporterSettings
 from imbue.slack_exporter.data_types import MessageEvent
@@ -59,6 +62,8 @@ _SLACK_SOURCE = EventSource("slack")
 _T = TypeVar("_T")
 
 _REACTION_SCAN_MESSAGE_LIMIT = 100
+
+_CHANNEL_INFO_THREAD_TIMEOUT_SECONDS: Final[float] = 600.0
 
 
 def _diff_and_save(
@@ -212,6 +217,25 @@ def _detect_relevant_threads(
     return results
 
 
+def _fetch_and_save_channel_info(
+    api_caller: SlackApiCaller,
+    channels_for_info: list[ChannelEvent],
+    settings: ExporterSettings,
+) -> None:
+    """Fetch per-channel unread markers via conversations.info and save changes."""
+    fresh_markers, _channel_latest = fetch_channel_info(api_caller, channels_for_info)
+    existing_markers = load_existing_unread_markers(settings.output_dir)
+    _diff_and_save(
+        fresh_items=fresh_markers,
+        existing_by_key=dict(existing_markers),
+        get_key=lambda m: m.channel_id,
+        get_raw=lambda m: m.raw,
+        save_fn=save_unread_marker_events,
+        output_dir=settings.output_dir,
+        entity_name="unread markers",
+    )
+
+
 def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     """Run the full export process: load state, resolve channels, fetch new messages, save."""
     existing_channel_by_id = load_existing_channels(settings.output_dir)
@@ -261,25 +285,6 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         )
         save_fetch_timestamp(settings.output_dir, DataType.CHANNELS, now)
 
-    # Fetch per-channel info (unread markers + latest message timestamps).
-    # Only fetch for channels we will actually export to avoid unnecessary API calls.
-    if settings.channels is not None:
-        export_channel_names = {config.name for config in settings.channels}
-        channels_for_info = [ch for ch in fresh_channels if ch.channel_name in export_channel_names]
-    else:
-        channels_for_info = fresh_channels
-    fresh_markers, channel_latest = fetch_channel_info(api_caller, channels_for_info)
-    existing_markers = load_existing_unread_markers(settings.output_dir)
-    _diff_and_save(
-        fresh_items=fresh_markers,
-        existing_by_key=dict(existing_markers),
-        get_key=lambda m: m.channel_id,
-        get_raw=lambda m: m.raw,
-        save_fn=save_unread_marker_events,
-        output_dir=settings.output_dir,
-        entity_name="unread markers",
-    )
-
     channel_id_by_name: dict[SlackChannelName, SlackChannelId] = {
         event.channel_name: event.channel_id for event in existing_channel_by_id.values()
     }
@@ -302,36 +307,52 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         )
         save_fetch_timestamp(settings.output_dir, DataType.USERS, now)
 
-    # Export messages, replies, reactions, and relevant threads per channel
-    latest_reply_by_thread = _build_latest_reply_by_thread(known_reply_keys)
-    channel_export_metadata = load_channel_export_metadata(settings.output_dir)
-
     # Determine which channels to export messages from
     if settings.channels is not None:
         channels_to_export = settings.channels
+        export_channel_names = {config.name for config in settings.channels}
+        channels_for_info = [ch for ch in fresh_channels if ch.channel_name in export_channel_names]
     else:
         channels_to_export = tuple(ChannelConfig(name=event.channel_name) for event in fresh_channels)
+        channels_for_info = fresh_channels
         logger.info("Exporting all %d channels", len(channels_to_export))
 
-    total_export_channels = len(channels_to_export)
-    for channel_idx, channel_config in enumerate(channels_to_export):
-        logger.info("Exporting channel %d/%d: %s", channel_idx + 1, total_export_channels, channel_config.name)
-        channel_id = resolve_channel_id(channel_config.name, fresh_channels, channel_id_by_name)
-        _export_single_channel(
-            channel_config=channel_config,
-            channel_id=channel_id,
-            state_by_channel_id=state_by_channel_id,
-            known_message_keys=known_message_keys,
-            known_reply_keys=known_reply_keys,
-            latest_reply_by_thread=latest_reply_by_thread,
-            channel_export_metadata=channel_export_metadata,
-            channel_latest=channel_latest.get(channel_id),
-            existing_reactions=existing_reactions,
-            existing_relevant_threads=existing_relevant_threads,
-            user_id=self_identity.user_id,
-            settings=settings,
-            api_caller=api_caller,
+    # Run channel info fetch (unread markers) and message export in parallel.
+    # Both make Slack API calls that are independently rate-limited, so parallelizing
+    # cuts total wall-clock time.
+    latest_reply_by_thread = _build_latest_reply_by_thread(known_reply_keys)
+    channel_export_metadata = load_channel_export_metadata(settings.output_dir)
+
+    with ConcurrencyGroup(
+        name="slack-export",
+        exit_timeout_seconds=_CHANNEL_INFO_THREAD_TIMEOUT_SECONDS,
+    ) as cg:
+        cg.start_new_thread(
+            target=_fetch_and_save_channel_info,
+            args=(api_caller, channels_for_info, settings),
+            name="channel-info",
         )
+
+        # Export messages in the main thread
+        total_export_channels = len(channels_to_export)
+        for channel_idx, channel_config in enumerate(channels_to_export):
+            logger.info("Exporting channel %d/%d: %s", channel_idx + 1, total_export_channels, channel_config.name)
+            channel_id = resolve_channel_id(channel_config.name, fresh_channels, channel_id_by_name)
+            _export_single_channel(
+                channel_config=channel_config,
+                channel_id=channel_id,
+                state_by_channel_id=state_by_channel_id,
+                known_message_keys=known_message_keys,
+                known_reply_keys=known_reply_keys,
+                latest_reply_by_thread=latest_reply_by_thread,
+                channel_export_metadata=channel_export_metadata,
+                channel_latest=None,
+                existing_reactions=existing_reactions,
+                existing_relevant_threads=existing_relevant_threads,
+                user_id=self_identity.user_id,
+                settings=settings,
+                api_caller=api_caller,
+            )
 
 
 def _export_single_channel(
