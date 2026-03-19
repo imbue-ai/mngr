@@ -97,6 +97,7 @@ _SCHEDULED_STATE_FILENAME: Final[str] = ".scheduled_events_state.json"
 _SOURCE_MIND_IDLE: Final[str] = "mind/idle"
 _SOURCE_MIND_SCHEDULE: Final[str] = "mind/schedule"
 _SOURCE_MIND_ONBOARDING: Final[str] = "mind/onboarding"
+_SOURCE_MIND_FILTER_ERROR: Final[str] = "mind/filter_error"
 
 
 # -- Settings --
@@ -1030,11 +1031,18 @@ def _apply_event_batch_filter(
     """Apply the event_batch_filter_script and remove filtered-out events.
 
     Lines that the script outputs as empty or '{}' are dropped.
-    If the script fails, the original lines are returned unmodified.
+    If the script fails, a filter_error event is prepended to the original
+    (unfiltered) lines so the agent knows the filter broke.
     """
     filtered_lines = _run_event_batch_filter_script(deliverable_lines, script_path)
     if filtered_lines is None:
-        return deliverable_lines
+        # Prepend a failure event so the agent knows the filter script broke
+        error_event = _make_synthetic_event_line(
+            "filter_error",
+            _SOURCE_MIND_FILTER_ERROR,
+            {"script_path": script_path, "message": "Event batch filter script failed; delivering unfiltered events"},
+        )
+        return [error_event, *deliverable_lines]
 
     result: list[str] = []
     for line in filtered_lines:

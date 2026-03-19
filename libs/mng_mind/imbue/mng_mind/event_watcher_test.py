@@ -2371,15 +2371,20 @@ def test_apply_event_batch_filter_drops_empty_and_empty_dict_lines(tmp_path: Pat
     assert result[0] == '{"source":"keep"}'
 
 
-def test_apply_event_batch_filter_returns_original_on_script_failure(tmp_path: Path) -> None:
-    """If the script fails, the original lines should be returned unmodified."""
+def test_apply_event_batch_filter_prepends_error_event_on_script_failure(tmp_path: Path) -> None:
+    """If the script fails, a filter_error event is prepended to the original lines."""
     script = tmp_path / "failing_filter.sh"
     script.write_text("#!/bin/bash\nexit 1\n")
     script.chmod(0o755)
 
     lines = ['{"source":"a"}', '{"source":"b"}']
     result = _apply_event_batch_filter(lines, str(script))
-    assert result == lines
+    assert len(result) == 3
+    error_event = json.loads(result[0])
+    assert error_event["type"] == "filter_error"
+    assert error_event["source"] == "mind/filter_error"
+    assert error_event["script_path"] == str(script)
+    assert result[1:] == lines
 
 
 def test_apply_event_batch_filter_returns_empty_when_all_filtered(tmp_path: Path) -> None:
