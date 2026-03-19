@@ -313,7 +313,9 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         channels_to_export = tuple(ChannelConfig(name=event.channel_name) for event in fresh_channels)
         logger.info("Exporting all %d channels", len(channels_to_export))
 
-    for channel_config in channels_to_export:
+    total_export_channels = len(channels_to_export)
+    for channel_idx, channel_config in enumerate(channels_to_export):
+        logger.info("Exporting channel %d/%d: %s", channel_idx + 1, total_export_channels, channel_config.name)
         channel_id = resolve_channel_id(channel_config.name, fresh_channels, channel_id_by_name)
         _export_single_channel(
             channel_config=channel_config,
@@ -364,8 +366,6 @@ def _export_single_channel(
     all_fetched: list[MessageEvent] = []
 
     if has_new_messages:
-        logger.info("Exporting channel %s (ID: %s)", channel_config.name, channel_id)
-
         # Forward fetch: get new messages since last export (or from requested oldest on first run)
         if existing_state and existing_state.latest_message_timestamp:
             forward_oldest = existing_state.latest_message_timestamp
@@ -492,14 +492,17 @@ def _export_replies_for_channel(
     if not thread_parents:
         return [], []
 
-    logger.info("  Found %d threads to check for replies", len(thread_parents))
+    total_thread_parents = len(thread_parents)
+    logger.info("  Found %d threads to check for replies", total_thread_parents)
     total_new_replies = 0
     skipped_threads = 0
     skipped_thread_ts_values: list[SlackMessageTimestamp] = []
     all_reply_reactions: list[ReactionEvent] = []
     thread_replies: dict[SlackMessageTimestamp, list[ReplyEvent]] = {}
 
-    for parent in thread_parents:
+    for thread_idx, parent in enumerate(thread_parents):
+        if total_thread_parents > 1:
+            logger.info("    Checking thread %d/%d", thread_idx + 1, total_thread_parents)
         thread_ts = parent.message_ts
         thread_key = (channel_id, thread_ts)
 

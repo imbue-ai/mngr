@@ -113,7 +113,10 @@ def fetch_channel_info(
     """
     markers: list[UnreadMarkerEvent] = []
     latest_by_channel: dict[SlackChannelId, SlackMessageTimestamp] = {}
-    for event in channel_events:
+    total_channels = len(channel_events)
+    for channel_idx, event in enumerate(channel_events):
+        if total_channels > 1:
+            logger.info("  Fetching channel info %d/%d: %s", channel_idx + 1, total_channels, event.channel_name)
         data = api_caller("conversations.info", {"channel": str(event.channel_id)})
         channel_info = data.get("channel", {})
 
