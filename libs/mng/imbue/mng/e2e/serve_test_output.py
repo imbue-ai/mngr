@@ -125,7 +125,48 @@ def _linkify_agent_names(rendered_html: str, cast_stems: list[str]) -> str:
     return rendered_html
 
 
-def _html_page(title: str, body: str) -> str:
+def _html_page(title: str, body: str, sidebar: str | None = None) -> str:
+    sidebar_css = ""
+    sidebar_js = ""
+    sidebar_html = ""
+    body_wrapper_start = ""
+    body_wrapper_end = ""
+
+    if sidebar is not None:
+        sidebar_css = """
+  .layout {{ display: flex; gap: 0; }}
+  .sidebar {{ width: 240px; min-width: 240px; border-right: 1px solid #ddd; padding: 0.5em 1em; font-size: 0.85em; overflow-y: auto; max-height: calc(100vh - 4em); position: sticky; top: 2em; }}
+  .sidebar.collapsed {{ width: 0; min-width: 0; padding: 0; overflow: hidden; border-right: none; }}
+  .sidebar ul {{ list-style: none; padding: 0; margin: 0; }}
+  .sidebar li {{ margin: 0.2em 0; }}
+  .sidebar li.active {{ font-weight: bold; }}
+  .sidebar a {{ color: #333; }}
+  .sidebar-toggle {{ cursor: pointer; user-select: none; font-size: 0.85em; color: #666; margin-bottom: 0.5em; }}
+  .sidebar-toggle:hover {{ color: #0066cc; }}
+  .main-content {{ flex: 1; min-width: 0; padding-left: 1.5em; }}"""
+        sidebar_js = """
+<script>
+(function() {
+  var KEY = 'e2e-sidebar-collapsed';
+  var sidebar = document.querySelector('.sidebar');
+  var toggle = document.querySelector('.sidebar-toggle');
+  if (!sidebar || !toggle) return;
+  if (localStorage.getItem(KEY) === 'true') {
+    sidebar.classList.add('collapsed');
+    toggle.textContent = '>> Tests';
+  }
+  toggle.addEventListener('click', function() {
+    sidebar.classList.toggle('collapsed');
+    var collapsed = sidebar.classList.contains('collapsed');
+    localStorage.setItem(KEY, collapsed);
+    toggle.textContent = collapsed ? '>> Tests' : '<< Tests';
+  });
+})();
+</script>"""
+        sidebar_html = f'<div class="sidebar"><div class="sidebar-toggle">&lt;&lt; Tests</div>{sidebar}</div>'
+        body_wrapper_start = '<div class="layout">' + sidebar_html + '<div class="main-content">'
+        body_wrapper_end = "</div></div>"
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -145,19 +186,40 @@ def _html_page(title: str, body: str) -> str:
   .transcript {{ background: #1e1e1e; color: #d4d4d4; padding: 1em; border-radius: 6px; overflow-x: auto; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }}
   .transcript .cmd-block {{ border-top: 1px solid #444; padding-top: 0.6em; margin-top: 0.6em; }}
   .transcript .cmd-block:first-child {{ border-top: none; padding-top: 0; margin-top: 0; }}
-  .transcript .comment {{ color: #6a9955; }}
+  .transcript .comment {{ color: #dcdcaa; }}
   .transcript .prompt {{ color: #569cd6; }}
   .transcript .stderr-prefix {{ color: #f44747; }}
   .transcript .exit-code {{ color: #888; font-style: italic; }}
   .cast-player {{ margin: 1em 0; }}
   .cast-label {{ font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; color: #666; margin-bottom: 0.3em; }}
+  {sidebar_css}
 </style>
 </head>
 <body>
+{body_wrapper_start}
 {body}
+{body_wrapper_end}
 <script src="{_ASCIINEMA_PLAYER_JS}"></script>
+{sidebar_js}
 </body>
 </html>"""
+
+
+def _render_tutorial_block(text: str) -> str:
+    """Render a tutorial block with the same color scheme as transcripts.
+
+    Lines starting with # are comments (yellow), everything else is a command (blue).
+    """
+    rendered_lines: list[str] = []
+    for line in text.splitlines():
+        escaped = html.escape(line)
+        if line.lstrip().startswith("#"):
+            rendered_lines.append(f'<span class="comment">{escaped}</span>')
+        elif line.strip():
+            rendered_lines.append(f'<span class="prompt">{escaped}</span>')
+        else:
+            rendered_lines.append(escaped)
+    return '<pre class="transcript">' + "\n".join(rendered_lines) + "</pre>"
 
 
 def _render_transcript(text: str, cast_stems: list[str] | None = None) -> str:
@@ -236,9 +298,18 @@ def _run_page(run_name: str) -> str | None:
 
 def _test_page(run_name: str, test_name: str) -> str | None:
     """Show transcript and cast players for a single test."""
-    test_dir = _TEST_OUTPUT_DIR / run_name / test_name
+    run_dir = _TEST_OUTPUT_DIR / run_name
+    test_dir = run_dir / test_name
     if not test_dir.is_dir():
         return None
+
+    # Build sidebar with all tests in this run
+    all_tests = sorted(d.name for d in run_dir.iterdir() if d.is_dir())
+    sidebar_items: list[str] = []
+    for t in all_tests:
+        cls = ' class="active"' if t == test_name else ""
+        sidebar_items.append(f'<li{cls}><a href="/run/{run_name}/{t}">{t}</a></li>')
+    sidebar = "<ul>" + "\n".join(sidebar_items) + "</ul>"
 
     nav = (
         f'<nav><a href="/">Test Runs</a> / '
@@ -251,7 +322,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     tutorial_block_path = test_dir / "tutorial_block.txt"
     if tutorial_block_path.exists():
         parts.append("<h2>Tutorial Block</h2>")
-        parts.append(f'<pre class="transcript">{html.escape(tutorial_block_path.read_text())}</pre>')
+        parts.append(_render_tutorial_block(tutorial_block_path.read_text()))
 
     # Collect cast files first so we can link agent names in the transcript
     cast_files = sorted(test_dir.glob("*.cast"))
@@ -294,7 +365,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
             f"</script>"
         )
 
-    return _html_page(f"{test_name} - {run_name}", "\n".join(parts))
+    return _html_page(f"{test_name} - {run_name}", "\n".join(parts), sidebar=sidebar)
 
 
 class _Handler(SimpleHTTPRequestHandler):
