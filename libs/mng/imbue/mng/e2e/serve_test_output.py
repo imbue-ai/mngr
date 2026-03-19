@@ -110,6 +110,21 @@ def _ansi_to_html(text: str) -> str:
     return "".join(result)
 
 
+def _linkify_agent_names(rendered_html: str, cast_stems: list[str]) -> str:
+    """Replace occurrences of cast stem names in already-rendered HTML with anchor links.
+
+    Only replaces occurrences that appear as plain text (not inside HTML tags).
+    The cast stems are agent names like "e2e-abc123" which are used as anchor IDs
+    for the corresponding player sections.
+    """
+    for stem in cast_stems:
+        escaped_stem = html.escape(stem)
+        # The anchor ID uses the stem directly
+        link = f'<a href="#cast-{escaped_stem}" style="color:#6cb6ff;text-decoration:underline">{escaped_stem}</a>'
+        rendered_html = rendered_html.replace(escaped_stem, link, 1)
+    return rendered_html
+
+
 def _html_page(title: str, body: str) -> str:
     return f"""<!DOCTYPE html>
 <html>
@@ -145,8 +160,12 @@ def _html_page(title: str, body: str) -> str:
 </html>"""
 
 
-def _render_transcript(text: str) -> str:
-    """Render a transcript into styled HTML blocks."""
+def _render_transcript(text: str, cast_stems: list[str] | None = None) -> str:
+    """Render a transcript into styled HTML blocks.
+
+    If cast_stems is provided, the first occurrence of each stem in the
+    transcript is turned into an anchor link to the corresponding player.
+    """
     lines = text.splitlines()
 
     # Split into blocks: a new block starts when a comment or command line
@@ -186,7 +205,12 @@ def _render_transcript(text: str) -> str:
                 rendered_lines.append(_ansi_to_html(line))
         html_parts.append('<div class="cmd-block">' + "\n".join(rendered_lines) + "</div>")
 
-    return '<pre class="transcript">' + "\n".join(html_parts) + "</pre>"
+    rendered = '<pre class="transcript">' + "\n".join(html_parts) + "</pre>"
+
+    if cast_stems:
+        rendered = _linkify_agent_names(rendered, cast_stems)
+
+    return rendered
 
 
 def _index_page() -> str:
@@ -196,7 +220,7 @@ def _index_page() -> str:
         reverse=True,
     )
     items = "\n".join(f'<li><a href="/run/{r.name}">{r.name}</a></li>' for r in runs)
-    return _html_page("E2E Test Runs", f"<h1>Test Runs</h1>\n<ul>\n{items}\n</ul>")
+    return _html_page("E2E Test Runs", "<nav><b>Test Runs</b></nav>\n<ul>\n" + items + "\n</ul>")
 
 
 def _run_page(run_name: str) -> str | None:
@@ -206,8 +230,8 @@ def _run_page(run_name: str) -> str | None:
         return None
     tests = sorted(d for d in run_dir.iterdir() if d.is_dir())
     items = "\n".join(f'<li><a href="/run/{run_name}/{t.name}">{t.name}</a></li>' for t in tests)
-    nav = '<nav><a href="/">&larr; all runs</a></nav>'
-    return _html_page(f"Run {run_name}", f"{nav}<h1>Run {html.escape(run_name)}</h1>\n<ul>\n{items}\n</ul>")
+    nav = f'<nav><a href="/">Test Runs</a> / <b>{html.escape(run_name)}</b></nav>'
+    return _html_page(f"Run {run_name}", f"{nav}\n<ul>\n{items}\n</ul>")
 
 
 def _test_page(run_name: str, test_name: str) -> str | None:
@@ -217,30 +241,35 @@ def _test_page(run_name: str, test_name: str) -> str | None:
         return None
 
     nav = (
-        f'<nav><a href="/">&larr; all runs</a> / '
-        f'<a href="/run/{html.escape(run_name)}">{html.escape(run_name)}</a></nav>'
+        f'<nav><a href="/">Test Runs</a> / '
+        f'<a href="/run/{html.escape(run_name)}">{html.escape(run_name)}</a> / '
+        f"<b>{html.escape(test_name)}</b></nav>"
     )
-    parts = [f"{nav}<h1>{html.escape(test_name)}</h1>"]
+    parts = [nav]
+
+    # Collect cast files first so we can link agent names in the transcript
+    cast_files = sorted(test_dir.glob("*.cast"))
+    cast_stems = [f.stem for f in cast_files]
 
     # Transcript
     transcript_path = test_dir / "transcript.txt"
     if transcript_path.exists():
         parts.append("<h2>Transcript</h2>")
-        parts.append(_render_transcript(transcript_path.read_text()))
+        parts.append(_render_transcript(transcript_path.read_text(), cast_stems=cast_stems))
 
-    # Cast files -- collect player init calls and run them after the JS loads
-    cast_files = sorted(test_dir.glob("*.cast"))
+    # Cast players
     player_inits: list[str] = []
     for i, cast_file in enumerate(cast_files):
         cast_url = f"/cast/{run_name}/{test_name}/{cast_file.name}"
-        parts.append(f"<h2>Recording: {html.escape(cast_file.stem)}</h2>")
+        anchor_id = f"cast-{html.escape(cast_file.stem)}"
+        parts.append(f'<h2 id="{anchor_id}">Recording: {html.escape(cast_file.stem)}</h2>')
         parts.append(f'<div class="cast-label">{html.escape(cast_file.name)}</div>')
         div_id = f"player-{i}"
         parts.append(f'<div id="{div_id}" class="cast-player"></div>')
         player_inits.append(
             f"AsciinemaPlayer.create({json.dumps(cast_url)}, "
             f"document.getElementById({json.dumps(div_id)}), "
-            f"{{fit: 'width', theme: 'asciinema', rows: 20}});"
+            f"{{fit: 'none', terminalFontSize: '12px', theme: 'asciinema'}});"
         )
 
     if player_inits:
@@ -249,7 +278,6 @@ def _test_page(run_name: str, test_name: str) -> str | None:
         parts.append(
             f"<script>\n"
             f"document.addEventListener('DOMContentLoaded', function() {{\n"
-            f"  // Wait for asciinema-player JS to load\n"
             f"  var check = setInterval(function() {{\n"
             f"    if (typeof AsciinemaPlayer !== 'undefined') {{\n"
             f"      clearInterval(check);\n"
