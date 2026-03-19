@@ -4,19 +4,12 @@
 Usage: python scripts/tutorial_matcher.py <script_file> <test_directory>
 
 The script file is a shell script split into "blocks" by empty lines. The test
-directory contains pytest functions that reference blocks via write_tutorial_block()
-calls or docstrings. This script identifies blocks without tests and tests without
-blocks.
-
-Matching is purely text-based: no AST walking. A function is identified by a line
-starting with "def test_", and its body is all subsequent indented lines. The block
-text is extracted from either a write_tutorial_block(\"\"\"...\"\"\") call or a
-docstring, dedented, and compared against the script blocks.
+directory contains pytest functions that reference blocks. Matching is done by
+checking whether every line of a script block (after stripping leading whitespace)
+appears in the function body (also stripped of leading whitespace).
 """
 
-import re
 import sys
-import textwrap
 from pathlib import Path
 
 
@@ -30,10 +23,8 @@ def parse_script_blocks(script_path: Path) -> list[str]:
         stripped = block.strip()
         if not stripped:
             continue
-        # Discard the first block if it starts with a shebang.
         if i == 0 and stripped.startswith("#!"):
             continue
-        # Discard blocks where every line is empty or a comment.
         lines = stripped.splitlines()
         if all(line.strip() == "" or line.strip().startswith("#") for line in lines):
             continue
@@ -42,40 +33,54 @@ def parse_script_blocks(script_path: Path) -> list[str]:
     return blocks
 
 
-def _parse_test_functions(source: str) -> list[tuple[str, str]]:
-    """Parse test functions from Python source using simple text heuristics.
+def _strip_lines(text: str) -> list[str]:
+    """Strip leading whitespace from each line and drop empty lines."""
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
-    Returns list of (signature, body) tuples where body is the full indented
-    text of the function body.
+
+def _block_lines_in_body(block: str, body: str) -> bool:
+    """Check if all non-empty lines of a block appear in order in the body.
+
+    Both block and body lines are stripped of leading whitespace before comparison.
     """
+    block_lines = _strip_lines(block)
+    body_lines = _strip_lines(body)
+
+    if not block_lines:
+        return False
+
+    bi = 0
+    for body_line in body_lines:
+        if bi < len(block_lines) and body_line == block_lines[bi]:
+            bi += 1
+    return bi == len(block_lines)
+
+
+def _parse_test_functions(source: str) -> list[tuple[str, str]]:
+    """Parse test functions from Python source, returning (signature, body) tuples."""
     lines = source.splitlines()
     functions: list[tuple[str, str]] = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        # Look for "def test_..." at any indentation level
         stripped = line.lstrip()
         if not stripped.startswith("def test_"):
             i += 1
             continue
 
-        # Collect the full signature (may span multiple lines)
         sig_lines = [line]
-        # If the line doesn't have both ')' and ':', it continues
         while i + 1 < len(lines) and (")" not in sig_lines[-1] or ":" not in sig_lines[-1]):
             i += 1
             sig_lines.append(lines[i])
         signature = "\n".join(sig_lines)
         i += 1
 
-        # Determine the body indentation (first non-empty line after signature)
         body_lines: list[str] = []
         while i < len(lines):
             if lines[i].strip() == "":
                 body_lines.append("")
                 i += 1
                 continue
-            # Check if this line is indented more than the def line
             if lines[i][0] in (" ", "\t"):
                 body_lines.append(lines[i])
                 i += 1
@@ -88,40 +93,16 @@ def _parse_test_functions(source: str) -> list[tuple[str, str]]:
     return functions
 
 
-def _extract_block_text(body: str) -> str | None:
-    """Extract tutorial block text from a function body.
-
-    Looks for write_tutorial_block(\"\"\"...\"\"\") first, then falls back to
-    a docstring (\"\"\"...\"\"\"). In both cases, the content is dedented and
-    stripped.
-    """
-    # Try write_tutorial_block("""...""") -- match the triple-quoted string argument
-    m = re.search(r'write_tutorial_block\(\s*"""(.*?)"""\s*\)', body, re.DOTALL)
-    if m:
-        return textwrap.dedent(m.group(1)).strip()
-
-    # Fall back to docstring: first triple-quoted string in the body
-    m = re.search(r'"""(.*?)"""', body, re.DOTALL)
-    if m:
-        return textwrap.dedent(m.group(1)).strip()
-
-    return None
-
-
-def find_pytest_functions(test_dir: Path) -> list[tuple[str, str | None, Path]]:
-    """Find all test functions in a directory.
-
-    Returns (signature, block_text, file_path) tuples.
-    """
-    results: list[tuple[str, str | None, Path]] = []
+def find_pytest_functions(test_dir: Path) -> list[tuple[str, str, Path]]:
+    """Find all test functions in a directory, returning (signature, body, file_path) tuples."""
+    results: list[tuple[str, str, Path]] = []
 
     for py_file in sorted(test_dir.rglob("*.py")):
-        if py_file.name == "conftest.py" or py_file.name == "serve_test_output.py":
+        if py_file.name in ("conftest.py", "serve_test_output.py"):
             continue
         source = py_file.read_text()
         for signature, body in _parse_test_functions(source):
-            block_text = _extract_block_text(body)
-            results.append((signature, block_text, py_file))
+            results.append((signature, body, py_file))
 
     return results
 
@@ -144,24 +125,18 @@ def main() -> None:
     blocks = parse_script_blocks(script_path)
     pytest_funcs = find_pytest_functions(test_dir)
 
-    # Find blocks with no corresponding pytest function.
     unmatched_blocks: list[str] = []
     for block in blocks:
-        has_match = any(text is not None and block in text for _, text, _ in pytest_funcs)
+        has_match = any(_block_lines_in_body(block, body) for _, body, _ in pytest_funcs)
         if not has_match:
             unmatched_blocks.append(block)
 
-    # Find pytest functions with no corresponding block.
-    unmatched_funcs: list[tuple[str, str | None, Path]] = []
-    for signature, text, file_path in pytest_funcs:
-        if text is None:
-            unmatched_funcs.append((signature, text, file_path))
-            continue
-        has_match = any(block in text for block in blocks)
+    unmatched_funcs: list[tuple[str, str, Path]] = []
+    for signature, body, file_path in pytest_funcs:
+        has_match = any(_block_lines_in_body(block, body) for block in blocks)
         if not has_match:
-            unmatched_funcs.append((signature, text, file_path))
+            unmatched_funcs.append((signature, body, file_path))
 
-    # Output results.
     if not unmatched_blocks and not unmatched_funcs:
         print("All script blocks have corresponding pytest functions and vice versa.")
         sys.exit(0)
@@ -173,12 +148,8 @@ def main() -> None:
 
     if unmatched_funcs:
         print("The following pytest functions don't correspond to any script block:\n")
-        for signature, text, file_path in unmatched_funcs:
-            print(f"```\n# {file_path}\n{signature}")
-            if text is not None:
-                indented = textwrap.indent(text, "    ")
-                print(f"    # extracted block text:\n{indented}")
-            print("```\n")
+        for signature, _, file_path in unmatched_funcs:
+            print(f"```\n# {file_path}\n{signature}\n```\n")
 
     sys.exit(1)
 
