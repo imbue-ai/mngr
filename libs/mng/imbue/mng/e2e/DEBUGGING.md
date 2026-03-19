@@ -18,9 +18,9 @@ uv run python -m imbue.mng.e2e.serve_test_output
 To control artifact saving, use the `--mng-e2e-artifacts` flag:
 
 ```bash
-just test path/to/test.py  # default: always save artifacts
-just test path/to/test.py --mng-e2e-artifacts=on-failure  # only on failure
-just test path/to/test.py --mng-e2e-artifacts=no  # never
+just test path/to/test.py                                # default: always save artifacts
+just test path/to/test.py --mng-e2e-artifacts=on-failure # only on failure
+just test path/to/test.py --mng-e2e-artifacts=no         # never
 ```
 
 ## Keeping the test environment alive
@@ -37,12 +37,39 @@ The three values are:
 - `on-failure` -- keep the environment only when the test fails
 - `yes` -- always keep the environment (even on success)
 
-When the environment is kept, the test output includes the env vars you need. You can use them to interact with the test's agents and tmux sessions:
+Note: `--mng-e2e-artifacts` must be at least as broad as `--mng-e2e-keep-env` (e.g., you cannot use `--mng-e2e-artifacts=no` with `--mng-e2e-keep-env=yes`).
+
+When the environment is kept, the test output includes all the env vars you need. Set them in your shell to interact with the test's agents and tmux sessions:
+
+```bash
+export MNG_HOST_DIR=/path/from/output
+export MNG_PREFIX=mng_xxx-
+export MNG_ROOT_NAME=mng-test-xxx
+export TMUX_TMPDIR=/tmp/mng-e2e-tmux-xxx
+unset TMUX
+cd /path/to/cwd
+```
 
 ### Listing agents
 
 ```bash
-MNG_HOST_DIR=/path/from/output MNG_PREFIX=mng_xxx- MNG_ROOT_NAME=mng-test-xxx mng list
+mng list
+```
+
+### Sending messages to agents
+
+`mng message` sends a text message to a running agent without connecting interactively. This works on both local and remote agents:
+
+```bash
+mng message <agent_name> "What is your status?"
+```
+
+### Capturing agent output
+
+`mng capture` takes a snapshot of an agent's current terminal output. This is useful for seeing what the agent is doing without attaching:
+
+```bash
+mng capture <agent_name>
 ```
 
 ### Connecting to an agent's tmux session
@@ -52,18 +79,11 @@ TMUX_TMPDIR=/tmp/mng-e2e-tmux-xxx tmux list-sessions
 TMUX_TMPDIR=/tmp/mng-e2e-tmux-xxx tmux attach -t <session_name>
 ```
 
-### Running mng commands against the test environment
+### Running commands on agents
 
 ```bash
-export MNG_HOST_DIR=/path/from/output
-export MNG_PREFIX=mng_xxx-
-export MNG_ROOT_NAME=mng-test-xxx
-export TMUX_TMPDIR=/tmp/mng-e2e-tmux-xxx
-unset TMUX
-
-mng list
 mng exec <agent_name> 'ps aux'
-mng destroy <agent_name> --force
+mng exec <agent_name> 'cat /some/file'
 ```
 
 ### Cleaning up

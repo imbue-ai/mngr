@@ -3,6 +3,11 @@
 These tests verify the CLI accepts remote-provider flags. Since Modal and Docker
 are disabled in the test environment, commands fail with provider-disabled errors
 rather than unknown-flag errors.
+
+The tests are intentionally kept as separate functions (not parametrized) so that
+each one has a 1:1 correspondence with a tutorial script block. This makes it
+easy to maintain the mapping between tutorial content and test coverage via the
+tutorial_matcher script.
 """
 
 import pytest

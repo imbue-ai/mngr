@@ -51,6 +51,9 @@ _DEBUGGING_DOC = "libs/mng/imbue/mng/e2e/DEBUGGING.md"
 _ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
+_LEVEL = {"no": 0, "on-failure": 1, "yes": 2}
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Register e2e-specific command line options."""
     group = parser.getgroup("mng-e2e", "mng e2e test options")
@@ -68,6 +71,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Save test artifacts (transcript, asciinema recordings, tutorial block). "
         "'yes' = always (default), 'on-failure' = only when test fails, 'no' = never",
     )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Validate that --mng-e2e-artifacts is at least as broad as --mng-e2e-keep-env."""
+    keep = config.getoption("--mng-e2e-keep-env", default="no")
+    artifacts = config.getoption("--mng-e2e-artifacts", default="yes")
+    if _LEVEL[artifacts] < _LEVEL[keep]:
+        raise pytest.UsageError(
+            f"--mng-e2e-artifacts={artifacts} cannot be lower than --mng-e2e-keep-env={keep}. "
+            f"Keeping the environment requires saving artifacts (for the destroy-env script)."
+        )
 
 
 def _should_keep_env(config: pytest.Config, test_failed: bool) -> bool:
@@ -282,9 +296,11 @@ def e2e(
     if keep_env:
         _write_destroy_script(test_output_dir, env, temp_git_repo, tmux_tmpdir)
         sys.stderr.write(f"\n  Environment kept alive. To clean up: {test_output_dir}/destroy-env\n")
-        sys.stderr.write(f"  TMUX_TMPDIR={tmux_tmpdir}\n")
         sys.stderr.write(f"  MNG_HOST_DIR={temp_host_dir}\n")
         sys.stderr.write(f"  MNG_PREFIX={mng_test_prefix}\n")
+        sys.stderr.write(f"  MNG_ROOT_NAME={mng_test_root_name}\n")
+        sys.stderr.write(f"  TMUX_TMPDIR={tmux_tmpdir}\n")
+        sys.stderr.write(f"  CWD={temp_git_repo}\n")
         return
 
     # Interrupt asciinema recording processes so they flush and exit
