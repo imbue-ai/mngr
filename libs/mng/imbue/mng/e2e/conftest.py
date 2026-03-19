@@ -19,11 +19,19 @@ from imbue.skitwright.session import Session
 
 
 class E2eSession(Session):
-    """Session subclass that adds e2e-specific helpers like tutorial block writing."""
+    """Session subclass that adds e2e-specific helpers like tutorial block writing.
 
-    def __init__(self, env: dict[str, str], cwd: Path, output_dir: Path) -> None:
-        super().__init__(env=env, cwd=cwd)
-        self._output_dir = output_dir
+    Use the class method `create` instead of constructing directly.
+    """
+
+    output_dir: Path
+
+    @classmethod
+    def create(cls, env: dict[str, str], cwd: Path, output_dir: Path) -> "E2eSession":
+        """Create an E2eSession with the given output directory."""
+        session = cls(env=env, cwd=cwd)
+        session.output_dir = output_dir
+        return session
 
     def write_tutorial_block(self, block: str) -> None:
         """Write the original tutorial script block to the test output directory.
@@ -32,7 +40,7 @@ class E2eSession(Session):
         triple-quoted strings produce clean output without leading whitespace.
         """
         cleaned = textwrap.dedent(block).strip() + "\n"
-        (self._output_dir / "tutorial_block.txt").write_text(cleaned)
+        (self.output_dir / "tutorial_block.txt").write_text(cleaned)
 
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -249,7 +257,7 @@ def e2e(
         "is_enabled = false\n"
     )
 
-    session = E2eSession(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
+    session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
 
     yield session
 

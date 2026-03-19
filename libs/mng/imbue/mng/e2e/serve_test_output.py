@@ -40,21 +40,23 @@ _ANSI_COLORS_16 = [
     "#fff",
 ]
 
-_SIDEBAR_CSS = (
-    ".layout { display: flex; gap: 0; }\n"
-    "  .sidebar-panel { display: flex; flex-shrink: 0; border-right: 1px solid #ddd; }\n"
-    "  .sidebar-toggle { writing-mode: vertical-lr; cursor: pointer; user-select: none; "
-    "font-size: 0.8em; color: #666; padding: 0.5em 0.3em; background: #f0f0f0; border: none; "
-    "border-right: 1px solid #ddd; }\n"
-    "  .sidebar-toggle:hover { color: #0066cc; background: #e8e8e8; }\n"
-    "  .sidebar { width: 300px; padding: 0.5em 1em; font-size: 0.85em; overflow-y: auto; "
-    "max-height: calc(100vh - 6em); position: sticky; top: 0; }\n"
-    "  .sidebar.collapsed { width: 0; padding: 0; overflow: hidden; }\n"
-    "  .sidebar ul { list-style: none; padding: 0; margin: 0; }\n"
-    "  .sidebar li { margin: 0.3em 0; }\n"
-    "  .sidebar li.active { font-weight: bold; }\n"
-    "  .sidebar a { color: #333; }\n"
-    "  .main-content { flex: 1; min-width: 0; padding-left: 1.5em; }"
+_SIDEBAR_CSS = "\n".join(
+    [
+        ".layout { display: flex; gap: 0; }",
+        ".sidebar-panel { display: flex; flex-shrink: 0; border-right: 1px solid rgb(221,221,221); }",
+        ".sidebar-toggle { writing-mode: vertical-lr; cursor: pointer; user-select: none;"
+        " font-size: 0.8em; color: rgb(102,102,102); padding: 0.5em 0.3em;"
+        " background: rgb(240,240,240); border: none; border-right: 1px solid rgb(221,221,221); }",
+        ".sidebar-toggle:hover { color: rgb(0,102,204); background: rgb(232,232,232); }",
+        ".sidebar { width: 300px; padding: 0.5em 1em; font-size: 0.85em; overflow-y: auto;"
+        " max-height: calc(100vh - 6em); position: sticky; top: 0; }",
+        ".sidebar.collapsed { width: 0; padding: 0; overflow: hidden; }",
+        ".sidebar ul { list-style: none; padding: 0; margin: 0; }",
+        ".sidebar li { margin: 0.3em 0; }",
+        ".sidebar li.active { font-weight: bold; }",
+        ".sidebar a { color: rgb(51,51,51); }",
+        ".main-content { flex: 1; min-width: 0; padding-left: 1.5em; }",
+    ]
 )
 
 _SIDEBAR_JS = """
@@ -117,22 +119,21 @@ def _ansi_to_html(text: str) -> str:
             elif 90 <= c <= 97:
                 styles.append(f"color:{_ANSI_COLORS_16[c - 90 + 8]}")
             elif c == 38 and i + 2 < len(parts) and parts[i + 1] == "5":
-                # 256-color: 38;5;N
                 n = int(parts[i + 2]) if parts[i + 2].isdigit() else 0
                 if n < 16:
                     styles.append(f"color:{_ANSI_COLORS_16[n]}")
                 elif n < 232:
-                    # 6x6x6 color cube
                     n -= 16
                     r = (n // 36) * 51
                     g = ((n % 36) // 6) * 51
                     b = (n % 6) * 51
                     styles.append(f"color:rgb({r},{g},{b})")
                 else:
-                    # Grayscale
                     v = 8 + (n - 232) * 10
                     styles.append(f"color:rgb({v},{v},{v})")
                 i += 2
+            else:
+                pass
             i += 1
 
         if styles:
@@ -149,7 +150,8 @@ def _linkify_agent_names(rendered_html: str, cast_stems: list[str]) -> str:
     """Replace occurrences of cast stem names in already-rendered HTML with anchor links."""
     for stem in cast_stems:
         escaped_stem = html.escape(stem)
-        link = f'<a href="#cast-{escaped_stem}" style="color:#6cb6ff;text-decoration:underline">{escaped_stem}</a>'
+        anchor = f"#cast-{escaped_stem}"
+        link = f'<a href="{anchor}" style="color:rgb(108,182,255);text-decoration:underline">{escaped_stem}</a>'
         rendered_html = rendered_html.replace(escaped_stem, link, 1)
     return rendered_html
 
@@ -181,21 +183,21 @@ def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> s
 <title>{html.escape(title)}</title>
 <link rel="stylesheet" type="text/css" href="{_ASCIINEMA_PLAYER_CSS}">
 <style>
-  body {{ font-family: system-ui, -apple-system, sans-serif; margin: 2em; background: #fafafa; color: #222; }}
+  body {{ font-family: system-ui, -apple-system, sans-serif; margin: 2em; background: rgb(250,250,250); color: rgb(34,34,34); }}
   h2 {{ font-size: 1.1em; margin-top: 2em; }}
-  a {{ color: #0066cc; text-decoration: none; }}
+  a {{ color: rgb(0,102,204); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  nav {{ margin-bottom: 1em; font-size: 0.9em; color: #666; }}
+  nav {{ margin-bottom: 1em; font-size: 0.9em; color: rgb(102,102,102); }}
   nav a {{ margin-right: 0.3em; }}
   ul {{ list-style: none; padding: 0; }}
   li {{ margin: 0.3em 0; }}
-  .transcript {{ background: #1e1e1e; color: #d4d4d4; padding: 1em; border-radius: 6px; overflow-x: auto; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }}
-  .transcript .cmd-block {{ border-top: 1px solid #444; padding-top: 0.6em; margin-top: 0.6em; }}
+  .transcript {{ background: rgb(30,30,30); color: rgb(212,212,212); padding: 1em; border-radius: 6px; overflow-x: auto; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; }}
+  .transcript .cmd-block {{ border-top: 1px solid rgb(68,68,68); padding-top: 0.6em; margin-top: 0.6em; }}
   .transcript .cmd-block:first-child {{ border-top: none; padding-top: 0; margin-top: 0; }}
-  .transcript .comment {{ color: #dcdcaa; }}
-  .transcript .prompt {{ color: #569cd6; }}
-  .transcript .stderr-prefix {{ color: #f44747; }}
-  .transcript .exit-code {{ color: #888; font-style: italic; }}
+  .transcript .comment {{ color: rgb(220,220,170); }}
+  .transcript .prompt {{ color: rgb(86,156,214); }}
+  .transcript .stderr-prefix {{ color: rgb(244,71,71); }}
+  .transcript .exit-code {{ color: rgb(136,136,136); font-style: italic; }}
   .cast-player {{ margin: 1em 0; display: flex; justify-content: flex-start; }}
   {extra_css}
 </style>
@@ -212,7 +214,7 @@ def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> s
 def _render_tutorial_block(text: str) -> str:
     """Render a tutorial block with the same color scheme as transcripts.
 
-    Lines starting with # are comments (yellow), everything else is a command (blue).
+    Comment lines (starting with the hash character) are yellow, command lines are blue.
     """
     rendered_lines: list[str] = []
     for line in text.splitlines():
