@@ -1,6 +1,7 @@
 import os
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import textwrap
@@ -37,12 +38,48 @@ class E2eSession(Session):
 _E2E_DIR = Path(__file__).resolve().parent
 _BIN_DIR = _E2E_DIR / "bin"
 _TEST_OUTPUT_DIR = _E2E_DIR / ".test_output"
+_DEBUGGING_DOC = "libs/mng/imbue/mng/e2e/DEBUGGING.md"
 
 _ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-def _is_keep_on_failure() -> bool:
-    return os.environ.get("MNG_E2E_KEEP_ON_FAILURE", "").lower() in ("1", "true", "yes")
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register e2e-specific command line options."""
+    group = parser.getgroup("mng-e2e", "mng e2e test options")
+    group.addoption(
+        "--mng-e2e-keep-env",
+        choices=["yes", "on-failure", "no"],
+        default="no",
+        help="Keep test environment (agents, tmux) after tests finish. "
+        "'yes' = always, 'on-failure' = only when test fails, 'no' = never (default: no)",
+    )
+    group.addoption(
+        "--mng-e2e-artifacts",
+        choices=["yes", "on-failure", "no"],
+        default="yes",
+        help="Save test artifacts (transcript, asciinema recordings, tutorial block). "
+        "'yes' = always (default), 'on-failure' = only when test fails, 'no' = never",
+    )
+
+
+def _should_keep_env(config: pytest.Config, test_failed: bool) -> bool:
+    """Determine whether to keep the test environment based on the CLI flag."""
+    value = config.getoption("--mng-e2e-keep-env", default="no")
+    if value == "yes":
+        return True
+    if value == "on-failure":
+        return test_failed
+    return False
+
+
+def _should_save_artifacts(config: pytest.Config, test_failed: bool) -> bool:
+    """Determine whether to save test artifacts based on the CLI flag."""
+    value = config.getoption("--mng-e2e-artifacts", default="yes")
+    if value == "yes":
+        return True
+    if value == "on-failure":
+        return test_failed
+    return False
 
 
 _e2e_test_failed: dict[str, bool] = {}
@@ -120,6 +157,38 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
+def _write_destroy_script(
+    test_output_dir: Path,
+    env: dict[str, str],
+    temp_git_repo: Path,
+    tmux_tmpdir: Path,
+) -> None:
+    """Write a destroy-env script that cleans up the kept test environment."""
+    socket_path = tmux_tmpdir / f"tmux-{os.getuid()}" / "default"
+    script_path = test_output_dir / "destroy-env"
+    script_path.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f'export MNG_HOST_DIR="{env["MNG_HOST_DIR"]}"\n'
+        f'export MNG_PREFIX="{env["MNG_PREFIX"]}"\n'
+        f'export MNG_ROOT_NAME="{env["MNG_ROOT_NAME"]}"\n'
+        f'export TMUX_TMPDIR="{tmux_tmpdir}"\n'
+        "unset TMUX\n"
+        "\n"
+        'echo "Destroying all agents..."\n'
+        f'cd "{temp_git_repo}" && mng destroy --all --force || true\n'
+        "\n"
+        'echo "Killing tmux server..."\n'
+        f'tmux -S "{socket_path}" kill-server 2>/dev/null || true\n'
+        "\n"
+        f'echo "Removing tmux tmpdir..."\n'
+        f'rm -rf "{tmux_tmpdir}"\n'
+        "\n"
+        'echo "Environment destroyed."\n'
+    )
+    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 @pytest.fixture
 def e2e(
     temp_host_dir: Path,
@@ -184,20 +253,29 @@ def e2e(
 
     yield session
 
-    # Save transcript alongside the cast files
-    transcript_path = test_output_dir / "transcript.txt"
-    transcript_path.write_text(session.transcript)
-
     # Detect test failure
     test_failed = _e2e_test_failed.pop(request.node.nodeid, False)
+    config = request.config
+
+    # Save artifacts (transcript, etc.) unless disabled
+    save_artifacts = _should_save_artifacts(config, test_failed)
+    if save_artifacts:
+        transcript_path = test_output_dir / "transcript.txt"
+        transcript_path.write_text(session.transcript)
+    else:
+        shutil.rmtree(test_output_dir, ignore_errors=True)
 
     if test_failed:
-        sys.stderr.write(f"\n  Test output saved to: {test_output_dir}\n")
+        sys.stderr.write(f"\n  Test output: {test_output_dir}\n")
+        sys.stderr.write(f"  Debugging tips: {_DEBUGGING_DOC} (relative to git root)\n")
 
-    if test_failed and _is_keep_on_failure():
-        sys.stderr.write("\n  MNG_E2E_KEEP_ON_FAILURE is set: agents and tmux session kept running.\n")
+    keep_env = _should_keep_env(config, test_failed)
+    if keep_env:
+        _write_destroy_script(test_output_dir, env, temp_git_repo, tmux_tmpdir)
+        sys.stderr.write(f"\n  Environment kept alive. To clean up: {test_output_dir}/destroy-env\n")
         sys.stderr.write(f"  TMUX_TMPDIR={tmux_tmpdir}\n")
         sys.stderr.write(f"  MNG_HOST_DIR={temp_host_dir}\n")
+        sys.stderr.write(f"  MNG_PREFIX={mng_test_prefix}\n")
         return
 
     # Interrupt asciinema recording processes so they flush and exit
