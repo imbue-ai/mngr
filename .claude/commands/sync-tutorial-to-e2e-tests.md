@@ -36,14 +36,36 @@ If no script block is even a close match, the block was removed from the script 
 
 ## Step 4: Add tests for remaining unmatched script blocks
 
-After step 3, some script blocks may still lack tests. For each one:
+After step 3, some script blocks may still lack tests. **Use subagents to write the tests in parallel.**
+
+Group the unmatched blocks into batches of 3-5 related blocks (e.g., by section in the tutorial). For each batch, launch a subagent with a prompt that includes:
+
+- The full text of the script blocks to cover
+- The path to the test file to write to (use a new file per batch if the blocks belong to a distinct section, e.g., `test_create_remote.py` for "CREATING AGENTS REMOTELY" blocks)
+- The existing test file(s) as examples of the conventions to follow
+- The conftest.py so the agent knows the available fixtures
+- All the guidelines below
+
+Each subagent writes its tests and returns the result. After all subagents finish, review the output and commit.
+
+### Guidelines for each test function
 
 1. Understand what the block does by reading the surrounding context in the tutorial script.
 2. Write one or more pytest functions that test the behavior demonstrated by that block. A single block may warrant multiple tests if it demonstrates multiple behaviors or has interesting edge cases.
 3. Each function's docstring MUST contain the exact text of the script block (indented to match Python syntax). The docstring may contain additional content beyond the block.
-4. The function name should be descriptive of what the block does (e.g., `test_create_task` for a block that runs `mng create ...`).
-5. Decorate each new test function with `@pytest.mark.release`, since these are e2e tests.
-6. Follow the existing test patterns in the directory for style, fixtures, and assertions.
+4. **CRITICAL docstring format**: The opening `"""` MUST be followed by a newline, and all content lines must share the same indentation. This is required for the matcher's `textwrap.dedent` to work. Example:
+   ```python
+   def test_foo(e2e: Session, agent_name: str) -> None:
+       """
+       # comment from tutorial
+       mng create my-task --some-flag
+       # another comment
+       """
+   ```
+   Do NOT put text on the same line as the opening `"""` -- that breaks dedent because the first line has zero indentation while the rest have four spaces.
+5. The function name should be descriptive of what the block does (e.g., `test_create_task` for a block that runs `mng create ...`).
+6. Decorate each new test function with `@pytest.mark.release`, since these are e2e tests.
+7. Follow the existing test patterns in the directory for style, fixtures, and assertions.
 
 ## Guidelines for writing test logic
 
