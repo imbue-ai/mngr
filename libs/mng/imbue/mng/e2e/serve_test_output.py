@@ -196,7 +196,6 @@ def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> s
   .transcript .stderr-prefix {{ color: #f44747; }}
   .transcript .exit-code {{ color: #888; font-style: italic; }}
   .cast-player {{ margin: 1em 0; }}
-  .cast-label {{ font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; color: #666; margin-bottom: 0.3em; }}
   {extra_css}
 </style>
 </head>
@@ -324,7 +323,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     # Tutorial block (the original script block this test covers)
     tutorial_block_path = test_dir / "tutorial_block.txt"
     if tutorial_block_path.exists():
-        parts.append("<h2>Tutorial Block</h2>")
+        parts.append("<h2>Tutorial block</h2>")
         parts.append(_render_tutorial_block(tutorial_block_path.read_text()))
 
     # Collect cast files first so we can link agent names in the transcript
@@ -334,7 +333,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     # Transcript
     transcript_path = test_dir / "transcript.txt"
     if transcript_path.exists():
-        parts.append("<h2>Transcript</h2>")
+        parts.append("<h2>CLI transcript</h2>")
         parts.append(_render_transcript(transcript_path.read_text(), cast_stems=cast_stems))
 
     # Cast players
@@ -342,14 +341,13 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     for i, cast_file in enumerate(cast_files):
         cast_url = f"/cast/{run_name}/{test_name}/{cast_file.name}"
         anchor_id = f"cast-{html.escape(cast_file.stem)}"
-        parts.append(f'<h2 id="{anchor_id}">Recording: {html.escape(cast_file.stem)}</h2>')
-        parts.append(f'<div class="cast-label">{html.escape(cast_file.name)}</div>')
+        parts.append(f'<h2 id="{anchor_id}">TUI recording: {html.escape(cast_file.stem)}</h2>')
         div_id = f"player-{i}"
         parts.append(f'<div id="{div_id}" class="cast-player"></div>')
         player_inits.append(
             f"AsciinemaPlayer.create({json.dumps(cast_url)}, "
             f"document.getElementById({json.dumps(div_id)}), "
-            f"{{fit: 'none', terminalFontSize: '12px', theme: 'asciinema'}});"
+            f"{{fit: 'none', terminalFontSize: '0.85em', theme: 'asciinema'}});"
         )
 
     if player_inits:
