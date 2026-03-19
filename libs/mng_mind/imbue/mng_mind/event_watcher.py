@@ -85,6 +85,8 @@ _BACKOFF_MAX_SECONDS: Final[float] = 60.0
 
 _IGNORED_SOURCES_FILENAME: Final[str] = "ignored_sources.txt"
 
+_EVENT_BATCH_FILTER_TIMEOUT_SECONDS: Final[float] = 30.0
+
 # How often the synthetic events loop checks for idle/schedule/onboarding events
 _SYNTHETIC_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 
@@ -114,6 +116,7 @@ class _EventWatcherSettings:
     idle_event_delay_minutes_schedule: tuple[int, ...] = ()
     scheduled_events: tuple[tuple[str, str], ...] = ()
     user_timezone: str = "UTC"
+    event_batch_filter_script: str | None = None
 
 
 def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
@@ -135,6 +138,7 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
         idle_event_delay_minutes_schedule=tuple(watchers.get("idle_event_delay_minutes_schedule", ())),
         scheduled_events=tuple((k, v) for k, v in raw_scheduled.items()),
         user_timezone=watchers.get("user_timezone", "UTC"),
+        event_batch_filter_script=watchers.get("event_batch_filter_script", None),
     )
 
 
@@ -960,6 +964,87 @@ def _write_events_file(event_lines: list[str], directory: Path) -> Path | None:
         return None
 
 
+def _run_event_batch_filter_script(
+    deliverable_lines: list[str],
+    script_path: str,
+) -> list[str] | None:
+    """Run the event_batch_filter_script, passing lines on stdin and reading filtered lines from stdout.
+
+    The script must output exactly the same number of lines as provided on stdin.
+    Lines that are empty or '{}' are treated as filtered out by the caller.
+
+    Returns the filtered lines on success, or None if the script fails (in which
+    case the original lines should be used unmodified).
+    """
+    stdin_data = "\n".join(deliverable_lines) + "\n"
+    try:
+        result = subprocess.run(
+            [script_path],
+            input=stdin_data,
+            capture_output=True,
+            text=True,
+            timeout=_EVENT_BATCH_FILTER_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        logger.error("Event batch filter script not found: {}", script_path)
+        return None
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "Event batch filter script timed out after {}s: {}", _EVENT_BATCH_FILTER_TIMEOUT_SECONDS, script_path
+        )
+        return None
+    except OSError as exc:
+        logger.error("Failed to run event batch filter script {}: {}", script_path, exc)
+        return None
+
+    if result.returncode != 0:
+        logger.error(
+            "Event batch filter script returned non-zero ({}): {}",
+            result.returncode,
+            result.stderr[:500],
+        )
+        return None
+
+    # Split output into lines, preserving empty lines but stripping the final trailing newline.
+    # The script is expected to output exactly len(deliverable_lines) lines terminated by newlines.
+    raw_output = result.stdout
+    if raw_output.endswith("\n"):
+        raw_output = raw_output[:-1]
+    output_lines = raw_output.split("\n") if raw_output or deliverable_lines else []
+
+    if len(output_lines) != len(deliverable_lines):
+        logger.error(
+            "Event batch filter script output {} lines but expected {} lines, ignoring filter",
+            len(output_lines),
+            len(deliverable_lines),
+        )
+        return None
+
+    return output_lines
+
+
+def _apply_event_batch_filter(
+    deliverable_lines: list[str],
+    script_path: str,
+) -> list[str]:
+    """Apply the event_batch_filter_script and remove filtered-out events.
+
+    Lines that the script outputs as empty or '{}' are dropped.
+    If the script fails, the original lines are returned unmodified.
+    """
+    filtered_lines = _run_event_batch_filter_script(deliverable_lines, script_path)
+    if filtered_lines is None:
+        return deliverable_lines
+
+    result: list[str] = []
+    for line in filtered_lines:
+        stripped = line.strip()
+        if stripped == "" or stripped == "{}":
+            continue
+        result.append(stripped)
+    return result
+
+
 def _apply_special_event_handling(
     deliverable_lines: list[str],
     event_lists_dir: Path,
@@ -1188,6 +1273,12 @@ def _run_delivery_loop(
             # Separate chat events: hold user messages until assistant responds
             deliverable_lines = _separate_chat_events(deliverable_lines, held_user_messages)
 
+        # Apply custom event batch filter script (drops events and fields before aggregation)
+        if settings.event_batch_filter_script and deliverable_lines:
+            deliverable_lines = _apply_event_batch_filter(deliverable_lines, settings.event_batch_filter_script)
+            if not deliverable_lines:
+                continue
+
         # Apply special event handling (aggregation for oversized or too-many events)
         deliverable_lines = _apply_special_event_handling(
             deliverable_lines,
@@ -1321,6 +1412,7 @@ def main(
     logger.info("  Idle schedule: {}", settings.idle_event_delay_minutes_schedule)
     logger.info("  Scheduled events: {}", settings.scheduled_events)
     logger.info("  User timezone: {}", settings.user_timezone)
+    logger.info("  Event batch filter script: {}", settings.event_batch_filter_script or "(none)")
 
     # Resolve the ignored_sources.txt path: $MNG_AGENT_WORK_DIR/$ROLE/ignored_sources.txt
     role = os.environ.get("ROLE", "")

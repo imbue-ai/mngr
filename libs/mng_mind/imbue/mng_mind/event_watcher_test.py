@@ -36,6 +36,7 @@ from imbue.mng_mind.event_watcher import _ONBOARDING_MARKER_FILENAME
 from imbue.mng_mind.event_watcher import _SCHEDULED_STATE_FILENAME
 from imbue.mng_mind.event_watcher import _SendRateTracker
 from imbue.mng_mind.event_watcher import _TokenBucket
+from imbue.mng_mind.event_watcher import _apply_event_batch_filter
 from imbue.mng_mind.event_watcher import _apply_special_event_handling
 from imbue.mng_mind.event_watcher import _compute_backoff_seconds
 from imbue.mng_mind.event_watcher import _cumulative_idle_delay_minutes
@@ -51,6 +52,7 @@ from imbue.mng_mind.event_watcher import _make_synthetic_event_line
 from imbue.mng_mind.event_watcher import _parse_time_of_day
 from imbue.mng_mind.event_watcher import _resolve_user_timezone
 from imbue.mng_mind.event_watcher import _run_delivery_loop
+from imbue.mng_mind.event_watcher import _run_event_batch_filter_script
 from imbue.mng_mind.event_watcher import _run_synthetic_events_loop
 from imbue.mng_mind.event_watcher import _save_delivery_state
 from imbue.mng_mind.event_watcher import _save_scheduled_events_state
@@ -95,6 +97,7 @@ def test_defaults_match_between_data_types_and_event_watcher() -> None:
     assert model_defaults.idle_event_delay_minutes_schedule == watcher_defaults.idle_event_delay_minutes_schedule
     assert model_defaults.scheduled_events == dict(watcher_defaults.scheduled_events)
     assert model_defaults.user_timezone == watcher_defaults.user_timezone
+    assert model_defaults.event_batch_filter_script == watcher_defaults.event_batch_filter_script
 
 
 # -- _load_watcher_settings tests --
@@ -2200,6 +2203,16 @@ def test_load_settings_defaults_new_fields(tmp_path: Path) -> None:
     assert settings.idle_event_delay_minutes_schedule == ()
     assert settings.scheduled_events == ()
     assert settings.user_timezone == "UTC"
+    assert settings.event_batch_filter_script is None
+
+
+def test_load_settings_reads_event_batch_filter_script(tmp_path: Path) -> None:
+    write_minds_settings_toml(
+        tmp_path,
+        '[watchers]\nevent_batch_filter_script = "/usr/local/bin/my_filter.sh"\n',
+    )
+    settings = _load_watcher_settings(tmp_path)
+    assert settings.event_batch_filter_script == "/usr/local/bin/my_filter.sh"
 
 
 @pytest.mark.timeout(15)
@@ -2267,3 +2280,145 @@ def test_main_delivers_subprocess_events_through_reader_thread(
     assert len(capture.calls) >= 1
     _, message = capture.calls[0]
     assert "Please process all events in " in message
+
+
+# -- _run_event_batch_filter_script tests --
+
+
+def test_run_event_batch_filter_script_passes_lines_through_identity_script(tmp_path: Path) -> None:
+    """A filter script that cats stdin should return the same lines."""
+    script = tmp_path / "identity_filter.sh"
+    script.write_text("#!/bin/bash\ncat\n")
+    script.chmod(0o755)
+
+    lines = ['{"source":"a","event_id":"1"}', '{"source":"b","event_id":"2"}']
+    result = _run_event_batch_filter_script(lines, str(script))
+    assert result is not None
+    assert len(result) == 2
+    assert result[0] == '{"source":"a","event_id":"1"}'
+    assert result[1] == '{"source":"b","event_id":"2"}'
+
+
+def test_run_event_batch_filter_script_allows_filtering_to_empty(tmp_path: Path) -> None:
+    """A filter script that outputs empty lines for all events."""
+    script = tmp_path / "drop_all_filter.sh"
+    # Output the same number of lines but all empty
+    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n')
+    script.chmod(0o755)
+
+    lines = ['{"source":"a"}', '{"source":"b"}']
+    result = _run_event_batch_filter_script(lines, str(script))
+    assert result is not None
+    assert len(result) == 2
+    assert result[0] == ""
+    assert result[1] == ""
+
+
+def test_run_event_batch_filter_script_replaces_filtered_events_with_empty_dict(tmp_path: Path) -> None:
+    """A filter script can output '{}' to indicate a filtered event."""
+    script = tmp_path / "replace_with_empty_dict.sh"
+    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo "{}"; done\n')
+    script.chmod(0o755)
+
+    lines = ['{"source":"a"}']
+    result = _run_event_batch_filter_script(lines, str(script))
+    assert result is not None
+    assert len(result) == 1
+    assert result[0] == "{}"
+
+
+def test_run_event_batch_filter_script_returns_none_for_missing_script() -> None:
+    """A non-existent script should return None."""
+    result = _run_event_batch_filter_script(['{"a":1}'], "/nonexistent/filter_42983.sh")
+    assert result is None
+
+
+def test_run_event_batch_filter_script_returns_none_for_nonzero_exit(tmp_path: Path) -> None:
+    """A script that exits non-zero should return None."""
+    script = tmp_path / "failing_filter.sh"
+    script.write_text("#!/bin/bash\nexit 1\n")
+    script.chmod(0o755)
+
+    result = _run_event_batch_filter_script(['{"a":1}'], str(script))
+    assert result is None
+
+
+def test_run_event_batch_filter_script_returns_none_for_wrong_line_count(tmp_path: Path) -> None:
+    """A script that outputs a different number of lines should return None."""
+    script = tmp_path / "bad_count_filter.sh"
+    # Output one line regardless of input
+    script.write_text('#!/bin/bash\necho "only one"\n')
+    script.chmod(0o755)
+
+    lines = ['{"a":1}', '{"b":2}', '{"c":3}']
+    result = _run_event_batch_filter_script(lines, str(script))
+    assert result is None
+
+
+# -- _apply_event_batch_filter tests --
+
+
+def test_apply_event_batch_filter_drops_empty_and_empty_dict_lines(tmp_path: Path) -> None:
+    """Lines that are empty or '{}' should be removed from the result."""
+    script = tmp_path / "selective_filter.sh"
+    # Keep first line, drop second (empty), drop third (empty dict)
+    script.write_text('#!/bin/bash\nread line1; echo "$line1"\nread line2; echo ""\nread line3; echo "{}"\n')
+    script.chmod(0o755)
+
+    lines = ['{"source":"keep"}', '{"source":"drop1"}', '{"source":"drop2"}']
+    result = _apply_event_batch_filter(lines, str(script))
+    assert len(result) == 1
+    assert result[0] == '{"source":"keep"}'
+
+
+def test_apply_event_batch_filter_returns_original_on_script_failure(tmp_path: Path) -> None:
+    """If the script fails, the original lines should be returned unmodified."""
+    script = tmp_path / "failing_filter.sh"
+    script.write_text("#!/bin/bash\nexit 1\n")
+    script.chmod(0o755)
+
+    lines = ['{"source":"a"}', '{"source":"b"}']
+    result = _apply_event_batch_filter(lines, str(script))
+    assert result == lines
+
+
+def test_apply_event_batch_filter_returns_empty_when_all_filtered(tmp_path: Path) -> None:
+    """When all events are filtered out, the result should be empty."""
+    script = tmp_path / "drop_all.sh"
+    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n')
+    script.chmod(0o755)
+
+    lines = ['{"source":"a"}', '{"source":"b"}']
+    result = _apply_event_batch_filter(lines, str(script))
+    assert result == []
+
+
+def test_apply_event_batch_filter_can_modify_event_content(tmp_path: Path) -> None:
+    """The script can modify event content (e.g. strip fields)."""
+    script = tmp_path / "strip_fields.sh"
+    # Use python to strip the "data" field from each JSON line
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if not line:\n"
+        '        print("")\n'
+        "        continue\n"
+        "    obj = json.loads(line)\n"
+        '    obj.pop("data", None)\n'
+        "    print(json.dumps(obj))\n"
+    )
+    script.chmod(0o755)
+
+    lines = [
+        '{"source":"a","data":"big_payload","event_id":"1"}',
+        '{"source":"b","event_id":"2"}',
+    ]
+    result = _apply_event_batch_filter(lines, str(script))
+    assert len(result) == 2
+    parsed_first = json.loads(result[0])
+    assert "data" not in parsed_first
+    assert parsed_first["source"] == "a"
+    parsed_second = json.loads(result[1])
+    assert parsed_second["source"] == "b"
