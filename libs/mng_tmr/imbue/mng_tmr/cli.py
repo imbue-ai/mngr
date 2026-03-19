@@ -136,7 +136,8 @@ def _run_integrator_phase(
     fix_branches = [
         r.branch_name
         for r in results
-        if r.outcome in (TestOutcome.FIX_TEST_SUCCEEDED, TestOutcome.FIX_IMPL_SUCCEEDED) and r.branch_name is not None
+        if r.outcome in (TestOutcome.FIX_TEST_SUCCEEDED, TestOutcome.FIX_IMPL_SUCCEEDED, TestOutcome.IMPROVED_TEST)
+        and r.branch_name is not None
     ]
     if not fix_branches:
         return None
