@@ -48,11 +48,18 @@ Examples:
         """,
     )
 
-    parser.add_argument(
+    channel_group = parser.add_mutually_exclusive_group()
+    channel_group.add_argument(
         "--channels",
         nargs="+",
         default=None,
         help="Channels to export (default: all member channels). E.g. 'general' or 'general:2024-01-01'",
+    )
+    channel_group.add_argument(
+        "--recently-active-channels",
+        type=int,
+        default=None,
+        help="Export only the N channels with the most recent messages (based on historical data)",
     )
     parser.add_argument(
         "--since",
@@ -110,6 +117,7 @@ Examples:
 
     settings = ExporterSettings(
         channels=channel_configs,
+        recently_active_channels=args.recently_active_channels,
         default_oldest=default_oldest,
         output_dir=args.output_dir,
         members_only=not args.all_channels,

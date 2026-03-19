@@ -11,6 +11,7 @@ from typing import TypeVar
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
+from imbue.imbue_common.model_update import to_update
 from imbue.slack_exporter.channels import fetch_channel_info
 from imbue.slack_exporter.channels import fetch_channel_list
 from imbue.slack_exporter.channels import fetch_self_identity
@@ -323,6 +324,26 @@ def _deferred_reaction_pass(
         )
 
 
+def _resolve_recently_active_channels(
+    state_by_channel_id: dict[SlackChannelId, ChannelExportState],
+    max_channels: int,
+) -> tuple[ChannelConfig, ...]:
+    """Select the N most recently active channels based on historical message data."""
+    sorted_states = sorted(
+        state_by_channel_id.values(),
+        key=lambda s: s.latest_message_timestamp or SlackMessageTimestamp("0"),
+        reverse=True,
+    )
+    selected = sorted_states[:max_channels]
+    selected_names = [state.channel_name for state in selected]
+    logger.info(
+        "Selected %d most recently active channels: %s",
+        len(selected),
+        ", ".join(str(name) for name in selected_names),
+    )
+    return tuple(ChannelConfig(name=state.channel_name) for state in selected)
+
+
 def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     """Run the full export process: load state, resolve channels, fetch new messages, save."""
     existing_channel_by_id = load_existing_channels(settings.output_dir)
@@ -331,6 +352,19 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     known_reply_keys = load_existing_reply_keys(settings.output_dir)
     existing_reactions = load_existing_reactions(settings.output_dir)
     existing_relevant_threads = load_existing_relevant_threads(settings.output_dir)
+
+    # Resolve --recently-active-channels into explicit channel configs
+    if settings.recently_active_channels is not None:
+        active_channels = _resolve_recently_active_channels(state_by_channel_id, settings.recently_active_channels)
+        if active_channels:
+            settings = settings.model_copy_update(
+                to_update(settings.field_ref().channels, active_channels),
+            )
+        else:
+            logger.warning("No historical message data found for --recently-active-channels, exporting all channels")
+            settings = settings.model_copy_update(
+                to_update(settings.field_ref().channels, None),
+            )
 
     fetch_metadata = load_fetch_metadata(settings.output_dir)
     now = datetime.now(timezone.utc)

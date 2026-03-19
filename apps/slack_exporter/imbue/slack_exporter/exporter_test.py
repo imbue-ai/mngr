@@ -756,6 +756,40 @@ def test_run_export_deferred_reaction_pass_uses_threads_from_previous_runs(temp_
     assert reply_reactions[0]["raw"]["reactions"][0]["name"] == "tada"
 
 
+def test_run_export_recently_active_channels_selects_top_n(temp_output_dir: Path) -> None:
+    """--recently-active-channels selects the N channels with the most recent messages."""
+    # Save messages with different timestamps to establish activity order
+    save_message_events(
+        temp_output_dir,
+        StreamType.CREATED,
+        [
+            make_message_event(channel_id="C1", channel_name="old-channel", ts="1600000000.000001"),
+            make_message_event(channel_id="C2", channel_name="new-channel", ts="1700000000.000001"),
+            make_message_event(channel_id="C3", channel_name="mid-channel", ts="1650000000.000001"),
+        ],
+    )
+
+    # Second run with --recently-active-channels 2: should pick new-channel and mid-channel
+    settings_active = ExporterSettings(
+        recently_active_channels=2,
+        default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
+        cache_ttl_seconds=0,
+    )
+    caller2, counts2 = _tracking_api_caller(
+        channel_data=[
+            {"id": "C1", "name": "old-channel", "is_member": True},
+            {"id": "C2", "name": "new-channel", "is_member": True},
+            {"id": "C3", "name": "mid-channel", "is_member": True},
+        ],
+    )
+    run_export(settings_active, api_caller=caller2)
+
+    # Should have fetched messages for only 2 channels (the most recently active)
+    assert counts2.get("conversations.history", 0) == 2
+
+
 def test_run_export_cached_channels_filtered_by_membership(temp_output_dir: Path) -> None:
     """When members_only=True and cache contains non-member channels, only member channels are used."""
     settings = _make_cached_settings(temp_output_dir)

@@ -46,6 +46,10 @@ class ExporterSettings(FrozenModel):
         default=None,
         description="Channels to export. When None, all channels from the fetched channel list are exported.",
     )
+    recently_active_channels: int | None = Field(
+        default=None,
+        description="If set, restrict to the N channels with the most recent messages (from historical data).",
+    )
     default_oldest: datetime = Field(
         description="Default earliest date to fetch messages from",
     )
