@@ -134,7 +134,7 @@ def _html_page(title: str, body: str) -> str:
   .transcript .prompt {{ color: #569cd6; }}
   .transcript .stderr-prefix {{ color: #f44747; }}
   .transcript .exit-code {{ color: #888; font-style: italic; }}
-  .cast-player {{ margin: 1em 0; max-height: 400px; overflow: auto; }}
+  .cast-player {{ margin: 1em 0; }}
   .cast-label {{ font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 0.85em; color: #666; margin-bottom: 0.3em; }}
 </style>
 </head>

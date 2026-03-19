@@ -13,6 +13,13 @@ from imbue.skitwright.session import Session
 _PROVIDER_ERROR_PATTERN = r"(?i)modal|docker|provider|disabled|not authorized|not available"
 
 
+def _assert_provider_disabled(result: Session) -> None:
+    """Assert a command failed because a remote provider is disabled."""
+    expect(result).to_fail()
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
+
+
 @pytest.mark.release
 def test_create_provider_modal(e2e: Session) -> None:
     """
@@ -20,13 +27,12 @@ def test_create_provider_modal(e2e: Session) -> None:
     mng create my-task --provider modal
     # see more details below in "CREATING AGENTS REMOTELY" for relevant options
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --no-ensure-clean",
-        comment="you can also launch claude remotely in Modal",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --no-ensure-clean",
+            comment="you can also launch claude remotely in Modal",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -38,13 +44,12 @@ def test_create_modal_no_connect_message(e2e: Session) -> None:
     # and then we also pass in an explicit message for the agent to start working on immediately
     # the message can also be specified as the contents of a file (by using --message-file instead of --message)
     """
-    result = e2e.run(
-        'mng create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github" --no-ensure-clean',
-        comment="you can send an initial message (so you don't have to wait around)",
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github" --no-ensure-clean',
+            comment="you can send an initial message (so you don't have to wait around)",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -53,13 +58,12 @@ def test_create_modal_edit_message(e2e: Session) -> None:
     # you can also edit the message *while the agent is starting up*, which is very handy for making it "feel" instant:
     mng create my-task --provider modal --edit-message
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --edit-message --no-ensure-clean",
-        comment="you can also edit the message *while the agent is starting up*",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --edit-message --no-ensure-clean",
+            comment="you can also edit the message *while the agent is starting up*",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -68,13 +72,12 @@ def test_create_modal_rsync(e2e: Session) -> None:
     # you can use rsync to transfer extra data as well, beyond just the git data:
     mng create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
     """
-    result = e2e.run(
-        'mng create my-task --provider modal --rsync --rsync-args "--exclude=node_modules" --no-ensure-clean',
-        comment="you can use rsync to transfer extra data as well",
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider modal --rsync --rsync-args "--exclude=node_modules" --no-ensure-clean',
+            comment="you can use rsync to transfer extra data as well",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -86,13 +89,12 @@ def test_create_modal_passthrough_agent_args(e2e: Session) -> None:
     # agents running remotely are running in a sandboxed environment where they can't really mess anything up on their local machine (or if they do, it doesn't matter)
     # because it's running remotely, you might also want something like that system prompt (to tell it not to get blocked on you)
     """
-    result = e2e.run(
-        'mng create my-task --provider modal --no-ensure-clean -- --dangerously-skip-permissions --append-system-prompt "Don\'t ask me any questions!"',
-        comment="one of the coolest features of mng is the ability to create agents on remote hosts",
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider modal --no-ensure-clean -- --dangerously-skip-permissions --append-system-prompt "Don\'t ask me any questions!"',
+            comment="one of the coolest features of mng is the ability to create agents on remote hosts",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -104,13 +106,12 @@ def test_create_modal_idle_timeout(e2e: Session) -> None:
     mng create my-task --provider modal --idle-timeout 60
     # that command shuts down the Modal host (and agent) after 1 minute of inactivity.
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --idle-timeout 60 --no-ensure-clean",
-        comment="mng makes it really easy to deal with this by automatically shutting down hosts when their agents are idle",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --idle-timeout 60 --no-ensure-clean",
+            comment="mng makes it really easy to deal with this by automatically shutting down hosts when their agents are idle",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -121,13 +122,12 @@ def test_create_modal_idle_mode_ssh(e2e: Session) -> None:
     # that command will only consider agents as "idle" when you are not connected to them
     # see the idle_detection.md file for more details on idle detection and timeouts
     """
-    result = e2e.run(
-        'mng create my-task --provider modal --idle-mode "ssh" --no-ensure-clean',
-        comment="You can customize what inactivity means by using the --idle-mode flag",
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider modal --idle-mode "ssh" --no-ensure-clean',
+            comment="You can customize what inactivity means by using the --idle-mode flag",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -141,9 +141,9 @@ def test_create_address_syntax_existing_host(e2e: Session) -> None:
         comment="you can specify which existing host to run on using the address syntax",
     )
     expect(result).to_fail()
+    # The error should mention the host not being found
     combined = result.stdout + result.stderr
-    # The error should be about the host not being found, not an unknown flag
-    expect(combined).to_match(r"(?i)host|not found|error")
+    expect(combined).to_match(r"(?i)host.*not found|no.*host|unknown.*host|could not find.*host|not.*registered")
 
 
 @pytest.mark.release
@@ -155,13 +155,12 @@ def test_create_modal_build_args(e2e: Session) -> None:
     # see "mng create --help" for all provider-specific build args
     # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
     """
-    result = e2e.run(
-        "mng create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12 --no-ensure-clean",
-        comment="build arguments let you customize that new remote host",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12 --no-ensure-clean",
+            comment="build arguments let you customize that new remote host",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -174,13 +173,12 @@ def test_create_modal_dockerfile_and_context(e2e: Session) -> None:
     # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
     # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
     """
-    result = e2e.run(
-        "mng create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context --no-ensure-clean",
-        comment="the most important build args for Modal are --file and --context-dir",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context --no-ensure-clean",
+            comment="the most important build args for Modal are --file and --context-dir",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -190,13 +188,12 @@ def test_create_named_host_new_host(e2e: Session) -> None:
     mng create my-task@my-modal-box.modal --new-host
     # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
     """
-    result = e2e.run(
-        "mng create my-task@my-modal-box.modal --new-host --no-ensure-clean",
-        comment="you can name the host using the address syntax",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task@my-modal-box.modal --new-host --no-ensure-clean",
+            comment="you can name the host using the address syntax",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -205,13 +202,12 @@ def test_create_modal_volume(e2e: Session) -> None:
     # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
     mng create my-task --provider modal -b volume=my-data:/data
     """
-    result = e2e.run(
-        "mng create my-task --provider modal -b volume=my-data:/data --no-ensure-clean",
-        comment="you can mount persistent Modal volumes",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal -b volume=my-data:/data --no-ensure-clean",
+            comment="you can mount persistent Modal volumes",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -220,34 +216,27 @@ def test_create_modal_snapshot(e2e: Session) -> None:
     # you can use an existing snapshot instead of building a new host from scratch:
     mng create my-task --provider modal --snapshot snap-123abc
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --snapshot snap-123abc --no-ensure-clean",
-        comment="you can use an existing snapshot instead of building a new host from scratch",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --snapshot snap-123abc --no-ensure-clean",
+            comment="you can use an existing snapshot instead of building a new host from scratch",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
-@pytest.mark.docker
 def test_create_docker_start_args(e2e: Session) -> None:
     """
     # some providers (like docker), take "start" args as well as build args:
     mng create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """
-    result = e2e.run(
-        'mng create my-task --provider docker -s "--gpus all" --no-ensure-clean',
-        comment="some providers (like docker), take start args as well as build args",
-        timeout=120.0,
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider docker -s "--gpus all" --no-ensure-clean',
+            comment="some providers (like docker), take start args as well as build args",
+        )
     )
-    # On machines with Docker running, this may succeed or fail with a Docker error.
-    # On machines without Docker, it fails with a provider/connection error.
-    # Either way, the flags should be accepted (no "unknown option" error).
-    combined = result.stdout + result.stderr
-    expect(combined).not_to_contain("No such option")
-    expect(combined).not_to_contain("no such option")
 
 
 @pytest.mark.release
@@ -256,13 +245,12 @@ def test_create_modal_target_path(e2e: Session) -> None:
     # you can specify the target path where the agent's work directory will be mounted:
     mng create my-task --provider modal --target-path /workspace
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --target-path /workspace --no-ensure-clean",
-        comment="you can specify the target path where the agent's work directory will be mounted",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --target-path /workspace --no-ensure-clean",
+            comment="you can specify the target path where the agent's work directory will be mounted",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -272,13 +260,12 @@ def test_create_modal_upload_and_user_command(e2e: Session) -> None:
     mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
     # (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
     """
-    result = e2e.run(
-        'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo" --no-ensure-clean',
-        comment="you can upload files and run custom commands during host provisioning",
+    _assert_provider_disabled(
+        e2e.run(
+            'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo" --no-ensure-clean',
+            comment="you can upload files and run custom commands during host provisioning",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -289,13 +276,12 @@ def test_create_modal_no_start_on_boot(e2e: Session) -> None:
     # but it only makes sense to do this if you are running multiple agents on the same host
     # that's because hosts are automatically stopped when they have no more running agents, so you have to have at least one.
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --no-start-on-boot --no-ensure-clean",
-        comment="by default, agents are started when a host is booted; this can be disabled",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --no-start-on-boot --no-ensure-clean",
+            comment="by default, agents are started when a host is booted; this can be disabled",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -305,13 +291,12 @@ def test_create_modal_pass_host_env(e2e: Session) -> None:
     mng create my-task --provider modal --pass-host-env MY_VAR
     # --host-env-file and --pass-host-env work the same as their agent counterparts, and again, you should generally prefer those forms (but if you really need to you can use --host-env to specify host env vars directly)
     """
-    result = e2e.run(
-        "MY_VAR=hello mng create my-task --provider modal --pass-host-env MY_VAR --no-ensure-clean",
-        comment="you can also set host-level environment variables",
+    _assert_provider_disabled(
+        e2e.run(
+            "MY_VAR=hello mng create my-task --provider modal --pass-host-env MY_VAR --no-ensure-clean",
+            comment="you can also set host-level environment variables",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -321,13 +306,12 @@ def test_create_modal_reuse(e2e: Session) -> None:
     mng create sisyphus --reuse --provider modal
     # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
     """
-    result = e2e.run(
-        "mng create sisyphus --reuse --provider modal --no-ensure-clean",
-        comment="another handy trick is to make the create command idempotent",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create sisyphus --reuse --provider modal --no-ensure-clean",
+            comment="another handy trick is to make the create command idempotent",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)
 
 
 @pytest.mark.release
@@ -337,10 +321,9 @@ def test_create_modal_retry(e2e: Session) -> None:
     mng create my-task --provider modal --retry 5 --retry-delay 10s
     # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
     """
-    result = e2e.run(
-        "mng create my-task --provider modal --retry 5 --retry-delay 10s --no-ensure-clean",
-        comment="you can control connection retries and timeouts",
+    _assert_provider_disabled(
+        e2e.run(
+            "mng create my-task --provider modal --retry 5 --retry-delay 10s --no-ensure-clean",
+            comment="you can control connection retries and timeouts",
+        )
     )
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_PROVIDER_ERROR_PATTERN)

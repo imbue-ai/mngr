@@ -95,11 +95,14 @@ def test_create_with_plugin_flags(e2e: Session, agent_name: str) -> None:
         f"mng create {agent_name} --plugin my-plugin --disable-plugin other-plugin --command 'sleep 99999' --no-ensure-clean",
         comment="you can enable or disable specific plugins",
     )
-    # This will likely fail because my-plugin does not exist, but the error
-    # should be about the plugin, not about an unknown CLI flag.
+    # The plugin flags should be accepted by the CLI (no "No such option" error).
+    # The command may fail because my-plugin doesn't exist, which is expected.
     combined = result.stdout + result.stderr
     expect(combined).not_to_contain("No such option")
     expect(combined).not_to_contain("no such option")
+    # Verify the error (if any) is about the plugin, not a crash
+    if result.exit_code != 0:
+        expect(combined).to_match(r"(?i)plugin|not found|unknown")
 
 
 @pytest.mark.release
