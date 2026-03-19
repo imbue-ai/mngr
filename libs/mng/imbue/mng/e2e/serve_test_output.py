@@ -10,6 +10,7 @@ import argparse
 import html
 import json
 import re
+import sys
 from http.server import HTTPServer
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
@@ -440,8 +441,8 @@ def main() -> None:
     args = parser.parse_args()
 
     server = HTTPServer(("127.0.0.1", args.port), _Handler)
-    print(f"Serving e2e test output at http://127.0.0.1:{args.port}")
-    print(f"Test output dir: {_TEST_OUTPUT_DIR}")
+    sys.stdout.write(f"Serving e2e test output at http://127.0.0.1:{args.port}\n")
+    sys.stdout.write(f"Test output dir: {_TEST_OUTPUT_DIR}\n")
     server.serve_forever()
 
 
