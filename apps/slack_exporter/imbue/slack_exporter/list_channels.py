@@ -7,9 +7,9 @@ from datetime import timezone
 from io import StringIO
 from typing import Any
 
+from imbue.slack_exporter.channels import fetch_raw_channel_list
 from imbue.slack_exporter.data_types import SlackApiCaller
 from imbue.slack_exporter.latchkey import call_slack_api
-from imbue.slack_exporter.latchkey import fetch_paginated
 
 
 def _format_timestamp(ts: float) -> str:
@@ -35,19 +35,7 @@ def fetch_and_sort_channels(
     members_only: bool,
 ) -> list[dict[str, Any]]:
     """Fetch channels via conversations.list and return sorted by most recent activity."""
-    raw_channels = fetch_paginated(
-        api_caller=api_caller,
-        method="conversations.list",
-        base_params={
-            "exclude_archived": "true",
-            "limit": "200",
-            "types": "public_channel,private_channel",
-        },
-        response_key="channels",
-    )
-
-    if members_only:
-        raw_channels = [ch for ch in raw_channels if ch.get("is_member", False)]
+    raw_channels = fetch_raw_channel_list(api_caller=api_caller, members_only=members_only)
 
     # Sort by the "updated" field (most recent first). This tracks the last time the
     # channel was modified (settings, topic, messages, etc.) and is the best activity

@@ -44,6 +44,18 @@ SLACK_EXPORTER_CACHE_TTL_SECONDS=300 slack-exporter
 slack-exporter -v
 ```
 
+## Listing channels
+
+Use `slack-channels` to see your channels sorted by most recent activity, which helps decide which channels to include in `--channels`:
+
+```bash
+# List member channels sorted by most recent activity
+slack-channels
+
+# Include non-member channels
+slack-channels --all
+```
+
 ## How it works
 
 1. Reads existing data from the output directory to understand what has already been exported

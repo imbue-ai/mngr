@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 _SLACK_SOURCE = EventSource("slack")
 
 
-def fetch_channel_list(api_caller: SlackApiCaller, members_only: bool = True) -> list[ChannelEvent]:
-    """Fetch non-archived channels from Slack.
+def fetch_raw_channel_list(
+    api_caller: SlackApiCaller,
+    members_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Fetch raw non-archived channel dicts from Slack via conversations.list.
 
     When members_only is True (default), only channels where the authenticated
     user is a member are returned.
@@ -37,6 +40,16 @@ def fetch_channel_list(api_caller: SlackApiCaller, members_only: bool = True) ->
     )
     if members_only:
         raw_channels = [ch for ch in raw_channels if ch.get("is_member", False)]
+    return raw_channels
+
+
+def fetch_channel_list(api_caller: SlackApiCaller, members_only: bool = True) -> list[ChannelEvent]:
+    """Fetch non-archived channels from Slack as ChannelEvent objects.
+
+    When members_only is True (default), only channels where the authenticated
+    user is a member are returned.
+    """
+    raw_channels = fetch_raw_channel_list(api_caller=api_caller, members_only=members_only)
     channels = [_make_channel_event(raw) for raw in raw_channels]
     logger.info("Fetched %d channels from Slack", len(channels))
     return channels
