@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 from datetime import timezone
@@ -66,6 +67,17 @@ Examples:
         help="Directory for output data (default: slack_export/)",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_channels",
+        help="Export all channels, not just those where you are a member",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force re-fetch of all cached data (channels, users, self identity, reactions)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -81,11 +93,15 @@ Examples:
 
     channel_configs = tuple(_parse_channel_spec(spec) for spec in args.channels)
     default_oldest = _parse_iso_datetime_as_utc(args.since)
+    cache_ttl_seconds = int(os.environ.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
 
     settings = ExporterSettings(
         channels=channel_configs,
         default_oldest=default_oldest,
         output_dir=args.output_dir,
+        members_only=not args.all_channels,
+        refresh=args.refresh,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
     try:

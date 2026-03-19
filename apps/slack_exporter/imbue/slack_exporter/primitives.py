@@ -23,3 +23,9 @@ class SlackUserId(NonEmptyStr):
     """A Slack user ID (e.g. 'U01ABCDEF')."""
 
     ...
+
+
+class SlackUserName(NonEmptyStr):
+    """A Slack user name as returned by auth.test (e.g. 'alice')."""
+
+    ...

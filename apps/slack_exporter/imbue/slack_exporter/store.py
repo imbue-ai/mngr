@@ -1,6 +1,7 @@
 import json
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,10 @@ from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.slack_exporter.data_types import ChannelEvent
 from imbue.slack_exporter.data_types import ChannelExportState
 from imbue.slack_exporter.data_types import MessageEvent
+from imbue.slack_exporter.data_types import ReactionItemEvent
 from imbue.slack_exporter.data_types import ReplyEvent
+from imbue.slack_exporter.data_types import SelfIdentityEvent
+from imbue.slack_exporter.data_types import UnreadMarkerEvent
 from imbue.slack_exporter.data_types import UserEvent
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackMessageTimestamp
@@ -23,7 +27,10 @@ class DataType(StrEnum):
 
     CHANNELS = "channels"
     MESSAGES = "messages"
+    REACTIONS = "reactions"
     REPLIES = "replies"
+    SELF_IDENTITY = "self_identity"
+    UNREAD_MARKERS = "unread_markers"
     USERS = "users"
 
 
@@ -148,3 +155,140 @@ def load_existing_reply_keys(
             known_keys.add((event.channel_id, event.thread_ts, event.reply_ts))
     logger.info("Loaded %d known replies from store", len(known_keys))
     return known_keys
+
+
+def load_existing_self_identity(output_dir: Path) -> dict[str, SelfIdentityEvent]:
+    """Load existing self-identity events, keeping the latest per user_id."""
+    identity_by_id: dict[str, SelfIdentityEvent] = {}
+    for stream in StreamType:
+        for record in _load_jsonl_records(_events_path(output_dir, DataType.SELF_IDENTITY, stream)):
+            event = SelfIdentityEvent.model_validate(record)
+            identity_by_id[event.user_id] = event
+    logger.info("Loaded %d self-identity events from store", len(identity_by_id))
+    return identity_by_id
+
+
+def save_self_identity_events(output_dir: Path, stream: StreamType, events: Sequence[SelfIdentityEvent]) -> None:
+    _append_events(_events_path(output_dir, DataType.SELF_IDENTITY, stream), events)
+
+
+def load_existing_unread_markers(output_dir: Path) -> dict[str, UnreadMarkerEvent]:
+    """Load existing unread marker events, keeping the latest per channel_id."""
+    marker_by_channel: dict[str, UnreadMarkerEvent] = {}
+    for stream in StreamType:
+        for record in _load_jsonl_records(_events_path(output_dir, DataType.UNREAD_MARKERS, stream)):
+            event = UnreadMarkerEvent.model_validate(record)
+            marker_by_channel[event.channel_id] = event
+    logger.info("Loaded %d unread marker events from store", len(marker_by_channel))
+    return marker_by_channel
+
+
+def save_unread_marker_events(output_dir: Path, stream: StreamType, events: Sequence[UnreadMarkerEvent]) -> None:
+    _append_events(_events_path(output_dir, DataType.UNREAD_MARKERS, stream), events)
+
+
+def derive_reaction_item_key(raw: dict[str, Any]) -> str:
+    """Derive a unique key from a reactions.list item's raw data."""
+    item_type = raw.get("type", "")
+    if item_type == "message":
+        channel = raw.get("channel", "")
+        ts = raw.get("message", {}).get("ts", "")
+        return f"message:{channel}:{ts}"
+    elif item_type == "file":
+        file_id = raw.get("file", {}).get("id", "")
+        return f"file:{file_id}"
+    elif item_type == "file_comment":
+        comment_id = raw.get("comment", {}).get("id", "")
+        return f"file_comment:{comment_id}"
+    else:
+        return f"other:{json.dumps(raw, sort_keys=True)}"
+
+
+def load_existing_reactions(output_dir: Path) -> dict[str, ReactionItemEvent]:
+    """Load existing reaction item events, keeping the latest per derived key."""
+    reaction_by_key: dict[str, ReactionItemEvent] = {}
+    for stream in StreamType:
+        for record in _load_jsonl_records(_events_path(output_dir, DataType.REACTIONS, stream)):
+            event = ReactionItemEvent.model_validate(record)
+            key = derive_reaction_item_key(event.raw)
+            reaction_by_key[key] = event
+    logger.info("Loaded %d reaction item events from store", len(reaction_by_key))
+    return reaction_by_key
+
+
+def save_reaction_events(output_dir: Path, stream: StreamType, events: Sequence[ReactionItemEvent]) -> None:
+    _append_events(_events_path(output_dir, DataType.REACTIONS, stream), events)
+
+
+def _channel_export_metadata_path(output_dir: Path) -> Path:
+    return output_dir / ".channel_export_metadata.json"
+
+
+def load_channel_export_metadata(output_dir: Path) -> dict[SlackChannelId, SlackMessageTimestamp]:
+    """Load the per-channel searched-oldest timestamps.
+
+    Returns a mapping from channel_id to the oldest Slack timestamp we have
+    already searched from for that channel.
+    """
+    path = _channel_export_metadata_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("Malformed channel export metadata at %s, treating as empty", path)
+        return {}
+    return {SlackChannelId(k): SlackMessageTimestamp(v) for k, v in raw.items()}
+
+
+def save_channel_searched_oldest(
+    output_dir: Path,
+    channel_id: SlackChannelId,
+    searched_oldest_ts: SlackMessageTimestamp,
+) -> None:
+    """Persist the oldest timestamp we have searched from for a channel.
+
+    Only updates the value if the new timestamp is older (earlier) than the
+    existing one, so repeated runs with the same --since are no-ops.
+    """
+    metadata = load_channel_export_metadata(output_dir)
+    existing = metadata.get(channel_id)
+    if existing is not None and existing <= searched_oldest_ts:
+        return
+    metadata[channel_id] = searched_oldest_ts
+    path = _channel_export_metadata_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({str(k): str(v) for k, v in metadata.items()}))
+
+
+def _fetch_metadata_path(output_dir: Path) -> Path:
+    return output_dir / ".fetch_metadata.json"
+
+
+def load_fetch_metadata(output_dir: Path) -> dict[str, datetime]:
+    """Load the per-data-type last-fetch timestamps."""
+    path = _fetch_metadata_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("Malformed fetch metadata at %s, treating as empty", path)
+        return {}
+    result: dict[str, datetime] = {}
+    for key, value in raw.items():
+        try:
+            result[key] = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            logger.warning("Skipping invalid timestamp for %s in fetch metadata", key)
+    return result
+
+
+def save_fetch_timestamp(output_dir: Path, data_type: str, timestamp: datetime) -> None:
+    """Update the last-fetch timestamp for a specific data type."""
+    metadata = load_fetch_metadata(output_dir)
+    metadata[data_type] = timestamp
+    path = _fetch_metadata_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = {k: v.isoformat() for k, v in metadata.items()}
+    path.write_text(json.dumps(raw))

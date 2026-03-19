@@ -1,12 +1,17 @@
 import pytest
 
+from imbue.slack_exporter.channels import extract_unread_markers
 from imbue.slack_exporter.channels import fetch_channel_list
+from imbue.slack_exporter.channels import fetch_self_identity
 from imbue.slack_exporter.channels import fetch_user_list
+from imbue.slack_exporter.channels import fetch_user_reactions
 from imbue.slack_exporter.channels import resolve_channel_id
 from imbue.slack_exporter.errors import ChannelNotFoundError
 from imbue.slack_exporter.primitives import SlackChannelId
 from imbue.slack_exporter.primitives import SlackChannelName
+from imbue.slack_exporter.primitives import SlackMessageTimestamp
 from imbue.slack_exporter.primitives import SlackUserId
+from imbue.slack_exporter.primitives import SlackUserName
 from imbue.slack_exporter.testing import make_channel_event
 from imbue.slack_exporter.testing import make_fake_api_caller
 from imbue.slack_exporter.testing import make_slack_response
@@ -19,8 +24,8 @@ def test_fetch_channel_list_single_page() -> None:
                 make_slack_response(
                     "channels",
                     [
-                        {"id": "C123", "name": "general"},
-                        {"id": "C456", "name": "random"},
+                        {"id": "C123", "name": "general", "is_member": True},
+                        {"id": "C456", "name": "random", "is_member": True},
                     ],
                 ),
             ],
@@ -36,16 +41,59 @@ def test_fetch_channel_list_single_page() -> None:
     assert "event_id" in channels[0].model_dump()
 
 
+def test_fetch_channel_list_filters_non_member_channels_by_default() -> None:
+    api_caller = make_fake_api_caller(
+        {
+            "conversations.list": [
+                make_slack_response(
+                    "channels",
+                    [
+                        {"id": "C123", "name": "general", "is_member": True},
+                        {"id": "C456", "name": "random", "is_member": False},
+                        {"id": "C789", "name": "private", "is_member": True},
+                    ],
+                ),
+            ],
+        }
+    )
+
+    channels = fetch_channel_list(api_caller)
+
+    assert len(channels) == 2
+    assert channels[0].channel_id == SlackChannelId("C123")
+    assert channels[1].channel_id == SlackChannelId("C789")
+
+
+def test_fetch_channel_list_includes_all_channels_when_members_only_false() -> None:
+    api_caller = make_fake_api_caller(
+        {
+            "conversations.list": [
+                make_slack_response(
+                    "channels",
+                    [
+                        {"id": "C123", "name": "general", "is_member": True},
+                        {"id": "C456", "name": "random", "is_member": False},
+                    ],
+                ),
+            ],
+        }
+    )
+
+    channels = fetch_channel_list(api_caller, members_only=False)
+
+    assert len(channels) == 2
+
+
 def test_fetch_channel_list_multiple_pages() -> None:
     api_caller = make_fake_api_caller(
         {
             "conversations.list": [
                 {
                     "ok": True,
-                    "channels": [{"id": "C123", "name": "general"}],
+                    "channels": [{"id": "C123", "name": "general", "is_member": True}],
                     "response_metadata": {"next_cursor": "cursor_page2"},
                 },
-                make_slack_response("channels", [{"id": "C456", "name": "random"}]),
+                make_slack_response("channels", [{"id": "C456", "name": "random", "is_member": True}]),
             ],
         }
     )
@@ -122,3 +170,86 @@ def test_resolve_channel_id_prefers_fresh_events_over_cache() -> None:
 def test_resolve_channel_id_raises_when_channel_not_found() -> None:
     with pytest.raises(ChannelNotFoundError):
         resolve_channel_id(SlackChannelName("nonexistent"), [], {})
+
+
+def test_fetch_self_identity_returns_event() -> None:
+    api_caller = make_fake_api_caller(
+        {
+            "auth.test": [{"ok": True, "user_id": "U001", "user": "alice", "team": "test", "team_id": "T001"}],
+        }
+    )
+
+    event = fetch_self_identity(api_caller)
+
+    assert event.user_id == SlackUserId("U001")
+    assert event.user_name == SlackUserName("alice")
+    assert event.source == "self_identity"
+    assert event.raw["team"] == "test"
+
+
+def test_extract_unread_markers_from_channels_with_last_read() -> None:
+    channels = [
+        make_channel_event("C123", "general", raw={"id": "C123", "name": "general", "last_read": "1700000000.000001"}),
+        make_channel_event("C456", "random", raw={"id": "C456", "name": "random", "last_read": "1700000000.000099"}),
+    ]
+
+    markers = extract_unread_markers(channels)
+
+    assert len(markers) == 2
+    assert markers[0].channel_id == SlackChannelId("C123")
+    assert markers[0].last_read_ts == SlackMessageTimestamp("1700000000.000001")
+    assert markers[0].source == "unread_markers"
+    assert markers[1].last_read_ts == SlackMessageTimestamp("1700000000.000099")
+
+
+def test_extract_unread_markers_skips_channels_without_last_read() -> None:
+    channels = [
+        make_channel_event("C123", "general", raw={"id": "C123", "name": "general", "last_read": "1700000000.000001"}),
+        make_channel_event("C456", "random", raw={"id": "C456", "name": "random"}),
+    ]
+
+    markers = extract_unread_markers(channels)
+
+    assert len(markers) == 1
+    assert markers[0].channel_id == SlackChannelId("C123")
+
+
+def test_fetch_user_reactions_returns_events() -> None:
+    reaction_item = {
+        "type": "message",
+        "channel": "C123",
+        "message": {
+            "ts": "1700000000.000001",
+            "text": "hello",
+            "reactions": [{"name": "thumbsup", "users": ["U001"], "count": 1}],
+        },
+    }
+    api_caller = make_fake_api_caller({"reactions.list": [make_slack_response("items", [reaction_item])]})
+
+    events = fetch_user_reactions(api_caller, SlackUserId("U001"))
+
+    assert len(events) == 1
+    assert events[0].user_id == SlackUserId("U001")
+    assert events[0].source == "reactions"
+    assert events[0].raw["type"] == "message"
+
+
+def test_fetch_user_reactions_handles_pagination() -> None:
+    item1 = {"type": "message", "channel": "C1", "message": {"ts": "1.0", "text": "a"}}
+    item2 = {"type": "message", "channel": "C2", "message": {"ts": "2.0", "text": "b"}}
+    api_caller = make_fake_api_caller(
+        {
+            "reactions.list": [
+                {
+                    "ok": True,
+                    "items": [item1],
+                    "response_metadata": {"next_cursor": "page2"},
+                },
+                make_slack_response("items", [item2]),
+            ],
+        }
+    )
+
+    events = fetch_user_reactions(api_caller, SlackUserId("U001"))
+
+    assert len(events) == 2

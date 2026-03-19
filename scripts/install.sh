@@ -206,22 +206,6 @@ else
     esac
 fi
 
-# ── Verify bash 4+ is on PATH (post-install) ─────────────────────────────────
-# Re-check after deps were installed. Warn if still too old.
-
-if [ "$_NEED_MODERN_BASH" = true ]; then
-    _POST_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
-    if [ "$_POST_BASH_VER" -lt 4 ] 2>/dev/null; then
-        if [ "$OS" = "macos" ]; then
-            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
-            warn "Ensure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH."
-        else
-            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
-            warn "Ensure the newly installed bash is before the old one in your PATH."
-        fi
-    fi
-fi
-
 # ── Verify uv is available ─────────────────────────────────────────────────────
 
 if ! command -v uv &>/dev/null; then
@@ -237,12 +221,6 @@ fi
 
 info "Installing mng..."
 uv tool install mng
-
-if ! command -v mng &>/dev/null; then
-    warn "mng was installed but is not on PATH."
-    warn "You may need to add ~/.local/bin to your PATH:"
-    printf '  export PATH="$HOME/.local/bin:$PATH"\n'
-fi
 
 # ── Shell completion ───────────────────────────────────────────────────────────
 
@@ -285,6 +263,31 @@ else
             info "Skipping shell completion"
             ;;
     esac
+fi
+
+# ── Post-install warnings ─────────────────────────────────────────────────────
+# IMPORTANT: Instructions that require user action after installation (e.g.
+# adding something to PATH) must always be printed last, so they remain visible
+# when the script exits. Do not add informational output after this section.
+
+# Re-check bash version after deps were installed. Warn if still too old.
+if [ "$_NEED_MODERN_BASH" = true ]; then
+    _POST_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
+    if [ "$_POST_BASH_VER" -lt 4 ] 2>/dev/null; then
+        if [ "$OS" = "macos" ]; then
+            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
+            warn "Ensure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH."
+        else
+            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
+            warn "Ensure the newly installed bash is before the old one in your PATH."
+        fi
+    fi
+fi
+
+if ! command -v mng &>/dev/null; then
+    warn "mng was installed but is not on PATH."
+    warn "You may need to add ~/.local/bin to your PATH:"
+    printf '  export PATH="$HOME/.local/bin:$PATH"\n'
 fi
 
 info "Get started with: mng --help"
