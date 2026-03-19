@@ -97,7 +97,14 @@ Examples:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    channel_configs = tuple(_parse_channel_spec(spec) for spec in args.channels) if args.channels else None
+    if args.channels:
+        # Support space-separated channel names within a single argument
+        all_specs: list[str] = []
+        for arg in args.channels:
+            all_specs.extend(arg.split())
+        channel_configs: tuple[ChannelConfig, ...] | None = tuple(_parse_channel_spec(spec) for spec in all_specs)
+    else:
+        channel_configs = None
     default_oldest = _parse_iso_datetime_as_utc(args.since)
     cache_ttl_seconds = int(os.environ.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
 

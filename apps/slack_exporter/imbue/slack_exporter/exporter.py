@@ -218,13 +218,15 @@ def _detect_relevant_threads(
 def _fetch_and_save_channel_info(
     api_caller: SlackApiCaller,
     channels_for_info: list[ChannelEvent],
+    existing_channel_by_id: dict[SlackChannelId, ChannelEvent],
     settings: ExporterSettings,
 ) -> None:
-    """Fetch per-channel unread markers via conversations.info and save changes."""
-    fresh_markers, _channel_latest = fetch_channel_info(api_caller, channels_for_info)
+    """Fetch per-channel info via conversations.info and save unread markers and channel updates."""
+    info_result = fetch_channel_info(api_caller, channels_for_info)
+
     existing_markers = load_existing_unread_markers(settings.output_dir)
     _diff_and_save(
-        fresh_items=fresh_markers,
+        fresh_items=list(info_result.unread_markers),
         existing_by_key=dict(existing_markers),
         get_key=lambda m: m.channel_id,
         get_raw=lambda m: m.raw,
@@ -232,6 +234,18 @@ def _fetch_and_save_channel_info(
         output_dir=settings.output_dir,
         entity_name="unread markers",
     )
+
+    # Update channel data from conversations.info responses
+    if info_result.updated_channels:
+        _diff_and_save(
+            fresh_items=list(info_result.updated_channels),
+            existing_by_key=dict(existing_channel_by_id),
+            get_key=lambda ch: ch.channel_id,
+            get_raw=lambda ch: ch.raw,
+            save_fn=save_channel_events,
+            output_dir=settings.output_dir,
+            entity_name="channels",
+        )
 
 
 def _get_latest_reply_timestamp_for_thread(
@@ -333,8 +347,28 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         )
         save_fetch_timestamp(settings.output_dir, DataType.SELF_IDENTITY, now)
 
-    # Export channel list (cached with TTL for metadata like names/IDs)
-    if _is_cache_fresh(fetch_metadata, DataType.CHANNELS, now, settings) and existing_channel_by_id:
+    # Build name-to-ID mapping from cached channel data
+    channel_id_by_name: dict[SlackChannelName, SlackChannelId] = {
+        event.channel_name: event.channel_id for event in existing_channel_by_id.values()
+    }
+
+    # When explicit channels are specified, all are already cached, and no refresh
+    # is requested, skip conversations.list entirely
+    is_all_channels_cached = (
+        settings.channels is not None
+        and not settings.refresh
+        and all(config.name in channel_id_by_name for config in settings.channels)
+    )
+
+    if is_all_channels_cached:
+        # Use cached channel data for the specified channels only
+        assert settings.channels is not None
+        export_channel_names = {config.name for config in settings.channels}
+        fresh_channels = [
+            event for event in existing_channel_by_id.values() if event.channel_name in export_channel_names
+        ]
+        logger.info("All %d channels resolved from cache, skipping conversations.list", len(fresh_channels))
+    elif _is_cache_fresh(fetch_metadata, DataType.CHANNELS, now, settings) and existing_channel_by_id:
         fresh_channels = list(existing_channel_by_id.values())
         if settings.members_only:
             fresh_channels = [ch for ch in fresh_channels if ch.raw.get("is_member", False)]
@@ -352,9 +386,6 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         )
         save_fetch_timestamp(settings.output_dir, DataType.CHANNELS, now)
 
-    channel_id_by_name: dict[SlackChannelName, SlackChannelId] = {
-        event.channel_name: event.channel_id for event in existing_channel_by_id.values()
-    }
     for event in fresh_channels:
         channel_id_by_name[event.channel_name] = event.channel_id
 
@@ -398,7 +429,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
     ) as cg:
         cg.start_new_thread(
             target=_fetch_and_save_channel_info,
-            args=(api_caller, channels_for_info, settings),
+            args=(api_caller, channels_for_info, existing_channel_by_id, settings),
             name="channel-info",
         )
 

@@ -1,8 +1,11 @@
 import logging
 from typing import Any
 
+from pydantic import Field
+
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.slack_exporter.data_types import ChannelEvent
 from imbue.slack_exporter.data_types import SelfIdentityEvent
 from imbue.slack_exporter.data_types import SlackApiCaller
@@ -115,23 +118,36 @@ def fetch_self_identity(api_caller: SlackApiCaller) -> SelfIdentityEvent:
     )
 
 
+class ChannelInfoResult(FrozenModel):
+    """Result of fetching per-channel info via conversations.info."""
+
+    unread_markers: tuple[UnreadMarkerEvent, ...] = Field(description="Unread marker events")
+    updated_channels: tuple[ChannelEvent, ...] = Field(
+        description="Channel events updated from conversations.info responses",
+    )
+
+
 def fetch_channel_info(
     api_caller: SlackApiCaller,
     channel_events: list[ChannelEvent],
-) -> tuple[list[UnreadMarkerEvent], dict[SlackChannelId, SlackMessageTimestamp]]:
+) -> ChannelInfoResult:
     """Fetch per-channel info via conversations.info.
 
-    Returns (unread_markers, latest_message_ts_by_channel). The latest timestamps
-    can be used to skip channels with no new messages.
+    Returns unread markers and updated channel events from the conversations.info
+    responses (which include the full channel object).
     """
     markers: list[UnreadMarkerEvent] = []
-    latest_by_channel: dict[SlackChannelId, SlackMessageTimestamp] = {}
+    updated_channels: list[ChannelEvent] = []
     total_channels = len(channel_events)
     for channel_idx, event in enumerate(channel_events):
         if total_channels > 1:
             logger.info("  Fetching channel info %d/%d: %s", channel_idx + 1, total_channels, event.channel_name)
         data = api_caller("conversations.info", {"channel": str(event.channel_id)})
         channel_info = data.get("channel", {})
+
+        # Build an updated channel event from the full conversations.info response
+        if channel_info.get("id") and channel_info.get("name"):
+            updated_channels.append(_make_channel_event(channel_info))
 
         last_read = channel_info.get("last_read")
         if last_read:
@@ -148,12 +164,11 @@ def fetch_channel_info(
                 )
             )
 
-        latest = channel_info.get("latest")
-        if isinstance(latest, dict) and latest.get("ts"):
-            latest_by_channel[event.channel_id] = SlackMessageTimestamp(latest["ts"])
-
     logger.info("Fetched info for %d channels (%d unread markers)", len(channel_events), len(markers))
-    return markers, latest_by_channel
+    return ChannelInfoResult(
+        unread_markers=tuple(markers),
+        updated_channels=tuple(updated_channels),
+    )
 
 
 def _make_user_event(user_raw: dict[str, Any]) -> UserEvent:

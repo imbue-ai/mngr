@@ -135,23 +135,28 @@ def test_run_export_unchanged_channels_not_written(default_settings: ExporterSet
 def test_run_export_changed_channels_go_to_updated_stream(default_settings: ExporterSettings) -> None:
     run_export(default_settings, api_caller=_standard_api_caller())
 
-    # Second run with changed channel data
+    # Second run: conversations.info returns updated channel data (topic changed).
+    # Since the channel is already cached, conversations.list is skipped, but
+    # conversations.info still updates channel data.
     run_export(
         default_settings,
         api_caller=make_fake_api_caller(
             {
                 "auth.test": [_DEFAULT_AUTH_RESPONSE],
-                "conversations.list": [
-                    make_slack_response(
-                        "channels", [{"id": "C123", "name": "general", "is_member": True, "topic": "new topic"}]
-                    ),
-                ],
                 "conversations.info": [
-                    {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000000"}},
+                    {
+                        "ok": True,
+                        "channel": {
+                            "id": "C123",
+                            "name": "general",
+                            "is_member": True,
+                            "topic": "new topic",
+                            "last_read": "1700000000.000000",
+                        },
+                    },
                 ],
                 "users.list": [make_slack_response("members", [])],
                 "conversations.history": [
-                    make_slack_response("messages", []),
                     make_slack_response("messages", []),
                 ],
             }

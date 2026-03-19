@@ -194,43 +194,20 @@ def test_fetch_unread_markers_from_conversations_info() -> None:
     api_caller = make_fake_api_caller(
         {
             "conversations.info": [
-                {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000001"}},
-                {"ok": True, "channel": {"id": "C456", "last_read": "1700000000.000099"}},
+                {"ok": True, "channel": {"id": "C123", "name": "general", "last_read": "1700000000.000001"}},
+                {"ok": True, "channel": {"id": "C456", "name": "random", "last_read": "1700000000.000099"}},
             ],
         }
     )
 
-    markers, latest = fetch_channel_info(api_caller, channels)
+    result = fetch_channel_info(api_caller, channels)
 
-    assert len(markers) == 2
-    assert markers[0].channel_id == SlackChannelId("C123")
-    assert markers[0].last_read_ts == SlackMessageTimestamp("1700000000.000001")
-    assert markers[0].source == "slack"
-    assert markers[1].last_read_ts == SlackMessageTimestamp("1700000000.000099")
-    assert latest == {}
-
-
-def test_fetch_channel_info_returns_latest_timestamps() -> None:
-    channels = [make_channel_event("C123", "general")]
-    api_caller = make_fake_api_caller(
-        {
-            "conversations.info": [
-                {
-                    "ok": True,
-                    "channel": {
-                        "id": "C123",
-                        "last_read": "1700000000.000001",
-                        "latest": {"ts": "1700000000.000099", "text": "hello"},
-                    },
-                },
-            ],
-        }
-    )
-
-    markers, latest = fetch_channel_info(api_caller, channels)
-
-    assert len(markers) == 1
-    assert latest[SlackChannelId("C123")] == SlackMessageTimestamp("1700000000.000099")
+    assert len(result.unread_markers) == 2
+    assert result.unread_markers[0].channel_id == SlackChannelId("C123")
+    assert result.unread_markers[0].last_read_ts == SlackMessageTimestamp("1700000000.000001")
+    assert result.unread_markers[0].source == "slack"
+    assert result.unread_markers[1].last_read_ts == SlackMessageTimestamp("1700000000.000099")
+    assert len(result.updated_channels) == 2
 
 
 def test_fetch_channel_info_skips_channels_without_last_read() -> None:
@@ -241,13 +218,13 @@ def test_fetch_channel_info_skips_channels_without_last_read() -> None:
     api_caller = make_fake_api_caller(
         {
             "conversations.info": [
-                {"ok": True, "channel": {"id": "C123", "last_read": "1700000000.000001"}},
-                {"ok": True, "channel": {"id": "C456"}},
+                {"ok": True, "channel": {"id": "C123", "name": "general", "last_read": "1700000000.000001"}},
+                {"ok": True, "channel": {"id": "C456", "name": "random"}},
             ],
         }
     )
 
-    markers, _ = fetch_channel_info(api_caller, channels)
+    result = fetch_channel_info(api_caller, channels)
 
-    assert len(markers) == 1
-    assert markers[0].channel_id == SlackChannelId("C123")
+    assert len(result.unread_markers) == 1
+    assert result.unread_markers[0].channel_id == SlackChannelId("C123")
