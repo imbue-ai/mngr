@@ -3,6 +3,8 @@ argument-hint: <script_file> <test_directory>
 description: Match tutorial script blocks to e2e pytest functions and add missing tests
 ---
 
+Default arguments (if none provided): `libs/mng/tutorials/mega_tutorial.sh libs/mng/imbue/mng/e2e`
+
 Your task is to ensure that every command block in a tutorial shell script has a corresponding pytest function.
 
 ## Step 1: Run the matcher
@@ -47,9 +49,11 @@ After step 3, some script blocks may still lack tests. For each one:
 
 When writing or updating tests, follow these two principles:
 
-**Run the actual commands from the script block.** The test must run commands that match the script block as closely as possible. The only acceptable differences are adding flags like `--no-connect` to make commands work without an interactive terminal. For example, if the script block demonstrates `mng create --foo`, the test must run `mng create --foo` (with optional extra flags) -- it must NOT simply run `mng create --help` and verify that `--foo` is a supported flag.
+**Run the actual commands from the script block.** The test must run commands that match the script block as closely as possible. For example, if the script block demonstrates `mng create --foo`, the test must run `mng create --foo` (with optional extra flags) -- it must NOT simply run `mng create --help` and verify that `--foo` is a supported flag.
 
 **Verify the actual behavior, not just surface-level output.** The script blocks usually don't contain verification code, but the test must verify the exact desired behavior as thoroughly as possible. For example, if a script block creates an agent in a specific directory, it is not sufficient to only verify that the agent appears in the result of `mng list` -- you must also verify that the agent is running in that directory, e.g. by running `mng exec $agent_name pwd` and checking its output. Think about what the command is supposed to accomplish and assert on the concrete effects.
+
+**Add comments to transcript commands.** The Skitwright `Session.run()` method accepts an optional `comment` parameter that is recorded in the transcript above the command (as `# ...` lines). Use this to annotate each command with a brief description of what it does. Reuse comments from the tutorial script block where available -- if a script block has comments above or beside a command, use those as the comment text.
 
 ## Step 5: Verify
 
