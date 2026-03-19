@@ -1613,6 +1613,14 @@ def test_main_delivers_events_from_subprocess(tmp_path: Path, monkeypatch: pytes
 
     capture.wait_for_call(timeout=5.0)
 
+    # Wait for delivery state file to be written. The state file is saved right after
+    # send_message returns, but wait_for_call fires at the moment send_message is
+    # called, before _save_delivery_state completes.
+    state_file = agent_state_dir / "events" / ".event_delivery_state.json"
+    deadline = time.monotonic() + 2.0
+    while not state_file.exists() and time.monotonic() < deadline:
+        stop_event.wait(timeout=0.01)
+
     stop_event.set()
     thread.join(timeout=3.0)
 
@@ -1636,7 +1644,6 @@ def test_main_delivers_events_from_subprocess(tmp_path: Path, monkeypatch: pytes
     assert "evt-b" in all_event_ids
 
     # Verify delivery state was persisted
-    state_file = agent_state_dir / "events" / ".event_delivery_state.json"
     assert state_file.exists()
     loaded = _load_delivery_state(state_file)
     assert loaded.last_event_id in ("evt-a", "evt-b")
