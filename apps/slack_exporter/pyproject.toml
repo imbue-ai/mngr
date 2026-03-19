@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 slack-exporter = "imbue.slack_exporter.main:main"
+slack-channels = "imbue.slack_exporter.list_channels:main"
 
 [build-system]
 requires = ["hatchling"]
