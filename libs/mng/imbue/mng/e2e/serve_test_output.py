@@ -133,17 +133,18 @@ def _html_page(title: str, body: str, sidebar: str | None = None) -> str:
     body_wrapper_end = ""
 
     if sidebar is not None:
-        sidebar_css = """
-  .layout {{ display: flex; gap: 0; }}
-  .sidebar {{ width: 240px; min-width: 240px; border-right: 1px solid #ddd; padding: 0.5em 1em; font-size: 0.85em; overflow-y: auto; max-height: calc(100vh - 4em); position: sticky; top: 2em; }}
-  .sidebar.collapsed {{ width: 0; min-width: 0; padding: 0; overflow: hidden; border-right: none; }}
-  .sidebar ul {{ list-style: none; padding: 0; margin: 0; }}
-  .sidebar li {{ margin: 0.2em 0; }}
-  .sidebar li.active {{ font-weight: bold; }}
-  .sidebar a {{ color: #333; }}
-  .sidebar-toggle {{ cursor: pointer; user-select: none; font-size: 0.85em; color: #666; margin-bottom: 0.5em; }}
-  .sidebar-toggle:hover {{ color: #0066cc; }}
-  .main-content {{ flex: 1; min-width: 0; padding-left: 1.5em; }}"""
+        sidebar_css = (
+            ".layout { display: flex; gap: 0; }\n"
+            "  .sidebar { width: 240px; min-width: 240px; border-right: 1px solid #ddd; padding: 0.5em 1em; font-size: 0.85em; overflow-y: auto; max-height: calc(100vh - 4em); position: sticky; top: 2em; }\n"
+            "  .sidebar.collapsed { width: 0; min-width: 0; padding: 0; overflow: hidden; border-right: none; }\n"
+            "  .sidebar ul { list-style: none; padding: 0; margin: 0; }\n"
+            "  .sidebar li { margin: 0.2em 0; }\n"
+            "  .sidebar li.active { font-weight: bold; }\n"
+            "  .sidebar a { color: #333; }\n"
+            "  .sidebar-toggle { cursor: pointer; user-select: none; font-size: 0.85em; color: #666; margin-bottom: 0.5em; }\n"
+            "  .sidebar-toggle:hover { color: #0066cc; }\n"
+            "  .main-content { flex: 1; min-width: 0; padding-left: 1.5em; }"
+        )
         sidebar_js = """
 <script>
 (function() {
