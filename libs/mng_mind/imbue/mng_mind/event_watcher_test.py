@@ -20,6 +20,7 @@ from imbue.mng_mind import event_watcher as event_watcher_module
 from imbue.mng_mind.conftest import EventWatcherSubprocessCapture
 from imbue.mng_mind.conftest import SyntheticLoopEnv
 from imbue.mng_mind.conftest import _create_synthetic_loop_env
+from imbue.mng_mind.conftest import create_executable_script
 from imbue.mng_mind.data_types import WatcherSettings
 from imbue.mng_mind.event_watcher import DEFAULT_CEL_FILTER
 from imbue.mng_mind.event_watcher import InvalidTimeFormatError
@@ -2287,12 +2288,10 @@ def test_main_delivers_subprocess_events_through_reader_thread(
 
 def test_run_event_batch_filter_script_passes_lines_through_identity_script(tmp_path: Path) -> None:
     """A filter script that cats stdin should return the same lines."""
-    script = tmp_path / "identity_filter.sh"
-    script.write_text("#!/bin/bash\ncat\n")
-    script.chmod(0o755)
+    script_path = create_executable_script(tmp_path, "identity_filter.sh", "#!/bin/bash\ncat\n")
 
     lines = ['{"source":"a","event_id":"1"}', '{"source":"b","event_id":"2"}']
-    result = _run_event_batch_filter_script(lines, str(script))
+    result = _run_event_batch_filter_script(lines, script_path)
     assert result is not None
     assert len(result) == 2
     assert result[0] == '{"source":"a","event_id":"1"}'
@@ -2301,13 +2300,12 @@ def test_run_event_batch_filter_script_passes_lines_through_identity_script(tmp_
 
 def test_run_event_batch_filter_script_allows_filtering_to_empty(tmp_path: Path) -> None:
     """A filter script that outputs empty lines for all events."""
-    script = tmp_path / "drop_all_filter.sh"
-    # Output the same number of lines but all empty
-    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n')
-    script.chmod(0o755)
+    script_path = create_executable_script(
+        tmp_path, "drop_all_filter.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n'
+    )
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _run_event_batch_filter_script(lines, str(script))
+    result = _run_event_batch_filter_script(lines, script_path)
     assert result is not None
     assert len(result) == 2
     assert result[0] == ""
@@ -2316,12 +2314,12 @@ def test_run_event_batch_filter_script_allows_filtering_to_empty(tmp_path: Path)
 
 def test_run_event_batch_filter_script_replaces_filtered_events_with_empty_dict(tmp_path: Path) -> None:
     """A filter script can output '{}' to indicate a filtered event."""
-    script = tmp_path / "replace_with_empty_dict.sh"
-    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo "{}"; done\n')
-    script.chmod(0o755)
+    script_path = create_executable_script(
+        tmp_path, "replace_with_empty_dict.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo "{}"; done\n'
+    )
 
     lines = ['{"source":"a"}']
-    result = _run_event_batch_filter_script(lines, str(script))
+    result = _run_event_batch_filter_script(lines, script_path)
     assert result is not None
     assert len(result) == 1
     assert result[0] == "{}"
@@ -2335,23 +2333,18 @@ def test_run_event_batch_filter_script_returns_none_for_missing_script() -> None
 
 def test_run_event_batch_filter_script_returns_none_for_nonzero_exit(tmp_path: Path) -> None:
     """A script that exits non-zero should return None."""
-    script = tmp_path / "failing_filter.sh"
-    script.write_text("#!/bin/bash\nexit 1\n")
-    script.chmod(0o755)
+    script_path = create_executable_script(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
 
-    result = _run_event_batch_filter_script(['{"a":1}'], str(script))
+    result = _run_event_batch_filter_script(['{"a":1}'], script_path)
     assert result is None
 
 
 def test_run_event_batch_filter_script_returns_none_for_wrong_line_count(tmp_path: Path) -> None:
     """A script that outputs a different number of lines should return None."""
-    script = tmp_path / "bad_count_filter.sh"
-    # Output one line regardless of input
-    script.write_text('#!/bin/bash\necho "only one"\n')
-    script.chmod(0o755)
+    script_path = create_executable_script(tmp_path, "bad_count_filter.sh", '#!/bin/bash\necho "only one"\n')
 
     lines = ['{"a":1}', '{"b":2}', '{"c":3}']
-    result = _run_event_batch_filter_script(lines, str(script))
+    result = _run_event_batch_filter_script(lines, script_path)
     assert result is None
 
 
@@ -2360,49 +2353,48 @@ def test_run_event_batch_filter_script_returns_none_for_wrong_line_count(tmp_pat
 
 def test_apply_event_batch_filter_drops_empty_and_empty_dict_lines(tmp_path: Path) -> None:
     """Lines that are empty or '{}' should be removed from the result."""
-    script = tmp_path / "selective_filter.sh"
-    # Keep first line, drop second (empty), drop third (empty dict)
-    script.write_text('#!/bin/bash\nread line1; echo "$line1"\nread line2; echo ""\nread line3; echo "{}"\n')
-    script.chmod(0o755)
+    script_path = create_executable_script(
+        tmp_path,
+        "selective_filter.sh",
+        '#!/bin/bash\nread line1; echo "$line1"\nread line2; echo ""\nread line3; echo "{}"\n',
+    )
 
     lines = ['{"source":"keep"}', '{"source":"drop1"}', '{"source":"drop2"}']
-    result = _apply_event_batch_filter(lines, str(script))
+    result = _apply_event_batch_filter(lines, script_path)
     assert len(result) == 1
     assert result[0] == '{"source":"keep"}'
 
 
 def test_apply_event_batch_filter_prepends_error_event_on_script_failure(tmp_path: Path) -> None:
     """If the script fails, a filter_error event is prepended to the original lines."""
-    script = tmp_path / "failing_filter.sh"
-    script.write_text("#!/bin/bash\nexit 1\n")
-    script.chmod(0o755)
+    script_path = create_executable_script(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _apply_event_batch_filter(lines, str(script))
+    result = _apply_event_batch_filter(lines, script_path)
     assert len(result) == 3
     error_event = json.loads(result[0])
     assert error_event["type"] == "filter_error"
     assert error_event["source"] == "mind/filter_error"
-    assert error_event["script_path"] == str(script)
+    assert error_event["script_path"] == script_path
     assert result[1:] == lines
 
 
 def test_apply_event_batch_filter_returns_empty_when_all_filtered(tmp_path: Path) -> None:
     """When all events are filtered out, the result should be empty."""
-    script = tmp_path / "drop_all.sh"
-    script.write_text('#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n')
-    script.chmod(0o755)
+    script_path = create_executable_script(
+        tmp_path, "drop_all.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n'
+    )
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _apply_event_batch_filter(lines, str(script))
+    result = _apply_event_batch_filter(lines, script_path)
     assert result == []
 
 
 def test_apply_event_batch_filter_can_modify_event_content(tmp_path: Path) -> None:
     """The script can modify event content (e.g. strip fields)."""
-    script = tmp_path / "strip_fields.sh"
-    # Use python to strip the "data" field from each JSON line
-    script.write_text(
+    script_path = create_executable_script(
+        tmp_path,
+        "strip_fields.sh",
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "for line in sys.stdin:\n"
@@ -2412,15 +2404,14 @@ def test_apply_event_batch_filter_can_modify_event_content(tmp_path: Path) -> No
         "        continue\n"
         "    obj = json.loads(line)\n"
         '    obj.pop("data", None)\n'
-        "    print(json.dumps(obj))\n"
+        "    print(json.dumps(obj))\n",
     )
-    script.chmod(0o755)
 
     lines = [
         '{"source":"a","data":"big_payload","event_id":"1"}',
         '{"source":"b","event_id":"2"}',
     ]
-    result = _apply_event_batch_filter(lines, str(script))
+    result = _apply_event_batch_filter(lines, script_path)
     assert len(result) == 2
     parsed_first = json.loads(result[0])
     assert "data" not in parsed_first

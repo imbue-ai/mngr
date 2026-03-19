@@ -225,3 +225,11 @@ def mock_subprocess_failure(monkeypatch: pytest.MonkeyPatch, fake_mng_binary: Pa
     mock_sp = types.SimpleNamespace(run=capture.run, TimeoutExpired=subprocess.TimeoutExpired)
     monkeypatch.setattr(event_watcher_module, "subprocess", mock_sp)
     return capture
+
+
+def create_executable_script(directory: Path, name: str, content: str) -> str:
+    """Create an executable script file and return its path as a string."""
+    script = directory / name
+    script.write_text(content)
+    script.chmod(0o755)
+    return str(script)
