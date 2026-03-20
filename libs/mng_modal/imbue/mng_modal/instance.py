@@ -1194,7 +1194,9 @@ class ModalProviderInstance(BaseProviderInstance):
         can use the SSH info for creating/updating host records.
         """
 
-        with self.mng_ctx.concurrency_group.make_concurrency_group("start ssh and create host") as concurrency_group:
+        with self.mng_ctx.concurrency_group.make_concurrency_group(
+            "start ssh and create host", exit_timeout_seconds=2.0
+        ) as concurrency_group:
             # For persistent apps, deploy the snapshot function and create shutdown script
             snapshot_url_future: Future[str] | None = None
             if self.config.is_persistent:
