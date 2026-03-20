@@ -54,7 +54,6 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import LOCAL_CONNECTOR_NAME
-from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.offline_host import BaseHost
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import CertifiedHostData
@@ -1083,8 +1082,6 @@ class Host(BaseHost, OnlineHostInterface):
             target_path = self.host_dir / "projects" / str(AgentId.generate())
             is_generated_work_dir = True
 
-        self._mkdir(target_path)
-
         # Track generated work directories at the host level.
         # When running in-place, actively remove from generated_work_dirs in case
         # a previous agent had registered this path (e.g., a worktree agent created
@@ -1109,6 +1106,9 @@ class Host(BaseHost, OnlineHostInterface):
         else:
             result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
             source_has_git = result.success
+
+        # Ensure the target directory exists before any transfer
+        self._mkdir(target_path)
 
         # Transfer files based on whether source has .git and whether we want to include it
         is_git_synced = options.git is not None and options.git.is_git_synced
@@ -1189,21 +1189,20 @@ class Host(BaseHost, OnlineHostInterface):
             base_branch=base_branch_name,
             new_branch=new_branch_name,
         ):
-            # Check if target already has a .git directory
-            if self.is_local:
-                target_has_git = (target_path / ".git").exists()
-            else:
-                result = self.execute_command(f"test -d {shlex.quote(str(target_path / '.git'))}")
-                target_has_git = result.success
-
-            if target_has_git:
-                logger.trace("Skipped git repo initialization: target already has .git")
-            else:
-                with log_span("Initializing bare git repo on target"):
-                    result = self.execute_command(f"git init --bare {shlex.quote(str(target_path / '.git'))}")
-                    if not result.success:
-                        raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
-                    add_safe_directory_on_remote(self, target_path)
+            # Ensure the target directory exists, initialize a bare git repo if
+            # needed, and on remote hosts add safe.directory. All in one command
+            # to minimize round trips. git init --bare is idempotent on an
+            # existing bare repo so we skip the existence check.
+            quoted_git_dir = shlex.quote(str(target_path / ".git"))
+            quoted_target = shlex.quote(str(target_path))
+            init_parts = [f"git init --bare {quoted_git_dir}"]
+            if not self.is_local:
+                init_parts.append(f"git config --global --add safe.directory {quoted_target}")
+            init_cmd = " && ".join(init_parts)
+            with log_span("Ensuring git repo on target"):
+                result = self.execute_command(init_cmd)
+                if not result.success:
+                    raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
 
             self._git_push_to_target(source_host, source_path, target_path)
 
