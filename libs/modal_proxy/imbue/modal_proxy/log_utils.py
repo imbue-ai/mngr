@@ -73,9 +73,7 @@ class ModalLoguruWriter:
 
     app_id: str | None = None
     app_name: str | None = None
-
-    def __init__(self):
-        self.current_line: str = ""
+    current_line: str = ""
 
     def write(self, text: str) -> int:
         """Write text to loguru, deduplicating consecutive identical messages."""

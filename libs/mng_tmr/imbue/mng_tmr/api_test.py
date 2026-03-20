@@ -135,8 +135,14 @@ def test_build_agent_options_passes_env_and_labels() -> None:
     config = _make_config()
     env = AgentEnvironmentOptions(env_vars=(EnvVar(key="FOO", value="bar"),))
     labels = AgentLabelOptions(labels={"batch": "1"})
-    updated = config.model_construct(
-        **{**config.__dict__, "env_options": env, "label_options": labels},
+    updated = TmrLaunchConfig.model_construct(
+        source_dir=config.source_dir,
+        source_host=config.source_host,
+        agent_type=config.agent_type,
+        provider_name=config.provider_name,
+        env_options=env,
+        label_options=labels,
+        snapshot=config.snapshot,
     )
     opts = _build_agent_options(AgentName("test"), "branch", updated)
     assert opts.environment.env_vars == (EnvVar(key="FOO", value="bar"),)

@@ -5,6 +5,7 @@ from typing import Any
 
 import click
 from click.testing import CliRunner
+from click.testing import Result
 
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import OutputFormat
@@ -86,7 +87,7 @@ def test_emit_agents_launched_json() -> None:
 
 def _invoke_tmr_command(
     args: list[str],
-) -> tuple[click.testing.Result, dict[str, Any]]:
+) -> tuple[Result, dict[str, Any]]:
     """Invoke a dummy _TmrCommand with the given args and return (result, captured_params)."""
     captured: dict[str, Any] = {}
 

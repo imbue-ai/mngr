@@ -260,6 +260,13 @@ def temp_mng_ctx(
 
 
 @pytest.fixture
+def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
+    """Provide an active ConcurrencyGroup for tests that construct MngContext directly."""
+    with ConcurrencyGroup(name="test") as cg:
+        yield cg
+
+
+@pytest.fixture
 def local_provider(temp_host_dir: Path, temp_mng_ctx: MngContext) -> LocalProviderInstance:
     """Create a LocalProviderInstance with a temporary host directory."""
     return LocalProviderInstance(
