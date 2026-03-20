@@ -28,6 +28,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -610,7 +611,9 @@ def _load_claude_resource_script(filename: str) -> str:
     return script_path.read_text()
 
 
-def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
+def _provision_background_scripts(
+    host: OnlineHostInterface, agent_state_dir: Path, concurrency_group: ConcurrencyGroup
+) -> None:
     """Write the background task scripts to $MNG_AGENT_STATE_DIR/commands/.
 
     Provisions stream_transcript.sh, claude_background_tasks.sh, and
@@ -625,11 +628,19 @@ def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Pa
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
     # Claude-specific scripts from this plugin's resources
+    threads: list[ObservableThread] = []
     for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
-            host.write_file(script_path, script_content.encode(), mode="0755")
+            thread = concurrency_group.start_new_thread(
+                host.write_file, (script_path, script_content.encode(), "0755")
+            )
+            threads.append(thread)
+
+    # make sure everything actually uploaded
+    for thread in threads:
+        thread.join(60.0)
 
 
 def _has_api_credentials_available(
@@ -1341,90 +1352,96 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         - clone: trust is prompted for the work_dir
         - trust_working_directory=True: trust is auto-added for work_dir
         """
-        config = self.agent_config
+        with mng_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
+            config = self.agent_config
 
-        if host.is_local:
-            # Determine the source path for trust extension
-            source_path: Path | None = None
-            copy_mode = options.git.copy_mode if options.git else None
-            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
-                source_path = self._find_git_source_path(mng_ctx.concurrency_group)
+            # Provision background task scripts to the agent state directory
+            provision_backgroun_script_thread = concurrency_group.start_new_thread(
+                _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
+            )
 
-            if config.trust_working_directory:
-                # Auto-approve all dialogs for agents that opt into trust
-                ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
-            else:
-                # Check/prompt for all blocking dialogs
-                # source_path=None (clone/no-git) means trust is prompted for work_dir
-                self._ensure_no_blocking_dialogs(source_path, mng_ctx)
+            if host.is_local:
+                # Determine the source path for trust extension
+                source_path: Path | None = None
+                copy_mode = options.git.copy_mode if options.git else None
+                if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+                    source_path = self._find_git_source_path(mng_ctx.concurrency_group)
 
-        # no matter what, *always* dismiss the cost popup, it's pointless
-        acknowledge_cost_threshold(get_claude_config_path())
+                if config.trust_working_directory:
+                    # Auto-approve all dialogs for agents that opt into trust
+                    ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
+                else:
+                    # Check/prompt for all blocking dialogs
+                    # source_path=None (clone/no-git) means trust is prompted for work_dir
+                    self._ensure_no_blocking_dialogs(source_path, mng_ctx)
 
-        # Ensure claude is installed (and at the right version if pinned)
-        if config.check_installation:
-            is_installed = _check_claude_installed(host)
-            if is_installed:
-                logger.debug("Claude is already installed on the host")
-                # If version is pinned, verify the installed version matches
-                if config.version is not None:
-                    installed_version = _get_claude_version(host)
-                    if installed_version != config.version:
-                        raise PluginMngError(
-                            f"Claude version mismatch: installed version is {installed_version!r}, "
-                            f"but agent config pins version {config.version!r}. "
-                            "Re-install claude with the correct version or update the pinned version in your agent config."
-                        )
-                    logger.debug("Claude version {} matches pinned version", installed_version)
-            else:
-                logger.warning("Claude is not installed on the host")
-                install_hint = _build_install_command_hint(config.version)
+            # Ensure claude is installed (and at the right version if pinned)
+            if config.check_installation:
+                is_installed = _check_claude_installed(host)
+                if is_installed:
+                    logger.debug("Claude is already installed on the host")
+                    # If version is pinned, verify the installed version matches
+                    if config.version is not None:
+                        installed_version = _get_claude_version(host)
+                        if installed_version != config.version:
+                            raise PluginMngError(
+                                f"Claude version mismatch: installed version is {installed_version!r}, "
+                                f"but agent config pins version {config.version!r}. "
+                                "Re-install claude with the correct version or update the pinned version in your agent config."
+                            )
+                        logger.debug("Claude version {} matches pinned version", installed_version)
+                else:
+                    logger.warning("Claude is not installed on the host")
+                    install_hint = _build_install_command_hint(config.version)
 
-                if host.is_local:
-                    # For local hosts, auto-approve or prompt the user for consent
-                    if mng_ctx.is_auto_approve:
-                        logger.debug("Auto-approving claude installation (--yes)")
-                    elif mng_ctx.is_interactive:
-                        if _prompt_user_for_installation(config.version):
-                            logger.debug("User consented to install claude locally")
+                    if host.is_local:
+                        # For local hosts, auto-approve or prompt the user for consent
+                        if mng_ctx.is_auto_approve:
+                            logger.debug("Auto-approving claude installation (--yes)")
+                        elif mng_ctx.is_interactive:
+                            if _prompt_user_for_installation(config.version):
+                                logger.debug("User consented to install claude locally")
+                            else:
+                                raise PluginMngError(
+                                    f"Claude is not installed. Please install it manually with:\n  {install_hint}"
+                                )
                         else:
+                            # Non-interactive mode: fail with a clear message
                             raise PluginMngError(
                                 f"Claude is not installed. Please install it manually with:\n  {install_hint}"
                             )
                     else:
-                        # Non-interactive mode: fail with a clear message
-                        raise PluginMngError(
-                            f"Claude is not installed. Please install it manually with:\n  {install_hint}"
-                        )
-                else:
-                    if not mng_ctx.config.is_remote_agent_installation_allowed:
-                        raise PluginMngError(
-                            "Claude is not installed on the remote host and automatic remote installation is disabled. "
-                            "Set is_remote_agent_installation_allowed = true in your mng config to enable automatic installation, "
-                            "or install Claude manually on the remote host."
-                        )
-                    else:
-                        logger.debug("Automatic remote agent installation is enabled, proceeding")
+                        if not mng_ctx.config.is_remote_agent_installation_allowed:
+                            raise PluginMngError(
+                                "Claude is not installed on the remote host and automatic remote installation is disabled. "
+                                "Set is_remote_agent_installation_allowed = true in your mng config to enable automatic installation, "
+                                "or install Claude manually on the remote host."
+                            )
+                        else:
+                            logger.debug("Automatic remote agent installation is enabled, proceeding")
 
-                # Install claude
-                logger.info("Installing claude...")
-                _install_claude(host, config.version)
-                logger.info("Claude installed successfully")
+                    # Install claude
+                    logger.info("Installing claude...")
+                    _install_claude(host, config.version)
+                    logger.info("Claude installed successfully")
 
-        # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
-        # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
-        # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
-        if options.source_agent_state_dir is not None:
-            self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+            # no matter what, *always* dismiss the cost popup, it's pointless
+            acknowledge_cost_threshold(get_claude_config_path())
 
-        # Set up per-agent config directory (for both local and remote hosts)
-        self._setup_per_agent_config_dir(host, options, mng_ctx)
+            # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
+            # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
+            # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
+            if options.source_agent_state_dir is not None:
+                self._transfer_source_plugin_data(host, options.source_agent_state_dir)
 
-        # Configure readiness hooks (for both local and remote hosts)
-        self._configure_readiness_hooks(host)
+            # Set up per-agent config directory (for both local and remote hosts)
+            self._setup_per_agent_config_dir(host, options, mng_ctx)
 
-        # Provision background task scripts to the agent state directory
-        _provision_background_scripts(host, self._get_agent_dir())
+            # Configure readiness hooks (for both local and remote hosts)
+            self._configure_readiness_hooks(host)
+
+            # should be done by now, just wanted to do in parallel for latency reasons
+            provision_backgroun_script_thread.join(60.0)
 
     def on_after_provisioning(
         self,

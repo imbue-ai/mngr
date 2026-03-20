@@ -1639,7 +1639,7 @@ class Host(BaseHost, OnlineHostInterface):
             resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
-            self._mkdirs([state_dir, state_dir / "events"])
+            self._mkdirs([state_dir, state_dir / "events", state_dir / "activity", state_dir / "commands"])
 
             create_time = datetime.now(timezone.utc)
 
@@ -1782,98 +1782,109 @@ class Host(BaseHost, OnlineHostInterface):
         """Provision an agent (install packages, configure, etc.).
 
         Applies all provisioning in a logical order:
-        1. Call agent.on_before_provisioning() (validation only)
-        2. Call agent.get_provision_file_transfers() to collect file transfers
-        3. Validate required files exist, execute file transfers
-        4. Write environment variables to agent env file (before agent.provision()
+        Call agent.on_before_provisioning() (validation only)
+        Call agent.get_provision_file_transfers() to collect file transfers
+        Validate required files exist, execute file transfers
+        Write environment variables to agent env file (before agent.provision()
            so agent provisioning can use env vars like UV_TOOL_DIR)
-        5. Ensure mng_log.sh exists at host and agent level
-        6. Call agent.provision() (agent-type-specific provisioning)
-        7. Create directories (so paths exist for uploads)
-        8. Upload files (files exist before modifications)
-        9. Append text to files
-        10. Prepend text to files
-        11. Run sudo commands (system-level setup, with env vars sourced)
-        12. Run user commands (user-level setup, with env vars sourced)
-        13. Call agent.on_after_provisioning() (finalization)
+        Ensure mng_log.sh exists at host and agent level
+        Call agent.provision() (agent-type-specific provisioning)
+        Create directories (so paths exist for uploads)
+        Upload files (files exist before modifications)
+        Append text to files
+        Prepend text to files
+        Run sudo commands (system-level setup, with env vars sourced)
+        Run user commands (user-level setup, with env vars sourced)
+        Call agent.on_after_provisioning() (finalization)
         """
-        # 1. Call pre-provisioning validation on agent
-        with log_span("Calling on_before_provisioning for agent {}", agent.name):
-            agent.on_before_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+        with self.mng_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
+            # Call pre-provisioning validation on agent
+            with log_span("Calling on_before_provisioning for agent {}", agent.name):
+                agent.on_before_provisioning(host=self, options=options, mng_ctx=mng_ctx)
 
-        # 2. Collect file transfers from agent
-        with log_span("Collecting file transfers for agent {}", agent.name):
-            all_file_transfers = list(agent.get_provision_file_transfers(host=self, options=options, mng_ctx=mng_ctx))
+            # Collect file transfers from agent
+            with log_span("Collecting file transfers for agent {}", agent.name):
+                all_file_transfers = list(
+                    agent.get_provision_file_transfers(host=self, options=options, mng_ctx=mng_ctx)
+                )
 
-        # 3. Validate required files exist and execute transfers
-        self._execute_agent_file_transfers(agent, all_file_transfers)
+            # Validate required files exist and execute transfers
+            agent_file_transfer_thread = concurrency_group.start_new_thread(
+                self._execute_agent_file_transfers, (agent, all_file_transfers)
+            )
 
-        # 4. Write environment variables to agent env file (before agent.provision()
-        # so that agent provisioning can use env vars like UV_TOOL_DIR)
-        env_vars = self._collect_agent_env_vars(agent, options)
-        self._write_agent_env_file(agent, env_vars)
+            # Write environment variables to agent env file (before agent.provision()
+            # so that agent provisioning can use env vars like UV_TOOL_DIR)
+            env_vars = self._collect_agent_env_vars(agent, options)
+            self._write_agent_env_file(agent, env_vars)
 
-        # 5. Ensure mng_log.sh exists at both host and agent level so that
-        # all bash scripts can source it for logging and timestamp utilities.
-        self._ensure_mng_log_sh(agent)
+            # Ensure mng_log.sh exists at both host and agent level so that
+            # all bash scripts can source it for logging and timestamp utilities.
+            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mng_log_sh, (agent,))
 
-        # 6. Call agent.provision() for agent-type-specific provisioning
-        with log_span("Calling provision for agent {}", agent.name):
-            agent.provision(host=self, options=options, mng_ctx=mng_ctx)
+            # files need to be there before provisioning--even making this a thread was just a minor optimization:
+            agent_file_transfer_thread.join(60.0)
 
-        provisioning = options.provisioning
-        with log_span(
-            "Applying user provisioning commands",
-            agent_name=str(agent.name),
-            dirs=len(provisioning.create_directories),
-            uploads=len(provisioning.upload_files),
-            appends=len(provisioning.append_to_files),
-            prepends=len(provisioning.prepend_to_files),
-            sudo_cmds=len(provisioning.sudo_commands),
-            user_cmds=len(provisioning.user_commands),
-        ):
-            # 7. Create directories
-            for directory in provisioning.create_directories:
-                self._mkdir(directory)
-                logger.trace("Created directory: {}", directory)
+            # Call agent.provision() for agent-type-specific provisioning
+            with log_span("Calling provision for agent {}", agent.name):
+                agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
-            # 8. Upload files (read from local filesystem, write to host)
-            for upload_spec in provisioning.upload_files:
-                # Read from local filesystem (not via host primitives)
-                local_content = upload_spec.local_path.read_bytes()
-                self.write_file(upload_spec.remote_path, local_content)
-                logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+            provisioning = options.provisioning
+            with log_span(
+                "Applying user provisioning commands",
+                agent_name=str(agent.name),
+                dirs=len(provisioning.create_directories),
+                uploads=len(provisioning.upload_files),
+                appends=len(provisioning.append_to_files),
+                prepends=len(provisioning.prepend_to_files),
+                sudo_cmds=len(provisioning.sudo_commands),
+                user_cmds=len(provisioning.user_commands),
+            ):
+                # Create directories
+                for directory in provisioning.create_directories:
+                    self._mkdir(directory)
+                    logger.trace("Created directory: {}", directory)
 
-            # 9. Append text to files
-            for append_spec in provisioning.append_to_files:
-                self._append_to_file(append_spec.remote_path, append_spec.text)
-                logger.trace("Appended to file: {}", append_spec.remote_path)
+                # Upload files (read from local filesystem, write to host)
+                for upload_spec in provisioning.upload_files:
+                    # Read from local filesystem (not via host primitives)
+                    local_content = upload_spec.local_path.read_bytes()
+                    self.write_file(upload_spec.remote_path, local_content)
+                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 10. Prepend text to files
-            for prepend_spec in provisioning.prepend_to_files:
-                self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
-                logger.trace("Prepended to file: {}", prepend_spec.remote_path)
+                # Append text to files
+                for append_spec in provisioning.append_to_files:
+                    self._append_to_file(append_spec.remote_path, append_spec.text)
+                    logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # Build the source prefix for commands (sources host env, then agent env)
-            source_prefix = self.build_source_env_prefix(agent)
+                # Prepend text to files
+                for prepend_spec in provisioning.prepend_to_files:
+                    self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
+                    logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
-            # 11. Run sudo commands (with env vars sourced)
-            for cmd in provisioning.sudo_commands:
-                result = self._run_sudo_command(source_prefix + cmd)
-                logger.trace("Ran sudo command: {}", cmd)
-                if not result.success:
-                    raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
+                # Build the source prefix for commands (sources host env, then agent env)
+                source_prefix = self.build_source_env_prefix(agent)
 
-            # 12. Run user commands (with env vars sourced)
-            for cmd in provisioning.user_commands:
-                result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
-                logger.trace("Ran user command: {}", cmd)
-                if not result.success:
-                    raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+                # Run sudo commands (with env vars sourced)
+                for cmd in provisioning.sudo_commands:
+                    result = self._run_sudo_command(source_prefix + cmd)
+                    logger.trace("Ran sudo command: {}", cmd)
+                    if not result.success:
+                        raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
 
-        # 13. Call post-provisioning on agent
-        with log_span("Calling on_after_provisioning for agent {}", agent.name):
-            agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+                # Run user commands (with env vars sourced)
+                for cmd in provisioning.user_commands:
+                    result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
+                    logger.trace("Ran user command: {}", cmd)
+                    if not result.success:
+                        raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+
+            # should be done by now
+            ensure_log_thread.join(60.0)
+
+            # Call post-provisioning on agent
+            with log_span("Calling on_after_provisioning for agent {}", agent.name):
+                agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
 
     def _ensure_mng_log_sh(self, agent: AgentInterface) -> None:
         """Write mng_log.sh to both host-level and agent-level commands directories.
