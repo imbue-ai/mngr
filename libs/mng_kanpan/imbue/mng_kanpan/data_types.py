@@ -92,8 +92,9 @@ class GitHubData(FrozenModel):
     create_pr_url generation and per-repo prs_loaded tracking.
     """
 
-    pr_by_branch: dict[str, PrInfo] = Field(
-        description="Mapping from branch name to the most relevant PR (merged across all repos)"
+    pr_by_repo_branch: dict[tuple[str, str], PrInfo] = Field(
+        default_factory=dict,
+        description="Mapping from (repo_path, branch) to the most relevant PR",
     )
     repo_path_by_work_dir: dict[str, str] = Field(
         default_factory=dict,
