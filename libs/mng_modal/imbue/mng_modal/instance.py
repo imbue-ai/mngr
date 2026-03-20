@@ -100,6 +100,7 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import SandboxInterface
@@ -559,6 +560,8 @@ class ModalProviderInstance(BaseProviderInstance):
     _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
     # Cache for host records read from the volume to avoid repeated reads
     _host_record_cache_by_id: dict[HostId, HostRecord] = PrivateAttr(default_factory=dict)
+    # a reference to the ssh process, just in case we ever need it (and to prevent it from being garbage collected)
+    _ssh_process: ExecProcess | None = PrivateAttr(default=None)
 
     config: ModalProviderConfig = Field(frozen=True, description="Modal provider configuration")
     modal_app: ModalProviderApp = Field(frozen=True, description="Modal app manager")
@@ -1108,7 +1111,7 @@ class ModalProviderInstance(BaseProviderInstance):
             sandbox.exec("mkdir", "-p", f"{self.host_dir}/events/logs").wait()
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
             # stdout/stderr are suppressed so Modal doesn't track them for performance/stability reasons.
-            sandbox.exec(
+            self._ssh_process = sandbox.exec(
                 "/usr/sbin/sshd",
                 "-D",
                 "-o",
@@ -1256,6 +1259,7 @@ class ModalProviderInstance(BaseProviderInstance):
                     mng_ctx=self.mng_ctx,
                     on_updated_host_data=None,
                 )
+                host._ensure_connected()
 
                 # Record BOOT activity for idle detection
                 set_boot_thread = concurrency_group.start_new_thread(host.record_activity, (ActivitySource.BOOT,))
