@@ -10,14 +10,16 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.utils.testing import init_git_repo_with_config
 from imbue.mng_kanpan.data_types import AgentBoardEntry
 from imbue.mng_kanpan.data_types import BoardSnapshot
+from imbue.mng_kanpan.data_types import GitHubData
 from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.data_types import RefreshHook
 from imbue.mng_kanpan.fetcher import _build_hook_env
 from imbue.mng_kanpan.fetcher import _build_pr_branch_index
-from imbue.mng_kanpan.fetcher import _find_git_cwd
 from imbue.mng_kanpan.fetcher import _pr_priority
+from imbue.mng_kanpan.fetcher import enrich_snapshot_with_github_data
 from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
+from imbue.mng_kanpan.fetcher import fetch_github_data
 from imbue.mng_kanpan.fetcher import run_refresh_hooks
 from imbue.mng_kanpan.github import FetchPrsResult
 from imbue.mng_kanpan.testing import make_agent_details
@@ -82,26 +84,202 @@ def test_build_pr_branch_index_merged_wins_over_closed() -> None:
     assert result["branch-a"].number == 2
 
 
-# === fetch_board_snapshot ===
+# === fetch_github_data ===
 
 
-def test_find_git_cwd_returns_first_local_work_dir(tmp_path: Path) -> None:
-    agent = make_agent_details(name="a", work_dir=tmp_path, provider_name="local")
-    assert _find_git_cwd([agent]) == tmp_path
+def _init_repo_with_remote(path: Path, remote_url: str = "git@github.com:org/repo.git") -> None:
+    """Initialize a git repo and add a GitHub remote."""
+    init_git_repo_with_config(path)
+    subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=path, check=True, capture_output=True)
 
 
-def test_find_git_cwd_skips_remote_agents() -> None:
-    agent = make_agent_details(name="a", work_dir=Path("/remote"), provider_name="modal")
-    assert _find_git_cwd([agent]) is None
+def test_fetch_github_data_skips_agents_without_remotes(tmp_path: Path) -> None:
+    """Agents without git remotes are skipped; agents with remotes still get PRs."""
+    no_remote_dir = tmp_path / "no-remote"
+    init_git_repo_with_config(no_remote_dir)
+
+    with_remote_dir = tmp_path / "with-remote"
+    _init_repo_with_remote(with_remote_dir)
+
+    agent_no_remote = make_agent_details(name="no-remote", work_dir=no_remote_dir, provider_name="local")
+    agent_with_remote = make_agent_details(name="with-remote", work_dir=with_remote_dir, provider_name="local")
+
+    pr = make_pr_info(number=1, head_branch="mng/feature")
+    pr_result = FetchPrsResult(prs=(pr,), error=None)
+
+    mng_ctx = MagicMock()
+
+    with (
+        ConcurrencyGroup(name="test") as cg,
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+    ):
+        mng_ctx.concurrency_group = cg
+        result = fetch_github_data(mng_ctx, [agent_no_remote, agent_with_remote])
+
+    assert result.prs_loaded is True
+    assert result.pr_by_branch["mng/feature"] == pr
+    assert str(with_remote_dir) in result.repo_path_by_work_dir
+    assert str(no_remote_dir) not in result.repo_path_by_work_dir
 
 
-def test_find_git_cwd_skips_nonexistent_dirs() -> None:
-    agent = make_agent_details(name="a", work_dir=Path("/nonexistent"), provider_name="local")
-    assert _find_git_cwd([agent]) is None
+def test_fetch_github_data_fetches_per_repo(tmp_path: Path) -> None:
+    """Agents in different repos trigger separate PR fetches."""
+    repo_a_dir = tmp_path / "repo-a"
+    _init_repo_with_remote(repo_a_dir, "git@github.com:org/repo-a.git")
+
+    repo_b_dir = tmp_path / "repo-b"
+    _init_repo_with_remote(repo_b_dir, "git@github.com:org/repo-b.git")
+
+    agent_a = make_agent_details(name="agent-a", work_dir=repo_a_dir, provider_name="local")
+    agent_b = make_agent_details(name="agent-b", work_dir=repo_b_dir, provider_name="local")
+
+    pr_a = make_pr_info(number=1, head_branch="mng/feature-a")
+    pr_b = make_pr_info(number=2, head_branch="mng/feature-b")
+
+    call_count = 0
+
+    def mock_fetch_prs(cg: object, cwd: Path | None = None) -> FetchPrsResult:
+        nonlocal call_count
+        call_count += 1
+        if cwd == repo_a_dir:
+            return FetchPrsResult(prs=(pr_a,), error=None)
+        if cwd == repo_b_dir:
+            return FetchPrsResult(prs=(pr_b,), error=None)
+        return FetchPrsResult(prs=(), error="unexpected cwd")
+
+    mng_ctx = MagicMock()
+
+    with (
+        ConcurrencyGroup(name="test") as cg,
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", side_effect=mock_fetch_prs),
+    ):
+        mng_ctx.concurrency_group = cg
+        result = fetch_github_data(mng_ctx, [agent_a, agent_b])
+
+    assert call_count == 2
+    assert result.prs_loaded is True
+    assert len(result.prs_loaded_repos) == 2
+    assert result.pr_by_branch["mng/feature-a"] == pr_a
+    assert result.pr_by_branch["mng/feature-b"] == pr_b
 
 
-def test_find_git_cwd_empty_agents() -> None:
-    assert _find_git_cwd([]) is None
+def test_fetch_github_data_deduplicates_repos(tmp_path: Path) -> None:
+    """Multiple agents in the same repo trigger only one PR fetch."""
+    # Simulate two agents with worktrees pointing to the same GitHub repo
+    wt1 = tmp_path / "wt1"
+    wt2 = tmp_path / "wt2"
+    _init_repo_with_remote(wt1, "git@github.com:org/repo.git")
+    _init_repo_with_remote(wt2, "git@github.com:org/repo.git")
+
+    agent1 = make_agent_details(name="a1", work_dir=wt1, provider_name="local")
+    agent2 = make_agent_details(name="a2", work_dir=wt2, provider_name="local")
+
+    call_count = 0
+
+    def mock_fetch_prs(cg: object, cwd: Path | None = None) -> FetchPrsResult:
+        nonlocal call_count
+        call_count += 1
+        return FetchPrsResult(prs=(), error=None)
+
+    mng_ctx = MagicMock()
+
+    with (
+        ConcurrencyGroup(name="test") as cg,
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", side_effect=mock_fetch_prs),
+    ):
+        mng_ctx.concurrency_group = cg
+        result = fetch_github_data(mng_ctx, [agent1, agent2])
+
+    assert call_count == 1
+    assert result.prs_loaded is True
+
+
+def test_fetch_github_data_partial_failure(tmp_path: Path) -> None:
+    """If one repo fails to fetch PRs, others still succeed."""
+    good_dir = tmp_path / "good"
+    _init_repo_with_remote(good_dir, "git@github.com:org/good.git")
+
+    bad_dir = tmp_path / "bad"
+    _init_repo_with_remote(bad_dir, "git@github.com:org/bad.git")
+
+    agent_good = make_agent_details(name="good", work_dir=good_dir, provider_name="local")
+    agent_bad = make_agent_details(name="bad", work_dir=bad_dir, provider_name="local")
+
+    pr = make_pr_info(number=1, head_branch="mng/feature")
+
+    def mock_fetch_prs(cg: object, cwd: Path | None = None) -> FetchPrsResult:
+        if cwd == good_dir:
+            return FetchPrsResult(prs=(pr,), error=None)
+        return FetchPrsResult(prs=(), error="gh pr list failed: auth required")
+
+    mng_ctx = MagicMock()
+
+    with (
+        ConcurrencyGroup(name="test") as cg,
+        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", side_effect=mock_fetch_prs),
+    ):
+        mng_ctx.concurrency_group = cg
+        result = fetch_github_data(mng_ctx, [agent_good, agent_bad])
+
+    assert result.prs_loaded is True
+    assert "org/good" in result.prs_loaded_repos
+    assert "org/bad" not in result.prs_loaded_repos
+    assert result.pr_by_branch["mng/feature"] == pr
+    assert len(result.errors) == 1
+    assert "auth required" in result.errors[0]
+
+
+def test_fetch_github_data_no_local_agents() -> None:
+    """Remote-only agents produce an empty GitHubData."""
+    agent = make_agent_details(name="remote", work_dir=Path("/remote"), provider_name="modal")
+    mng_ctx = MagicMock()
+    result = fetch_github_data(mng_ctx, [agent])
+    assert result.prs_loaded is False
+    assert result.pr_by_branch == {}
+    assert result.errors == ()
+
+
+# === enrich_snapshot_with_github_data ===
+
+
+def test_enrich_uses_per_agent_repo_for_create_pr_url() -> None:
+    """create_pr_url uses the agent's own repo, not a global one."""
+    entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        work_dir=Path("/work/agent-1"),
+        branch="mng/feature",
+    )
+    snapshot = BoardSnapshot(entries=(entry,), fetch_time_seconds=1.0, prs_loaded=False)
+    remote = GitHubData(
+        pr_by_branch={},
+        repo_path_by_work_dir={"/work/agent-1": "org/my-repo"},
+        prs_loaded_repos=frozenset({"org/my-repo"}),
+        prs_loaded=True,
+    )
+    result = enrich_snapshot_with_github_data(snapshot, remote)
+    assert result.entries[0].create_pr_url == "https://github.com/org/my-repo/compare/mng/feature?expand=1"
+
+
+def test_enrich_suppresses_create_pr_url_when_repo_pr_fetch_failed() -> None:
+    """create_pr_url is suppressed for agents whose repo failed to load PRs."""
+    entry = AgentBoardEntry(
+        name=AgentName("agent-1"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        work_dir=Path("/work/agent-1"),
+        branch="mng/feature",
+    )
+    snapshot = BoardSnapshot(entries=(entry,), fetch_time_seconds=1.0, prs_loaded=False)
+    remote = GitHubData(
+        pr_by_branch={},
+        repo_path_by_work_dir={"/work/agent-1": "org/my-repo"},
+        prs_loaded_repos=frozenset(),
+        prs_loaded=False,
+    )
+    result = enrich_snapshot_with_github_data(snapshot, remote)
+    assert result.entries[0].create_pr_url is None
 
 
 # === fetch_board_snapshot ===
@@ -114,7 +292,6 @@ def test_fetch_board_snapshot_integrates_agents_and_prs() -> None:
     agent2 = make_agent_details(name="agent-2", state=AgentLifecycleState.DONE, provider_name="modal")
 
     pr1 = make_pr_info(number=42, head_branch="mng/agent-1", state=PrState.OPEN)
-    pr_result = FetchPrsResult(prs=(pr1,), error=None)
 
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent1, agent2]
@@ -123,9 +300,17 @@ def test_fetch_board_snapshot_integrates_agents_and_prs() -> None:
     mng_ctx = MagicMock()
     mng_ctx.concurrency_group = MagicMock()
 
+    # Remote-only agents have no work_dirs to discover repos from, so
+    # fetch_github_data returns empty. Patch it directly to inject PR data.
+    remote = GitHubData(
+        pr_by_branch={"mng/agent-1": pr1},
+        prs_loaded_repos=frozenset({"org/repo"}),
+        prs_loaded=True,
+    )
+
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
 
@@ -149,14 +334,14 @@ def test_fetch_board_snapshot_with_list_errors() -> None:
     mock_list_result.agents = []
     mock_list_result.errors = [mock_error]
 
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
 
     mng_ctx = MagicMock()
     mng_ctx.concurrency_group = MagicMock()
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
 
@@ -194,14 +379,14 @@ def test_fetch_board_snapshot_passes_filters_to_list_agents() -> None:
     mock_list_result.agents = []
     mock_list_result.errors = []
 
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
 
     mng_ctx = MagicMock()
     mng_ctx.concurrency_group = MagicMock()
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result) as mock_list,
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         fetch_board_snapshot(
             mng_ctx,
@@ -253,13 +438,13 @@ def test_fetch_board_snapshot_passes_labels_and_plugin_data() -> None:
     mock_list_result.agents = [agent]
     mock_list_result.errors = []
 
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
     mng_ctx = MagicMock()
     mng_ctx.concurrency_group = MagicMock()
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
 
@@ -293,16 +478,17 @@ def test_fetch_agent_snapshot_passes_labels_and_plugin_data() -> None:
 def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
     init_git_repo_with_config(repo_dir)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "git@github.com:org/repo.git"],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-    )
 
     agent = make_agent_details(name="agent-1", work_dir=repo_dir, provider_name="local", initial_branch="mng/agent-1")
 
-    pr_result = FetchPrsResult(prs=(), error="gh pr list failed: auth required")
+    # Simulate fetch_github_data returning an error for this repo.
+    remote = GitHubData(
+        pr_by_branch={},
+        repo_path_by_work_dir={str(repo_dir): "org/repo"},
+        prs_loaded_repos=frozenset(),
+        prs_loaded=False,
+        errors=("gh pr list failed: auth required",),
+    )
 
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
@@ -313,8 +499,7 @@ def test_fetch_board_snapshot_surfaces_gh_errors_and_suppresses_create_pr_url(tm
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
-        patch("imbue.mng_kanpan.fetcher._get_github_repo_path", return_value="org/repo"),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
 
@@ -462,7 +647,7 @@ def test_run_refresh_hooks_execute_in_order(tmp_path: Path) -> None:
 def test_fetch_board_snapshot_no_hooks() -> None:
     """With None hooks, no hook execution occurs."""
     agent = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
     mock_list_result.errors = []
@@ -471,7 +656,7 @@ def test_fetch_board_snapshot_no_hooks() -> None:
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), None, None, None)
 
@@ -482,7 +667,7 @@ def test_fetch_board_snapshot_no_hooks() -> None:
 def test_fetch_board_snapshot_after_hooks_run() -> None:
     """After-hooks run against the new snapshot entries."""
     agent = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
     mock_list_result.errors = []
@@ -492,7 +677,7 @@ def test_fetch_board_snapshot_after_hooks_run() -> None:
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
         patch(
             "imbue.mng_kanpan.fetcher.run_refresh_hooks",
             return_value=["Hook 'After hook' failed for agent-1 (exit 1)"],
@@ -508,7 +693,7 @@ def test_fetch_board_snapshot_after_hooks_run() -> None:
 def test_fetch_board_snapshot_before_hooks_skipped_on_first_refresh() -> None:
     """Before-hooks are skipped when there is no previous snapshot."""
     agent = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
     mock_list_result.errors = []
@@ -518,7 +703,7 @@ def test_fetch_board_snapshot_before_hooks_skipped_on_first_refresh() -> None:
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
         patch("imbue.mng_kanpan.fetcher.run_refresh_hooks", return_value=[]) as mock_hooks,
     ):
         snapshot = fetch_board_snapshot(mng_ctx, (), (), [before_hook], None, None)
@@ -530,7 +715,7 @@ def test_fetch_board_snapshot_before_hooks_skipped_on_first_refresh() -> None:
 def test_fetch_board_snapshot_before_hooks_run_with_prev_snapshot() -> None:
     """Before-hooks run against previous snapshot entries when available."""
     agent = make_agent_details(name="agent-1", state=AgentLifecycleState.RUNNING, provider_name="modal")
-    pr_result = FetchPrsResult(prs=(), error=None)
+    remote = GitHubData(pr_by_branch={}, prs_loaded=False)
     mock_list_result = MagicMock()
     mock_list_result.agents = [agent]
     mock_list_result.errors = []
@@ -544,7 +729,7 @@ def test_fetch_board_snapshot_before_hooks_run_with_prev_snapshot() -> None:
 
     with (
         patch("imbue.mng_kanpan.fetcher.list_agents", return_value=mock_list_result),
-        patch("imbue.mng_kanpan.fetcher.fetch_all_prs", return_value=pr_result),
+        patch("imbue.mng_kanpan.fetcher.fetch_github_data", return_value=remote),
         patch("imbue.mng_kanpan.fetcher.run_refresh_hooks", return_value=[]) as mock_hooks,
     ):
         fetch_board_snapshot(mng_ctx, (), (), [before_hook], None, prev_snapshot)

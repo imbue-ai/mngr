@@ -85,11 +85,27 @@ class BoardSnapshot(FrozenModel):
 
 
 class GitHubData(FrozenModel):
-    """GitHub PR data fetched via the gh CLI, used to enrich agent snapshots."""
+    """GitHub PR data fetched via the gh CLI, used to enrich agent snapshots.
 
-    pr_by_branch: dict[str, PrInfo] = Field(description="Mapping from branch name to the most relevant PR")
-    repo_path: str | None = Field(default=None, description="GitHub owner/repo path (e.g. 'owner/repo')")
-    prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched")
+    Supports agents across multiple GitHub repos. PRs are fetched per-repo and
+    merged into a single branch index. Per-agent repo paths allow correct
+    create_pr_url generation and per-repo prs_loaded tracking.
+    """
+
+    pr_by_branch: dict[str, PrInfo] = Field(
+        description="Mapping from branch name to the most relevant PR (merged across all repos)"
+    )
+    repo_path_by_work_dir: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping from str(work_dir) to GitHub 'owner/repo' for each local agent with a GitHub remote",
+    )
+    prs_loaded_repos: frozenset[str] = Field(
+        default_factory=frozenset,
+        description="Set of repo paths (e.g. 'owner/repo') for which PRs were successfully fetched",
+    )
+    prs_loaded: bool = Field(
+        default=True, description="Whether PR data was successfully fetched for at least one repo"
+    )
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during remote fetch")
 
 

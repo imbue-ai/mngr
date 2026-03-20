@@ -88,27 +88,55 @@ def fetch_agent_snapshot(
 
 
 def fetch_github_data(mng_ctx: MngContext, agents: list[AgentDetails]) -> GitHubData:
-    """Fetch GitHub PR data and build the PR-to-branch index.
+    """Fetch GitHub PR data from all unique repos and build the PR-to-branch index.
 
-    Returns a GitHubData containing pr_by_branch, repo_path, and any errors.
+    Discovers each local agent's GitHub repo, fetches PRs once per unique repo,
+    and merges results. Agents without GitHub remotes are skipped (logged at
+    debug level) and do not block other agents.
     """
     cg = mng_ctx.concurrency_group
     errors: list[str] = []
 
-    gh_cwd = _find_git_cwd(agents)
+    # Map each local agent work_dir to its GitHub repo path, and collect
+    # one representative cwd per unique repo for the gh CLI call.
+    repo_path_by_work_dir: dict[str, str] = {}
+    cwd_by_repo: dict[str, Path] = {}
+    seen_work_dirs: set[str] = set()
 
-    pr_result = fetch_all_prs(cg, cwd=gh_cwd)
-    prs_loaded = pr_result.error is None
-    if pr_result.error is not None:
-        errors.append(pr_result.error)
-    pr_by_branch = _build_pr_branch_index(pr_result.prs)
+    for agent in agents:
+        if agent.host.provider_name != LOCAL_PROVIDER_NAME or not agent.work_dir.exists():
+            continue
+        work_dir_key = str(agent.work_dir)
+        if work_dir_key in seen_work_dirs:
+            continue
+        seen_work_dirs.add(work_dir_key)
+        repo_path = _get_github_repo_path(agent.work_dir, cg)
+        if repo_path is not None:
+            repo_path_by_work_dir[work_dir_key] = repo_path
+            if repo_path not in cwd_by_repo:
+                cwd_by_repo[repo_path] = agent.work_dir
+        else:
+            logger.debug("Skipping agent {} ({}): no GitHub remote", agent.name, agent.work_dir)
 
-    repo_path = _get_github_repo_path(gh_cwd, cg) if gh_cwd is not None else None
+    # Fetch PRs once per unique repo.
+    all_prs: list[PrInfo] = []
+    prs_loaded_repos: set[str] = set()
+
+    for repo_path, cwd in cwd_by_repo.items():
+        pr_result = fetch_all_prs(cg, cwd=cwd)
+        if pr_result.error is None:
+            all_prs.extend(pr_result.prs)
+            prs_loaded_repos.add(repo_path)
+        else:
+            errors.append(pr_result.error)
+
+    pr_by_branch = _build_pr_branch_index(tuple(all_prs))
 
     return GitHubData(
         pr_by_branch=pr_by_branch,
-        repo_path=repo_path,
-        prs_loaded=prs_loaded,
+        repo_path_by_work_dir=repo_path_by_work_dir,
+        prs_loaded_repos=frozenset(prs_loaded_repos),
+        prs_loaded=len(prs_loaded_repos) > 0,
         errors=tuple(errors),
     )
 
@@ -118,13 +146,16 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
     """Enrich a local-only snapshot with GitHub PR data.
 
     For each entry, looks up PR by branch name and attaches pr and create_pr_url.
+    create_pr_url is only generated for agents whose repo had a successful PR fetch.
     """
     enriched_entries: list[AgentBoardEntry] = []
     for entry in snapshot.entries:
         pr = remote.pr_by_branch.get(entry.branch) if entry.branch else None
+        agent_repo = remote.repo_path_by_work_dir.get(str(entry.work_dir)) if entry.work_dir else None
+        agent_prs_loaded = agent_repo in remote.prs_loaded_repos if agent_repo else False
         create_pr_url = (
-            _build_create_pr_url(remote.repo_path, entry.branch)
-            if remote.prs_loaded and remote.repo_path and entry.branch and pr is None
+            _build_create_pr_url(agent_repo, entry.branch)
+            if agent_prs_loaded and entry.branch and pr is None
             else None
         )
         enriched_entry = entry.model_copy_update(
@@ -186,10 +217,10 @@ def fetch_board_snapshot(
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
         commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
         pr = remote.pr_by_branch.get(branch) if branch else None
+        agent_repo = remote.repo_path_by_work_dir.get(str(local_work_dir)) if local_work_dir else None
+        agent_prs_loaded = agent_repo in remote.prs_loaded_repos if agent_repo else False
         create_pr_url = (
-            _build_create_pr_url(remote.repo_path, branch)
-            if remote.prs_loaded and remote.repo_path and branch and pr is None
-            else None
+            _build_create_pr_url(agent_repo, branch) if agent_prs_loaded and branch and pr is None else None
         )
         entries.append(
             AgentBoardEntry(
@@ -311,18 +342,6 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
 def _is_agent_muted(certified_data: Any) -> bool:
     """Check if an agent is muted based on its certified data."""
     return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
-
-
-def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:
-    """Find a local agent work_dir to use as cwd for gh commands.
-
-    Returns the first accessible local agent work_dir, or None if no local
-    agent has an accessible work_dir.
-    """
-    for agent in agents:
-        if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists():
-            return agent.work_dir
-    return None
 
 
 def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:
