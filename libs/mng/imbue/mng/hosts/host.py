@@ -1195,7 +1195,7 @@ class Host(BaseHost, OnlineHostInterface):
             )
 
         with info_span(
-            "Transferring git repository",
+            "Transferring git repository...",
             source=str(source_path),
             target=str(target_path),
             base_branch=base_branch_name,
@@ -1633,8 +1633,8 @@ class Host(BaseHost, OnlineHostInterface):
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
         agent_type = options.agent_type or AgentTypeName("claude")
-        with log_span(
-            "Creating agent state",
+        with info_span(
+            "Creating agent state...",
             agent_id=str(agent_id),
             agent_name=str(agent_name),
             agent_type=str(agent_type),

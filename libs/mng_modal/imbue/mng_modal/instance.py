@@ -1917,7 +1917,7 @@ log "=== Shutdown script completed ==="
         # Optionally create an initial snapshot based on config
         # When enabled, this ensures the host can be restarted even after a hard kill
         if self.config.is_snapshotted_after_create:
-            with log_span("Creating initial snapshot for host", host_id=str(host.id)):
+            with info_span("Creating initial snapshot for host...", host_id=str(host.id)):
                 sandbox = self._find_sandbox_by_host_id(host.id)
                 assert sandbox is not None, "Sandbox must exist for online host"
                 self._create_initial_snapshot(sandbox, host.id)
