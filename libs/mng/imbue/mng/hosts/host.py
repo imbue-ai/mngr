@@ -1227,6 +1227,16 @@ class Host(BaseHost, OnlineHostInterface):
                         f" || git remote add origin {shlex.quote(origin_url)}"
                     )
                     config_commands.append(set_or_add)
+
+                # Copy .git/info/exclude from source to target. This file is not
+                # transferred by git push --mirror since it lives outside the git
+                # object store. We read it here and include it in the config command.
+                exclude_content = self._read_source_git_info_exclude(source_host, source_path)
+                if exclude_content is not None:
+                    escaped = exclude_content.replace("'", "'\"'\"'")
+                    target_exclude = ".git/info/exclude"
+                    config_commands.append(f"printf '%s' '{escaped}' > {shlex.quote(target_exclude)}")
+
                 result = self.execute_command(
                     " && ".join(config_commands),
                     cwd=target_path,
@@ -1234,20 +1244,14 @@ class Host(BaseHost, OnlineHostInterface):
                 if not result.success:
                     raise MngError(f"Failed to configure git repo on target: {result.stderr}")
 
-            # Copy .git/info/exclude from source to target. This file is not
-            # transferred by git push --mirror since it lives outside the git
-            # object store.
-            self._transfer_git_info_exclude(source_host, source_path, target_path)
-
         return new_branch_name
 
-    def _transfer_git_info_exclude(
+    def _read_source_git_info_exclude(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
-        target_path: Path,
-    ) -> None:
-        """Copy .git/info/exclude from source to target if it exists."""
+    ) -> str | None:
+        """Read .git/info/exclude content from the source repo, or None if unavailable."""
         # Resolve the git common dir on the source so this works in worktrees,
         # where .git is a file rather than a directory.
         if source_host.is_local:
@@ -1257,27 +1261,23 @@ class Host(BaseHost, OnlineHostInterface):
                 )
             except ProcessError:
                 logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
-                return
+                return None
             git_common_dir = Path(result.stdout.strip())
         else:
             result = source_host.execute_command("git rev-parse --git-common-dir", cwd=source_path)
             if not result.success:
                 logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
-                return
+                return None
             git_common_dir = Path(result.stdout.strip())
         if not git_common_dir.is_absolute():
             git_common_dir = source_path / git_common_dir
 
         source_exclude_path = git_common_dir / "info" / "exclude"
-        target_exclude_path = target_path / ".git" / "info" / "exclude"
         try:
-            content = source_host.read_file(source_exclude_path)
+            return source_host.read_file(source_exclude_path).decode()
         except (FileNotFoundError, NotADirectoryError):
             logger.trace("No info/exclude in source, skipping")
-            return
-
-        with log_span("Copying .git/info/exclude to target"):
-            self.write_file(target_exclude_path, content)
+            return None
 
     def _git_push_to_target(
         self,
