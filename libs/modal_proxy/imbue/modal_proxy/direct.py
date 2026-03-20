@@ -22,6 +22,7 @@ import modal
 import modal.exception
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
+from loguru import logger
 from modal.stream_type import StreamType as ModalStreamType
 from modal.volume import FileEntryType as ModalFileEntryType
 from pydantic import ConfigDict
