@@ -176,7 +176,7 @@ def load_config(
 
     # Block disabled plugins so their hooks don't fire. This covers
     # CLI-level --disable-plugin flags that weren't known at startup.
-    block_disabled_plugins(pm, config_dict["disabled_plugins"])
+    block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
 
     # Include logging if not None
     if config.logging is not None:
@@ -432,7 +432,7 @@ def _apply_plugin_overrides(
     return enabled_result, disabled_names
 
 
-def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[str]) -> None:
+def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[str], is_strict: bool = False) -> None:
     """Block disabled plugins in the plugin manager so their hooks don't fire.
 
     Uses pm.set_blocked() which both prevents future registration and
@@ -440,6 +440,11 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
     are already blocked (no-op in that case).
     """
     for name in disabled_names:
+        if is_strict:
+            if not pm.has_plugin(name):
+                raise Exception(
+                    f"Cannot disable plugin '{name}' because it is not registered. Possibly was not installed, or was disabled via a config file? Registered plugins: {pm.list_name_plugin()}"
+                )
         if not pm.is_blocked(name):
             pm.set_blocked(name)
 
