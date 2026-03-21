@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,27 @@ from imbue.mng_file.data_types import FileEntry
 from imbue.mng_file.data_types import FileType
 
 
+def _make_file_entry(
+    name: str = "f",
+    path: str = "/f",
+    file_type: FileType = FileType.FILE,
+    size: int | None = 0,
+    modified: str | None = None,
+    permissions: str | None = None,
+) -> FileEntry:
+    return FileEntry(
+        name=name,
+        path=path,
+        file_type=file_type,
+        size=size,
+        modified=modified,
+        permissions=permissions,
+    )
+
+
+# --- parse_find_output ---
+
+
 def test_parse_find_output_parses_file_entry() -> None:
     output = "myfile.txt\t1024\t2026-03-21+12:00:00\tf\t-rw-r--r--\t/home/user/myfile.txt\n"
     entries = parse_find_output(output)
@@ -30,22 +52,18 @@ def test_parse_find_output_parses_file_entry() -> None:
     assert entry.permissions == "-rw-r--r--"
 
 
-def test_parse_find_output_parses_directory_entry() -> None:
+def test_parse_find_output_parses_directory_with_none_size() -> None:
     output = "subdir\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user/subdir\n"
     entries = parse_find_output(output)
 
     assert len(entries) == 1
-    entry = entries[0]
-    assert entry.name == "subdir"
-    assert entry.file_type == FileType.DIRECTORY
-    assert entry.size is None
+    assert entries[0].file_type == FileType.DIRECTORY
+    assert entries[0].size is None
 
 
 def test_parse_find_output_skips_dot_entry() -> None:
     output = ".\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user\n"
-    entries = parse_find_output(output)
-
-    assert len(entries) == 0
+    assert parse_find_output(output) == []
 
 
 def test_parse_find_output_parses_multiple_entries() -> None:
@@ -55,24 +73,15 @@ def test_parse_find_output_parses_multiple_entries() -> None:
         "subdir\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user/subdir\n"
     )
     entries = parse_find_output(output)
-
-    assert len(entries) == 3
-    assert entries[0].name == "file1.txt"
-    assert entries[1].name == "file2.txt"
-    assert entries[2].name == "subdir"
+    assert [e.name for e in entries] == ["file1.txt", "file2.txt", "subdir"]
 
 
 def test_parse_find_output_handles_empty_output() -> None:
-    entries = parse_find_output("")
-
-    assert len(entries) == 0
+    assert parse_find_output("") == []
 
 
 def test_parse_find_output_skips_malformed_lines() -> None:
-    output = "this is not valid find output\n"
-    entries = parse_find_output(output)
-
-    assert len(entries) == 0
+    assert parse_find_output("this is not valid find output\n") == []
 
 
 def test_parse_find_output_handles_symlink() -> None:
@@ -84,116 +93,57 @@ def test_parse_find_output_handles_symlink() -> None:
     assert entries[0].size == 10
 
 
-def test_get_field_value_formats_size_with_units() -> None:
-    entry = FileEntry(
-        name="big.bin",
-        path="/big.bin",
-        file_type=FileType.FILE,
-        size=2048,
-        modified=None,
-        permissions=None,
-    )
-    assert _get_field_value(entry, "size") == "2.0 KB"
+# --- _get_field_value (parameterized) ---
 
 
-def test_get_field_value_returns_dash_for_none_size() -> None:
-    entry = FileEntry(
-        name="dir",
-        path="/dir",
-        file_type=FileType.DIRECTORY,
-        size=None,
-        modified=None,
-        permissions=None,
-    )
-    assert _get_field_value(entry, "size") == "-"
-
-
-def test_get_field_value_returns_dash_for_none_modified() -> None:
-    entry = FileEntry(
-        name="f",
-        path="/f",
-        file_type=FileType.FILE,
-        size=0,
-        modified=None,
-        permissions=None,
-    )
-    assert _get_field_value(entry, "modified") == "-"
+@pytest.mark.parametrize(
+    ("field", "entry_kwargs", "expected"),
+    [
+        ("name", {"name": "test.txt"}, "test.txt"),
+        ("path", {"path": "/home/test.txt"}, "/home/test.txt"),
+        ("file_type", {"file_type": FileType.DIRECTORY}, "directory"),
+        ("file_type", {"file_type": FileType.SYMLINK}, "symlink"),
+        ("size", {"size": 2048}, "2.0 KB"),
+        ("size", {"size": None, "file_type": FileType.DIRECTORY}, "-"),
+        ("modified", {"modified": "2026-03-21+12:00:00"}, "2026-03-21+12:00:00"),
+        ("modified", {"modified": None}, "-"),
+        ("permissions", {"permissions": "-rwxr-xr-x"}, "-rwxr-xr-x"),
+        ("permissions", {"permissions": None}, "-"),
+    ],
+    ids=[
+        "name",
+        "path",
+        "file_type_dir",
+        "file_type_symlink",
+        "size_formatted",
+        "size_none",
+        "modified_present",
+        "modified_none",
+        "permissions_present",
+        "permissions_none",
+    ],
+)
+def test_get_field_value(field: str, entry_kwargs: dict[str, Any], expected: str) -> None:
+    entry = _make_file_entry(**entry_kwargs)
+    assert _get_field_value(entry, field) == expected
 
 
 def test_get_field_value_returns_empty_for_unknown_field() -> None:
-    entry = FileEntry(
-        name="f",
-        path="/f",
-        file_type=FileType.FILE,
-        size=0,
-        modified=None,
-        permissions=None,
-    )
-    assert _get_field_value(entry, "nonexistent") == ""
+    assert _get_field_value(_make_file_entry(), "nonexistent") == ""
 
 
-def test_get_field_value_returns_name() -> None:
-    entry = FileEntry(
-        name="test.txt",
-        path="/test.txt",
-        file_type=FileType.FILE,
-        size=100,
-        modified="2026-01-01",
-        permissions="-rw-r--r--",
-    )
-    assert _get_field_value(entry, "name") == "test.txt"
-
-
-def test_get_field_value_returns_path() -> None:
-    entry = FileEntry(
-        name="test.txt", path="/home/test.txt", file_type=FileType.FILE, size=100, modified=None, permissions=None
-    )
-    assert _get_field_value(entry, "path") == "/home/test.txt"
-
-
-def test_get_field_value_returns_file_type() -> None:
-    entry = FileEntry(name="d", path="/d", file_type=FileType.DIRECTORY, size=None, modified=None, permissions=None)
-    assert _get_field_value(entry, "file_type") == "directory"
-
-
-def test_get_field_value_returns_permissions() -> None:
-    entry = FileEntry(name="f", path="/f", file_type=FileType.FILE, size=0, modified=None, permissions="-rwxr-xr-x")
-    assert _get_field_value(entry, "permissions") == "-rwxr-xr-x"
-
-
-def test_get_field_value_returns_dash_for_none_permissions() -> None:
-    entry = FileEntry(name="f", path="/f", file_type=FileType.FILE, size=0, modified=None, permissions=None)
-    assert _get_field_value(entry, "permissions") == "-"
-
-
-def test_get_field_value_returns_modified() -> None:
-    entry = FileEntry(
-        name="f", path="/f", file_type=FileType.FILE, size=0, modified="2026-03-21+12:00:00", permissions=None
-    )
-    assert _get_field_value(entry, "modified") == "2026-03-21+12:00:00"
+# --- _entry_to_field_mapping / _entry_to_json_dict ---
 
 
 def test_entry_to_field_mapping_returns_correct_mapping() -> None:
-    entry = FileEntry(
-        name="test.txt",
-        path="/test.txt",
-        file_type=FileType.FILE,
-        size=1024,
-        modified="2026-01-01",
-        permissions="-rw-r--r--",
-    )
+    entry = _make_file_entry(name="test.txt", size=1024)
     mapping = _entry_to_field_mapping(entry, ("name", "size"))
     assert mapping == {"name": "test.txt", "size": "1.0 KB"}
 
 
 def test_entry_to_json_dict_includes_all_fields() -> None:
-    entry = FileEntry(
-        name="test.txt",
-        path="/test.txt",
-        file_type=FileType.FILE,
-        size=1024,
-        modified="2026-01-01",
-        permissions="-rw-r--r--",
+    entry = _make_file_entry(
+        name="test.txt", path="/test.txt", size=1024, modified="2026-01-01", permissions="-rw-r--r--"
     )
     result = _entry_to_json_dict(entry)
     assert result["name"] == "test.txt"
@@ -204,60 +154,50 @@ def test_entry_to_json_dict_includes_all_fields() -> None:
     assert result["permissions"] == "-rw-r--r--"
 
 
+# --- _emit_list_result ---
+
+
 def test_emit_list_result_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template=None)
     _emit_list_result([], ("name",), output_opts)
-    captured = capsys.readouterr()
-    assert "(empty)" in captured.out
+    assert "(empty)" in capsys.readouterr().out
 
 
 def test_emit_list_result_human_with_entries(capsys: pytest.CaptureFixture[str]) -> None:
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template=None)
-    entries = [
-        FileEntry(
-            name="file.txt",
-            path="/file.txt",
-            file_type=FileType.FILE,
-            size=100,
-            modified="2026-01-01",
-            permissions=None,
-        ),
-    ]
+    entries = [_make_file_entry(name="file.txt", size=100)]
     _emit_list_result(entries, ("name", "file_type", "size"), output_opts)
-    captured = capsys.readouterr()
-    assert "file.txt" in captured.out
-    assert "file" in captured.out
+    out = capsys.readouterr().out
+    assert "file.txt" in out
+    assert "file" in out
 
 
 def test_emit_list_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     output_opts = OutputOptions(output_format=OutputFormat.JSON, format_template=None)
-    entries = [
-        FileEntry(name="a.txt", path="/a.txt", file_type=FileType.FILE, size=50, modified=None, permissions=None),
-    ]
+    entries = [_make_file_entry(name="a.txt", path="/a.txt", size=50)]
     _emit_list_result(entries, ("name",), output_opts)
-    captured = capsys.readouterr()
-    parsed = json.loads(captured.out)
+    parsed = json.loads(capsys.readouterr().out)
     assert parsed["count"] == 1
-    assert len(parsed["files"]) == 1
     assert parsed["files"][0]["name"] == "a.txt"
 
 
 def test_emit_list_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     output_opts = OutputOptions(output_format=OutputFormat.JSONL, format_template=None)
     entries = [
-        FileEntry(name="a.txt", path="/a.txt", file_type=FileType.FILE, size=50, modified=None, permissions=None),
-        FileEntry(name="b.txt", path="/b.txt", file_type=FileType.FILE, size=100, modified=None, permissions=None),
+        _make_file_entry(name="a.txt", path="/a.txt", size=50),
+        _make_file_entry(name="b.txt", path="/b.txt", size=100),
     ]
     _emit_list_result(entries, ("name",), output_opts)
-    captured = capsys.readouterr()
-    lines = captured.out.strip().splitlines()
+    lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["name"] == "a.txt"
     assert json.loads(lines[1])["name"] == "b.txt"
 
 
+# --- list_files_on_volume ---
+
+
 def test_list_files_on_volume_returns_file_entries(tmp_path: Path) -> None:
-    # Create files in the temp directory
     (tmp_path / "file1.txt").write_text("hello")
     (tmp_path / "file2.bin").write_bytes(b"\x00" * 100)
     (tmp_path / "subdir").mkdir()
@@ -283,9 +223,7 @@ def test_list_files_on_volume_empty_directory(tmp_path: Path) -> None:
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
     volume = LocalVolume(root_path=empty_dir)
-    entries = list_files_on_volume(volume=volume, vol_path=".", is_recursive=False)
-
-    assert entries == []
+    assert list_files_on_volume(volume=volume, vol_path=".", is_recursive=False) == []
 
 
 def test_list_files_on_volume_recursive(tmp_path: Path) -> None:
