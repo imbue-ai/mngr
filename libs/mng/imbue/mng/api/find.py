@@ -473,6 +473,7 @@ def find_agents_by_identifiers_or_state(
     filter_all: bool,
     target_state: AgentLifecycleState | None,
     mng_ctx: MngContext,
+    include_destroyed: bool = False,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -483,7 +484,7 @@ def find_agents_by_identifiers_or_state(
 
     Raises AgentNotFoundError if any identifier does not match an agent.
     """
-    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=include_destroyed)
 
     # Collect candidate matches from the lightweight agent references
     candidates: list[AgentMatch] = []

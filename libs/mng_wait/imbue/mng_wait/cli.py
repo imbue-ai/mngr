@@ -1,3 +1,4 @@
+import io
 import sys
 from typing import assert_never
 
@@ -11,6 +12,7 @@ from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
+from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
@@ -21,7 +23,9 @@ from imbue.mng_wait.api import resolve_wait_target
 from imbue.mng_wait.api import wait_for_state
 from imbue.mng_wait.data_types import StateChange
 from imbue.mng_wait.data_types import WaitResult
+from imbue.mng_wait.data_types import check_state_match
 from imbue.mng_wait.data_types import compute_default_target_states
+from imbue.mng_wait.data_types import describe_combined_state
 from imbue.mng_wait.data_types import validate_state_strings
 from imbue.mng_wait.primitives import ALL_VALID_STATE_STRINGS
 from imbue.mng_wait.primitives import EXIT_CODE_ERROR
@@ -39,11 +43,14 @@ class WaitCliOptions(CommonCliOptions):
     interval: str
 
 
-def _read_target_from_stdin() -> str:
+def _read_target_from_stdin(
+    stdin: io.TextIOBase | None = None,
+) -> str:
     """Read a target identifier from stdin (one line)."""
-    if sys.stdin.isatty():
+    stream = stdin if stdin is not None else sys.stdin
+    if hasattr(stream, "isatty") and stream.isatty():
         write_human_line("Waiting for target on stdin...")
-    line = sys.stdin.readline().strip()
+    line = stream.readline().strip()
     if not line:
         raise click.UsageError("No target provided on stdin")
     return line
@@ -181,12 +188,40 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     # Parse interval
     interval_seconds = parse_duration_to_seconds(opts.interval)
 
+    # Poll the initial state
+    initial_state = poll_target_state(resolved)
+    current_state_description = describe_combined_state(initial_state, resolved.target.target_type)
+
+    # Check if already in a target state
+    already_matched = check_state_match(
+        combined_state=initial_state,
+        target_type=resolved.target.target_type,
+        target_states=target_states,
+    )
+    if already_matched is not None:
+        result = WaitResult(
+            target=resolved.target,
+            is_matched=True,
+            is_timed_out=False,
+            final_state=initial_state,
+            matched_state=already_matched,
+            elapsed_seconds=0.0,
+            state_changes=(),
+        )
+        emit_info(
+            f"Target '{resolved.target.identifier}' is already in state {already_matched} ({current_state_description})",
+            output_opts.output_format,
+        )
+        _output_result(result, output_opts)
+        ctx.exit(EXIT_CODE_SUCCESS)
+        return
+
     # Log what we're waiting for
-    logger.info(
-        "Waiting for {} '{}' to reach state(s): {}",
-        resolved.target.target_type.value.lower(),
-        resolved.target.identifier,
-        ", ".join(sorted(target_states)),
+    sorted_states = ", ".join(sorted(target_states))
+    emit_info(
+        f"Waiting for {resolved.target.target_type.value.lower()} '{resolved.target.identifier}' "
+        f"to transition from {current_state_description} to one of: {sorted_states}",
+        output_opts.output_format,
     )
     if timeout_seconds is not None:
         logger.info("Timeout: {:.0f}s", timeout_seconds)

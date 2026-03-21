@@ -53,6 +53,29 @@ class WaitResult(FrozenModel):
 
 
 @pure
+def describe_combined_state(combined_state: CombinedState, target_type: WaitTargetType) -> str:
+    """Return a human-readable description of the current combined state."""
+    match target_type:
+        case WaitTargetType.HOST:
+            if combined_state.host_state is not None:
+                return combined_state.host_state.value
+            else:
+                return "UNKNOWN"
+        case WaitTargetType.AGENT:
+            parts: list[str] = []
+            if combined_state.agent_state is not None:
+                parts.append(f"agent={combined_state.agent_state.value}")
+            if combined_state.host_state is not None:
+                parts.append(f"host={combined_state.host_state.value}")
+            if parts:
+                return ", ".join(parts)
+            else:
+                return "UNKNOWN"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
 def compute_default_target_states(target_type: WaitTargetType) -> frozenset[str]:
     """Return the default set of state strings to wait for, given the target type."""
     match target_type:

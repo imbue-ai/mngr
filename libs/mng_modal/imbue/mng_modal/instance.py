@@ -88,6 +88,7 @@ from imbue.mng.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mng_modal.config import ModalProviderConfig
 from imbue.mng_modal.errors import NoSnapshotsModalMngError
 from imbue.mng_modal.routes.deployment import deploy_function
+from imbue.mng_modal.routes.deployment import get_function_url
 from imbue.mng_modal.ssh_utils import add_host_to_known_hosts
 from imbue.mng_modal.ssh_utils import create_pyinfra_host
 from imbue.mng_modal.ssh_utils import load_or_create_host_keypair
@@ -1202,19 +1203,30 @@ class ModalProviderInstance(BaseProviderInstance):
         with self.mng_ctx.concurrency_group.make_concurrency_group("start ssh and create host") as concurrency_group:
             # For persistent apps, deploy the snapshot function and create shutdown script
             snapshot_url_future: Future[str] | None = None
-            if self.config.is_persistent and os.environ.get("MNG_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
-                # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
-                #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
+            if self.config.is_persistent:
                 snapshot_url_future = Future()
-                concurrency_group.start_new_thread(
-                    _set_result,
-                    (
-                        snapshot_url_future,
-                        lambda: deploy_function(
-                            "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                if os.environ.get("MNG_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
+                    # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
+                    #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
+                    concurrency_group.start_new_thread(
+                        _set_result,
+                        (
+                            snapshot_url_future,
+                            lambda: deploy_function(
+                                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                            ),
                         ),
-                    ),
-                )
+                    )
+                else:
+                    concurrency_group.start_new_thread(
+                        _set_result,
+                        (
+                            snapshot_url_future,
+                            lambda: get_function_url(
+                                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                            ),
+                        ),
+                    )
 
             # Get SSH connection info
             ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)

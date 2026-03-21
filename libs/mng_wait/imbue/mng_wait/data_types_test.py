@@ -6,6 +6,7 @@ from imbue.mng.primitives import HostState
 from imbue.mng_wait.data_types import CombinedState
 from imbue.mng_wait.data_types import check_state_match
 from imbue.mng_wait.data_types import compute_default_target_states
+from imbue.mng_wait.data_types import describe_combined_state
 from imbue.mng_wait.data_types import validate_state_strings
 from imbue.mng_wait.primitives import ALL_VALID_STATE_STRINGS
 from imbue.mng_wait.primitives import WaitTargetType
@@ -51,6 +52,57 @@ def test_default_host_states_exclude_running_and_transient() -> None:
     assert "BUILDING" not in states
     assert "STARTING" not in states
     assert "STOPPING" not in states
+
+
+# === describe_combined_state ===
+
+
+def test_describe_combined_state_host_target_shows_host_state() -> None:
+    combined_state = CombinedState(host_state=HostState.RUNNING)
+    result = describe_combined_state(combined_state, WaitTargetType.HOST)
+    assert result == "RUNNING"
+
+
+def test_describe_combined_state_host_target_unknown_when_none() -> None:
+    combined_state = CombinedState()
+    result = describe_combined_state(combined_state, WaitTargetType.HOST)
+    assert result == "UNKNOWN"
+
+
+def test_describe_combined_state_agent_target_shows_both_states() -> None:
+    combined_state = CombinedState(
+        host_state=HostState.RUNNING,
+        agent_state=AgentLifecycleState.WAITING,
+    )
+    result = describe_combined_state(combined_state, WaitTargetType.AGENT)
+    assert "agent=WAITING" in result
+    assert "host=RUNNING" in result
+
+
+def test_describe_combined_state_agent_target_unknown_when_none() -> None:
+    combined_state = CombinedState()
+    result = describe_combined_state(combined_state, WaitTargetType.AGENT)
+    assert result == "UNKNOWN"
+
+
+def test_describe_combined_state_agent_target_agent_only() -> None:
+    combined_state = CombinedState(agent_state=AgentLifecycleState.RUNNING)
+    result = describe_combined_state(combined_state, WaitTargetType.AGENT)
+    assert "agent=RUNNING" in result
+    assert "host=" not in result
+
+
+def test_describe_combined_state_agent_target_host_only() -> None:
+    combined_state = CombinedState(host_state=HostState.CRASHED)
+    result = describe_combined_state(combined_state, WaitTargetType.AGENT)
+    assert "host=CRASHED" in result
+    assert "agent=" not in result
+
+
+def test_describe_combined_state_host_target_stopped() -> None:
+    combined_state = CombinedState(host_state=HostState.STOPPED)
+    result = describe_combined_state(combined_state, WaitTargetType.HOST)
+    assert result == "STOPPED"
 
 
 # === check_state_match ===
