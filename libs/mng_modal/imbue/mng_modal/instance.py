@@ -1202,19 +1202,23 @@ class ModalProviderInstance(BaseProviderInstance):
         with self.mng_ctx.concurrency_group.make_concurrency_group("start ssh and create host") as concurrency_group:
             # For persistent apps, deploy the snapshot function and create shutdown script
             snapshot_url_future: Future[str] | None = None
-            if self.config.is_persistent and os.environ.get("MNG_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
-                # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
-                #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
+            if self.config.is_persistent:
                 snapshot_url_future = Future()
-                concurrency_group.start_new_thread(
-                    _set_result,
-                    (
-                        snapshot_url_future,
-                        lambda: deploy_function(
-                            "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                if os.environ.get("MNG_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
+                    # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
+                    #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
+                    concurrency_group.start_new_thread(
+                        _set_result,
+                        (
+                            snapshot_url_future,
+                            lambda: deploy_function(
+                                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                            ),
                         ),
-                    ),
-                )
+                    )
+                else:
+                    # FIXME: this is obviously broken--this needs to make a thread that uses the modal interface to *get* the URL for the deployed snapshot_and_shutdown function (we can assume that it exists)
+                    snapshot_url_future.set_result("http://fake-url-for-testing.com/snapshot_and_shutdown")
 
             # Get SSH connection info
             ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
