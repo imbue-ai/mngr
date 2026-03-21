@@ -2545,6 +2545,7 @@ log "=== Shutdown script completed ==="
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        on_agent_error: Callable[[DiscoveredAgent, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
         with trace_span("Building host listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
@@ -2557,20 +2558,22 @@ log "=== Shutdown script completed ==="
 
                 # For offline hosts, fall back to the default per-field collection
                 if not isinstance(host, Host):
-                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
+                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_agent_error)
 
                 # Collect all data in one SSH command
                 with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     raw = self._collect_all_listing_data_via_ssh(host)
                     if raw is None:
-                        return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
+                        return super().get_host_and_agent_details(
+                            host_ref, agent_refs, field_generators, on_agent_error
+                        )
             except HostConnectionError as e:
                 logger.debug(
                     "Host {} unreachable during optimized listing, falling back to default: {}",
                     host_ref.host_id,
                     e,
                 )
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
+                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_agent_error)
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):

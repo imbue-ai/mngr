@@ -381,6 +381,23 @@ def _discover_and_emit_details_for_provider(
             params.on_error(error_info)
 
 
+def _handle_agent_error(
+    agent_ref: DiscoveredAgent,
+    exception: BaseException,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+) -> None:
+    """Handle a per-agent error during detail collection."""
+    if params.error_behavior == ErrorBehavior.ABORT:
+        raise exception
+    error_info = AgentErrorInfo.build_for_agent(exception, agent_ref.agent_id)
+    with results_lock:
+        result.errors.append(error_info)
+    if params.on_error:
+        params.on_error(error_info)
+
+
 def _collect_and_emit_details_for_host(
     host_ref: DiscoveredHost,
     agent_refs: list[DiscoveredAgent],
@@ -390,7 +407,10 @@ def _collect_and_emit_details_for_host(
     results_lock: Lock,
 ) -> None:
     _host_details, agent_details_list = provider.get_host_and_agent_details(
-        host_ref, agent_refs, params.field_generators
+        host_ref,
+        agent_refs,
+        params.field_generators,
+        lambda agent_ref, exc: _handle_agent_error(agent_ref, exc, params, result, results_lock),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
