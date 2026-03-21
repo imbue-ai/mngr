@@ -46,3 +46,8 @@ omit = [
     "test_*.py",
     "*/conftest.py",
 ]
+
+[tool.coverage.report]
+exclude_lines = [
+    "assert_never",
+]

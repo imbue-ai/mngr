@@ -54,6 +54,13 @@ def test_build_agent_resolved_target_finds_agent_by_id(temp_mng_ctx: MngContext)
     assert result.agent_id == agent_ref.agent_id
 
 
+def test_build_agent_resolved_target_finds_agent_by_name(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, host_ref, agent_ref = _make_agents_by_host(agent_name="named-agent")
+    result = _build_agent_resolved_target("named-agent", agents_by_host, temp_mng_ctx)
+    assert result.target.target_type == WaitTargetType.AGENT
+    assert result.agent_id == agent_ref.agent_id
+
+
 def test_build_agent_resolved_target_raises_when_not_found(temp_mng_ctx: MngContext) -> None:
     agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
     nonexistent_agent_id = str(AgentId.generate())
@@ -69,6 +76,14 @@ def test_build_host_resolved_target_finds_host_by_id(temp_mng_ctx: MngContext) -
     all_hosts = list(agents_by_host.keys())
     host_id_str = str(host_ref.host_id)
     result = _build_host_resolved_target(host_id_str, all_hosts, temp_mng_ctx)
+    assert result.target.target_type == WaitTargetType.HOST
+    assert result.host_id == host_ref.host_id
+
+
+def test_build_host_resolved_target_finds_host_by_name(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, host_ref, _agent_ref = _make_agents_by_host(host_name="named-host")
+    all_hosts = list(agents_by_host.keys())
+    result = _build_host_resolved_target("named-host", all_hosts, temp_mng_ctx)
     assert result.target.target_type == WaitTargetType.HOST
     assert result.host_id == host_ref.host_id
 
@@ -230,19 +245,21 @@ def test_detect_state_changes_records_agent_state_change() -> None:
         agent_state=AgentLifecycleState.WAITING,
     )
     changes: list[StateChange] = []
+    recorded: list[StateChange] = []
 
     _detect_state_changes(
         previous_state=previous,
         current_state=current,
         elapsed=10.0,
         state_changes=changes,
-        on_state_change=None,
+        on_state_change=recorded.append,
     )
 
     assert len(changes) == 1
     assert changes[0].field == "agent_state"
     assert changes[0].old_value == "RUNNING"
     assert changes[0].new_value == "WAITING"
+    assert len(recorded) == 1
 
 
 def test_detect_state_changes_no_change_records_nothing() -> None:
@@ -467,3 +484,34 @@ def test_wait_for_state_agent_target_matches_host_crashed() -> None:
 
     assert result.is_matched is True
     assert result.matched_state == "CRASHED"
+
+
+def test_wait_for_state_detects_destroyed_after_connection_errors() -> None:
+    """Simulate what happens when a host is destroyed: polls fail, then return DESTROYED."""
+    target = _make_wait_target(WaitTargetType.HOST)
+    call_count = 0
+
+    def _poll_with_destruction() -> CombinedState:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            # First two polls: host is running
+            return CombinedState(host_state=HostState.RUNNING)
+        else:
+            # After destruction: offline host reports DESTROYED
+            return CombinedState(host_state=HostState.DESTROYED)
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=_poll_with_destruction,
+        target_states=frozenset({"DESTROYED", "STOPPED", "CRASHED"}),
+        timeout_seconds=5.0,
+        interval_seconds=0.01,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.matched_state == "DESTROYED"
+    assert len(result.state_changes) == 1
+    assert result.state_changes[0].old_value == "RUNNING"
+    assert result.state_changes[0].new_value == "DESTROYED"

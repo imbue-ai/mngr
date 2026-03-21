@@ -11,6 +11,7 @@ from imbue.mng.api.find import resolve_agent_reference
 from imbue.mng.api.find import resolve_host_reference
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
@@ -66,10 +67,13 @@ def _build_agent_resolved_target(
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
     mng_ctx: MngContext,
 ) -> ResolvedTarget:
-    """Build a ResolvedTarget for an agent identifier using find.py's resolve_agent_reference."""
+    """Build a ResolvedTarget for an agent identifier using find.py's resolve_agent_reference.
+
+    resolve_agent_reference raises UserInputError if not found; it only returns None
+    when identifier is None, which cannot happen here.
+    """
     result = resolve_agent_reference(identifier, resolved_host=None, agents_by_host=agents_by_host)
-    if result is None:
-        raise UserInputError(f"Could not find agent: {identifier}")
+    assert result is not None
     host_ref, agent_ref = result
     provider = get_provider_instance(host_ref.provider_name, mng_ctx)
     return ResolvedTarget(
@@ -85,10 +89,13 @@ def _build_host_resolved_target(
     all_hosts: list[DiscoveredHost],
     mng_ctx: MngContext,
 ) -> ResolvedTarget:
-    """Build a ResolvedTarget for a host identifier using find.py's resolve_host_reference."""
+    """Build a ResolvedTarget for a host identifier using find.py's resolve_host_reference.
+
+    resolve_host_reference raises UserInputError if not found; it only returns None
+    when identifier is None, which cannot happen here.
+    """
     host_ref = resolve_host_reference(identifier, all_hosts)
-    if host_ref is None:
-        raise UserInputError(f"Could not find host: {identifier}")
+    assert host_ref is not None
     provider = get_provider_instance(host_ref.provider_name, mng_ctx)
     return ResolvedTarget(
         target=WaitTarget(identifier=identifier, target_type=WaitTargetType.HOST),
@@ -172,8 +179,18 @@ def poll_target_state(
 
     Gets a fresh host interface from the provider and queries state directly.
     Does NOT call reset_caches().
+
+    When the host is unreachable (SSH connection error), falls back to
+    the offline host representation to determine the state (e.g. DESTROYED,
+    STOPPED, CRASHED).
     """
-    host_interface = resolved.provider.get_host(resolved.host_id)
+    try:
+        host_interface = resolved.provider.get_host(resolved.host_id)
+    except HostConnectionError as exc:
+        # Host is unreachable -- fall back to offline host to get the provider-level state
+        logger.debug("Host unreachable, falling back to offline state: {}", exc)
+        host_interface = resolved.provider.to_offline_host(resolved.host_id)
+
     host_state = host_interface.get_state()
 
     agent_state: AgentLifecycleState | None = None

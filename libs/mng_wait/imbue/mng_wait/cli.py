@@ -44,6 +44,7 @@ class WaitCliOptions(CommonCliOptions):
 
 
 def _read_target_from_stdin(
+    # Accepts any file-like object with readline(); defaults to sys.stdin
     stdin: io.TextIOBase | None = None,
 ) -> str:
     """Read a target identifier from stdin (one line)."""
