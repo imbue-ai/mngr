@@ -30,15 +30,32 @@ def deploy_function(
         except ModalProxyError as e:
             raise MngError(f"Failed to deploy {function} function: {e}") from e
 
-    # get the URL out of the resulting Function object
-    func = modal_interface.function_from_name(
-        name=function,
-        app_name=app_name,
-        environment_name=environment_name,
-    )
-    web_url = func.get_web_url()
-    if not web_url:
-        raise MngError(f"Could not find function URL in deploy output for {function}")
+    return get_function_url(function, app_name, environment_name, modal_interface)
 
-    logger.trace("Deployed {} function, URL: {}", function, web_url)
+
+def get_function_url(
+    function: str,
+    app_name: str,
+    environment_name: str | None,
+    modal_interface: ModalInterface,
+) -> str:
+    """Look up the web URL for an already-deployed Modal function.
+
+    Raises MngError if the function cannot be found or has no web URL.
+    """
+    with log_span("Looking up URL for deployed {} function in app: {}", function, app_name):
+        try:
+            func = modal_interface.function_from_name(
+                name=function,
+                app_name=app_name,
+                environment_name=environment_name,
+            )
+        except ModalProxyError as e:
+            raise MngError(f"Failed to look up deployed {function} function: {e}") from e
+
+        web_url = func.get_web_url()
+        if not web_url:
+            raise MngError(f"Could not find function URL for {function}")
+
+    logger.trace("Found {} function URL: {}", function, web_url)
     return web_url
