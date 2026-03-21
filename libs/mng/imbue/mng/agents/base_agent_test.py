@@ -1273,3 +1273,120 @@ def test_check_paste_content_long_message_uses_tail() -> None:
     message = "x" * 100 + tail
     pane = "prompt> " + tail
     assert _check_paste_content(pane, message) is True
+
+
+# =========================================================================
+# send_message retry tests
+# =========================================================================
+
+
+class _FailingAgent(BaseAgent):
+    """BaseAgent subclass that can be configured to fail send_message N times."""
+
+    _fail_count: int = 0
+    _send_attempts: int = 0
+    _clear_input_calls: int = 0
+
+    def _send_message_simple(self, tmux_target: str, message: str) -> None:
+        self._send_attempts += 1
+        if self._send_attempts <= self._fail_count:
+            raise SendMessageError(str(self.name), f"simulated failure attempt {self._send_attempts}")
+        # Success on subsequent attempts - no-op
+
+    def clear_input(self) -> None:
+        self._clear_input_calls += 1
+
+
+def _create_failing_agent(
+    temp_mng_ctx: MngContext,
+    fail_count: int,
+) -> _FailingAgent:
+    """Create a _FailingAgent with a stub host."""
+    stub = _StubHost()
+    agent = _FailingAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("failing-agent"),
+        agent_type=AgentTypeName("test"),
+        work_dir=Path("/tmp/stub-work"),
+        create_time=datetime.now(timezone.utc),
+        host_id=HostId.generate(),
+        host=stub,
+        mng_ctx=temp_mng_ctx,
+        agent_config=AgentTypeConfig(command=CommandString("sleep 1000")),
+        enter_submission_timeout_seconds=20.0,
+    )
+    agent._fail_count = fail_count
+    agent._send_attempts = 0
+    agent._clear_input_calls = 0
+    return agent
+
+
+def test_send_message_succeeds_on_first_attempt(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """send_message should succeed without retries when the first attempt works."""
+    agent = _create_failing_agent(temp_mng_ctx, fail_count=0)
+
+    agent.send_message("hello")
+
+    assert agent._send_attempts == 1
+    assert agent._clear_input_calls == 0
+
+
+def test_send_message_retries_on_send_message_error(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """send_message should retry on SendMessageError and succeed on a later attempt."""
+    agent = _create_failing_agent(temp_mng_ctx, fail_count=1)
+
+    agent.send_message("hello")
+
+    assert agent._send_attempts == 2
+    assert agent._clear_input_calls == 1
+
+
+def test_send_message_calls_clear_input_before_each_retry(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """send_message should call clear_input before each retry attempt."""
+    agent = _create_failing_agent(temp_mng_ctx, fail_count=2)
+
+    agent.send_message("hello")
+
+    assert agent._send_attempts == 3
+    assert agent._clear_input_calls == 2
+
+
+def test_send_message_raises_after_max_attempts(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """send_message should raise SendMessageError after exhausting all retry attempts."""
+    # fail_count=3 means all 3 attempts fail (max_attempts is 3)
+    agent = _create_failing_agent(temp_mng_ctx, fail_count=3)
+
+    with pytest.raises(SendMessageError, match="simulated failure attempt"):
+        agent.send_message("hello")
+
+    assert agent._send_attempts == 3
+    assert agent._clear_input_calls == 2
+
+
+# =========================================================================
+# clear_input tests
+# =========================================================================
+
+
+def test_clear_input_sends_ctrl_c(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """clear_input should send Ctrl-C via tmux to the agent's pane."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
+
+    agent.clear_input()
+
+    # First command should be sending C-c, second should be the sleep
+    assert len(stub.executed_commands) == 2
+    assert "C-c" in stub.executed_commands[0]
+    assert "send-keys" in stub.executed_commands[0]
+    assert "sleep" in stub.executed_commands[1]
