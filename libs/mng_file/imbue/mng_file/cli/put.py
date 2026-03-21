@@ -5,6 +5,7 @@ from typing import assert_never
 
 import click
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng.cli.common_opts import add_common_options
@@ -117,10 +118,11 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
     with log_span("Writing file"):
         if resolved.is_online:
             resolved.host.write_file(full_path, content, mode=opts.mode)
-        elif resolved.volume is not None:
+        else:
+            assert resolved.volume is not None
+            if opts.mode is not None:
+                logger.warning("--mode is not supported when writing via volume (host is offline); ignoring")
             vol_path = compute_volume_path(relative_to, resolved.agent_id, opts.path)
             resolved.volume.write_files({vol_path: content})
-        else:
-            resolved.host.write_file(full_path, content, mode=opts.mode)
 
     _emit_put_result(full_path, len(content), output_opts)

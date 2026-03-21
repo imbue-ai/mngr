@@ -33,6 +33,7 @@ from imbue.mng_file.cli.target import compute_volume_path
 from imbue.mng_file.cli.target import resolve_file_target
 from imbue.mng_file.cli.target import resolve_full_path
 from imbue.mng_file.data_types import FileEntry
+from imbue.mng_file.data_types import FileType
 from imbue.mng_file.data_types import PathRelativeTo
 
 _DEFAULT_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
@@ -64,14 +65,14 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 # %f = filename, %s = size, %T+ = mod time, %y = type char, %M = symbolic permissions, %p = full path
 _FIND_FORMAT: Final[str] = r"%f\t%s\t%T+\t%y\t%M\t%p\n"
 
-_FILE_TYPE_BY_FIND_CHAR: Final[dict[str, str]] = {
-    "f": "file",
-    "d": "directory",
-    "l": "symlink",
-    "p": "pipe",
-    "s": "socket",
-    "b": "block",
-    "c": "character",
+_FILE_TYPE_BY_FIND_CHAR: Final[dict[str, FileType]] = {
+    "f": FileType.FILE,
+    "d": FileType.DIRECTORY,
+    "l": FileType.SYMLINK,
+    "p": FileType.PIPE,
+    "s": FileType.SOCKET,
+    "b": FileType.BLOCK,
+    "c": FileType.CHARACTER,
 }
 
 
@@ -99,10 +100,10 @@ def _parse_find_output_line(line: str) -> FileEntry | None:
     if name == ".":
         return None
 
-    file_type = _FILE_TYPE_BY_FIND_CHAR.get(type_char, "other")
+    file_type = _FILE_TYPE_BY_FIND_CHAR.get(type_char, FileType.OTHER)
 
     parsed_size: int | None = None
-    if file_type != "directory":
+    if file_type != FileType.DIRECTORY:
         try:
             parsed_size = int(size_str)
         except ValueError:
@@ -151,27 +152,25 @@ def list_files_on_host(
     return parse_find_output(result.stdout)
 
 
-def list_files_on_volume(
+def _list_volume_directory(
     volume: Volume,
     vol_path: str,
-    is_recursive: bool,
 ) -> list[FileEntry]:
-    """List files in a directory using a Volume interface."""
-    with log_span("Listing files on volume"):
-        volume_files = volume.listdir(vol_path)
+    """List immediate children of a directory on a volume."""
+    volume_files = volume.listdir(vol_path)
 
     entries: list[FileEntry] = []
     for vf in volume_files:
         name = vf.path.rsplit("/", 1)[-1] if "/" in vf.path else vf.path
         match vf.file_type:
             case VolumeFileType.FILE:
-                file_type = "file"
+                file_type = FileType.FILE
             case VolumeFileType.DIRECTORY:
-                file_type = "directory"
+                file_type = FileType.DIRECTORY
             case _ as unreachable:
                 assert_never(unreachable)
 
-        size = vf.size if file_type != "directory" else None
+        size = vf.size if file_type != FileType.DIRECTORY else None
         modified = None
         if vf.mtime > 0:
             modified = datetime.fromtimestamp(vf.mtime, tz=timezone.utc).isoformat()
@@ -190,6 +189,29 @@ def list_files_on_volume(
     return entries
 
 
+def list_files_on_volume(
+    volume: Volume,
+    vol_path: str,
+    is_recursive: bool,
+) -> list[FileEntry]:
+    """List files in a directory using a Volume interface."""
+    with log_span("Listing files on volume"):
+        entries = _list_volume_directory(volume, vol_path)
+
+    if not is_recursive:
+        return entries
+
+    # Recurse into subdirectories
+    directories_to_visit = [e.path for e in entries if e.file_type == FileType.DIRECTORY]
+    while directories_to_visit:
+        subdir_path = directories_to_visit.pop(0)
+        sub_entries = _list_volume_directory(volume, subdir_path)
+        entries.extend(sub_entries)
+        directories_to_visit.extend(e.path for e in sub_entries if e.file_type == FileType.DIRECTORY)
+
+    return entries
+
+
 @pure
 def _get_field_value(entry: FileEntry, field: str) -> str:
     """Extract a display value from a FileEntry for the given field name."""
@@ -199,7 +221,7 @@ def _get_field_value(entry: FileEntry, field: str) -> str:
         case "path":
             return entry.path
         case "file_type":
-            return entry.file_type
+            return entry.file_type.value.lower()
         case "size":
             if entry.size is None:
                 return "-"
@@ -224,7 +246,7 @@ def _entry_to_json_dict(entry: FileEntry) -> dict[str, Any]:
     return {
         "name": entry.name,
         "path": entry.path,
-        "file_type": entry.file_type,
+        "file_type": entry.file_type.value.lower(),
         "size": entry.size,
         "modified": entry.modified,
         "permissions": entry.permissions,
@@ -338,17 +360,12 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
             directory=directory,
             is_recursive=opts.recursive,
         )
-    elif resolved.volume is not None:
+    else:
+        assert resolved.volume is not None
         vol_path = compute_volume_path(relative_to, resolved.agent_id, opts.path)
         entries = list_files_on_volume(
             volume=resolved.volume,
             vol_path=vol_path,
-            is_recursive=opts.recursive,
-        )
-    else:
-        entries = list_files_on_host(
-            host=resolved.host,
-            directory=directory,
             is_recursive=opts.recursive,
         )
 

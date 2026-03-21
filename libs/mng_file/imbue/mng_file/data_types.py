@@ -14,12 +14,25 @@ class PathRelativeTo(UpperCaseStrEnum):
     HOST = auto()
 
 
+class FileType(UpperCaseStrEnum):
+    """Type of a file system entry."""
+
+    FILE = auto()
+    DIRECTORY = auto()
+    SYMLINK = auto()
+    PIPE = auto()
+    SOCKET = auto()
+    BLOCK = auto()
+    CHARACTER = auto()
+    OTHER = auto()
+
+
 class FileEntry(FrozenModel):
     """A single file or directory entry from a remote listing."""
 
     name: str = Field(description="File or directory name")
     path: str = Field(description="Full path on the remote host")
-    file_type: str = Field(description="Type: file, directory, symlink, or other")
+    file_type: FileType = Field(description="Type of the file system entry")
     size: int | None = Field(default=None, description="Size in bytes (None for directories)")
     modified: str | None = Field(default=None, description="Last modification time as ISO 8601 string")
     permissions: str | None = Field(default=None, description="File permissions string (e.g. -rw-r--r--)")

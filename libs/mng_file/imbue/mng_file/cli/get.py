@@ -103,11 +103,10 @@ def file_get(ctx: click.Context, **kwargs: Any) -> None:
     with log_span("Reading file"):
         if resolved.is_online:
             content = resolved.host.read_file(full_path)
-        elif resolved.volume is not None:
+        else:
+            assert resolved.volume is not None
             vol_path = compute_volume_path(relative_to, resolved.agent_id, opts.path)
             content = resolved.volume.read_file(vol_path)
-        else:
-            content = resolved.host.read_file(full_path)
 
     # Output
     if opts.output is not None:
