@@ -17,8 +17,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
+from imbue.mng.errors import MngError
 from imbue.mng.hosts.common import compute_idle_seconds
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
@@ -424,26 +426,35 @@ class ProviderInstanceInterface(MutableModel, ABC):
         resolved_field_generators = field_generators or {}
         agent_details_list: list[AgentDetails] = []
         for agent_ref in agent_refs:
-            agent_details: AgentDetails | None = None
-            if agents is not None and isinstance(host, OnlineHostInterface):
-                # Find the agent in the list for running hosts
-                agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
-                if agent is not None:
-                    agent_details = _build_agent_details_from_online_agent(
-                        agent, host_details, host, ssh_activity, resolved_field_generators
-                    )
-                else:
-                    logger.debug(
-                        "Agent {} not found on host {}, using offline data",
-                        agent_ref.agent_id,
-                        host_ref.host_id,
-                    )
+            try:
+                agent_details: AgentDetails | None = None
+                if agents is not None and isinstance(host, OnlineHostInterface):
+                    # Find the agent in the list for running hosts
+                    agent = next((a for a in agents if a.id == agent_ref.agent_id), None)
+                    if agent is not None:
+                        agent_details = _build_agent_details_from_online_agent(
+                            agent, host_details, host, ssh_activity, resolved_field_generators
+                        )
+                    else:
+                        logger.debug(
+                            "Agent {} not found on host {}, using offline data",
+                            agent_ref.agent_id,
+                            host_ref.host_id,
+                        )
 
-            # If this host is offline, or if we failed to find the agent on the online host
-            if agent_details is None:
-                agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
+                # If this host is offline, or if we failed to find the agent on the online host
+                if agent_details is None:
+                    agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
 
-            agent_details_list.append(agent_details)
+                agent_details_list.append(agent_details)
+            except (MngError, BaseMngError) as e:
+                logger.debug(
+                    "Failed to build details for agent {} on host {}, using offline data: {}",
+                    agent_ref.agent_id,
+                    host_ref.host_id,
+                    e,
+                )
+                agent_details_list.append(_build_agent_details_from_offline_ref(agent_ref, host_details))
 
         return host_details, agent_details_list
 

@@ -2564,7 +2564,12 @@ log "=== Shutdown script completed ==="
                     raw = self._collect_all_listing_data_via_ssh(host)
                     if raw is None:
                         return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
-            except HostConnectionError:
+            except HostConnectionError as e:
+                logger.debug(
+                    "Host {} unreachable during optimized listing, falling back to default: {}",
+                    host_ref.host_id,
+                    e,
+                )
                 return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
 
             # Build HostDetails from cached host record + SSH-collected data
