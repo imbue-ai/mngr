@@ -14,9 +14,13 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng_wait.api import _detect_state_changes
 from imbue.mng_wait.api import _is_agent_match
 from imbue.mng_wait.api import _is_host_match
+from imbue.mng_wait.api import _resolve_agent_target
 from imbue.mng_wait.api import _resolve_by_name
+from imbue.mng_wait.api import _resolve_host_target
+from imbue.mng_wait.api import wait_for_state
 from imbue.mng_wait.data_types import StateChange
 from imbue.mng_wait.data_types import StateSnapshot
+from imbue.mng_wait.data_types import WaitTarget
 from imbue.mng_wait.primitives import WaitTargetType
 
 # === _is_agent_match ===
@@ -323,3 +327,204 @@ def test_resolve_by_name_raises_when_multiple_hosts(temp_mng_ctx: MngContext) ->
 
     with pytest.raises(UserInputError, match="Multiple hosts"):
         _resolve_by_name("dup-host", agents_by_host, temp_mng_ctx)
+
+
+# === _resolve_agent_target ===
+
+
+def test_resolve_agent_target_finds_agent_by_id(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, host_ref, agent_ref = _make_agents_by_host(agent_name="my-agent")
+    agent_id_str = str(agent_ref.agent_id)
+    result = _resolve_agent_target(agent_id_str, agents_by_host, temp_mng_ctx)
+    assert result.target.target_type == WaitTargetType.AGENT
+    assert result.agent_id == agent_ref.agent_id
+
+
+def test_resolve_agent_target_raises_when_not_found(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
+    # Use a valid AgentId format that doesn't match any existing agent
+    nonexistent_agent_id = str(AgentId.generate())
+    with pytest.raises(Exception, match="not found"):
+        _resolve_agent_target(nonexistent_agent_id, agents_by_host, temp_mng_ctx)
+
+
+# === _resolve_host_target ===
+
+
+def test_resolve_host_target_finds_host_by_id(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, host_ref, _agent_ref = _make_agents_by_host()
+    host_id_str = str(host_ref.host_id)
+    result = _resolve_host_target(host_id_str, agents_by_host, temp_mng_ctx)
+    assert result.target.target_type == WaitTargetType.HOST
+    assert result.host_id == host_ref.host_id
+
+
+def test_resolve_host_target_raises_when_not_found(temp_mng_ctx: MngContext) -> None:
+    agents_by_host, _host_ref, _agent_ref = _make_agents_by_host()
+    # Use a valid HostId format that doesn't match any existing host
+    nonexistent_host_id = str(HostId.generate())
+    with pytest.raises(Exception, match="not found"):
+        _resolve_host_target(nonexistent_host_id, agents_by_host, temp_mng_ctx)
+
+
+# === wait_for_state ===
+
+
+def _make_wait_target(target_type: WaitTargetType = WaitTargetType.HOST) -> WaitTarget:
+    return WaitTarget(identifier="test-target", target_type=target_type)
+
+
+def test_wait_for_state_returns_immediately_when_already_matched() -> None:
+    target = _make_wait_target(WaitTargetType.HOST)
+    snapshot = StateSnapshot(host_state=HostState.STOPPED)
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=lambda: snapshot,
+        target_states=frozenset({"STOPPED"}),
+        timeout_seconds=5.0,
+        interval_seconds=1.0,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.is_timed_out is False
+    assert result.matched_state == "STOPPED"
+    assert result.elapsed_seconds < 1.0
+
+
+def test_wait_for_state_times_out_when_state_never_matches() -> None:
+    target = _make_wait_target(WaitTargetType.HOST)
+    snapshot = StateSnapshot(host_state=HostState.RUNNING)
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=lambda: snapshot,
+        target_states=frozenset({"STOPPED"}),
+        timeout_seconds=0.1,
+        interval_seconds=0.05,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is False
+    assert result.is_timed_out is True
+    assert result.matched_state is None
+
+
+def test_wait_for_state_detects_state_transition() -> None:
+    target = _make_wait_target(WaitTargetType.HOST)
+    call_count = 0
+
+    def _poll_with_transition() -> StateSnapshot:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            return StateSnapshot(host_state=HostState.STOPPED)
+        return StateSnapshot(host_state=HostState.RUNNING)
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=_poll_with_transition,
+        target_states=frozenset({"STOPPED"}),
+        timeout_seconds=5.0,
+        interval_seconds=0.01,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.matched_state == "STOPPED"
+    assert len(result.state_changes) >= 1
+
+
+def test_wait_for_state_records_state_changes() -> None:
+    target = _make_wait_target(WaitTargetType.HOST)
+    call_count = 0
+
+    def _poll_through_states() -> StateSnapshot:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return StateSnapshot(host_state=HostState.RUNNING)
+        elif call_count == 2:
+            return StateSnapshot(host_state=HostState.STOPPING)
+        else:
+            return StateSnapshot(host_state=HostState.STOPPED)
+
+    recorded_changes: list[StateChange] = []
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=_poll_through_states,
+        target_states=frozenset({"STOPPED"}),
+        timeout_seconds=5.0,
+        interval_seconds=0.01,
+        on_state_change=recorded_changes.append,
+    )
+
+    assert result.is_matched is True
+    assert len(result.state_changes) >= 1
+    assert len(recorded_changes) >= 1
+
+
+def test_wait_for_state_handles_poll_errors_gracefully() -> None:
+    target = _make_wait_target(WaitTargetType.HOST)
+    call_count = 0
+
+    def _poll_with_error() -> StateSnapshot:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ConnectionError("transient error")
+        return StateSnapshot(host_state=HostState.STOPPED)
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=_poll_with_error,
+        target_states=frozenset({"STOPPED"}),
+        timeout_seconds=5.0,
+        interval_seconds=0.01,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.matched_state == "STOPPED"
+
+
+def test_wait_for_state_agent_target_matches_agent_state() -> None:
+    target = _make_wait_target(WaitTargetType.AGENT)
+    snapshot = StateSnapshot(
+        host_state=HostState.RUNNING,
+        agent_state=AgentLifecycleState.WAITING,
+    )
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=lambda: snapshot,
+        target_states=frozenset({"WAITING"}),
+        timeout_seconds=5.0,
+        interval_seconds=1.0,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.matched_state == "WAITING"
+
+
+def test_wait_for_state_agent_target_matches_host_crashed() -> None:
+    target = _make_wait_target(WaitTargetType.AGENT)
+    snapshot = StateSnapshot(
+        host_state=HostState.CRASHED,
+        agent_state=AgentLifecycleState.RUNNING,
+    )
+
+    result = wait_for_state(
+        target=target,
+        poll_fn=lambda: snapshot,
+        target_states=frozenset({"CRASHED"}),
+        timeout_seconds=5.0,
+        interval_seconds=1.0,
+        on_state_change=None,
+    )
+
+    assert result.is_matched is True
+    assert result.matched_state == "CRASHED"

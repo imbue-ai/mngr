@@ -255,13 +255,17 @@ def _get_agent_lifecycle_state(
 
 
 def wait_for_state(
-    resolved: ResolvedTarget,
+    target: WaitTarget,
+    poll_fn: Callable[[], StateSnapshot],
     target_states: frozenset[str],
     timeout_seconds: float | None,
     interval_seconds: float,
     on_state_change: Callable[[StateChange], None] | None,
 ) -> WaitResult:
-    """Poll until the target reaches one of the target states, or timeout."""
+    """Poll until the target reaches one of the target states, or timeout.
+
+    poll_fn is called each iteration to get the current state snapshot.
+    """
     start_time = time.monotonic()
     state_changes: list[StateChange] = []
     previous_snapshot = StateSnapshot()
@@ -272,7 +276,7 @@ def wait_for_state(
 
         # Poll current state
         try:
-            current_snapshot = poll_target_state(resolved)
+            current_snapshot = poll_fn()
         except Exception as exc:
             logger.warning("Polling error (will retry): {}", exc)
             current_snapshot = StateSnapshot()
@@ -290,12 +294,12 @@ def wait_for_state(
         # Check for match
         matched_state = check_state_match(
             snapshot=current_snapshot,
-            target_type=resolved.target.target_type,
+            target_type=target.target_type,
             target_states=target_states,
         )
         if matched_state is not None:
             return WaitResult(
-                target=resolved.target,
+                target=target,
                 is_matched=True,
                 is_timed_out=False,
                 final_snapshot=current_snapshot,
@@ -313,7 +317,7 @@ def wait_for_state(
 
     final_elapsed = time.monotonic() - start_time
     return WaitResult(
-        target=resolved.target,
+        target=target,
         is_matched=False,
         is_timed_out=True,
         final_snapshot=previous_snapshot,

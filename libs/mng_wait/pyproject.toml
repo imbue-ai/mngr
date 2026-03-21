@@ -35,7 +35,7 @@ testpaths = ["."]
 addopts = [
     "--cov=imbue.mng_wait",
     "--cov-report=term-missing",
-    "--cov-fail-under=65",
+    "--cov-fail-under=80",
     "--timeout=30",
 ]
 

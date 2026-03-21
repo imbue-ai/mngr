@@ -16,6 +16,7 @@ from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.duration import parse_duration_to_seconds
+from imbue.mng_wait.api import poll_target_state
 from imbue.mng_wait.api import resolve_wait_target
 from imbue.mng_wait.api import wait_for_state
 from imbue.mng_wait.data_types import StateChange
@@ -195,7 +196,8 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     captured_output_format = output_opts.output_format
     try:
         result = wait_for_state(
-            resolved=resolved,
+            target=resolved.target,
+            poll_fn=lambda: poll_target_state(resolved),
             target_states=target_states,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,

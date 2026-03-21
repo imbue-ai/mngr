@@ -53,121 +53,112 @@ def test_default_host_states_exclude_running_and_transient() -> None:
     assert "STOPPING" not in states
 
 
-# === check_state_match for HOST targets ===
+# === check_state_match ===
 
 
-def test_host_target_matches_host_state() -> None:
-    snapshot = StateSnapshot(host_state=HostState.STOPPED)
-    result = check_state_match(snapshot, WaitTargetType.HOST, frozenset({"STOPPED"}))
-    assert result == "STOPPED"
+@pytest.mark.parametrize(
+    "host_state, target_states, expected",
+    [
+        pytest.param(HostState.STOPPED, {"STOPPED"}, "STOPPED", id="host_stopped_matches"),
+        pytest.param(HostState.RUNNING, {"STOPPED"}, None, id="host_running_does_not_match_stopped"),
+        pytest.param(None, {"STOPPED"}, None, id="none_host_state_does_not_match"),
+        pytest.param(HostState.CRASHED, {"CRASHED", "FAILED"}, "CRASHED", id="host_crashed_matches"),
+    ],
+)
+def test_check_state_match_host_target(
+    host_state: HostState | None,
+    target_states: set[str],
+    expected: str | None,
+) -> None:
+    snapshot = StateSnapshot(host_state=host_state)
+    result = check_state_match(snapshot, WaitTargetType.HOST, frozenset(target_states))
+    assert result == expected
 
 
-def test_host_target_does_not_match_wrong_state() -> None:
-    snapshot = StateSnapshot(host_state=HostState.RUNNING)
-    result = check_state_match(snapshot, WaitTargetType.HOST, frozenset({"STOPPED"}))
-    assert result is None
-
-
-def test_host_target_none_host_state_does_not_match() -> None:
-    snapshot = StateSnapshot(host_state=None)
-    result = check_state_match(snapshot, WaitTargetType.HOST, frozenset({"STOPPED"}))
-    assert result is None
-
-
-# === check_state_match for AGENT targets ===
-
-
-def test_agent_target_matches_agent_done_state() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.DONE,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"DONE"}))
-    assert result == "DONE"
-
-
-def test_agent_target_matches_agent_waiting_state() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.WAITING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"WAITING"}))
-    assert result == "WAITING"
-
-
-def test_agent_target_running_only_counts_for_agent_not_host() -> None:
-    # Agent is STOPPED but host is RUNNING -- should NOT match RUNNING
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.STOPPED,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"RUNNING"}))
-    assert result is None
-
-
-def test_agent_target_running_matches_when_agent_is_running() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.RUNNING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"RUNNING"}))
-    assert result == "RUNNING"
-
-
-def test_agent_target_stopped_matches_when_agent_stopped() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.STOPPED,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"STOPPED"}))
-    assert result == "STOPPED"
-
-
-def test_agent_target_stopped_matches_when_host_stopped() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.STOPPED,
-        agent_state=AgentLifecycleState.RUNNING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"STOPPED"}))
-    assert result == "STOPPED"
-
-
-def test_agent_target_matches_host_crashed() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.CRASHED,
-        agent_state=AgentLifecycleState.RUNNING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"CRASHED"}))
-    assert result == "CRASHED"
-
-
-def test_agent_target_matches_host_paused() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.PAUSED,
-        agent_state=AgentLifecycleState.RUNNING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"PAUSED"}))
-    assert result == "PAUSED"
-
-
-def test_agent_target_host_running_does_not_match_when_watching_agent() -> None:
-    # When watching an agent and target states include RUNNING,
-    # host RUNNING should NOT count -- only agent RUNNING
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.WAITING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"RUNNING"}))
-    assert result is None
-
-
-def test_agent_target_no_match_returns_none() -> None:
-    snapshot = StateSnapshot(
-        host_state=HostState.RUNNING,
-        agent_state=AgentLifecycleState.RUNNING,
-    )
-    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset({"DONE", "WAITING"}))
-    assert result is None
+@pytest.mark.parametrize(
+    "host_state, agent_state, target_states, expected",
+    [
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.DONE,
+            {"DONE"},
+            "DONE",
+            id="agent_done_matches",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.WAITING,
+            {"WAITING"},
+            "WAITING",
+            id="agent_waiting_matches",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.RUNNING,
+            {"RUNNING"},
+            "RUNNING",
+            id="agent_running_matches_running",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.STOPPED,
+            {"RUNNING"},
+            None,
+            id="agent_stopped_does_not_match_running",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.WAITING,
+            {"RUNNING"},
+            None,
+            id="host_running_does_not_match_running_for_agent",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.STOPPED,
+            {"STOPPED"},
+            "STOPPED",
+            id="agent_stopped_matches_stopped",
+        ),
+        pytest.param(
+            HostState.STOPPED,
+            AgentLifecycleState.RUNNING,
+            {"STOPPED"},
+            "STOPPED",
+            id="host_stopped_matches_stopped_for_agent",
+        ),
+        pytest.param(
+            HostState.CRASHED,
+            AgentLifecycleState.RUNNING,
+            {"CRASHED"},
+            "CRASHED",
+            id="host_crashed_matches_for_agent",
+        ),
+        pytest.param(
+            HostState.PAUSED,
+            AgentLifecycleState.RUNNING,
+            {"PAUSED"},
+            "PAUSED",
+            id="host_paused_matches_for_agent",
+        ),
+        pytest.param(
+            HostState.RUNNING,
+            AgentLifecycleState.RUNNING,
+            {"DONE", "WAITING"},
+            None,
+            id="no_match_returns_none",
+        ),
+    ],
+)
+def test_check_state_match_agent_target(
+    host_state: HostState,
+    agent_state: AgentLifecycleState,
+    target_states: set[str],
+    expected: str | None,
+) -> None:
+    snapshot = StateSnapshot(host_state=host_state, agent_state=agent_state)
+    result = check_state_match(snapshot, WaitTargetType.AGENT, frozenset(target_states))
+    assert result == expected
 
 
 # === validate_state_strings ===
