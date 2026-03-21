@@ -2531,24 +2531,29 @@ log "=== Shutdown script completed ==="
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
-    ) -> tuple[HostDetails, list[AgentDetails]] | None:
+        field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
+        | None = None,
+    ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
         with trace_span("Building host listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
             with trace_span("Reading host record for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_record = self._read_host_record(host_ref.host_id)
 
-            with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                host = self._get_host(host_ref.host_id, host_record)
+            try:
+                with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
+                    host = self._get_host(host_ref.host_id, host_record)
 
-            # For offline hosts, fall back to the default per-field collection
-            if not isinstance(host, Host):
-                return None
+                # For offline hosts, fall back to the default per-field collection
+                if not isinstance(host, Host):
+                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
 
-            # Collect all data in one SSH command
-            with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                raw = self._collect_all_listing_data_via_ssh(host)
-                if raw is None:
-                    return None
+                # Collect all data in one SSH command
+                with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
+                    raw = self._collect_all_listing_data_via_ssh(host)
+                    if raw is None:
+                        return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
+            except HostConnectionError:
+                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators)
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):
