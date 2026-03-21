@@ -1571,15 +1571,25 @@ log "=== Shutdown script completed ==="
         return None
 
     def _cache_sandbox(self, host_id: HostId, name: HostName, sandbox: SandboxInterface) -> None:
-        """Cache a sandbox by host_id and name for fast lookup."""
+        """Cache a sandbox by host_id and name for fast lookup.
+
+        Also invalidates the full sandbox list cache so that subsequent
+        discover_hosts calls will see the new sandbox.
+        """
         self._sandbox_cache_by_id[host_id] = sandbox
         self._sandbox_cache_by_name[name] = sandbox
+        self._full_sandbox_list_cache = None
 
     def _uncache_sandbox(self, host_id: HostId, name: HostName | None = None) -> None:
-        """Remove a sandbox from the caches."""
+        """Remove a sandbox from the caches.
+
+        Also invalidates the full sandbox list cache so that subsequent
+        discover_hosts calls reflect the removal.
+        """
         self._sandbox_cache_by_id.pop(host_id, None)
         if name is not None:
             self._sandbox_cache_by_name.pop(name, None)
+        self._full_sandbox_list_cache = None
 
     def _uncache_host(self, host_id: HostId) -> None:
         """Remove a host from the host cache.
