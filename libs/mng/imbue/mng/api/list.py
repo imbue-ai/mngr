@@ -381,17 +381,20 @@ def _discover_and_emit_details_for_provider(
             params.on_error(error_info)
 
 
-def _handle_agent_error(
-    agent_ref: DiscoveredAgent,
+def _handle_listing_error(
+    source: DiscoveredAgent | DiscoveredHost,
     exception: BaseException,
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
 ) -> None:
-    """Handle a per-agent error during detail collection."""
+    """Handle an error during detail collection for an agent or host."""
     if params.error_behavior == ErrorBehavior.ABORT:
         raise exception
-    error_info = AgentErrorInfo.build_for_agent(exception, agent_ref.agent_id)
+    if isinstance(source, DiscoveredAgent):
+        error_info = AgentErrorInfo.build_for_agent(exception, source.agent_id)
+    else:
+        error_info = HostErrorInfo.build_for_host(exception, source.host_id)
     with results_lock:
         result.errors.append(error_info)
     if params.on_error:
@@ -410,7 +413,7 @@ def _collect_and_emit_details_for_host(
         host_ref,
         agent_refs,
         params.field_generators,
-        lambda agent_ref, exc: _handle_agent_error(agent_ref, exc, params, result, results_lock),
+        lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided

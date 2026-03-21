@@ -414,10 +414,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
-        # Called when a per-agent error occurs. If the callback raises, the error
-        # propagates (ABORT semantics). If it returns, the agent is skipped (CONTINUE).
-        # When None, per-agent errors fall back to offline data instead.
-        on_agent_error: Callable[[DiscoveredAgent, BaseException], None] | None = None,
+        # Called when an error occurs for a specific agent or the host itself.
+        # If the callback raises, the error propagates (ABORT semantics).
+        # If it returns, the errored item is skipped (CONTINUE).
+        # When None, errors fall back to offline data instead.
+        on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails for a host for listing.
 
@@ -457,8 +458,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     else:
                         # Agent was discovered but is no longer on the host
                         exception = AgentNotFoundOnHostError(agent_ref.agent_id, host_ref.host_id)
-                        if on_agent_error is not None:
-                            on_agent_error(agent_ref, exception)
+                        if on_error is not None:
+                            on_error(agent_ref, exception)
                             continue
                         else:
                             logger.debug(
@@ -473,8 +474,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
                 agent_details_list.append(agent_details)
             except MngError as e:
-                if on_agent_error is not None:
-                    on_agent_error(agent_ref, e)
+                if on_error is not None:
+                    on_error(agent_ref, e)
                     # callback didn't raise, skip this agent
                 else:
                     logger.debug(
