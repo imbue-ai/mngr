@@ -281,6 +281,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         return f"{self.session_name}:0"
 
+    # FIXME: this function should have a tenacity retry decorator to retry on SendMessageError
+    #  when retrying, we should call self.clear_input() to clear any potential garbled input in the TUI before retrying the send
+    #  the default implementation for that can just be to tmux send ctrl-c and wait a few seconds, since that seems to work for most of the default agents...
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
 
