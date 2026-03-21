@@ -151,6 +151,7 @@ def find_agents_by_addresses(
     filter_all: bool,
     target_state: AgentLifecycleState | None,
     mng_ctx: MngContext,
+    include_destroyed: bool = False,
 ) -> list[AgentMatch]:
     """Find agents by identifiers that may contain agent addresses.
 
@@ -173,6 +174,7 @@ def find_agents_by_addresses(
         filter_all=filter_all,
         target_state=target_state,
         mng_ctx=mng_ctx,
+        include_destroyed=include_destroyed,
     )
 
     return _post_filter_matches_by_addresses(raw_identifiers, parsed, matches)
