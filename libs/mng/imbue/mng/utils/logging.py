@@ -212,6 +212,51 @@ class _PyinfraToLoguruHandler(logging.Handler):
         logger.trace("[pyinfra] {}", msg)
 
 
+_PARAMIKO_EXPECTED_ERROR_RE = re.compile(
+    r"Exception \((?:client|server)\):"
+    r"|Socket exception:"
+    r"|EOF in transport thread"
+    r"|Traceback \(most recent call last\):"
+    r"|^\s+File "
+    r"|^\s+raise "
+    r"|^paramiko\."
+    r"|^EOFError"
+    r"|^socket\."
+    r"|^ConnectionResetError"
+    r"|^OSError"
+)
+"""Patterns for paramiko messages that are expected when hosts go offline.
+
+Paramiko's transport thread logs SSH connection failures (banner read errors,
+socket disconnects, EOF) at ERROR level with full tracebacks. Mng already
+handles these via HostConnectionError, so the paramiko output is noise.
+We redirect these to debug level. Unknown/unexpected paramiko errors are
+forwarded at warning level so they remain visible.
+"""
+
+
+class _ParamikoToLoguruHandler(logging.Handler):
+    """Forward paramiko log messages to loguru with level-appropriate routing.
+
+    Expected connection-failure messages (SSH banner errors, socket errors,
+    EOF) are logged at debug level since mng handles these via
+    HostConnectionError. Unexpected paramiko messages are forwarded at
+    warning level to remain visible.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if record.levelno >= logging.ERROR:
+            if _PARAMIKO_EXPECTED_ERROR_RE.search(msg):
+                logger.debug("[paramiko] {}", msg)
+            else:
+                logger.warning("[paramiko] {}", msg)
+        elif record.levelno >= logging.WARNING:
+            logger.debug("[paramiko] {}", msg)
+        else:
+            logger.trace("[paramiko] {}", msg)
+
+
 def suppress_warnings() -> None:
     # Redirect all pyinfra log output to loguru at TRACE level. Pyinfra uses
     # Python's standard logging module and logs warnings during file upload
@@ -224,6 +269,17 @@ def suppress_warnings() -> None:
     pyinfra_logger.handlers.clear()
     pyinfra_logger.addHandler(_PyinfraToLoguruHandler())
     pyinfra_logger.propagate = False
+
+    # Redirect paramiko log output to loguru with level-appropriate routing.
+    # Paramiko's transport thread logs SSH connection failures at ERROR level
+    # with full tracebacks when hosts go offline. Mng handles these via
+    # HostConnectionError, so the raw paramiko output is noise. Expected
+    # error patterns go to debug; unexpected ones go to warning.
+    paramiko_logger = logging.getLogger("paramiko")
+    paramiko_logger.setLevel(logging.DEBUG)
+    paramiko_logger.handlers.clear()
+    paramiko_logger.addHandler(_ParamikoToLoguruHandler())
+    paramiko_logger.propagate = False
 
 
 def setup_logging(

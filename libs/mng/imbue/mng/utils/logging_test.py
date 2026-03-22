@@ -2,9 +2,11 @@
 
 import io
 import json
+import logging
 import sys
 from pathlib import Path
 
+import pytest
 from loguru import logger
 
 import imbue.mng.utils.logging as mng_logging_module
@@ -20,6 +22,7 @@ from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.logging import RESET_COLOR
 from imbue.mng.utils.logging import WARNING_COLOR
+from imbue.mng.utils.logging import _ParamikoToLoguruHandler
 from imbue.mng.utils.logging import _format_user_message
 from imbue.mng.utils.logging import _resolve_log_dir
 from imbue.mng.utils.logging import remove_console_handlers
@@ -480,3 +483,116 @@ def test_setup_logging_writes_to_current_stderr_after_stream_replacement(
         assert "dynamic sink regression test message" in captured_output
     finally:
         sys.stderr = original_stderr
+
+
+# =============================================================================
+# Tests for _ParamikoToLoguruHandler
+# =============================================================================
+
+
+def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level: int) -> None:
+    """Create and emit a logging record through the paramiko handler."""
+    record = logging.LogRecord(
+        name="paramiko.transport",
+        level=level,
+        pathname="transport.py",
+        lineno=2288,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(record)
+
+
+@pytest.mark.parametrize(
+    "message, input_level, expected_substring, sink_level",
+    [
+        pytest.param(
+            "Exception (client): Error reading SSH protocol banner",
+            logging.ERROR,
+            "Exception (client)",
+            "DEBUG",
+            id="ssh_banner_error_to_debug",
+        ),
+        pytest.param(
+            "Socket exception: Connection refused (111)",
+            logging.ERROR,
+            "Socket exception",
+            "DEBUG",
+            id="socket_exception_to_debug",
+        ),
+        pytest.param(
+            "EOF in transport thread",
+            logging.ERROR,
+            "EOF in transport",
+            "DEBUG",
+            id="eof_to_debug",
+        ),
+        pytest.param(
+            "Traceback (most recent call last):",
+            logging.ERROR,
+            "Traceback",
+            "DEBUG",
+            id="traceback_line_to_debug",
+        ),
+        pytest.param(
+            "paramiko.ssh_exception.SSHException: banner error",
+            logging.ERROR,
+            "paramiko.",
+            "DEBUG",
+            id="paramiko_exception_line_to_debug",
+        ),
+        pytest.param(
+            "Some paramiko warning",
+            logging.WARNING,
+            "warning",
+            "DEBUG",
+            id="warning_level_to_debug",
+        ),
+        pytest.param(
+            "starting thread (client mode)",
+            logging.DEBUG,
+            "starting thread",
+            "TRACE",
+            id="debug_level_to_trace",
+        ),
+    ],
+)
+def test_paramiko_handler_routes_expected_messages(
+    message: str,
+    input_level: int,
+    expected_substring: str,
+    sink_level: str,
+) -> None:
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level=sink_level)
+    try:
+        _emit_paramiko_record(handler, message, input_level)
+        assert any("[paramiko]" in m and expected_substring in m for m in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_handler_routes_unknown_error_to_warning() -> None:
+    """Unexpected paramiko errors should remain visible at warning level."""
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        _emit_paramiko_record(handler, "Something completely unexpected happened", logging.ERROR)
+        assert any("[paramiko]" in m and "unexpected" in m for m in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_handler_expected_errors_not_routed_to_warning() -> None:
+    """Expected connection errors should NOT appear at warning level."""
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        _emit_paramiko_record(handler, "Exception (client): Error reading SSH protocol banner", logging.ERROR)
+        assert not any("[paramiko]" in m for m in messages)
+    finally:
+        logger.remove(handler_id)

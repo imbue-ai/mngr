@@ -310,7 +310,7 @@ def _detect_state_changes(
             elapsed_seconds=elapsed,
         )
         state_changes.append(change)
-        logger.info(
+        logger.debug(
             "Host state changed: {} -> {} (after {:.1f}s)",
             change.old_value,
             change.new_value,
@@ -331,7 +331,7 @@ def _detect_state_changes(
             elapsed_seconds=elapsed,
         )
         state_changes.append(change)
-        logger.info(
+        logger.debug(
             "Agent state changed: {} -> {} (after {:.1f}s)",
             change.old_value,
             change.new_value,
