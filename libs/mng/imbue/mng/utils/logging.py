@@ -264,6 +264,32 @@ class _ParamikoToLoguruHandler(logging.Handler):
             pass
 
 
+_ORIGINAL_TRANSPORT_LOG = paramiko.transport.Transport._log
+
+
+def _patched_transport_log(self: object, level: int, msg: object, *args: object) -> None:
+    """Join list messages into a single log record before forwarding to the original _log.
+
+    Paramiko's Transport._log iterates over list messages (from util.tb_strings())
+    and logs each line separately at ERROR level. This patch joins them into a single
+    newline-separated record so our handler can match the "Traceback" header and
+    route the entire traceback to debug.
+    """
+    if isinstance(msg, list):
+        joined = "\n".join(str(line) for line in msg if line)
+        _ORIGINAL_TRANSPORT_LOG(self, level, joined, *args)
+    else:
+        _ORIGINAL_TRANSPORT_LOG(self, level, msg, *args)
+
+
+_patched_transport_log._mng_patched = True  # type: ignore[attr-defined]
+
+
+def _apply_paramiko_transport_log_patch() -> None:
+    if not getattr(paramiko.transport.Transport._log, "_mng_patched", False):
+        paramiko.transport.Transport._log = _patched_transport_log  # type: ignore[assignment]
+
+
 def suppress_warnings() -> None:
     # Redirect all pyinfra log output to loguru at TRACE level. Pyinfra uses
     # Python's standard logging module and logs warnings during file upload
@@ -280,21 +306,9 @@ def suppress_warnings() -> None:
     # Patch paramiko's Transport._log to join list messages (tracebacks) into a
     # single log record instead of logging each line separately. Paramiko's _log
     # method splits traceback strings into individual lines and logs each at ERROR
-    # level, making it impossible to match the header and suppress the rest. By
-    # joining them, our handler sees one record with the full traceback and can
-    # match the "Exception (client):" header to route the entire thing to debug.
-    if not getattr(paramiko.transport.Transport._log, "_mng_patched", False):
-        _original_transport_log = paramiko.transport.Transport._log
-
-        def _patched_transport_log(self: object, level: int, msg: object, *args: object) -> None:
-            if isinstance(msg, list):
-                joined = "\n".join(str(line) for line in msg if line)
-                _original_transport_log(self, level, joined, *args)
-            else:
-                _original_transport_log(self, level, msg, *args)
-
-        _patched_transport_log._mng_patched = True  # type: ignore[attr-defined]
-        paramiko.transport.Transport._log = _patched_transport_log  # type: ignore[assignment]
+    # level. By joining them, our handler sees one record starting with "Traceback"
+    # which matches _PARAMIKO_EXPECTED_ERROR_RE and gets routed to debug.
+    _apply_paramiko_transport_log_patch()
 
     # Redirect paramiko log output to loguru with level-appropriate routing.
     # Paramiko's transport thread logs SSH connection failures at ERROR level
