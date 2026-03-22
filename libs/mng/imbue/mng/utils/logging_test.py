@@ -28,10 +28,10 @@ from imbue.mng.utils.logging import RESET_COLOR
 from imbue.mng.utils.logging import WARNING_COLOR
 from imbue.mng.utils.logging import _ParamikoToLoguruHandler
 from imbue.mng.utils.logging import _format_user_message
-from imbue.mng.utils.logging import _is_paramiko_thread_exception
-from imbue.mng.utils.logging import _paramiko_threading_excepthook
+from imbue.mng.utils.logging import _is_expected_paramiko_thread_exception
 from imbue.mng.utils.logging import _patched_transport_log
 from imbue.mng.utils.logging import _resolve_log_dir
+from imbue.mng.utils.logging import _threading_excepthook
 from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.logging import setup_logging
 from imbue.mng.utils.logging import suppress_warnings
@@ -663,21 +663,34 @@ def test_paramiko_transport_log_patch_joins_list_messages() -> None:
 
 
 # =============================================================================
-# Tests for paramiko threading.excepthook
+# Tests for threading.excepthook
 # =============================================================================
 
 
-def _make_paramiko_excepthook_args() -> threading.ExceptHookArgs:
+def _get_paramiko_traceback() -> types.TracebackType:
     import paramiko.channel
 
     try:
         cast(Any, paramiko.channel.Channel._send)(None, b"test", None)
     except (AttributeError, TypeError, OSError) as e:
-        return threading.ExceptHookArgs((type(e), e, e.__traceback__, threading.current_thread()))
+        assert e.__traceback__ is not None
+        return e.__traceback__
     raise AssertionError("should not reach here")
 
 
-def _make_non_paramiko_excepthook_args() -> threading.ExceptHookArgs:
+def _make_paramiko_socket_closed_args() -> threading.ExceptHookArgs:
+    exc = OSError("Socket is closed")
+    tb = _get_paramiko_traceback()
+    return threading.ExceptHookArgs((type(exc), exc, tb, threading.current_thread()))
+
+
+def _make_paramiko_unexpected_args() -> threading.ExceptHookArgs:
+    exc = RuntimeError("something unexpected in paramiko")
+    tb = _get_paramiko_traceback()
+    return threading.ExceptHookArgs((type(exc), exc, tb, threading.current_thread()))
+
+
+def _make_non_paramiko_args() -> threading.ExceptHookArgs:
     try:
         raise RuntimeError("not paramiko")
     except RuntimeError as e:
@@ -685,54 +698,73 @@ def _make_non_paramiko_excepthook_args() -> threading.ExceptHookArgs:
     raise AssertionError("should not reach here")
 
 
-def test_is_paramiko_thread_exception_detects_paramiko_path() -> None:
-    """_is_paramiko_thread_exception returns True for paramiko frames."""
-    args = _make_paramiko_excepthook_args()
-    assert _is_paramiko_thread_exception(args)
+def test_is_expected_paramiko_thread_exception_matches_socket_closed() -> None:
+    """The specific paramiko "Socket is closed" OSError should be recognized as expected."""
+    args = _make_paramiko_socket_closed_args()
+    assert _is_expected_paramiko_thread_exception(args)
 
 
-def test_is_paramiko_thread_exception_rejects_non_paramiko_path() -> None:
-    """_is_paramiko_thread_exception returns False for non-paramiko frames."""
-    args = _make_non_paramiko_excepthook_args()
-    assert not _is_paramiko_thread_exception(args)
+def test_is_expected_paramiko_thread_exception_rejects_other_paramiko_errors() -> None:
+    """Other paramiko errors (not "Socket is closed") should not be considered expected."""
+    args = _make_paramiko_unexpected_args()
+    assert not _is_expected_paramiko_thread_exception(args)
 
 
-def test_paramiko_threading_excepthook_routes_to_debug() -> None:
-    """Paramiko thread exceptions should be logged at debug, not printed to stderr."""
-    args = _make_paramiko_excepthook_args()
+def test_is_expected_paramiko_thread_exception_rejects_non_paramiko() -> None:
+    args = _make_non_paramiko_args()
+    assert not _is_expected_paramiko_thread_exception(args)
+
+
+def test_threading_excepthook_routes_expected_paramiko_to_debug() -> None:
+    """The known paramiko "Socket is closed" error should be logged at debug."""
+    args = _make_paramiko_socket_closed_args()
 
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
     try:
-        _paramiko_threading_excepthook(args)
+        _threading_excepthook(args)
         paramiko_messages = [m for m in messages if "[paramiko]" in m]
         assert len(paramiko_messages) == 1
-        assert "Unhandled exception in thread" in paramiko_messages[0]
+        assert "Expected exception" in paramiko_messages[0]
     finally:
         logger.remove(handler_id)
 
 
-def test_paramiko_threading_excepthook_forwards_non_paramiko() -> None:
-    """Non-paramiko thread exceptions should be forwarded to the original hook."""
-    args = _make_non_paramiko_excepthook_args()
+def test_threading_excepthook_routes_unexpected_paramiko_to_error() -> None:
+    """Unexpected paramiko thread exceptions should be logged at error, not debug."""
+    args = _make_paramiko_unexpected_args()
 
-    forwarded: list[threading.ExceptHookArgs] = []
-    original_hook = mng_logging_module._original_threading_excepthook
-    mng_logging_module._original_threading_excepthook = lambda a: forwarded.append(a)
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="ERROR")
     try:
-        _paramiko_threading_excepthook(args)
-        assert len(forwarded) == 1
+        _threading_excepthook(args)
+        error_messages = [m for m in messages if "Unhandled exception in thread" in m]
+        assert len(error_messages) == 1
     finally:
-        mng_logging_module._original_threading_excepthook = original_hook
+        logger.remove(handler_id)
+
+
+def test_threading_excepthook_routes_non_paramiko_to_error() -> None:
+    """Non-paramiko thread exceptions should be logged at error level."""
+    args = _make_non_paramiko_args()
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="ERROR")
+    try:
+        _threading_excepthook(args)
+        error_messages = [m for m in messages if "Unhandled exception in thread" in m]
+        assert len(error_messages) == 1
+    finally:
+        logger.remove(handler_id)
 
 
 def test_suppress_warnings_installs_threading_excepthook() -> None:
-    """suppress_warnings should install the paramiko threading excepthook."""
+    """suppress_warnings should install our threading excepthook."""
     mng_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False
     original = threading.excepthook
     try:
         suppress_warnings()
-        assert threading.excepthook is _paramiko_threading_excepthook
+        assert threading.excepthook is _threading_excepthook
     finally:
         threading.excepthook = original
         mng_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False

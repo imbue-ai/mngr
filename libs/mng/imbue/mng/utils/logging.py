@@ -6,7 +6,6 @@ import sys
 import threading
 import traceback
 from collections import deque
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -294,18 +293,19 @@ def _apply_paramiko_transport_log_patch() -> None:
         _IS_TRANSPORT_LOG_PATCHED["patched"] = True
 
 
-def _is_paramiko_thread_exception(args: threading.ExceptHookArgs) -> bool:
-    """Check whether an unhandled thread exception originated from paramiko.
+def _is_expected_paramiko_thread_exception(args: threading.ExceptHookArgs) -> bool:
+    """Check whether this is the known paramiko SFTP prefetch "Socket is closed" error.
 
-    Paramiko runs background threads (e.g. SFTP prefetch) that can raise
-    unhandled exceptions like "Socket is closed" when the SSH connection
-    drops. Python's default threading.excepthook prints these to stderr,
-    bypassing the logging system entirely.
+    Paramiko's SFTP _prefetch_thread raises an unhandled OSError("Socket is
+    closed") when the SSH connection drops during a prefetch read. This is
+    expected and harmless -- mng already handles connection loss via
+    HostConnectionError at a higher level.
     """
+    if not (args.exc_type is OSError and args.exc_value is not None and "Socket is closed" in str(args.exc_value)):
+        return False
     tb = args.exc_traceback
     if tb is None:
         return False
-    # Walk the traceback to check if any frame is from a paramiko module
     for frame_summary in traceback.extract_tb(tb):
         filename = frame_summary.filename
         if "/paramiko/" in filename or "\\paramiko\\" in filename:
@@ -313,28 +313,21 @@ def _is_paramiko_thread_exception(args: threading.ExceptHookArgs) -> bool:
     return False
 
 
-_original_threading_excepthook: Callable[[threading.ExceptHookArgs], Any] | None = None
-
-
-def _paramiko_threading_excepthook(args: threading.ExceptHookArgs) -> None:
-    """Route paramiko thread exceptions to loguru instead of stderr."""
-    if _is_paramiko_thread_exception(args):
-        formatted = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
-        logger.debug("[paramiko] Unhandled exception in thread {}: {}", args.thread, formatted.strip())
-        return
-    # Not from paramiko -- forward to the original hook
-    if _original_threading_excepthook is not None:
-        _original_threading_excepthook(args)
+def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Route all unhandled thread exceptions through loguru instead of stderr."""
+    exc_info = (args.exc_type, args.exc_value, args.exc_traceback)
+    if _is_expected_paramiko_thread_exception(args):
+        logger.opt(exception=exc_info).debug("[paramiko] Expected exception in thread {}", args.thread)
+    else:
+        logger.opt(exception=exc_info).error("Unhandled exception in thread {}", args.thread)
 
 
 _IS_THREADING_EXCEPTHOOK_INSTALLED: dict[str, bool] = {"installed": False}
 
 
-def _install_paramiko_threading_excepthook() -> None:
-    global _original_threading_excepthook
+def _install_threading_excepthook() -> None:
     if not _IS_THREADING_EXCEPTHOOK_INSTALLED["installed"]:
-        _original_threading_excepthook = threading.excepthook
-        threading.excepthook = _paramiko_threading_excepthook
+        threading.excepthook = _threading_excepthook
         _IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = True
 
 
@@ -369,11 +362,11 @@ def suppress_warnings() -> None:
     paramiko_logger.addHandler(_ParamikoToLoguruHandler())
     paramiko_logger.propagate = False
 
-    # Install a threading.excepthook to catch unhandled exceptions from
-    # paramiko's background threads (e.g. SFTP _prefetch_thread raising
-    # "Socket is closed" when the connection drops). These bypass the
-    # logging system entirely and print directly to stderr by default.
-    _install_paramiko_threading_excepthook()
+    # Install a threading.excepthook to route all unhandled thread exceptions
+    # through loguru instead of printing to stderr. The specific paramiko SFTP
+    # _prefetch_thread "Socket is closed" error is logged at debug (it's
+    # expected when connections drop); everything else is logged at error.
+    _install_threading_excepthook()
 
 
 def setup_logging(
