@@ -188,8 +188,8 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
         transport = None
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(min(5.0, max(1.0, timeout_seconds - (time.time() - start_time))))
             sock.connect((hostname, port))
             transport = paramiko.Transport(sock)
@@ -203,6 +203,8 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
                     transport.close()
                 except (OSError, paramiko.SSHException):
                     pass
+            else:
+                sock.close()
     raise MngError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 
