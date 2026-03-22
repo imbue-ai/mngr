@@ -277,16 +277,18 @@ def suppress_warnings() -> None:
     # level, making it impossible to match the header and suppress the rest. By
     # joining them, our handler sees one record with the full traceback and can
     # match the "Exception (client):" header to route the entire thing to debug.
-    _original_transport_log = paramiko.transport.Transport._log
+    if not getattr(paramiko.transport.Transport._log, "_mng_patched", False):
+        _original_transport_log = paramiko.transport.Transport._log
 
-    def _patched_transport_log(self: object, level: int, msg: object, *args: object) -> None:
-        if isinstance(msg, list):
-            joined = "\n".join(str(line) for line in msg if line)
-            _original_transport_log(self, level, joined, *args)
-        else:
-            _original_transport_log(self, level, msg, *args)
+        def _patched_transport_log(self: object, level: int, msg: object, *args: object) -> None:
+            if isinstance(msg, list):
+                joined = "\n".join(str(line) for line in msg if line)
+                _original_transport_log(self, level, joined, *args)
+            else:
+                _original_transport_log(self, level, msg, *args)
 
-    paramiko.transport.Transport._log = _patched_transport_log  # type: ignore[assignment]
+        _patched_transport_log._mng_patched = True  # type: ignore[attr-defined]
+        paramiko.transport.Transport._log = _patched_transport_log  # type: ignore[assignment]
 
     # Redirect paramiko log output to loguru with level-appropriate routing.
     # Paramiko's transport thread logs SSH connection failures at ERROR level

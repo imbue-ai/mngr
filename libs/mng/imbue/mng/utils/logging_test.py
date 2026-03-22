@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -599,30 +600,34 @@ def test_paramiko_handler_expected_errors_not_routed_to_warning() -> None:
 
 def test_paramiko_transport_log_patch_joins_list_messages() -> None:
     """The _log patch should join list messages into a single log record."""
+    import paramiko.transport
+
     from imbue.mng.utils.logging import suppress_warnings
 
     suppress_warnings()
 
-    paramiko_logger = logging.getLogger("paramiko.transport")
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
     try:
-        # Simulate what paramiko does: log a list of traceback lines
+        # Create a minimal Transport-like object that has a logger attribute
+        # to exercise the patched _log method with a list argument
         traceback_lines = [
             "Exception (client): Error reading SSH protocol banner",
             "Traceback (most recent call last):",
             '  File "transport.py", line 2373',
             "paramiko.ssh_exception.SSHException: banner error",
         ]
-        for line in traceback_lines:
-            paramiko_logger.log(logging.ERROR, line)
-        # Without the patch, each line would be a separate record.
-        # With the patch applied at the Transport._log level, the lines
-        # arrive individually here (the patch only affects Transport._log,
-        # not the logger itself). But the handler should still route them
-        # to debug since "Exception (client):" matches.
+        transport_self = types.SimpleNamespace(
+            logger=logging.getLogger("paramiko.transport"),
+        )
+        # Call the patched _log with a list (simulating what paramiko does internally)
+        paramiko.transport.Transport._log(transport_self, logging.ERROR, traceback_lines)
+
+        # The patch should join the list into one message, so we get exactly
+        # one paramiko record (not 4 separate ones)
         paramiko_messages = [m for m in messages if "[paramiko]" in m]
-        assert len(paramiko_messages) >= 1
-        assert any("Exception (client)" in m for m in paramiko_messages)
+        assert len(paramiko_messages) == 1
+        assert "Exception (client)" in paramiko_messages[0]
+        assert "banner error" in paramiko_messages[0]
     finally:
         logger.remove(handler_id)
