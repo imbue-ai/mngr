@@ -445,10 +445,9 @@ def _resolve_host_for_partition(
                     str(e),
                 )
                 offline_host_interface = host_interface.to_offline_host()
-                with results_lock:
-                    _check_all_agents_targeted_on_offline_host(
-                        offline_host_interface, matched_ids, host_id_str, offline_hosts, provider
-                    )
+                _check_all_agents_targeted_on_offline_host(
+                    offline_host_interface, matched_ids, host_id_str, offline_hosts, provider, results_lock
+                )
                 return
 
             with results_lock:
@@ -456,10 +455,9 @@ def _resolve_host_for_partition(
                     if agent.id in matched_ids:
                         online_agents.append((agent, online_host))
         case HostInterface() as offline_host:
-            with results_lock:
-                _check_all_agents_targeted_on_offline_host(
-                    offline_host, matched_ids, host_id_str, offline_hosts, provider
-                )
+            _check_all_agents_targeted_on_offline_host(
+                offline_host, matched_ids, host_id_str, offline_hosts, provider, results_lock
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -541,6 +539,7 @@ def _check_all_agents_targeted_on_offline_host(
     host_id_str: str,
     offline_hosts: list[_OfflineHostToDestroy],
     provider: BaseProviderInstance,
+    results_lock: threading.Lock,
 ) -> None:
     """Verify all agents on an offline host are targeted, then queue it for destruction.
 
@@ -549,22 +548,23 @@ def _check_all_agents_targeted_on_offline_host(
     are targeted.
     """
     all_agent_refs = offline_host.discover_agents()
-    all_targeted = all(ref.agent_id in matched_ids for ref in all_agent_refs)
-    if all_targeted:
-        offline_hosts.append(
-            _OfflineHostToDestroy(
-                host=offline_host,
-                provider=provider,
-                agent_names=[ref.agent_name for ref in all_agent_refs],
-                agent_ids=[ref.agent_id for ref in all_agent_refs],
+    with results_lock:
+        all_targeted = all(ref.agent_id in matched_ids for ref in all_agent_refs)
+        if all_targeted:
+            offline_hosts.append(
+                _OfflineHostToDestroy(
+                    host=offline_host,
+                    provider=provider,
+                    agent_names=[ref.agent_name for ref in all_agent_refs],
+                    agent_ids=[ref.agent_id for ref in all_agent_refs],
+                )
             )
-        )
-    else:
-        raise HostOfflineError(
-            f"Host '{host_id_str}' is offline. Cannot destroy individual agents on an "
-            f"offline host. Either start the host first, or destroy all "
-            f"{len(all_agent_refs)} agent(s) on this host."
-        )
+        else:
+            raise HostOfflineError(
+                f"Host '{host_id_str}' is offline. Cannot destroy individual agents on an "
+                f"offline host. Either start the host first, or destroy all "
+                f"{len(all_agent_refs)} agent(s) on this host."
+            )
 
 
 def _confirm_destruction(targets: _DestroyTargets) -> None:
