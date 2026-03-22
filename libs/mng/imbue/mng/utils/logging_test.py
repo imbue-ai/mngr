@@ -7,6 +7,7 @@ import sys
 import types
 from pathlib import Path
 
+import paramiko.transport
 import pytest
 from loguru import logger
 
@@ -28,6 +29,7 @@ from imbue.mng.utils.logging import _format_user_message
 from imbue.mng.utils.logging import _resolve_log_dir
 from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.logging import setup_logging
+from imbue.mng.utils.logging import suppress_warnings
 
 
 def test_resolve_log_dir_uses_absolute_path(mng_test_prefix: str) -> None:
@@ -564,22 +566,27 @@ def test_paramiko_handler_routes_expected_messages(
         logger.remove(handler_id)
 
 
-def test_paramiko_handler_routes_joined_traceback_to_debug() -> None:
-    """A joined traceback (header + traceback lines) should be routed to debug as one message."""
+def test_paramiko_handler_routes_joined_traceback_body_to_debug() -> None:
+    """A joined traceback body (from tb_strings()) should be routed to debug.
+
+    Paramiko logs the header ("Exception (client): ...") and the traceback body
+    (from util.tb_strings()) as separate _log calls. The body starts with
+    "Traceback (most recent call last):" and should be matched by the regex.
+    """
     handler = _ParamikoToLoguruHandler()
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
     try:
-        joined_traceback = (
-            "Exception (client): Error reading SSH protocol banner\n"
+        joined_traceback_body = (
             "Traceback (most recent call last):\n"
             '  File "/path/to/transport.py", line 42, in run\n'
+            "    self._check_banner()\n"
             "paramiko.ssh_exception.SSHException: banner error"
         )
-        _emit_paramiko_record(handler, joined_traceback, logging.ERROR)
+        _emit_paramiko_record(handler, joined_traceback_body, logging.ERROR)
         paramiko_messages = [m for m in messages if "[paramiko]" in m]
         assert len(paramiko_messages) == 1
-        assert "Exception (client)" in paramiko_messages[0]
+        assert "Traceback" in paramiko_messages[0]
     finally:
         logger.remove(handler_id)
 
@@ -602,42 +609,48 @@ def test_paramiko_handler_expected_errors_not_routed_to_warning() -> None:
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
     try:
+        # Header (separate _log call)
         _emit_paramiko_record(handler, "Exception (client): Error reading SSH protocol banner", logging.ERROR)
+        # Traceback body (joined by our patch, starts with "Traceback")
+        _emit_paramiko_record(
+            handler,
+            'Traceback (most recent call last):\n  File "transport.py"\nparamiko.SSHException: banner',
+            logging.ERROR,
+        )
         assert not any("[paramiko]" in m for m in messages)
     finally:
         logger.remove(handler_id)
 
 
 def test_paramiko_transport_log_patch_joins_list_messages() -> None:
-    """The _log patch should join list messages into a single log record."""
-    import paramiko.transport
+    """The _log patch should join traceback list into a single log record.
 
-    from imbue.mng.utils.logging import suppress_warnings
-
+    Paramiko's Transport._log calls self.logger.log(level, m) for each line
+    in a list. Our patch joins the list into one message so the handler sees
+    a single record starting with "Traceback (most recent call last):".
+    """
     suppress_warnings()
 
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
     try:
-        # Create a minimal Transport-like object that has a logger attribute
-        # to exercise the patched _log method with a list argument
+        # This is what util.tb_strings() returns -- the traceback body only,
+        # NOT the "Exception (client):" header (which is a separate _log call)
         traceback_lines = [
-            "Exception (client): Error reading SSH protocol banner",
             "Traceback (most recent call last):",
-            '  File "transport.py", line 2373',
-            "paramiko.ssh_exception.SSHException: banner error",
+            '  File "transport.py", line 2373, in _check_banner',
+            "    raise SSHException(",
+            "paramiko.ssh_exception.SSHException: Error reading SSH protocol banner",
         ]
         transport_self = types.SimpleNamespace(
             logger=logging.getLogger("paramiko.transport"),
         )
-        # Call the patched _log with a list (simulating what paramiko does internally)
         paramiko.transport.Transport._log(transport_self, logging.ERROR, traceback_lines)
 
-        # The patch should join the list into one message, so we get exactly
-        # one paramiko record (not 4 separate ones)
+        # The patch should join the list into one record (not 4 separate ones)
         paramiko_messages = [m for m in messages if "[paramiko]" in m]
         assert len(paramiko_messages) == 1
-        assert "Exception (client)" in paramiko_messages[0]
-        assert "banner error" in paramiko_messages[0]
+        assert "Traceback" in paramiko_messages[0]
+        assert "banner" in paramiko_messages[0]
     finally:
         logger.remove(handler_id)

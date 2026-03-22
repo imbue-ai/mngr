@@ -218,18 +218,21 @@ _PARAMIKO_EXPECTED_ERROR_RE = re.compile(
     r"Exception \((?:client|server)\):"
     r"|Socket exception:"
     r"|EOF in transport thread"
+    r"|Traceback \(most recent call last\):"
 )
 """Patterns for paramiko ERROR messages that are expected when hosts go offline.
 
-Paramiko's transport thread logs SSH connection failures (banner read errors,
-socket disconnects, EOF) at ERROR level. Mng already handles these via
-HostConnectionError, so the paramiko output is noise. We redirect these to
-debug level. Unknown/unexpected paramiko errors are forwarded at warning
-level so they remain visible.
+Paramiko's transport thread logs SSH connection failures in two separate _log
+calls: first the header ("Exception (client): ...") as a string, then the
+traceback body (via util.tb_strings()) as a list. We patch Transport._log to
+join the list into a single message, but the header and traceback are still
+separate records.
 
-Note: paramiko's _log method splits tracebacks into individual lines and logs
-each separately. We patch Transport._log in suppress_warnings() to join them
-back into a single message so this regex can match the header line.
+The "Traceback" pattern catches the joined traceback body. This is safe because
+paramiko only calls tb_strings() immediately after logging an expected error
+header. For truly unexpected errors (matched by "Unknown exception:"), the
+header itself won't match this regex and will be routed to WARNING, alerting
+the user even though the traceback body goes to debug.
 """
 
 
