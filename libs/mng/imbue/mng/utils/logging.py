@@ -235,7 +235,9 @@ We redirect these to debug level. Unknown/unexpected paramiko errors are
 forwarded at warning level so they remain visible.
 """
 
-_IS_PARAMIKO_LOGGING_ENABLED: bool = os.environ.get("MNG_ENABLE_PARAMIKO_LOGGING", "0") == "1"
+
+def _is_paramiko_logging_enabled() -> bool:
+    return os.environ.get("MNG_ENABLE_PARAMIKO_LOGGING", "0") == "1"
 
 
 class _ParamikoToLoguruHandler(logging.Handler):
@@ -256,9 +258,10 @@ class _ParamikoToLoguruHandler(logging.Handler):
                 logger.warning("[paramiko] {}", msg)
         elif record.levelno >= logging.WARNING:
             logger.warning("[paramiko] {}", msg)
+        elif _is_paramiko_logging_enabled():
+            logger.trace("[paramiko] {}", msg)
         else:
-            if _IS_PARAMIKO_LOGGING_ENABLED:
-                logger.trace("[paramiko] {}", msg)
+            pass
 
 
 def suppress_warnings() -> None:
