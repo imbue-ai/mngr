@@ -12,6 +12,8 @@ import modal.exception
 import pluggy
 import pytest
 import toml
+from _pytest.runner import runtestprotocol
+from loguru import logger
 from modal.environments import delete_environment
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -44,6 +46,8 @@ from imbue.mng_modal.instance import ModalProviderInstance
 from imbue.mng_modal.testing import make_testing_modal_interface
 from imbue.mng_modal.testing import make_testing_provider
 from imbue.modal_proxy.testing import TestingModalInterface
+
+MODAL_SANDBOX_TIMEOUT_MAX_RETRIES: int = 3
 
 
 def make_modal_provider_real(
@@ -449,6 +453,47 @@ def modal_session_cleanup() -> Generator[None, None, None]:
             + "\n\n".join(errors)
             + "\n\nThese resources have been cleaned up, but tests should not leak!\n"
         )
+
+
+# =============================================================================
+# Retry logic for transient Modal sandbox timeout errors
+# =============================================================================
+
+
+def _is_modal_sandbox_timeout_text(text: str) -> bool:
+    """Check if error text indicates a Modal sandbox timeout."""
+    return "ModalSandboxTimeoutMngError" in text or "SandboxTimeoutError" in text
+
+
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool | None:
+    """Retry acceptance/release tests that fail due to transient Modal sandbox timeouts.
+
+    Returns True to indicate that the hook handled the protocol (preventing
+    the default protocol from running), or None to let the default run.
+    """
+    is_retryable = any(m.name in ("acceptance", "release") for m in item.iter_markers())
+    if not is_retryable:
+        return None
+
+    for attempt in range(MODAL_SANDBOX_TIMEOUT_MAX_RETRIES):
+        reports = runtestprotocol(item, nextitem=nextitem, log=False)
+        for report in reports:
+            item.ihook.pytest_runtest_logreport(report=report)
+
+        call_report = next((r for r in reports if r.when == "call"), None)
+        if call_report is None or not call_report.failed:
+            return True
+        if not _is_modal_sandbox_timeout_text(call_report.longreprtext):
+            return True
+        if attempt == MODAL_SANDBOX_TIMEOUT_MAX_RETRIES - 1:
+            return True
+        logger.warning(
+            "Modal sandbox timeout on attempt {}/{}, retrying test {}",
+            attempt + 1,
+            MODAL_SANDBOX_TIMEOUT_MAX_RETRIES,
+            item.nodeid,
+        )
+    return True
 
 
 # =============================================================================

@@ -87,6 +87,7 @@ from imbue.mng.providers.ssh_host_setup import build_start_activity_watcher_comm
 from imbue.mng.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mng.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mng_modal.config import ModalProviderConfig
+from imbue.mng_modal.errors import ModalSandboxTimeoutMngError
 from imbue.mng_modal.errors import NoSnapshotsModalMngError
 from imbue.mng_modal.routes.deployment import deploy_function
 from imbue.mng_modal.routes.deployment import get_function_url
@@ -142,6 +143,17 @@ _MODAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("c8f1a2b3-d4e5-6789-abc
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+
+@pure
+def _is_sandbox_timeout(exc: BaseException) -> bool:
+    """Check if an exception (or its cause chain) indicates a Modal sandbox timeout."""
+    current: BaseException | None = exc
+    while current is not None:
+        if "SandboxTimeoutError" in type(current).__name__:
+            return True
+        current = current.__cause__
+    return False
 
 
 def _parse_volume_spec(spec: str) -> tuple[str, str]:
@@ -1141,7 +1153,12 @@ class ModalProviderInstance(BaseProviderInstance):
 
     def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface) -> tuple[str, int]:
         """Extract SSH connection info from a running sandbox."""
-        tunnels = sandbox.tunnels()
+        try:
+            tunnels = sandbox.tunnels()
+        except ModalProxyError as e:
+            if _is_sandbox_timeout(e):
+                raise ModalSandboxTimeoutMngError("Sandbox failed to come online fast enough") from e
+            raise
         ssh_tunnel = tunnels[CONTAINER_SSH_PORT]
         return ssh_tunnel.tcp_socket
 
