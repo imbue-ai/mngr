@@ -232,7 +232,9 @@ each separately. We patch Transport._log in suppress_warnings() to join them
 back into a single message so this regex can match the header line.
 """
 
-_IS_PARAMIKO_LOGGING_ENABLED: bool = os.environ.get("MNG_ENABLE_PARAMIKO_LOGGING", "0") == "1"
+
+def _is_paramiko_logging_enabled() -> bool:
+    return os.environ.get("MNG_ENABLE_PARAMIKO_LOGGING", "0") == "1"
 
 
 class _ParamikoToLoguruHandler(logging.Handler):
@@ -253,9 +255,10 @@ class _ParamikoToLoguruHandler(logging.Handler):
                 logger.warning("[paramiko] {}", msg)
         elif record.levelno >= logging.WARNING:
             logger.warning("[paramiko] {}", msg)
+        elif _is_paramiko_logging_enabled():
+            logger.trace("[paramiko] {}", msg)
         else:
-            if _IS_PARAMIKO_LOGGING_ENABLED:
-                logger.trace("[paramiko] {}", msg)
+            pass
 
 
 def suppress_warnings() -> None:
