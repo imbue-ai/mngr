@@ -150,7 +150,7 @@ def _gc_single_host_work_dir(
     error_behavior: ErrorBehavior,
     dry_run: bool,
     result: GcResult,
-):
+) -> None:
     host = provider_instance.get_host(host_ref.host_id)
     if not isinstance(host, OnlineHostInterface):
         # Skip offline hosts - can't query them

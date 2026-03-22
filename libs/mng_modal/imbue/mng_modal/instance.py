@@ -2333,7 +2333,7 @@ log "=== Shutdown script completed ==="
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
 
-        host_futures_with_records: list[Future] = []
+        host_futures_with_records: list[Future[HostInterface | None]] = []
         with ConcurrencyGroupExecutor(
             parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
         ) as executor:
@@ -2358,22 +2358,24 @@ log "=== Shutdown script completed ==="
 
         # Second, include any running sandboxes that don't have host records yet
         # (handles eventual consistency of volume or legacy sandboxes)
-        other_host_futures: list[Future] = []
+        other_host_futures: list[tuple[HostId, Future[Host | None]]] = []
         with ConcurrencyGroupExecutor(
             parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
         ) as executor:
             for host_id, sandbox in running_sandbox_by_host_id.items():
                 if host_id in processed_host_ids:
                     continue
-                other_host_futures.append(executor.submit(self._create_host_from_sandbox, sandbox))
+                other_host_futures.append((host_id, executor.submit(self._create_host_from_sandbox, sandbox)))
 
-        for future in other_host_futures:
+        for future_host_id, future in other_host_futures:
             try:
                 host_obj = future.result()
                 if host_obj is not None:
                     hosts.append(host_obj)
-            except (KeyError, ValueError) as e:
-                logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
+            except (KeyError, ValueError, HostConnectionError) as e:
+                if isinstance(e, HostConnectionError):
+                    self.on_connection_error(future_host_id)
+                logger.warning("Failed to create host from sandbox {}: {}", future_host_id, e)
                 continue
 
         # add these hosts to a cache so we don't need to look them up by name or id again
@@ -2383,7 +2385,11 @@ log "=== Shutdown script completed ==="
         return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
 
     def _construct_host_from_record_for_discovery(
-        self, host_id, host_record, running_sandbox_by_host_id, include_destroyed
+        self,
+        host_id: HostId,
+        host_record: HostRecord,
+        running_sandbox_by_host_id: dict[HostId, SandboxInterface],
+        include_destroyed: bool,
     ) -> HostInterface | None:
         host_obj: HostInterface | None = None
         if host_id in running_sandbox_by_host_id:
