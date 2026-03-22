@@ -219,10 +219,9 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     )
 
     # Compile CEL filters if provided
-    has_cel_filters = bool(opts.include or opts.exclude)
     compiled_include_filters: list[Any] = []
     compiled_exclude_filters: list[Any] = []
-    if has_cel_filters:
+    if opts.include or opts.exclude:
         compiled_include_filters, compiled_exclude_filters = compile_cel_filters(opts.include, opts.exclude)
 
     # Validate input
@@ -246,12 +245,14 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                 )
             agent_identifiers.append(agent_name)
 
-    # --include alone is sufficient to target agents (acts like --all with filtering)
-    is_filter_only = not agent_identifiers and not opts.destroy_all and has_cel_filters
-    effective_destroy_all = opts.destroy_all or is_filter_only
+    # --include alone (without --exclude) is sufficient to target agents (acts like --all with filtering).
+    # --exclude alone requires explicit agent names or --all, since it would otherwise implicitly
+    # target all agents for a destructive operation.
+    is_include_filter_only = not agent_identifiers and not opts.destroy_all and bool(opts.include)
+    effective_destroy_all = opts.destroy_all or is_include_filter_only
 
     if not agent_identifiers and not effective_destroy_all:
-        raise UserInputError("Must specify at least one agent or use --all")
+        raise UserInputError("Must specify at least one agent, use --all, or use --include filters")
 
     if agent_identifiers and opts.destroy_all:
         raise UserInputError("Cannot specify both agent names and --all")

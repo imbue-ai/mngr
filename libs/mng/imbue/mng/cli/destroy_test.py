@@ -108,7 +108,7 @@ def test_destroy_requires_agent_or_all(
     )
 
     assert result.exit_code != 0
-    assert "Must specify at least one agent or use --all" in result.output
+    assert "Must specify at least one agent" in result.output
 
 
 def test_destroy_cannot_combine_agents_and_all(
@@ -414,6 +414,35 @@ def test_destroy_include_alone_does_not_require_all_flag(
     assert result.exit_code == 0
 
 
+def test_destroy_exclude_alone_requires_agents_or_all(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--exclude alone (without --include, --all, or agent names) should require explicit targeting."""
+    result = cli_runner.invoke(
+        destroy,
+        ["--exclude", 'name == "keep-me"', "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "Must specify at least one agent" in result.output
+
+
+def test_destroy_exclude_with_all_works(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--exclude with --all should work (targets all agents except excluded)."""
+    result = cli_runner.invoke(
+        destroy,
+        ["--all", "--exclude", 'name == "keep-me"', "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+
 def test_destroy_invalid_cel_expression_reports_error(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -463,7 +492,7 @@ def test_destroy_stdin_empty_input_requires_agents(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
-    assert "Must specify at least one agent or use --all" in result.output
+    assert "Must specify at least one agent" in result.output
 
 
 def test_destroy_stdin_multiple_names(
