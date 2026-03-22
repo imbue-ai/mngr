@@ -1,14 +1,17 @@
 import shlex
 import shutil
 from collections.abc import Sequence
+from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from threading import Lock
 from typing import Final
 from typing import assert_never
 
 from loguru import logger
 
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -28,6 +31,7 @@ from imbue.mng.interfaces.data_types import WorkDirInfo
 from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
@@ -162,82 +166,125 @@ def gc_machines(
     result: GcResult,
 ) -> None:
     """Garbage collect idle machines and delete old offline host records."""
+    results_lock = Lock()
+
     for provider in providers:
         try:
             host_refs = provider.discover_hosts(include_destroyed=True, cg=provider.mng_ctx.concurrency_group)
 
-            for host_ref in host_refs:
-                try:
-                    host = provider.get_host(host_ref.host_id)
+            # Process hosts in parallel to avoid sequential SSH timeouts for offline hosts
+            futures: list[Future[None]] = []
+            with ConcurrencyGroupExecutor(
+                parent_cg=mng_ctx.concurrency_group, name="gc_machines", max_workers=32
+            ) as executor:
+                for host_ref in host_refs:
+                    futures.append(
+                        executor.submit(
+                            _gc_single_host,
+                            host_ref,
+                            provider,
+                            mng_ctx,
+                            dry_run,
+                            error_behavior,
+                            result,
+                            results_lock,
+                        )
+                    )
 
-                    # Handle offline hosts
-                    # all we care about is that they have no agents (or is failed/crashed/destroyed),
-                    # and that they're sufficiently old
-                    # if so, then we permanently delete the associated data (to prevent data from accumulating)
-                    if not isinstance(host, OnlineHostInterface):
-                        seconds_since_stopped = host.get_seconds_since_stopped()
-                        if (
-                            seconds_since_stopped is not None
-                            and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
-                        ):
-                            agent_refs = host.discover_agents()
-                            if len(agent_refs) == 0 or host.get_state() in (
-                                HostState.FAILED,
-                                HostState.CRASHED,
-                                HostState.DESTROYED,
-                            ):
-                                # permanently delete the host's data
-                                if not dry_run:
-                                    # FOLLOWUP: when there are multiple instance of gc running concurrently on different hosts
-                                    #  there's a risk of getting into a screwy situation here--if we delete this right as
-                                    #  someone else starts it, you might have a host that is running but is untracked
-                                    #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
-                                    provider.delete_host(host)
-                                    emit_host_destroyed(
-                                        mng_ctx.config,
-                                        host_ref.host_id,
-                                        [ref.agent_id for ref in agent_refs],
-                                    )
-                                result.machines_deleted.append(host_ref)
-                        # no matter what we're done--the rest of the logic only applies to online hosts
-                        continue
-
-                    # Skip local hosts - they cannot be destroyed
-                    if host.is_local:
-                        continue
-
-                    try:
-                        # Only consider online hosts with no agents
-                        agent_refs = host.discover_agents()
-                        if len(agent_refs) > 0:
-                            continue
-                        host_to_destroy: HostInterface = host
-                    except HostAuthenticationError:
-                        # hosts that fail to authenticate should be destroyed--we assume all hosts are reachable
-                        logger.warning("Failed to authenticate with host during GC, destroying: {}", host.id)
-                        host_to_destroy = host.to_offline_host()
-                    except HostConnectionError as e:
-                        # we skip hosts that suddenly appear offline for now--it's hard to tell exactly what happened
-                        logger.warning("Failed to connect to host {} during gc, skipping: {}", host.id, e)
-                        continue
-
-                    if not dry_run:
-                        mng_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
-                        provider.destroy_host(host_to_destroy)
-                        mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
-                        emit_host_destroyed(mng_ctx.config, host_ref.host_id, [])
-
-                    result.machines_destroyed.append(host_ref)
-
-                except MngError as e:
-                    error_msg = f"Failed to check/destroy host {host_ref.host_id}: {e}"
-                    result.errors.append(error_msg)
-                    _handle_error(error_msg, error_behavior, exc=e)
+            # Re-raise any thread exceptions
+            for future in futures:
+                future.result()
 
         except MngError as e:
             error_msg = f"Failed to discover hosts for provider {provider.name}: {e}"
-            result.errors.append(error_msg)
+            with results_lock:
+                result.errors.append(error_msg)
             _handle_error(error_msg, error_behavior, exc=e)
+
+
+def _gc_single_host(
+    host_ref: DiscoveredHost,
+    provider: ProviderInstanceInterface,
+    mng_ctx: MngContext,
+    dry_run: bool,
+    error_behavior: ErrorBehavior,
+    result: GcResult,
+    results_lock: Lock,
+) -> None:
+    """Process a single host for garbage collection.
+
+    This function is run in a thread by gc_machines.
+    Results are merged into the shared result object under the results_lock.
+    """
+    try:
+        host = provider.get_host(host_ref.host_id)
+
+        # Handle offline hosts
+        # all we care about is that they have no agents (or is failed/crashed/destroyed),
+        # and that they're sufficiently old
+        # if so, then we permanently delete the associated data (to prevent data from accumulating)
+        if not isinstance(host, OnlineHostInterface):
+            seconds_since_stopped = host.get_seconds_since_stopped()
+            if (
+                seconds_since_stopped is not None
+                and seconds_since_stopped > provider.get_max_destroyed_host_persisted_seconds()
+            ):
+                agent_refs = host.discover_agents()
+                if len(agent_refs) == 0 or host.get_state() in (
+                    HostState.FAILED,
+                    HostState.CRASHED,
+                    HostState.DESTROYED,
+                ):
+                    # permanently delete the host's data
+                    if not dry_run:
+                        # FOLLOWUP: when there are multiple instance of gc running concurrently on different hosts
+                        #  there's a risk of getting into a screwy situation here--if we delete this right as
+                        #  someone else starts it, you might have a host that is running but is untracked
+                        #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
+                        provider.delete_host(host)
+                        emit_host_destroyed(
+                            mng_ctx.config,
+                            host_ref.host_id,
+                            [ref.agent_id for ref in agent_refs],
+                        )
+                    with results_lock:
+                        result.machines_deleted.append(host_ref)
+            # no matter what we're done--the rest of the logic only applies to online hosts
+            return
+
+        # Skip local hosts - they cannot be destroyed
+        if host.is_local:
+            return
+
+        try:
+            # Only consider online hosts with no agents
+            agent_refs = host.discover_agents()
+            if len(agent_refs) > 0:
+                return
+            host_to_destroy: HostInterface = host
+        except HostAuthenticationError:
+            # hosts that fail to authenticate should be destroyed--we assume all hosts are reachable
+            logger.warning("Failed to authenticate with host during GC, destroying: {}", host.id)
+            host_to_destroy = host.to_offline_host()
+        except HostConnectionError as e:
+            # we skip hosts that suddenly appear offline for now--it's hard to tell exactly what happened
+            logger.warning("Failed to connect to host {} during gc, skipping: {}", host.id, e)
+            return
+
+        if not dry_run:
+            mng_ctx.pm.hook.on_before_host_destroy(host=host_to_destroy)
+            provider.destroy_host(host_to_destroy)
+            mng_ctx.pm.hook.on_host_destroyed(host=host_to_destroy)
+            emit_host_destroyed(mng_ctx.config, host_ref.host_id, [])
+
+        with results_lock:
+            result.machines_destroyed.append(host_ref)
+
+    except MngError as e:
+        error_msg = f"Failed to check/destroy host {host_ref.host_id}: {e}"
+        with results_lock:
+            result.errors.append(error_msg)
+        _handle_error(error_msg, error_behavior, exc=e)
 
 
 def gc_snapshots(
