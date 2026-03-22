@@ -26,6 +26,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.concurrency_group.thread_utils import ObservableThread
@@ -633,9 +634,15 @@ def _provision_background_scripts(
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
-            thread = concurrency_group.start_new_thread(
-                host.write_file, (script_path, script_content.encode(), "0755")
-            )
+            try:
+                thread = concurrency_group.start_new_thread(
+                    host.write_file, (script_path, script_content.encode(), "0755")
+                )
+            except InvalidConcurrencyGroupStateError:
+                # The parent group is shutting down (e.g., another provisioning step
+                # failed). Stop spawning threads and let the real error propagate.
+                logger.debug("Concurrency group shutting down; aborting background script provisioning")
+                return
             threads.append(thread)
 
     # make sure everything actually uploaded

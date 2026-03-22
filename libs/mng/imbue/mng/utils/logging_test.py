@@ -563,7 +563,10 @@ def test_paramiko_handler_routes_expected_messages(
     input_level: int,
     expected_substring: str,
     sink_level: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Enable paramiko logging so DEBUG-level messages are routed to TRACE
+    monkeypatch.setenv("MNG_ENABLE_PARAMIKO_LOGGING", "1")
     handler = _ParamikoToLoguruHandler()
     messages: list[str] = []
     handler_id = logger.add(lambda msg: messages.append(msg), level=sink_level)
