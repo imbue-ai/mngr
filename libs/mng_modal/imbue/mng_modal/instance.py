@@ -1114,6 +1114,7 @@ class ModalProviderInstance(BaseProviderInstance):
             # Ensure the logs directory exists before sshd starts writing to it
             sshd_log_path = f"{self.host_dir}/logs/sshd.log"
             setup_parts.append(f"mkdir -p '{self.host_dir}/logs'")
+            setup_parts.append(f"mkdir -p '{self.host_dir}/events/logs'")
 
             combined_cmd = " && ".join(setup_parts)
             exit_code = sandbox.exec("sh", "-c", combined_cmd).wait()
