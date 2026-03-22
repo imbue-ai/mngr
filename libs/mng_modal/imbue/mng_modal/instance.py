@@ -2850,7 +2850,13 @@ log "=== Shutdown script completed ==="
                 list(host_record.certified_host_data.snapshots) + [new_snapshot],
             ),
         )
-        self.get_host(host_id).set_certified_data(updated_certified_data)
+        updated_host_record = host_record.model_copy_update(
+            to_update(
+                host_record.field_ref().certified_host_data,
+                updated_certified_data,
+            ),
+        )
+        self._get_host(host_id, host_record=updated_host_record).set_certified_data(updated_certified_data)
         logger.debug(
             "Created snapshot: id={}, name={}",
             snapshot_id,
