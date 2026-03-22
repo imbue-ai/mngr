@@ -1684,6 +1684,7 @@ log "=== Shutdown script completed ==="
             tags = sandbox.get_tags()
             if TAG_HOST_ID in tags:
                 sandboxes.append(sandbox)
+
         logger.trace("Listed all mng sandboxes for app={} in env={}", self.app_name, self.environment_name)
         return sandboxes
 
@@ -2332,71 +2333,46 @@ log "=== Shutdown script completed ==="
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
 
-        # First, process host records (includes both running and stopped hosts)
-        for host_record in all_host_records:
-            host_id = HostId(host_record.certified_host_data.host_id)
-            processed_host_ids.add(host_id)
+        host_futures_with_records: list[Future] = []
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
+        ) as executor:
+            # First, process host records (includes both running and stopped hosts)
+            for host_record in all_host_records:
+                host_id = HostId(host_record.certified_host_data.host_id)
+                processed_host_ids.add(host_id)
+                host_futures_with_records.append(
+                    executor.submit(
+                        self._construct_host_from_record_for_discovery,
+                        host_id,
+                        host_record,
+                        running_sandbox_by_host_id,
+                        include_destroyed,
+                    )
+                )
 
-            host_obj: HostInterface | None = None
-            if host_id in running_sandbox_by_host_id:
-                # Host has a running sandbox - create from sandbox
-                sandbox = running_sandbox_by_host_id[host_id]
-                try:
-                    host_obj = self._create_host_from_sandbox(sandbox)
-                    if host_obj is not None:
-                        hosts.append(host_obj)
-                except (KeyError, ValueError, HostConnectionError) as e:
-                    if isinstance(e, HostConnectionError):
-                        # must call on_connection_error when there is a connection error (to properly clear the cache)
-                        self.on_connection_error(host_id)
-                    logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
-                    continue
-            if host_id not in running_sandbox_by_host_id or host_obj is None:
-                # Host has no running sandbox - it's stopped, failed, destroyed, or we couldn't connect
-                has_snapshots = len(host_record.certified_host_data.snapshots) > 0
-                is_failed = host_record.certified_host_data.failure_reason is not None
-
-                if is_failed:
-                    # Failed host - always include so users can warning() build failures
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                elif has_snapshots:
-                    # Stopped host (can be restarted)
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                elif include_destroyed:
-                    # Destroyed host (no snapshots, can't be restarted)
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                else:
-                    # Skip destroyed hosts when include_destroyed=False
-                    pass
+        for future in host_futures_with_records:
+            host_obj = future.result()
+            if host_obj is not None:
+                hosts.append(host_obj)
 
         # Second, include any running sandboxes that don't have host records yet
         # (handles eventual consistency of volume or legacy sandboxes)
-        for host_id, sandbox in running_sandbox_by_host_id.items():
-            if host_id in processed_host_ids:
-                continue
+        other_host_futures: list[Future] = []
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
+        ) as executor:
+            for host_id, sandbox in running_sandbox_by_host_id.items():
+                if host_id in processed_host_ids:
+                    continue
+                other_host_futures.append(executor.submit(self._create_host_from_sandbox, sandbox))
+
+        for future in other_host_futures:
             try:
-                host_obj = self._create_host_from_sandbox(sandbox)
+                host_obj = future.result()
                 if host_obj is not None:
                     hosts.append(host_obj)
-            except (KeyError, ValueError, HostConnectionError) as e:
-                if isinstance(e, HostConnectionError):
-                    # must call on_connection_error when there is a connection error (to properly clear the cache)
-                    self.on_connection_error(host_id)
+            except (KeyError, ValueError) as e:
                 logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
                 continue
 
@@ -2405,6 +2381,54 @@ log "=== Shutdown script completed ==="
             self._host_by_id_cache[host.id] = host
 
         return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
+
+    def _construct_host_from_record_for_discovery(
+        self, host_id, host_record, running_sandbox_by_host_id, include_destroyed
+    ) -> HostInterface | None:
+        host_obj: HostInterface | None = None
+        if host_id in running_sandbox_by_host_id:
+            # Host has a running sandbox - create from sandbox
+            sandbox = running_sandbox_by_host_id[host_id]
+            try:
+                host_obj = self._create_host_from_sandbox(sandbox, host_record=host_record)
+                if host_obj is not None:
+                    return host_obj
+            except (KeyError, ValueError, HostConnectionError) as e:
+                if isinstance(e, HostConnectionError):
+                    # must call on_connection_error when there is a connection error (to properly clear the cache)
+                    self.on_connection_error(host_id)
+                logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
+                return None
+        if host_id not in running_sandbox_by_host_id or host_obj is None:
+            # Host has no running sandbox - it's stopped, failed, destroyed, or we couldn't connect
+            has_snapshots = len(host_record.certified_host_data.snapshots) > 0
+            is_failed = host_record.certified_host_data.failure_reason is not None
+
+            if is_failed:
+                # Failed host - always include so users can warning() build failures
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            elif has_snapshots:
+                # Stopped host (can be restarted)
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            elif include_destroyed:
+                # Destroyed host (no snapshots, can't be restarted)
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            else:
+                # Skip destroyed hosts when include_destroyed=False
+                return None
+        return None
 
     def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.

@@ -130,32 +130,49 @@ def gc_work_dirs(
     result: GcResult,
 ) -> None:
     """Garbage collect orphaned work directories."""
-    for provider_instance in providers:
-        for host_ref in provider_instance.discover_hosts(cg=mng_ctx.concurrency_group):
-            host = provider_instance.get_host(host_ref.host_id)
-            if not isinstance(host, OnlineHostInterface):
-                # Skip offline hosts - can't query them
-                logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
-            else:
-                # otherwise is online
-                try:
-                    orphaned_dirs = _get_orphaned_work_dirs(host=host, provider_name=provider_instance.name)
-                except HostOfflineError:
-                    logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
-                    continue
-                except HostAuthenticationError:
-                    logger.trace("Skipped work dir GC because host authentication failed", host_id=host.id)
-                    continue
+    futures: list[Future[None]] = []
+    with ConcurrencyGroupExecutor(parent_cg=mng_ctx.concurrency_group, name="gc_machines", max_workers=32) as executor:
+        for provider_instance in providers:
+            for host_ref in provider_instance.discover_hosts(cg=mng_ctx.concurrency_group):
+                futures.append(
+                    executor.submit(
+                        _gc_single_host_work_dir, host_ref, provider_instance, error_behavior, dry_run, result
+                    )
+                )
+    # Re-raise any thread exceptions
+    for future in futures:
+        future.result()
 
-                for work_dir_info in orphaned_dirs:
-                    try:
-                        if not dry_run:
-                            _clean_work_dir(host=host, work_dir_path=work_dir_info.path, dry_run=False)
-                        result.work_dirs_destroyed.append(work_dir_info)
-                    except MngError as e:
-                        error_msg = f"Failed to clean {work_dir_info.path}: {e}"
-                        result.errors.append(error_msg)
-                        _handle_error(error_msg, error_behavior, exc=e)
+
+def _gc_single_host_work_dir(
+    host_ref: DiscoveredHost,
+    provider_instance: ProviderInstanceInterface,
+    error_behavior: ErrorBehavior,
+    dry_run: bool,
+    result: GcResult,
+):
+    host = provider_instance.get_host(host_ref.host_id)
+    if not isinstance(host, OnlineHostInterface):
+        # Skip offline hosts - can't query them
+        logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
+    else:
+        # otherwise is online
+        try:
+            orphaned_dirs = _get_orphaned_work_dirs(host=host, provider_name=provider_instance.name)
+        except HostOfflineError:
+            logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
+        except HostAuthenticationError:
+            logger.trace("Skipped work dir GC because host authentication failed", host_id=host.id)
+        else:
+            for work_dir_info in orphaned_dirs:
+                try:
+                    if not dry_run:
+                        _clean_work_dir(host=host, work_dir_path=work_dir_info.path, dry_run=False)
+                    result.work_dirs_destroyed.append(work_dir_info)
+                except MngError as e:
+                    error_msg = f"Failed to clean {work_dir_info.path}: {e}"
+                    result.errors.append(error_msg)
+                    _handle_error(error_msg, error_behavior, exc=e)
 
 
 def gc_machines(
