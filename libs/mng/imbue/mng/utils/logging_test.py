@@ -536,6 +536,13 @@ def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level
             "DEBUG",
             id="warning_level_to_debug",
         ),
+        pytest.param(
+            "starting thread (client mode)",
+            logging.DEBUG,
+            "starting thread",
+            "TRACE",
+            id="debug_level_to_trace",
+        ),
     ],
 )
 def test_paramiko_handler_routes_expected_messages(
