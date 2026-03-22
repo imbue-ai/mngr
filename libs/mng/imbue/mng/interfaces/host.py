@@ -195,12 +195,7 @@ class OnlineHostInterface(HostInterface, ABC):
         ...
 
     @abstractmethod
-    def write_file(
-        self,
-        path: Path,
-        content: bytes,
-        mode: str | None = None,
-    ) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes content to a file."""
         ...
 

@@ -516,34 +516,47 @@ class Host(BaseHost, OnlineHostInterface):
             self._get_file(str(path), output)
             return output.getvalue()
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None) -> None:
+    # it'd be really nice to change the default for is_atomic to True, but it's actually a non-trivial performance impact the way it is implemented right now...
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes content to a file, creating parent directories as needed."""
+        if is_atomic:
+            write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+        else:
+            write_path = path
+
         # Try to write first, only create parent directory if the write fails.
         # This avoids an extra subprocess call for mkdir -p on every write.
         if self.is_local:
             try:
-                path.write_bytes(content)
+                write_path.write_bytes(content)
             except FileNotFoundError:
                 # Parent directory doesn't exist, create it and retry
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
+                write_path.parent.mkdir(parents=True, exist_ok=True)
+                write_path.write_bytes(content)
         else:
             try:
-                is_success = self._put_file(io.BytesIO(content), str(path))
+                is_success = self._put_file(io.BytesIO(content), str(write_path))
             except IOError:
                 # pyinfra/paramiko raises IOError when the parent directory doesn't exist
                 is_success = False
             if not is_success:
                 # May have failed because parent directory doesn't exist, create it and retry
-                parent_dir = str(path.parent)
+                parent_dir = str(write_path.parent)
                 result = self.execute_command(f"mkdir -p '{parent_dir}'")
                 if not result.success:
                     raise MngError(
                         f"Failed to create parent directory '{parent_dir}' on host {self.id} because: {result.stderr}"
                     )
-                is_success = self._put_file(io.BytesIO(content), str(path))
+                is_success = self._put_file(io.BytesIO(content), str(write_path))
                 if not is_success:
-                    raise MngError(f"Failed to write file '{str(path)}' on host {self.id}'")
+                    raise MngError(f"Failed to write file '{str(write_path)}' on host {self.id}'")
+        if write_path != path:
+            # Move temp file to final location atomically
+            result = self.execute_command(f"mv '{str(write_path)}' '{str(path)}'")
+            if not result.success:
+                raise MngError(
+                    f"Failed to move temp file to final location on host {self.id} because: {result.stderr}"
+                )
         if mode is not None:
             self.execute_command(f"chmod {mode} '{str(path)}'")
 
@@ -804,15 +817,23 @@ class Host(BaseHost, OnlineHostInterface):
 
     def set_certified_data(self, data: CertifiedHostData) -> None:
         """Save certified data to data.json and notify the provider."""
-        # Always stamp updated_at with the current time when writing
-        stamped_data = data.model_copy_update(
-            to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        data_path = self.host_dir / "data.json"
-        self.write_text_file(data_path, json.dumps(stamped_data.model_dump(by_alias=True, mode="json"), indent=2))
-        # Notify the provider so it can update any external storage (e.g., Modal volume)
-        if self.on_updated_host_data:
-            self.on_updated_host_data(self.id, stamped_data)
+        with self.mng_ctx.concurrency_group.make_concurrency_group("set_certified_data") as concurrency_group:
+            # Always stamp updated_at with the current time when writing
+            stamped_data = data.model_copy_update(
+                to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            data_path = self.host_dir / "data.json"
+            serialized_data = json.dumps(stamped_data.model_dump(by_alias=True, mode="json"), indent=2)
+            direct_write_thread = concurrency_group.start_new_thread(
+                # must write atomically, otherwise we can get in trouble
+                self.write_file,
+                kwargs=dict(path=data_path, content=serialized_data.encode("utf-8"), mode=None, is_atomic=True),
+            )
+            # Notify the provider so it can update any external storage (e.g., Modal volume)
+            if self.on_updated_host_data:
+                self.on_updated_host_data(self.id, stamped_data)
+            # we're only doing this in parallel as a minor optimization--both the atomic write and the on_updated_host_data calls takes a meaningful amount of time
+            direct_write_thread.join(60.0)
 
     def _add_generated_work_dir(self, work_dir: Path) -> None:
         """Add a work directory to the list of generated work directories."""

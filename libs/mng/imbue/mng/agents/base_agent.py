@@ -36,14 +36,15 @@ from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.polling import poll_until
 
 # Constants for send_message paste-detection synchronization
-_SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 10.0
-_TUI_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
+_SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
+# this can take a while, especialy on modal--the process needs to actually start and render the TUI before the indicator appears
+_TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
+_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Default timeout for signal-based synchronization
 # Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
 # this is *especially* the case when running on modal, when really overloading the machine while it is starting, etc
-_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 60.0
+_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 90.0
 
 # Compiled once for _normalize_for_match performance
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")

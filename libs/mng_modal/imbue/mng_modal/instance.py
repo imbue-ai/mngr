@@ -712,7 +712,8 @@ class ModalProviderInstance(BaseProviderInstance):
         volume = self.get_state_volume()
         host_id = HostId(host_record.certified_host_data.host_id)
         path = self._get_host_record_path(host_id)
-        data = host_record.model_dump_json(indent=2)
+        # FIXME: we need to make sure that this is the same in both places that this is called. This logic should move to a method on host_record, and we should update this and Host::set_certified_data to use that method as well, to ensure consistency.
+        data = host_record.model_dump_json(by_alias=True, indent=2)
 
         volume.write_files({path: data.encode("utf-8")})
         logger.trace("Wrote host record to volume: {}", path, host_data=data)
