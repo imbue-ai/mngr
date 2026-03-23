@@ -185,7 +185,6 @@ entry per kind, not per individual edit):
 
 - "FIX_TEST": fix the test code (including fixtures).
 - "FIX_IMPL": fix the program being tested.
-- "FIX_TUTORIAL": fix related documentation or configuration.
 
 Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
 but could not complete it, or "BLOCKED" if the issue needs larger intervention
@@ -202,11 +201,28 @@ Consider whether the test can be improved:
 
 - Are there interesting edge cases worth covering?
 
-- Is the code run in the pytest function close enough to the tutorial block?
-
 If you make improvements, record a change under the key "IMPROVE_TEST". If you
 identify an improvement that needs a larger-scale intervention, use status
 "BLOCKED". If no improvements are needed, leave the changes object empty.
+
+# Inspecting tutorial blocks
+
+Each of those tests are also associated with a tutorial block in
+libs/mng/tutorials/mega_tutorial.sh; we divide the file into blocks by splitting
+around empty lines. You'll find a reproduction of a tutorial block using the API
+e2e.write_tutorial_block. When modifying the test, you should normally keep the
+tutorial block unchanged: they should match exactly with the block in the tutorial
+file (modulo leading whitespaces).
+
+However, try to think if tutorial itself could be wrong or outdated. This should be
+a rare case - often the tutorial block is a bit too concise to be run as-is, and
+that may be intentional.
+
+If you do think that the tutorial block is wrong or outdated, update both the
+tutorial block in the mega_tutorial.sh file and the test code itself, and record
+a change under the key "FIX_TUTORIAL".
+
+# Writing the result
 
 In all cases, write the result to a JSON file at
 $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with this schema:
