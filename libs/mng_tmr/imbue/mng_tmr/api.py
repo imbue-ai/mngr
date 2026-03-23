@@ -153,11 +153,25 @@ def _build_agent_prompt(
 
     prompt = f"""Run the test with: {run_cmd}
 
-If the test succeeds, inspect whether it can be improved: are the assertions
-complete enough? Are there interesting edge cases worth covering? If you find
-improvements, make them and verify the test still passes. The outcome in this
-case is IMPROVED_TEST. If no improvements are needed, the outcome is
-RUN_SUCCEEDED.
+If the test succeeds, think about how the test can be improved:
+
+- We want the command run in the tests to match the demo script as much as possible.
+  Remember that this is an E2E test, so we want to be as realistic as possible.
+  We can afford to run real Claude Code sessions and even real Modal instances.
+
+- We want the assertions to be complete and reflect things that can be easily
+  tested in a real-world situation - note that the check is usually not part of
+  the demo script, so you need to come up with the check yourself. For example,
+  if a command is supposed to have an effect on Git, use Git commands to check
+  the outcome. If a command is supposed to create a file, check the actual file.
+
+- We also want the test to go a little bit beyond what the demo script literally
+  says. Sometimes a simple command will work a little bit differently depending
+  on the exact circumstances. In those cases, err on the side of having more tests
+  rather than fewer. You can attach the same demo block to multiple tests.
+
+The outcome in this case is IMPROVED_TEST. If no improvements are needed, the
+outcome is RUN_SUCCEEDED.
 
 If the test fails:
 
