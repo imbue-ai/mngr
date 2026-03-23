@@ -288,8 +288,7 @@ def _check_headless_claude_available() -> None:
             "The 'headless_claude' agent type is not available. "
             "The mng_claude plugin may not be installed.\n"
             "Reinstall mng with the mng_claude plugin included, e.g.:\n"
-            "  uv tool install -e libs/mng --with 'mng-claude @ libs/mng_claude' --reinstall\n"
-            "Or use: uv run mng ask ..."
+            "  uv tool install -e libs/mng --with 'mng-claude @ libs/mng_claude' --reinstall"
         )
 
 
