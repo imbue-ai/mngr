@@ -1,9 +1,11 @@
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from typing import Generator
 from uuid import uuid4
 
@@ -460,17 +462,27 @@ def modal_session_cleanup() -> Generator[None, None, None]:
 # =============================================================================
 
 
-def _is_modal_sandbox_timeout_text(text: str) -> bool:
-    """Check if error text indicates a Modal sandbox timeout."""
-    return "ModalSandboxTimeoutMngError" in text or "SandboxTimeoutError" in text
+_TRANSIENT_MODAL_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "ModalSandboxTimeoutMngError",
+    "SandboxTimeoutError",
+    "ConnectionResetError",
+    "Sandbox failed to come online",
+)
+
+
+def _is_transient_modal_error(text: str) -> bool:
+    """Check if error text indicates a transient Modal infrastructure failure."""
+    return any(marker in text for marker in _TRANSIENT_MODAL_ERROR_MARKERS)
 
 
 # FOLLOWUP: this is jank--we should design a more principled way of retrying various types of errors.
 def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool | None:
-    """Retry acceptance/release tests that fail due to transient Modal sandbox timeouts.
+    """Retry acceptance/release tests that fail due to transient Modal errors.
 
-    Returns True to indicate that the hook handled the protocol (preventing
-    the default protocol from running), or None to let the default run.
+    Detects sandbox timeouts, connection resets, and other transient Modal
+    infrastructure failures in the test's longreprtext. Returns True to
+    indicate that the hook handled the protocol (preventing the default
+    protocol from running), or None to let the default run.
     """
     is_retryable = any(m.name in ("acceptance", "release") for m in item.iter_markers())
     if not is_retryable:
@@ -484,16 +496,19 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         call_report = next((r for r in reports if r.when == "call"), None)
         if call_report is None or not call_report.failed:
             return True
-        if not _is_modal_sandbox_timeout_text(call_report.longreprtext):
+        if not _is_transient_modal_error(call_report.longreprtext):
             return True
         if attempt == MODAL_SANDBOX_TIMEOUT_MAX_RETRIES - 1:
             return True
-        logger.warning(
-            "Modal sandbox timeout on attempt {}/{}, retrying test {}",
-            attempt + 1,
-            MODAL_SANDBOX_TIMEOUT_MAX_RETRIES,
-            item.nodeid,
+        msg = (
+            f"Transient Modal error on attempt {attempt + 1}/{MODAL_SANDBOX_TIMEOUT_MAX_RETRIES}, "
+            f"retrying test {item.nodeid}"
         )
+        # Write directly to stderr so the message is visible in CI output,
+        # and also log via loguru for structured log consumers.
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+        logger.warning(msg)
     return True
 
 
