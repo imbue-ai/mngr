@@ -193,9 +193,16 @@ beyond this task. If you cannot determine what is wrong, report no changes.
 
 # If the test succeeds - or after you fixed a failing test
 
-Consider whether the test can be improved: are the
-assertions thorough enough? Are there interesting edge cases worth covering?
-Is the code run in the pytest function close enough to the tutorial block?
+Consider whether the test can be improved:
+
+- Are the assertions good enough? Try to test by observing the actual effect of
+  commands, like how a human would do when debugging interactively, by looking at
+  e.g. files, git status, and so on. Avoid having too many specific assertions,
+  because this can make the tests very brittle.
+
+- Are there interesting edge cases worth covering?
+
+- Is the code run in the pytest function close enough to the tutorial block?
 
 If you make improvements, record a change under the key "IMPROVE_TEST". If you
 identify an improvement that needs a larger-scale intervention, use status
@@ -999,11 +1006,11 @@ def launch_integrator_agent(
 For each branch, run `git merge <branch>` (resolve conflicts if needed).
 After merging all branches, verify that the code still compiles/passes basic checks.
 Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
-{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary": "Merged 2 of 3 branches."}}
+{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary_markdown": "Merged 2 of 3 branches."}}
 
 - merged: list of branch names that were successfully merged
 - failed: list of branch names that could not be merged
-- summary: overall markdown summary
+- summary_markdown: overall markdown summary
 """
 
     logger.info("Launching integrator agent '{}' to merge {} branches", agent_name, len(fix_branches))

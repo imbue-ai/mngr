@@ -32,6 +32,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
+    # Ratchet at 5: 2 existing poll sleeps + 1 launch-delay + 2 retry-after-error sleeps (human-sanctioned)
     rc.check_time_sleep(_DIR, snapshot(5))
 
 
@@ -51,6 +52,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
+    # Ratchet at 2: polling loops that must survive transient provider errors (human-sanctioned)
     rc.check_broad_exception_catch(_DIR, snapshot(2))
 
 
