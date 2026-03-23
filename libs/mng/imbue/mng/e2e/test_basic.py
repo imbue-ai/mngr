@@ -123,6 +123,11 @@ def test_create_headless(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # when you're done with an agent, destroy it to clean up all of its resources:
+    mng destroy my-task --force
+    # use --force to skip confirmation and allow destroying running agents
+    """)
     expect(
         e2e.run(
             "mng create my-task --command 'sleep 99999' --no-ensure-clean",
@@ -130,12 +135,107 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    destroy_result = e2e.run("mng destroy my-task --force", comment="Destroy the agent")
-    expect(destroy_result).to_succeed()
-
-    list_result = e2e.run("mng list", comment="Verify agent no longer appears in list")
+    # Verify agent exists before destroying
+    list_result = e2e.run("mng list", comment="Verify agent exists before destroy")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).not_to_contain("my-task")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+
+    destroy_result = e2e.run(
+        "mng destroy my-task --force",
+        comment="when you're done with an agent, destroy it to clean up all of its resources",
+    )
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
+    expect(destroy_result.stdout).to_contain("Successfully destroyed 1 agent(s)")
+
+    # Verify agent is gone via JSON list (more thorough than text matching)
+    list_result = e2e.run("mng list --format json", comment="Verify agent no longer appears in list")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert parsed["agents"] == []
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_destroy_with_dry_run(e2e: E2eSession) -> None:
+    """Verify --dry-run shows what would be destroyed without actually destroying."""
+    e2e.write_tutorial_block("""
+    # preview what would be destroyed without actually destroying:
+    mng destroy my-task --dry-run
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
+            comment="Create agent for dry-run test",
+        )
+    ).to_succeed()
+
+    dry_run_result = e2e.run(
+        "mng destroy my-task --dry-run",
+        comment="preview what would be destroyed without actually destroying",
+    )
+    expect(dry_run_result).to_succeed()
+    expect(dry_run_result.stdout).to_contain("my-task")
+
+    # Agent should still exist after dry-run
+    list_result = e2e.run("mng list", comment="Verify agent still exists after dry-run")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_destroy_all_agents(e2e: E2eSession) -> None:
+    """Verify --all --force destroys all agents at once."""
+    e2e.write_tutorial_block("""
+    # destroy all agents at once:
+    mng destroy --all --force
+    """)
+    expect(
+        e2e.run(
+            "mng create task-one --command 'sleep 99999' --no-ensure-clean",
+            comment="Create first agent",
+        )
+    ).to_succeed()
+    expect(
+        e2e.run(
+            "mng create task-two --command 'sleep 99999' --no-ensure-clean",
+            comment="Create second agent",
+        )
+    ).to_succeed()
+
+    destroy_result = e2e.run(
+        "mng destroy --all --force",
+        comment="destroy all agents at once",
+    )
+    expect(destroy_result).to_succeed()
+    expect(destroy_result.stdout).to_contain("Successfully destroyed 2 agent(s)")
+
+    list_result = e2e.run("mng list --format json", comment="Verify all agents are gone")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert parsed["agents"] == []
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_destroy_with_json_output(e2e: E2eSession) -> None:
+    """Verify --format json returns structured destroy result."""
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
+            comment="Create agent for JSON destroy test",
+        )
+    ).to_succeed()
+
+    destroy_result = e2e.run(
+        "mng destroy my-task --force --format json",
+        comment="Destroy agent with JSON output",
+    )
+    expect(destroy_result).to_succeed()
+    parsed = json.loads(destroy_result.stdout)
+    assert parsed["destroyed_agents"] == ["my-task"]
+    assert parsed["count"] == 1
 
 
 @pytest.mark.release
