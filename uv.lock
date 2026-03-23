@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1873,14 +1873,18 @@ version = "0.1.0"
 source = { editable = "libs/mng_claude" }
 dependencies = [
     { name = "mng" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "mng-modal" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "mng", editable = "libs/mng" },
-    { name = "mng-modal", editable = "libs/mng_modal" },
-]
+requires-dist = [{ name = "mng", editable = "libs/mng" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "mng-modal", editable = "libs/mng_modal" }]
 
 [[package]]
 name = "mng-claude-mind"

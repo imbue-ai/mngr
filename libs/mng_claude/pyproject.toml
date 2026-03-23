@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.7",
+]
+
+[dependency-groups]
+dev = [
     "mng-modal==0.1.0",
 ]
 
