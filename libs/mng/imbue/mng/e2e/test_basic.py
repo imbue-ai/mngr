@@ -40,8 +40,25 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
         comment="tons more arguments for anything you could want! As always, you can learn more via --help",
     )
     expect(result).to_succeed()
+
+    # Verify help structure: major sections are present
+    expect(result.stdout).to_contain("NAME")
+    expect(result.stdout).to_contain("SYNOPSIS")
+    expect(result.stdout).to_contain("DESCRIPTION")
+    expect(result.stdout).to_contain("OPTIONS")
+    expect(result.stdout).to_contain("EXAMPLES")
+
+    # Verify command description
+    expect(result.stdout).to_contain("Create and run an agent")
+
+    # Verify key options that users rely on
     expect(result.stdout).to_contain("--no-connect")
     expect(result.stdout).to_contain("--command")
+    expect(result.stdout).to_contain("--template")
+    expect(result.stdout).to_contain("--headless")
+    expect(result.stdout).to_contain("--provider")
+    expect(result.stdout).to_contain("--label")
+    expect(result.stdout).to_contain("--format")
 
 
 @pytest.mark.release
