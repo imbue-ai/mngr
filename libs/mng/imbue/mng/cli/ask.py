@@ -288,7 +288,7 @@ def _check_headless_claude_available() -> None:
             "The 'headless_claude' agent type is not available. "
             "The mng_claude plugin may not be installed.\n"
             "Install it with:\n"
-            "  mng plugin add --path libs/mng_claude"
+            "  mng plugin add mng-claude"
         )
 
 
