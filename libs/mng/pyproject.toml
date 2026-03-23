@@ -1,6 +1,6 @@
 [project]
 name = "mng"
-version = "0.1.7"
+version = "0.1.8"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.11"
 license = "MIT"
@@ -17,12 +17,12 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.7",
-    "resource-guards==0.1.0",
+    "imbue-common==0.1.8",
+    "resource-guards==0.1.1",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.7",
+    "concurrency-group==0.1.8",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker because the guard registration module

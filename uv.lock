@@ -660,7 +660,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1524,7 +1524,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1816,7 +1816,7 @@ requires-dist = [
 
 [[package]]
 name = "mng"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "libs/mng" }
 dependencies = [
     { name = "cel-python" },
@@ -1932,7 +1932,7 @@ requires-dist = [
 
 [[package]]
 name = "mng-kanpan"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "libs/mng_kanpan" }
 dependencies = [
     { name = "click" },
@@ -2034,7 +2034,7 @@ requires-dist = [
 
 [[package]]
 name = "mng-opencode"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mng_opencode" }
 dependencies = [
     { name = "mng" },
@@ -2045,7 +2045,7 @@ requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-pair"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "libs/mng_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -2152,7 +2152,7 @@ requires-dist = [{ name = "mng", editable = "libs/mng" }]
 
 [[package]]
 name = "mng-tutor"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "libs/mng_tutor" }
 dependencies = [
     { name = "click" },
@@ -3007,7 +3007,7 @@ wheels = [
 
 [[package]]
 name = "resource-guards"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "libs/resource_guards" }
 dependencies = [
     { name = "pytest" },

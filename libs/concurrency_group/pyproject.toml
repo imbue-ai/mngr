@@ -1,6 +1,6 @@
 [project]
 name = "concurrency-group"
-version = "0.1.7"
+version = "0.1.8"
 description = "Utilities for managing threads and processes in a structured way"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.7",
+    "imbue-common==0.1.8",
     "loguru>=0.7",
     "pydantic>=2.0",
 ]
