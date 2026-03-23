@@ -76,7 +76,7 @@ Show the user a complete preview of the GitHub issue you would create:
 TITLE: <issue title>
 PRIORITY: <priority:critical|high|medium|low>
 SIZE: <size:xs|s|m|l|xl>
-PROJECT: <project:name> (or comma-separated if multiple)
+PROJECT: <project:name>  (list each on its own line if multiple)
 LABELS: <other labels, comma-separated>
 ---
 
@@ -145,8 +145,9 @@ Once approved:
 1. **If merging into an existing issue:** Update that issue with `gh issue edit <number>` to incorporate the new information. Show the user the updated issue.
 2. **If creating a new issue:** Run:
    ```bash
-   gh issue create --title "<title>" --body "<body>" --label "<label1>" --label "<label2>"
+   gh issue create --title "<title>" --body "<body>" --label "<priority>" --label "<size>" --label "<project>" --label "<category>"
    ```
+   Each label MUST be a separate `--label` flag. Never comma-separate labels in a single flag.
    Report the created issue number and URL.
 3. **Remove the entry from the backlog file.** Delete the unindented line and all its indented sub-lines from the file. Be precise -- only remove the exact entry that was just processed.
 4. **Move on to the next entry** in priority order.
