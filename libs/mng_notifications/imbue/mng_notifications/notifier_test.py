@@ -1,4 +1,5 @@
 import shlex
+from collections.abc import Generator
 
 import pytest
 
@@ -21,6 +22,13 @@ def _config(
         custom_terminal_command=custom_terminal_command,
         notification_only=notification_only,
     )
+
+
+@pytest.fixture()
+def notification_cg() -> Generator[ConcurrencyGroup, None, None]:
+    """ConcurrencyGroup for notification subprocess calls."""
+    with ConcurrencyGroup(name="test-notification") as group:
+        yield group
 
 
 # --- build_execute_command ---

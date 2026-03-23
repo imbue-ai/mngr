@@ -1,5 +1,8 @@
 import json
+from collections.abc import Generator
 from pathlib import Path
+
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng_notifications.config import NotificationsPluginConfig
@@ -7,6 +10,12 @@ from imbue.mng_notifications.mock_notifier_test import RecordingNotifier
 from imbue.mng_notifications.watcher import _get_file_size
 from imbue.mng_notifications.watcher import _process_events
 from imbue.mng_notifications.watcher import _read_from_offset
+
+
+@pytest.fixture()
+def notification_cg() -> Generator[ConcurrencyGroup, None, None]:
+    with ConcurrencyGroup(name="test-notification") as group:
+        yield group
 
 
 def _make_state_change_event(

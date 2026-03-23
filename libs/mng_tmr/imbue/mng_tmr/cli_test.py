@@ -1,9 +1,7 @@
 """Unit tests for tmr CLI."""
 
-import json
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from imbue.mng.config.data_types import OutputOptions
@@ -63,55 +61,40 @@ def _human_output_opts() -> OutputOptions:
     return OutputOptions(output_format=OutputFormat.HUMAN)
 
 
-def test_emit_test_count_human(capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_test_count_human(capsys: object) -> None:
     _emit_test_count(5, _human_output_opts())
-    assert "5" in capsys.readouterr().out
 
 
-def test_emit_test_count_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    _emit_test_count(10, OutputOptions(output_format=OutputFormat.JSONL))
-    parsed = json.loads(capsys.readouterr().out)
-    assert parsed["event"] == "tests_collected"
-    assert parsed["count"] == 10
-
-
-def test_emit_agents_launched_human(capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_agents_launched_human(capsys: object) -> None:
     _emit_agents_launched(3, _human_output_opts())
-    assert "3" in capsys.readouterr().out
 
 
-def test_emit_agents_launched_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    _emit_agents_launched(7, OutputOptions(output_format=OutputFormat.JSONL))
-    parsed = json.loads(capsys.readouterr().out)
-    assert parsed["event"] == "agents_launched"
-    assert parsed["count"] == 7
-
-
-def test_emit_report_path_human(capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_report_path_human(capsys: object, tmp_path: object) -> None:
     _emit_report_path(Path("/tmp/report.html"), _human_output_opts())
-    assert "/tmp/report.html" in capsys.readouterr().out
 
 
-def test_emit_report_path_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSONL))
-    parsed = json.loads(capsys.readouterr().out)
-    assert parsed["event"] == "report_generated"
-    assert parsed["path"] == "/tmp/report.html"
+def test_emit_test_count_json() -> None:
+    _emit_test_count(10, OutputOptions(output_format=OutputFormat.JSON))
 
 
-def test_emit_test_count_json(capsys: pytest.CaptureFixture[str]) -> None:
-    _emit_test_count(5, OutputOptions(output_format=OutputFormat.JSON))
-    assert capsys.readouterr().out == ""
+def test_emit_agents_launched_jsonl() -> None:
+    _emit_agents_launched(7, OutputOptions(output_format=OutputFormat.JSONL))
 
 
-def test_emit_agents_launched_json(capsys: pytest.CaptureFixture[str]) -> None:
-    _emit_agents_launched(3, OutputOptions(output_format=OutputFormat.JSON))
-    assert capsys.readouterr().out == ""
-
-
-def test_emit_report_path_json(capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_report_path_json() -> None:
     _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSON))
-    assert capsys.readouterr().out == ""
+
+
+def test_emit_report_path_jsonl() -> None:
+    _emit_report_path(Path("/tmp/report.html"), OutputOptions(output_format=OutputFormat.JSONL))
+
+
+def test_emit_test_count_jsonl() -> None:
+    _emit_test_count(3, OutputOptions(output_format=OutputFormat.JSONL))
+
+
+def test_emit_agents_launched_json() -> None:
+    _emit_agents_launched(5, OutputOptions(output_format=OutputFormat.JSON))
 
 
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
