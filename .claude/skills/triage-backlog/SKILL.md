@@ -105,7 +105,7 @@ Original backlog entry:
 
 *Project (required -- at least one):*
 
-Every issue must be tagged with the sub-project it belongs to. Use the `project:<name>` labels, which correspond to directories under `apps/` and `libs/`. If an issue spans multiple projects, apply multiple project labels. Determine the correct project by looking at which code the task would touch. If it is truly repo-wide (e.g., CI config, root-level tooling), ask the user which project label to use.
+Every issue must be tagged with the sub-project it belongs to. Use the `project:<name>` labels, which correspond to directories under `apps/` and `libs/`. If an issue spans multiple projects, apply multiple project labels. Determine the correct project by looking at which code the task would touch. For truly repo-wide concerns (CI config, root-level tooling, cross-cutting changes), use `project:repo`.
 
 To see the current list of project labels, run: `gh label list --search "project:" --json name --limit 100`
 
