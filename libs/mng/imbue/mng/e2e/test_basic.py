@@ -181,3 +181,48 @@ def test_create_with_label(e2e: E2eSession) -> None:
     matching_agents = [a for a in agents if a["name"] == "my-task"]
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"
+    assert matching_agents[0]["host"]["tags"]["env"] == "staging"
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_with_label_filtering(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can add labels to organize your agents and tags for host metadata:
+    mng create my-task --label team=backend --host-label env=staging
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
+            comment="create agent with labels for filtering tests",
+        )
+    ).to_succeed()
+
+    # Filter by agent label -- should find the agent
+    label_filter = e2e.run(
+        "mng list --label team=backend --format json",
+        comment="Filter by agent label",
+    )
+    expect(label_filter).to_succeed()
+    parsed = json.loads(label_filter.stdout)
+    assert len(parsed["agents"]) == 1
+    assert parsed["agents"][0]["name"] == "my-task"
+
+    # Filter by non-matching agent label -- should find nothing
+    no_match = e2e.run(
+        "mng list --label team=frontend --format json",
+        comment="Filter by non-matching agent label",
+    )
+    expect(no_match).to_succeed()
+    parsed = json.loads(no_match.stdout)
+    assert len(parsed["agents"]) == 0
+
+    # Filter by host label -- should find the agent
+    host_filter = e2e.run(
+        "mng list --host-label env=staging --format json",
+        comment="Filter by host label",
+    )
+    expect(host_filter).to_succeed()
+    parsed = json.loads(host_filter.stdout)
+    assert len(parsed["agents"]) == 1
+    assert parsed["agents"][0]["name"] == "my-task"
