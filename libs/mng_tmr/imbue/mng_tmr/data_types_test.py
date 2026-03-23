@@ -62,23 +62,16 @@ def test_test_result_with_changes() -> None:
 
 
 def test_test_result_from_json_compatible_dict() -> None:
-    data = {
-        "changes": [{"kind": "FIX_IMPL", "status": "SUCCEEDED", "summary": "Fixed bug"}],
-        "errored": False,
-        "tests_passing_before": False,
-        "tests_passing_after": True,
-        "summary": "Fixed implementation bug",
-    }
+    raw_changes = [{"kind": "FIX_IMPL", "status": "SUCCEEDED", "summary": "Fixed bug"}]
     changes = tuple(
-        Change(kind=ChangeKind(c["kind"]), status=ChangeStatus(c["status"]), summary=c["summary"])
-        for c in data["changes"]
+        Change(kind=ChangeKind(c["kind"]), status=ChangeStatus(c["status"]), summary=c["summary"]) for c in raw_changes
     )
     result = TestResult(
         changes=changes,
-        errored=data["errored"],
-        tests_passing_before=data["tests_passing_before"],
-        tests_passing_after=data["tests_passing_after"],
-        summary=data["summary"],
+        errored=False,
+        tests_passing_before=False,
+        tests_passing_after=True,
+        summary="Fixed implementation bug",
     )
     assert result.changes[0].kind == ChangeKind.FIX_IMPL
     assert result.tests_passing_after is True

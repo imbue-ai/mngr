@@ -444,7 +444,8 @@ Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 
 Each agent writes its result to $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
-with an outcome enum and a markdown summary.""",
+with a structured JSON containing: changes (list of kind/status/summary), errored flag,
+tests_passing_before/after booleans, and a markdown summary.""",
     examples=(
         ("Run all tests in current directory", "mng tmr"),
         ("Run tests in a specific file", "mng tmr tests/test_foo.py"),
