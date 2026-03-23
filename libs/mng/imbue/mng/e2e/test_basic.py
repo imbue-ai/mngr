@@ -397,6 +397,10 @@ def test_destroy_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can rename an agent at any time:
+    mng rename my-task renamed-task
+    """)
     expect(
         e2e.run(
             "mng create my-task --command 'sleep 99999' --no-ensure-clean",
@@ -404,16 +408,82 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
+    # Capture the agent ID before rename so we can verify it's preserved
+    pre_list = e2e.run("mng list --format json", comment="Get agent ID before rename")
+    expect(pre_list).to_succeed()
+    pre_agents = json.loads(pre_list.stdout)["agents"]
+    assert len(pre_agents) == 1
+    original_id = pre_agents[0]["id"]
+
     rename_result = e2e.run(
         "mng rename my-task renamed-task",
-        comment="Rename agent to renamed-task",
+        comment="you can rename an agent at any time",
     )
     expect(rename_result).to_succeed()
+    expect(rename_result.stdout).to_contain("Renamed agent")
+
+    list_result = e2e.run("mng list --format json", comment="Verify rename via JSON")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert len(agents) == 1
+    assert agents[0]["name"] == "renamed-task"
+    assert agents[0]["id"] == original_id
+    assert agents[0]["state"] in ("RUNNING", "WAITING")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_rename_agent_with_mv_alias(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can also use the "mv" alias:
+    mng mv my-task renamed-task
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
+            comment="Create agent to rename via alias",
+        )
+    ).to_succeed()
+
+    rename_result = e2e.run(
+        "mng mv my-task renamed-task",
+        comment="you can also use the mv alias",
+    )
+    expect(rename_result).to_succeed()
+    expect(rename_result.stdout).to_contain("Renamed agent")
 
     list_result = e2e.run("mng list", comment="Verify only the new name appears")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("renamed-task")
     expect(list_result.stdout).not_to_contain("my-task")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_rename_agent_dry_run(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # preview what would be renamed without actually renaming:
+    mng rename my-task new-name --dry-run
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
+            comment="Create agent for dry-run rename",
+        )
+    ).to_succeed()
+
+    dry_run_result = e2e.run(
+        "mng rename my-task new-name --dry-run",
+        comment="preview what would be renamed without actually renaming",
+    )
+    expect(dry_run_result).to_succeed()
+    expect(dry_run_result.stdout).to_contain("Would rename")
+
+    # Verify the agent was NOT actually renamed
+    list_result = e2e.run("mng list", comment="Verify agent still has original name")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+    expect(list_result.stdout).not_to_contain("new-name")
 
 
 @pytest.mark.release
