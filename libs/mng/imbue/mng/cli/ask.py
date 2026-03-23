@@ -297,7 +297,9 @@ def _headless_claude_output(
         raise MngError(
             "The 'headless_claude' agent type is not available. "
             "The mng_claude plugin may not be installed.\n"
-            "Try running: uv run mng ask ..."
+            "Reinstall mng with the mng_claude plugin included, e.g.:\n"
+            "  uv tool install -e libs/mng --with 'mng-claude @ libs/mng_claude' --reinstall\n"
+            "Or use: uv run mng ask ..."
         )
 
     work_path = _create_work_dir_on_host(host)
