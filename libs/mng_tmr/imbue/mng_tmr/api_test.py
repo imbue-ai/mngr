@@ -132,13 +132,19 @@ def test_build_agent_options_remote_ready_timeout() -> None:
 
 
 def test_build_agent_options_passes_env_and_labels() -> None:
-    config = _make_config()
     env = AgentEnvironmentOptions(env_vars=(EnvVar(key="FOO", value="bar"),))
     labels = AgentLabelOptions(labels={"batch": "1"})
-    updated = config.model_construct(
-        **{**config.__dict__, "env_options": env, "label_options": labels},
+    config = _make_config()
+    config_with_env_and_labels = TmrLaunchConfig.model_construct(
+        source_dir=config.source_dir,
+        source_host=None,
+        agent_type=config.agent_type,
+        provider_name=config.provider_name,
+        env_options=env,
+        label_options=labels,
+        snapshot=None,
     )
-    opts = _build_agent_options(AgentName("test"), "branch", updated)
+    opts = _build_agent_options(AgentName("test"), "branch", config_with_env_and_labels)
     assert opts.environment.env_vars == (EnvVar(key="FOO", value="bar"),)
     assert opts.label_options.labels == {"batch": "1"}
 

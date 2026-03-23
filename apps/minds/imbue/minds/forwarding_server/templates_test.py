@@ -85,12 +85,14 @@ def test_render_create_form_has_default_values() -> None:
     assert "selene" in html
     assert "simple_mind" in html
     assert "agent_name" in html
+    assert "main" in html
 
 
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", agent_name="my-bot")
+    html = render_create_form(git_url="https://custom/repo", agent_name="my-bot", branch="feature/test")
     assert "https://custom/repo" in html
     assert "my-bot" in html
+    assert "feature/test" in html
 
 
 def test_render_login_page_shows_prompt() -> None:

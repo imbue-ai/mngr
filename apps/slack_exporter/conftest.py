@@ -23,5 +23,6 @@ def default_settings(temp_output_dir: Path) -> ExporterSettings:
         channels=(ChannelConfig(name=SlackChannelName("general")),),
         default_oldest=datetime(2024, 1, 1, tzinfo=timezone.utc),
         output_dir=temp_output_dir,
+        max_recent_threads_for_reactions=0,
         cache_ttl_seconds=0,
     )

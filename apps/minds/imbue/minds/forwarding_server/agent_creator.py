@@ -37,6 +37,7 @@ from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
 from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
 from imbue.minds.forwarding_server.vendor_mng import vendor_repos
 from imbue.minds.primitives import AgentName
+from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.mng.primitives import AgentId
 from imbue.mng_claude_mind.data_types import ClaudeMindSettings
@@ -112,6 +113,34 @@ def clone_git_repo(
     if result.returncode != 0:
         raise GitCloneError(
             "git clone failed (exit code {}):\n{}".format(
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+        )
+
+
+def checkout_branch(
+    repo_dir: Path,
+    branch: GitBranch,
+    on_output: OutputCallback | None = None,
+) -> None:
+    """Check out a specific branch in a cloned repository.
+
+    Raises GitOperationError if the checkout fails (e.g. branch does not exist).
+    """
+    logger.debug("Checking out branch {} in {}", branch, repo_dir)
+    cg = ConcurrencyGroup(name="git-checkout")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["git", "checkout", str(branch)],
+            cwd=repo_dir,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        raise GitOperationError(
+            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+                branch,
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
             )
@@ -216,7 +245,7 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
-    def start_creation(self, git_url: str, agent_name: str = "") -> AgentId:
+    def start_creation(self, git_url: str, agent_name: str = "", branch: str = "") -> AgentId:
         """Start creating an agent from a git URL in a background thread.
 
         Returns the agent ID immediately. Use get_creation_info() to poll status,
@@ -229,10 +258,11 @@ class AgentCreator(MutableModel):
             self._log_queues[str(agent_id)] = log_queue
 
         effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(git_url)
+        effective_branch = branch.strip()
 
         thread = threading.Thread(
             target=self._create_agent_background,
-            args=(agent_id, git_url, effective_name, log_queue),
+            args=(agent_id, git_url, effective_name, effective_branch, log_queue),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
         )
@@ -262,6 +292,7 @@ class AgentCreator(MutableModel):
         agent_id: AgentId,
         git_url: str,
         agent_name: str,
+        branch: str,
         log_queue: queue.Queue[str],
     ) -> None:
         """Background thread that clones a repo and creates an mng agent."""
@@ -274,6 +305,11 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Cloning {}...".format(git_url))
                 clone_git_repo(GitUrl(git_url), mind_dir, on_output=emit_log)
+
+                # Check out the specified branch before setting up parent tracking
+                if branch:
+                    log_queue.put("[minds] Checking out branch '{}'...".format(branch))
+                    checkout_branch(mind_dir, GitBranch(branch), on_output=emit_log)
 
                 log_queue.put("[minds] Setting up branch and parent tracking...")
                 setup_mind_branch_and_parent(mind_dir, AgentName(agent_name), GitUrl(git_url), on_output=emit_log)

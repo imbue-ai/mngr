@@ -1,10 +1,9 @@
 import pytest
 
-from imbue.slack_exporter.channels import extract_unread_markers
+from imbue.slack_exporter.channels import fetch_channel_info
 from imbue.slack_exporter.channels import fetch_channel_list
 from imbue.slack_exporter.channels import fetch_self_identity
 from imbue.slack_exporter.channels import fetch_user_list
-from imbue.slack_exporter.channels import fetch_user_reactions
 from imbue.slack_exporter.channels import resolve_channel_id
 from imbue.slack_exporter.errors import ChannelNotFoundError
 from imbue.slack_exporter.primitives import SlackChannelId
@@ -37,7 +36,7 @@ def test_fetch_channel_list_single_page() -> None:
     assert len(channels) == 2
     assert channels[0].channel_id == SlackChannelId("C123")
     assert channels[1].channel_id == SlackChannelId("C456")
-    assert channels[0].source == "channels"
+    assert channels[0].source == "slack"
     assert "event_id" in channels[0].model_dump()
 
 
@@ -127,7 +126,7 @@ def test_fetch_user_list_single_page() -> None:
 
     assert len(users) == 2
     assert users[0].user_id == SlackUserId("U001")
-    assert users[0].source == "users"
+    assert users[0].source == "slack"
 
 
 def test_fetch_user_list_multiple_pages() -> None:
@@ -183,73 +182,49 @@ def test_fetch_self_identity_returns_event() -> None:
 
     assert event.user_id == SlackUserId("U001")
     assert event.user_name == SlackUserName("alice")
-    assert event.source == "self_identity"
+    assert event.source == "slack"
     assert event.raw["team"] == "test"
 
 
-def test_extract_unread_markers_from_channels_with_last_read() -> None:
+def test_fetch_unread_markers_from_conversations_info() -> None:
     channels = [
-        make_channel_event("C123", "general", raw={"id": "C123", "name": "general", "last_read": "1700000000.000001"}),
-        make_channel_event("C456", "random", raw={"id": "C456", "name": "random", "last_read": "1700000000.000099"}),
+        make_channel_event("C123", "general"),
+        make_channel_event("C456", "random"),
     ]
-
-    markers = extract_unread_markers(channels)
-
-    assert len(markers) == 2
-    assert markers[0].channel_id == SlackChannelId("C123")
-    assert markers[0].last_read_ts == SlackMessageTimestamp("1700000000.000001")
-    assert markers[0].source == "unread_markers"
-    assert markers[1].last_read_ts == SlackMessageTimestamp("1700000000.000099")
-
-
-def test_extract_unread_markers_skips_channels_without_last_read() -> None:
-    channels = [
-        make_channel_event("C123", "general", raw={"id": "C123", "name": "general", "last_read": "1700000000.000001"}),
-        make_channel_event("C456", "random", raw={"id": "C456", "name": "random"}),
-    ]
-
-    markers = extract_unread_markers(channels)
-
-    assert len(markers) == 1
-    assert markers[0].channel_id == SlackChannelId("C123")
-
-
-def test_fetch_user_reactions_returns_events() -> None:
-    reaction_item = {
-        "type": "message",
-        "channel": "C123",
-        "message": {
-            "ts": "1700000000.000001",
-            "text": "hello",
-            "reactions": [{"name": "thumbsup", "users": ["U001"], "count": 1}],
-        },
-    }
-    api_caller = make_fake_api_caller({"reactions.list": [make_slack_response("items", [reaction_item])]})
-
-    events = fetch_user_reactions(api_caller, SlackUserId("U001"))
-
-    assert len(events) == 1
-    assert events[0].user_id == SlackUserId("U001")
-    assert events[0].source == "reactions"
-    assert events[0].raw["type"] == "message"
-
-
-def test_fetch_user_reactions_handles_pagination() -> None:
-    item1 = {"type": "message", "channel": "C1", "message": {"ts": "1.0", "text": "a"}}
-    item2 = {"type": "message", "channel": "C2", "message": {"ts": "2.0", "text": "b"}}
     api_caller = make_fake_api_caller(
         {
-            "reactions.list": [
-                {
-                    "ok": True,
-                    "items": [item1],
-                    "response_metadata": {"next_cursor": "page2"},
-                },
-                make_slack_response("items", [item2]),
+            "conversations.info": [
+                {"ok": True, "channel": {"id": "C123", "name": "general", "last_read": "1700000000.000001"}},
+                {"ok": True, "channel": {"id": "C456", "name": "random", "last_read": "1700000000.000099"}},
             ],
         }
     )
 
-    events = fetch_user_reactions(api_caller, SlackUserId("U001"))
+    result = fetch_channel_info(api_caller, channels)
 
-    assert len(events) == 2
+    assert len(result.unread_markers) == 2
+    assert result.unread_markers[0].channel_id == SlackChannelId("C123")
+    assert result.unread_markers[0].last_read_ts == SlackMessageTimestamp("1700000000.000001")
+    assert result.unread_markers[0].source == "slack"
+    assert result.unread_markers[1].last_read_ts == SlackMessageTimestamp("1700000000.000099")
+    assert len(result.updated_channels) == 2
+
+
+def test_fetch_channel_info_skips_channels_without_last_read() -> None:
+    channels = [
+        make_channel_event("C123", "general"),
+        make_channel_event("C456", "random"),
+    ]
+    api_caller = make_fake_api_caller(
+        {
+            "conversations.info": [
+                {"ok": True, "channel": {"id": "C123", "name": "general", "last_read": "1700000000.000001"}},
+                {"ok": True, "channel": {"id": "C456", "name": "random"}},
+            ],
+        }
+    )
+
+    result = fetch_channel_info(api_caller, channels)
+
+    assert len(result.unread_markers) == 1
+    assert result.unread_markers[0].channel_id == SlackChannelId("C123")

@@ -1,3 +1,4 @@
+import os
 from collections.abc import Sequence
 from typing import Final
 
@@ -101,6 +102,12 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
              placeholder="https://github.com/imbue-ai/simple_mind.git" required>
       <p class="help-text">The repository will be cloned and used as the agent's working directory.</p>
+    </div>
+    <div class="form-group">
+      <label for="branch">Branch</label>
+      <input type="text" id="branch" name="branch" value="{{ branch }}"
+             placeholder="main">
+      <p class="help-text">The branch to check out after cloning. Leave empty to use the repository's default branch.</p>
     </div>
     <button type="submit" class="btn">Create</button>
   </form>
@@ -238,8 +245,11 @@ _DEFAULT_GIT_URL: Final[str] = "https://github.com/imbue-ai/simple_mind.git"
 _DEFAULT_AGENT_NAME: Final[str] = "selene"
 
 
+_DEFAULT_BRANCH: Final[str] = os.getenv("MIND_BRANCH", "main")
+
+
 @pure
-def render_create_form(git_url: str = "", agent_name: str = "") -> str:
+def render_create_form(git_url: str = "", agent_name: str = "", branch: str = "") -> str:
     """Render the agent creation form page.
 
     When git_url is provided, the form field is pre-filled with that value.
@@ -247,8 +257,9 @@ def render_create_form(git_url: str = "", agent_name: str = "") -> str:
     """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
+    effective_branch = branch if branch else _DEFAULT_BRANCH
     template = _JINJA_ENV.from_string(_CREATE_FORM_TEMPLATE)
-    return template.render(git_url=effective_url, agent_name=effective_name)
+    return template.render(git_url=effective_url, agent_name=effective_name, branch=effective_branch)
 
 
 @pure

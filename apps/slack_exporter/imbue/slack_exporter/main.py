@@ -48,11 +48,18 @@ Examples:
         """,
     )
 
-    parser.add_argument(
+    channel_group = parser.add_mutually_exclusive_group()
+    channel_group.add_argument(
         "--channels",
         nargs="+",
-        default=["general"],
-        help="Channels to export (e.g. 'general' or 'general:2024-01-01' for per-channel oldest date)",
+        default=None,
+        help="Channels to export (default: all member channels). E.g. 'general' or 'general:2024-01-01'",
+    )
+    channel_group.add_argument(
+        "--recently-active-channels",
+        type=int,
+        default=None,
+        help="Export only the N channels with the most recent messages (based on historical data)",
     )
     parser.add_argument(
         "--since",
@@ -73,9 +80,15 @@ Examples:
         help="Export all channels, not just those where you are a member",
     )
     parser.add_argument(
+        "--max-recent-threads-for-reactions",
+        type=int,
+        default=50,
+        help="Number of most recent relevant threads to check for reaction changes (default: 50)",
+    )
+    parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Force re-fetch of all cached data (channels, users, self identity, reactions)",
+        help="Force re-fetch of all cached data (channels, users, self identity)",
     )
     parser.add_argument(
         "-v",
@@ -91,15 +104,24 @@ Examples:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    channel_configs = tuple(_parse_channel_spec(spec) for spec in args.channels)
+    if args.channels:
+        # Support space-separated channel names within a single argument
+        all_specs: list[str] = []
+        for arg in args.channels:
+            all_specs.extend(arg.split())
+        channel_configs: tuple[ChannelConfig, ...] | None = tuple(_parse_channel_spec(spec) for spec in all_specs)
+    else:
+        channel_configs = None
     default_oldest = _parse_iso_datetime_as_utc(args.since)
     cache_ttl_seconds = int(os.environ.get("SLACK_EXPORTER_CACHE_TTL_SECONDS", "600"))
 
     settings = ExporterSettings(
         channels=channel_configs,
+        recently_active_channels=args.recently_active_channels,
         default_oldest=default_oldest,
         output_dir=args.output_dir,
         members_only=not args.all_channels,
+        max_recent_threads_for_reactions=args.max_recent_threads_for_reactions,
         refresh=args.refresh,
         cache_ttl_seconds=cache_ttl_seconds,
     )

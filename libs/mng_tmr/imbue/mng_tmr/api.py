@@ -15,7 +15,6 @@ from loguru import logger
 from markdown_it import MarkdownIt
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.model_update import to_update
@@ -66,6 +65,7 @@ _TERMINAL_STATES = frozenset(
 
 _OUTCOME_COLORS: dict[TestOutcome, str] = {
     TestOutcome.PENDING: "rgb(3, 169, 244)",
+    TestOutcome.IMPROVED_TEST: "rgb(0, 200, 83)",
     TestOutcome.FIX_TEST_SUCCEEDED: "rgb(33, 150, 243)",
     TestOutcome.FIX_IMPL_SUCCEEDED: "rgb(33, 150, 243)",
     TestOutcome.FIX_TEST_FAILED: "rgb(244, 67, 54)",
@@ -79,6 +79,7 @@ _OUTCOME_COLORS: dict[TestOutcome, str] = {
 
 _OUTCOME_GROUP_ORDER: list[TestOutcome] = [
     TestOutcome.PENDING,
+    TestOutcome.IMPROVED_TEST,
     TestOutcome.FIX_IMPL_SUCCEEDED,
     TestOutcome.FIX_TEST_SUCCEEDED,
     TestOutcome.FIX_IMPL_FAILED,
@@ -152,9 +153,21 @@ def _build_agent_prompt(
 
     prompt = f"""Run the test with: {run_cmd}
 
-If the test succeeds, there is nothing more to do (outcome = RUN_SUCCEEDED).
+If the test succeeds, inspect whether it can be improved: are the assertions
+complete enough? Are there interesting edge cases worth covering? If you find
+improvements, make them and verify the test still passes. The outcome in this
+case is IMPROVED_TEST. If no improvements are needed, the outcome is
+RUN_SUCCEEDED.
 
 If the test fails:
+
+Read the output carefully for any debugging instructions. There should be
+instructions for how to keep the test environment alive to debug it. While the
+test environment is alive, debug agents "interactively" by using commands like
+`mng capture` and `mng message` to get a good idea of what's happening inside
+agents.
+
+Then:
 
 - If you are certain that the test code itself has issues (including test fixture
   code), fix the test code itself. Depending on whether the fix was successful,
@@ -172,8 +185,8 @@ result to a JSON file at $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json,
 with content like:
 {{"outcome": "RUN_SUCCEEDED", "summary": "Test passed on first run."}}
 
-Valid outcome values: RUN_SUCCEEDED, FIX_TEST_SUCCEEDED, FIX_TEST_FAILED,
-FIX_IMPL_SUCCEEDED, FIX_IMPL_FAILED, FIX_UNCERTAIN.
+Valid outcome values: RUN_SUCCEEDED, IMPROVED_TEST, FIX_TEST_SUCCEEDED,
+FIX_TEST_FAILED, FIX_IMPL_SUCCEEDED, FIX_IMPL_FAILED, FIX_UNCERTAIN.
 """
     if prompt_suffix:
         prompt += f"\n{prompt_suffix}\n"
@@ -253,7 +266,9 @@ def _create_tmr_agent(
     source_location = HostLocation(host=config.source_host, path=config.source_dir)
     snapshot = config.snapshot
     build = NewHostBuildOptions(snapshot=snapshot) if snapshot is not None else NewHostBuildOptions()
-    target_host = NewHostOptions(provider=config.provider_name, name=HostName(str(agent_name)), build=build)
+    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
+    host_name = None if is_local else HostName(str(agent_name))
+    target_host = NewHostOptions(provider=config.provider_name, name=host_name, build=build)
 
     result = api_create(
         source_location=source_location,
@@ -453,7 +468,7 @@ def poll_until_all_done(
                 is_streaming=False,
                 error_behavior=ErrorBehavior.CONTINUE,
             )
-        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+        except Exception as exc:
             logger.warning("Polling failed (will retry next cycle): {}", exc)
             time.sleep(poll_interval_seconds)
             continue
@@ -695,9 +710,13 @@ def gather_results(
         missing_detail_summary="Agent details not found after polling",
     )
 
-    # Pull branches for successful fixes
+    # Pull branches for successful fixes and improvements
     for result in results:
-        if result.outcome in (TestOutcome.FIX_TEST_SUCCEEDED, TestOutcome.FIX_IMPL_SUCCEEDED):
+        if result.outcome in (
+            TestOutcome.FIX_TEST_SUCCEEDED,
+            TestOutcome.FIX_IMPL_SUCCEEDED,
+            TestOutcome.IMPROVED_TEST,
+        ):
             agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
             detail = final_details.get(agent_id_str)
             if detail is not None:
@@ -908,7 +927,7 @@ def wait_for_integrator(
                 is_streaming=False,
                 error_behavior=ErrorBehavior.CONTINUE,
             )
-        except (MngError, HostError, ConcurrencyGroupError, OSError) as exc:
+        except Exception as exc:
             logger.warning("Integrator polling failed (will retry next cycle): {}", exc)
             time.sleep(poll_interval_seconds)
             continue

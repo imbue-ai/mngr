@@ -3,15 +3,20 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import GitOperationError
 from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
+from imbue.minds.forwarding_server.agent_creator import checkout_branch
 from imbue.minds.forwarding_server.agent_creator import clone_git_repo
 from imbue.minds.forwarding_server.agent_creator import extract_repo_name
 from imbue.minds.forwarding_server.agent_creator import load_creation_settings
 from imbue.minds.forwarding_server.agent_creator import make_log_callback
+from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
+from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
 from imbue.mng.primitives import AgentId
 
@@ -93,6 +98,58 @@ def test_clone_git_repo_raises_on_bad_url(tmp_path: Path) -> None:
     dest = tmp_path / "dest"
     with pytest.raises(GitCloneError, match="git clone failed"):
         clone_git_repo(GitUrl("/nonexistent/path"), dest)
+
+
+# -- checkout_branch tests --
+
+
+def test_checkout_branch_switches_to_existing_branch(tmp_path: Path) -> None:
+    """Verify checkout_branch can switch to an existing branch in a cloned repo."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "hello.txt").write_text("hello")
+    init_and_commit_git_repo(source, tmp_path)
+
+    # Create a branch in the source repo with a unique file
+    cg_create = ConcurrencyGroup(name="test-branch-create")
+    with cg_create:
+        cg_create.run_process_to_completion(command=["git", "checkout", "-b", "test/feature-branch-84923"], cwd=source)
+    (source / "feature.txt").write_text("feature")
+    add_and_commit_git_repo(source, tmp_path, message="add feature")
+
+    # Switch back to the default branch so that clone doesn't land on the feature branch
+    cg_switch = ConcurrencyGroup(name="test-branch-switch")
+    with cg_switch:
+        cg_switch.run_process_to_completion(
+            command=["git", "checkout", "-"],
+            cwd=source,
+        )
+
+    # Clone and checkout the branch
+    dest = tmp_path / "dest"
+    clone_git_repo(GitUrl(str(source)), dest)
+
+    # The feature file should NOT be present on the default branch
+    assert not (dest / "feature.txt").exists()
+
+    checkout_branch(dest, GitBranch("test/feature-branch-84923"))
+
+    # After checkout, the feature file should be present
+    assert (dest / "feature.txt").read_text() == "feature"
+
+
+def test_checkout_branch_raises_on_nonexistent_branch(tmp_path: Path) -> None:
+    """Verify checkout_branch raises GitOperationError for a missing branch."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "hello.txt").write_text("hello")
+    init_and_commit_git_repo(source, tmp_path)
+
+    dest = tmp_path / "dest"
+    clone_git_repo(GitUrl(str(source)), dest)
+
+    with pytest.raises(GitOperationError, match="git checkout failed"):
+        checkout_branch(dest, GitBranch("nonexistent/branch-72391"))
 
 
 # -- AgentCreator tests --

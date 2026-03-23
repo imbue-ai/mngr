@@ -3189,12 +3189,14 @@ name = "slack-exporter"
 version = "0.1.0"
 source = { editable = "apps/slack_exporter" }
 dependencies = [
+    { name = "concurrency-group" },
     { name = "imbue-common" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "pydantic", specifier = ">=2.5.0" },
 ]

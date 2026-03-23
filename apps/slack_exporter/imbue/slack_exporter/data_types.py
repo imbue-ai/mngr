@@ -42,9 +42,13 @@ class ChannelConfig(FrozenModel):
 class ExporterSettings(FrozenModel):
     """Top-level settings for the slack exporter."""
 
-    channels: tuple[ChannelConfig, ...] = Field(
-        default=(ChannelConfig(name=SlackChannelName("general")),),
-        description="Channels to export",
+    channels: tuple[ChannelConfig, ...] | None = Field(
+        default=None,
+        description="Channels to export. When None, all channels from the fetched channel list are exported.",
+    )
+    recently_active_channels: int | None = Field(
+        default=None,
+        description="If set, restrict to the N channels with the most recent messages (from historical data).",
     )
     default_oldest: datetime = Field(
         description="Default earliest date to fetch messages from",
@@ -55,15 +59,19 @@ class ExporterSettings(FrozenModel):
     )
     refresh: bool = Field(
         default=False,
-        description="Force re-fetch of all cached data (channels, users, self identity, reactions)",
+        description="Force re-fetch of all cached data (channels, users, self identity)",
     )
     members_only: bool = Field(
         default=True,
         description="Only export channels where the authenticated user is a member",
     )
+    max_recent_threads_for_reactions: int = Field(
+        default=50,
+        description="Number of most recent relevant threads to check for reaction changes after export",
+    )
     cache_ttl_seconds: int = Field(
         default=600,
-        description="How long to cache channel/user/identity/reaction data before re-fetching (seconds)",
+        description="How long to cache channel/user/identity data before re-fetching (seconds)",
     )
 
 
@@ -118,11 +126,29 @@ class UnreadMarkerEvent(EventEnvelope):
     raw: dict[str, Any] = Field(description="Raw unread marker data")
 
 
-class ReactionItemEvent(EventEnvelope):
-    """An event envelope wrapping an item the authenticated user has reacted to."""
+class ReactionEvent(EventEnvelope):
+    """An event envelope wrapping the reaction state of a Slack message or reply."""
 
-    user_id: SlackUserId = Field(description="Slack user ID of the authenticated user")
-    raw: dict[str, Any] = Field(description="Raw Slack API reactions.list item payload")
+    channel_id: SlackChannelId = Field(description="Slack channel ID")
+    channel_name: SlackChannelName = Field(description="Channel name at time of extraction")
+    message_ts: SlackMessageTimestamp = Field(description="Timestamp of the message with reactions")
+    thread_ts: SlackMessageTimestamp | None = Field(
+        default=None,
+        description="Parent thread ts if this is a reply, None for top-level messages",
+    )
+    raw: dict[str, Any] = Field(description="Contains the reactions list from the message")
+
+
+class RelevantThreadEvent(EventEnvelope):
+    """An event envelope recording that a thread is relevant to the authenticated user."""
+
+    channel_id: SlackChannelId = Field(description="Slack channel ID")
+    channel_name: SlackChannelName = Field(description="Channel name at time of detection")
+    thread_ts: SlackMessageTimestamp = Field(description="Thread root message ts")
+    relevance_reasons: tuple[str, ...] = Field(
+        description="Why this thread is relevant: 'mentioned', 'participated'",
+    )
+    raw: dict[str, Any] = Field(description="Relevance summary data")
 
 
 class ChannelExportState(FrozenModel):
