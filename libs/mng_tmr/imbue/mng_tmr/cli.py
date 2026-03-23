@@ -32,7 +32,6 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
-from imbue.mng_tmr.api import display_category_of
 from imbue.mng_tmr.api import gather_results
 from imbue.mng_tmr.api import generate_html_report
 from imbue.mng_tmr.api import get_base_commit
@@ -179,26 +178,10 @@ def _run_integrator_phase(
     if integrator_result is None:
         integrator_result = IntegratorResult(
             branch_name=integrator_branch,
-            summary="Integrator timed out or could not be reached",
+            summary_markdown="Integrator timed out or could not be reached",
         )
 
     return integrator_result
-
-
-def _emit_summary(results: list[TestMapReduceResult], output_opts: OutputOptions) -> None:
-    """Print per-test outcome summary in human mode."""
-    if output_opts.output_format != OutputFormat.HUMAN:
-        return
-    for r in results:
-        branch_info = f" -> {r.branch_name}" if r.branch_name else ""
-        category = display_category_of(r).value
-        write_human_line(
-            "  {} [{}] {}{}",
-            category,
-            r.agent_name,
-            r.summary,
-            branch_info,
-        )
 
 
 @click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
@@ -408,7 +391,6 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     integrator_result = _run_integrator_phase(results, integrator_config, mng_ctx, opts, base_commit=base_commit)
     generate_html_report(results, html_path, integrator=integrator_result)
     _emit_report_path(html_path, output_opts)
-    _emit_summary(results, output_opts)
 
 
 CommandHelpMetadata(
@@ -444,7 +426,8 @@ Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 
 Each agent writes its result to $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
-with an outcome enum and a markdown summary.""",
+with a structured JSON containing: changes (list of kind/status/summary), errored flag,
+tests_passing_before/after booleans, and a markdown summary.""",
     examples=(
         ("Run all tests in current directory", "mng tmr"),
         ("Run tests in a specific file", "mng tmr tests/test_foo.py"),

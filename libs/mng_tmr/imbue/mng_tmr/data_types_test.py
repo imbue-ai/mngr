@@ -32,55 +32,51 @@ def test_display_category_values() -> None:
 
 
 def test_change_construction() -> None:
-    change = Change(kind=ChangeKind.FIX_TEST, status=ChangeStatus.SUCCEEDED, summary="Fixed assertion")
-    assert change.kind == ChangeKind.FIX_TEST
+    change = Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed assertion")
     assert change.status == ChangeStatus.SUCCEEDED
-    assert change.summary == "Fixed assertion"
+    assert change.summary_markdown == "Fixed assertion"
 
 
 def test_test_result_empty() -> None:
-    result = TestResult(tests_passing_before=True, tests_passing_after=True, summary="All good")
-    assert result.changes == ()
+    result = TestResult(tests_passing_before=True, tests_passing_after=True, summary_markdown="All good")
+    assert result.changes == {}
     assert result.errored is False
     assert result.tests_passing_before is True
     assert result.tests_passing_after is True
 
 
 def test_test_result_with_changes() -> None:
-    changes = (
-        Change(kind=ChangeKind.FIX_TEST, status=ChangeStatus.SUCCEEDED, summary="Fixed"),
-        Change(kind=ChangeKind.IMPROVE_TEST, status=ChangeStatus.BLOCKED, summary="Needs work"),
-    )
+    changes = {
+        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="Needs work"),
+    }
     result = TestResult(
         changes=changes,
         tests_passing_before=False,
         tests_passing_after=True,
-        summary="Fixed test",
+        summary_markdown="Fixed test",
     )
     assert len(result.changes) == 2
-    assert result.changes[0].kind == ChangeKind.FIX_TEST
+    assert ChangeKind.FIX_TEST in result.changes
 
 
 def test_test_result_from_json_compatible_dict() -> None:
-    data = {
-        "changes": [{"kind": "FIX_IMPL", "status": "SUCCEEDED", "summary": "Fixed bug"}],
-        "errored": False,
-        "tests_passing_before": False,
-        "tests_passing_after": True,
-        "summary": "Fixed implementation bug",
+    raw_changes = {"FIX_IMPL": {"status": "SUCCEEDED", "summary_markdown": "Fixed bug"}}
+    changes = {
+        ChangeKind(kind_str): Change(
+            status=ChangeStatus(entry["status"]),
+            summary_markdown=entry["summary_markdown"],
+        )
+        for kind_str, entry in raw_changes.items()
     }
-    changes = tuple(
-        Change(kind=ChangeKind(c["kind"]), status=ChangeStatus(c["status"]), summary=c["summary"])
-        for c in data["changes"]
-    )
     result = TestResult(
         changes=changes,
-        errored=data["errored"],
-        tests_passing_before=data["tests_passing_before"],
-        tests_passing_after=data["tests_passing_after"],
-        summary=data["summary"],
+        errored=False,
+        tests_passing_before=False,
+        tests_passing_after=True,
+        summary_markdown="Fixed implementation bug",
     )
-    assert result.changes[0].kind == ChangeKind.FIX_IMPL
+    assert ChangeKind.FIX_IMPL in result.changes
     assert result.tests_passing_after is True
 
 
@@ -98,10 +94,10 @@ def test_test_map_reduce_result_with_branch() -> None:
     result = TestMapReduceResult(
         test_node_id="tests/test_foo.py::test_baz",
         agent_name=AgentName("tmr-test-baz"),
-        changes=(Change(kind=ChangeKind.FIX_IMPL, status=ChangeStatus.SUCCEEDED, summary="Fixed null check"),),
+        changes={ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed null check")},
         tests_passing_before=False,
         tests_passing_after=True,
-        summary="Fixed missing null check",
+        summary_markdown="Fixed missing null check",
         branch_name="mng-tmr/test-baz",
     )
     assert result.branch_name == "mng-tmr/test-baz"
@@ -114,7 +110,7 @@ def test_test_map_reduce_result_without_branch() -> None:
         agent_name=AgentName("tmr-test-ok"),
         tests_passing_before=True,
         tests_passing_after=True,
-        summary="Test passed on first run",
+        summary_markdown="Test passed on first run",
     )
     assert result.branch_name is None
-    assert result.changes == ()
+    assert result.changes == {}

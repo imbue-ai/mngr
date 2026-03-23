@@ -100,7 +100,7 @@ def should_pull_changes(result: TestMapReduceResult) -> bool:
     """
     if result.errored:
         return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes):
+    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values()):
         return False
     if result.tests_passing_before is True and result.tests_passing_after is not True:
         return False
@@ -113,7 +113,7 @@ def display_category_of(result: TestMapReduceResult) -> DisplayCategory:
         return DisplayCategory.ERRORED
     if result.tests_passing_before is None and result.tests_passing_after is None and not result.changes:
         return DisplayCategory.PENDING
-    has_succeeded = any(c.status == ChangeStatus.SUCCEEDED for c in result.changes)
+    has_succeeded = any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values())
     if has_succeeded:
         if result.tests_passing_before is True and result.tests_passing_after is not True:
             return DisplayCategory.REGRESSED
@@ -178,62 +178,69 @@ def _build_agent_prompt(
 
     prompt = f"""Run the test with: {run_cmd}
 
-If the test succeeds, think about how the test can be improved:
+# If the test fails
 
-- We want the command run in the tests to match the demo script as much as possible.
-  Remember that this is an E2E test, so we want to be as realistic as possible.
-  We can afford to run real Claude Code sessions and even real Modal instances.
+You can record multiple kinds of changes -- they are not mutually exclusive (one
+entry per kind, not per individual edit):
 
-- We want the assertions to be complete and reflect things that can be easily
-  tested in a real-world situation - note that the check is usually not part of
-  the demo script, so you need to come up with the check yourself. For example,
-  if a command is supposed to have an effect on Git, use Git commands to check
-  the outcome. If a command is supposed to create a file, check the actual file.
-
-- We also want the test to go a little bit beyond what the demo script literally
-  says. Sometimes a simple command will work a little bit differently depending
-  on the exact circumstances. In those cases, err on the side of having more tests
-  rather than fewer. You can attach the same demo block to multiple tests.
-
-If you make improvements, record each as a change with kind "IMPROVE_TEST". If
-you identify an improvement that needs a larger-scale intervention, use status
-"BLOCKED". If no improvements are needed, leave the changes list empty.
-
-If the test fails:
-
-Read the output carefully for any debugging instructions. There should be
-instructions for how to keep the test environment alive to debug it. While the
-test environment is alive, debug agents "interactively" by using commands like
-`mng capture` and `mng message` to get a good idea of what's happening inside
-agents.
-
-Then try to fix it. You can make multiple kinds of changes -- they are not
-mutually exclusive:
-
-- Fix the test code (including fixtures): record a change with kind "FIX_TEST".
-- Fix the program being tested: record a change with kind "FIX_IMPL".
-- Fix the tutorial/demo block: record a change with kind "FIX_TUTORIAL".
+- "FIX_TEST": fix the test code (including fixtures).
+- "FIX_IMPL": fix the program being tested.
 
 Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
 but could not complete it, or "BLOCKED" if the issue needs larger intervention
 beyond this task. If you cannot determine what is wrong, report no changes.
 
+# If the test succeeds - or after you fixed a failing test
+
+Consider whether the test can be improved:
+
+- Are the assertions good enough? Try to test by observing the actual effect of
+  commands, like how a human would do when debugging interactively, by looking at
+  e.g. files, git status, and so on. Avoid having too many specific assertions,
+  because this can make the tests very brittle.
+
+- Are there interesting edge cases worth covering?
+
+If you make improvements, record a change under the key "IMPROVE_TEST". If you
+identify an improvement that needs a larger-scale intervention, use status
+"BLOCKED". If no improvements are needed, leave the changes object empty.
+
+# Inspecting tutorial blocks
+
+Each of those tests are also associated with a tutorial block in
+libs/mng/tutorials/mega_tutorial.sh; we divide the file into blocks by splitting
+around empty lines. You'll find a reproduction of a tutorial block using the API
+e2e.write_tutorial_block. When modifying the test, you should normally keep the
+tutorial block unchanged: they should match exactly with the block in the tutorial
+file (modulo leading whitespaces).
+
+However, try to think if tutorial itself could be wrong or outdated. This should be
+a rare case - often the tutorial block is a bit too concise to be run as-is, and
+that may be intentional.
+
+If you do think that the tutorial block is wrong or outdated, update both the
+tutorial block in the mega_tutorial.sh file and the test code itself, and record
+a change under the key "FIX_TUTORIAL".
+
+# Writing the result
+
 In all cases, write the result to a JSON file at
 $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with this schema:
 
-{{"changes": [{{"kind": "FIX_TEST", "status": "SUCCEEDED", "summary": "Fixed assertion"}}],
+{{"changes": {{"FIX_TEST": {{"status": "SUCCEEDED", "summary_markdown": "Fixed assertion"}}}},
  "errored": false,
  "tests_passing_before": false,
  "tests_passing_after": true,
- "summary": "Fixed test assertion and verified it passes."}}
+ "summary_markdown": "Fixed test assertion and verified it passes."}}
 
 Fields:
-- changes: list of attempted changes, each with kind (IMPROVE_TEST, FIX_TEST,
-  FIX_IMPL, FIX_TUTORIAL), status (SUCCEEDED, FAILED, BLOCKED), and summary.
+- changes: object keyed by change kind (IMPROVE_TEST, FIX_TEST, FIX_IMPL,
+  FIX_TUTORIAL). Each value has status (SUCCEEDED, FAILED, BLOCKED) and
+  summary_markdown. One entry per kind -- do not duplicate kinds.
 - errored: true only for infrastructure errors that prevented you from working.
 - tests_passing_before: were tests passing before you made any changes?
 - tests_passing_after: are tests passing now, after all your changes?
-- summary: overall markdown summary of what happened.
+- summary_markdown: overall markdown summary of what happened.
 """
     if prompt_suffix:
         prompt += f"\n{prompt_suffix}\n"
@@ -583,32 +590,32 @@ def read_agent_result(
     try:
         raw = host.read_text_file(result_path)
         data = json.loads(raw)
-        changes = tuple(
-            Change(
-                kind=ChangeKind(c["kind"]),
-                status=ChangeStatus(c["status"]),
-                summary=c.get("summary", ""),
+        raw_changes = data.get("changes", {})
+        changes: dict[ChangeKind, Change] = {
+            ChangeKind(kind_str): Change(
+                status=ChangeStatus(entry["status"]),
+                summary_markdown=entry.get("summary_markdown", entry.get("summary", "")),
             )
-            for c in data.get("changes", ())
-        )
+            for kind_str, entry in raw_changes.items()
+        }
         return TestResult(
             changes=changes,
             errored=data.get("errored", False),
             tests_passing_before=data.get("tests_passing_before"),
             tests_passing_after=data.get("tests_passing_after"),
-            summary=data.get("summary", ""),
+            summary_markdown=data.get("summary_markdown", ""),
         )
     except HostError as exc:
         logger.warning("Lost connection to agent {} while fetching result file: {}", agent_detail.name, exc)
         return TestResult(
             errored=True,
-            summary=f"Connection lost while fetching result file from agent host: {exc}",
+            summary_markdown=f"Connection lost while fetching result file from agent host: {exc}",
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
         return TestResult(
             errored=True,
-            summary=f"Failed to read agent result: {exc}",
+            summary_markdown=f"Failed to read agent result: {exc}",
         )
 
 
@@ -649,13 +656,13 @@ def read_integrator_result(
             merged=tuple(data.get("merged", ())),
             failed=tuple(data.get("failed", ())),
             branch_name=branch_name,
-            summary=data.get("summary", ""),
+            summary_markdown=data.get("summary_markdown", data.get("summary", "")),
         )
     except (HostError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read integrator result: {}", exc)
         return IntegratorResult(
             branch_name=branch_name,
-            summary=f"Failed to read integrator result: {exc}",
+            summary_markdown=f"Failed to read integrator result: {exc}",
         )
 
 
@@ -760,7 +767,7 @@ def _collect_agent_results(
                     test_node_id=agent_info.test_node_id,
                     agent_name=agent_info.agent_name,
                     errored=True,
-                    summary="Agent was stopped because the timeout was reached.",
+                    summary_markdown="Agent was stopped because the timeout was reached.",
                 )
             )
             continue
@@ -773,7 +780,7 @@ def _collect_agent_results(
                     test_node_id=agent_info.test_node_id,
                     agent_name=agent_info.agent_name,
                     errored=missing_detail_errored,
-                    summary=missing_detail_summary,
+                    summary_markdown=missing_detail_summary,
                 )
             )
             continue
@@ -787,7 +794,7 @@ def _collect_agent_results(
                 errored=test_result.errored,
                 tests_passing_before=test_result.tests_passing_before,
                 tests_passing_after=test_result.tests_passing_after,
-                summary=test_result.summary,
+                summary_markdown=test_result.summary_markdown,
                 branch_name=detail.initial_branch,
             )
         )
@@ -806,9 +813,10 @@ def gather_results(
 ) -> list[TestMapReduceResult]:
     """Gather results from all finished agents, pulling branches where appropriate.
 
-    If base_commit is provided, a local branch is created from that commit before
-    pulling each agent's changes. This is needed for remote agents whose branches
-    don't exist locally.
+    If base_commit is provided (remote providers), a local branch is created from
+    that commit before pulling each agent's changes. For local providers,
+    base_commit should be None and branches are not pulled (they already exist
+    as git worktrees).
     """
     results = _collect_agent_results(
         agents=agents,
@@ -819,13 +827,15 @@ def gather_results(
         missing_detail_summary="Agent details not found after polling",
     )
 
-    # Pull branches for agents whose changes should be kept
-    for result in results:
-        if should_pull_changes(result):
-            agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
-            detail = final_details.get(agent_id_str)
-            if detail is not None:
-                pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
+    # Pull branches from remote agents whose changes should be kept.
+    # For local agents (base_commit is None), branches already exist as worktrees.
+    if base_commit is not None:
+        for result in results:
+            if should_pull_changes(result):
+                agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
+                detail = final_details.get(agent_id_str)
+                if detail is not None:
+                    pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
 
     return results
 
@@ -923,8 +933,8 @@ def _build_integrator_section(integrator: IntegratorResult | None) -> str:
         for b in integrator.failed:
             section += f"    <li><code>{html.escape(b)}</code></li>\n"
         section += "  </ul>\n"
-    if integrator.summary:
-        section += f'  <div class="md">{_render_markdown(integrator.summary)}</div>\n'
+    if integrator.summary_markdown:
+        section += f'  <div class="md">{_render_markdown(integrator.summary_markdown)}</div>\n'
     return section
 
 
@@ -952,8 +962,12 @@ def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
         sections += "</tr>\n    </thead>\n    <tbody>\n"
         for r in group:
             branch_cell = r.branch_name if r.branch_name else "-"
-            summary_html = _render_markdown(r.summary)
-            changes_cell = ", ".join(f"{c.kind.value}/{c.status.value}" for c in r.changes) if r.changes else "-"
+            summary_html = _render_markdown(r.summary_markdown)
+            changes_cell = (
+                ", ".join(f"{kind.value}/{change.status.value}" for kind, change in r.changes.items())
+                if r.changes
+                else "-"
+            )
             sections += f"""      <tr>
         <td>{html.escape(r.test_node_id)}</td>
         <td>{html.escape(changes_cell)}</td>
@@ -1008,11 +1022,11 @@ def launch_integrator_agent(
 For each branch, run `git merge <branch>` (resolve conflicts if needed).
 After merging all branches, verify that the code still compiles/passes basic checks.
 Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
-{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary": "Merged 2 of 3 branches."}}
+{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary_markdown": "Merged 2 of 3 branches."}}
 
 - merged: list of branch names that were successfully merged
 - failed: list of branch names that could not be merged
-- summary: overall markdown summary
+- summary_markdown: overall markdown summary
 """
 
     logger.info("Launching integrator agent '{}' to merge {} branches", agent_name, len(fix_branches))
