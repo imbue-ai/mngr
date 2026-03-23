@@ -239,3 +239,20 @@ def test_show_command_summary_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "commands"
+
+
+def test_ask_missing_headless_claude_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """When the headless_claude plugin is missing, shows an actionable error."""
+    from imbue.mng.agents.base_agent import BaseAgent
+
+    monkeypatch.setattr(ask_module, "get_agent_class", lambda _agent_type: BaseAgent)
+
+    result = cli_runner.invoke(ask, ["test"], obj=plugin_manager, catch_exceptions=True)
+
+    assert result.exit_code != 0
+    assert "headless_claude" in result.output
+    assert "not available" in result.output
