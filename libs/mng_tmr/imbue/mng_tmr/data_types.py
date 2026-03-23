@@ -36,9 +36,8 @@ class ChangeStatus(str, Enum):
 class Change(FrozenModel):
     """One change the agent attempted."""
 
-    kind: ChangeKind = Field(description="What kind of change was attempted")
     status: ChangeStatus = Field(description="Whether the change succeeded, failed, or is blocked")
-    summary: str = Field(description="Short description of what was done or attempted")
+    summary_markdown: str = Field(description="Markdown description of what was done or attempted")
 
 
 class DisplayCategory(str, Enum):
@@ -55,7 +54,9 @@ class DisplayCategory(str, Enum):
 class TestResult(FrozenModel):
     """Result reported by a test agent, read from result.json."""
 
-    changes: tuple[Change, ...] = Field(default=(), description="Changes the agent attempted")
+    changes: dict[ChangeKind, Change] = Field(
+        default_factory=dict, description="Changes the agent attempted, keyed by kind"
+    )
     errored: bool = Field(
         default=False, description="Whether an infrastructure error prevented the agent from working"
     )
@@ -65,7 +66,7 @@ class TestResult(FrozenModel):
     tests_passing_after: bool | None = Field(
         default=None, description="Are tests passing after all changes? None if unknown."
     )
-    summary: str = Field(default="", description="Short human-readable summary of what happened")
+    summary_markdown: str = Field(default="", description="Overall markdown summary of what happened")
 
 
 class TestAgentInfo(FrozenModel):
@@ -103,7 +104,7 @@ class IntegratorResult(FrozenModel):
     merged: tuple[str, ...] = Field(default=(), description="Branch names successfully merged")
     failed: tuple[str, ...] = Field(default=(), description="Branch names that could not be merged")
     branch_name: str | None = Field(default=None, description="Integrated branch name, if any merges succeeded")
-    summary: str = Field(default="", description="Summary from the integrator agent")
+    summary_markdown: str = Field(default="", description="Markdown summary from the integrator agent")
 
 
 class TestMapReduceResult(FrozenModel):
@@ -111,11 +112,13 @@ class TestMapReduceResult(FrozenModel):
 
     test_node_id: str = Field(description="The pytest node ID for the test")
     agent_name: AgentName = Field(description="Name of the agent that ran this test")
-    changes: tuple[Change, ...] = Field(default=(), description="Changes the agent attempted")
+    changes: dict[ChangeKind, Change] = Field(
+        default_factory=dict, description="Changes the agent attempted, keyed by kind"
+    )
     errored: bool = Field(default=False, description="Whether an error prevented the agent from working")
     tests_passing_before: bool | None = Field(default=None, description="Were tests passing before changes?")
     tests_passing_after: bool | None = Field(default=None, description="Are tests passing after changes?")
-    summary: str = Field(default="", description="Short summary from the agent")
+    summary_markdown: str = Field(default="", description="Markdown summary from the agent")
     branch_name: str | None = Field(
         default=None,
         description="Git branch name if code changes were pulled, or None",

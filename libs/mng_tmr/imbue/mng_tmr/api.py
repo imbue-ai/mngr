@@ -100,7 +100,7 @@ def should_pull_changes(result: TestMapReduceResult) -> bool:
     """
     if result.errored:
         return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes):
+    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values()):
         return False
     if result.tests_passing_before is True and result.tests_passing_after is not True:
         return False
@@ -113,7 +113,7 @@ def display_category_of(result: TestMapReduceResult) -> DisplayCategory:
         return DisplayCategory.ERRORED
     if result.tests_passing_before is None and result.tests_passing_after is None and not result.changes:
         return DisplayCategory.PENDING
-    has_succeeded = any(c.status == ChangeStatus.SUCCEEDED for c in result.changes)
+    has_succeeded = any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values())
     if has_succeeded:
         if result.tests_passing_before is True and result.tests_passing_after is not True:
             return DisplayCategory.REGRESSED
@@ -181,16 +181,16 @@ def _build_agent_prompt(
 If the test succeeds, consider whether the test can be improved: are the
 assertions thorough enough? Are there interesting edge cases worth covering?
 
-If you make improvements, record each as a change with kind "IMPROVE_TEST". If
-you identify an improvement that needs a larger-scale intervention, use status
-"BLOCKED". If no improvements are needed, leave the changes list empty.
+If you make improvements, record a change under the key "IMPROVE_TEST". If you
+identify an improvement that needs a larger-scale intervention, use status
+"BLOCKED". If no improvements are needed, leave the changes object empty.
 
-If the test fails, try to fix it. You can make multiple kinds of changes -- they
-are not mutually exclusive:
+If the test fails, try to fix it. You can record multiple kinds of changes --
+they are not mutually exclusive (one entry per kind, not per individual edit):
 
-- Fix the test code (including fixtures): record a change with kind "FIX_TEST".
-- Fix the program being tested: record a change with kind "FIX_IMPL".
-- Fix related documentation or configuration: record a change with kind "FIX_TUTORIAL".
+- "FIX_TEST": fix the test code (including fixtures).
+- "FIX_IMPL": fix the program being tested.
+- "FIX_TUTORIAL": fix related documentation or configuration.
 
 Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
 but could not complete it, or "BLOCKED" if the issue needs larger intervention
@@ -199,19 +199,20 @@ beyond this task. If you cannot determine what is wrong, report no changes.
 In all cases, write the result to a JSON file at
 $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with this schema:
 
-{{"changes": [{{"kind": "FIX_TEST", "status": "SUCCEEDED", "summary": "Fixed assertion"}}],
+{{"changes": {{"FIX_TEST": {{"status": "SUCCEEDED", "summary_markdown": "Fixed assertion"}}}},
  "errored": false,
  "tests_passing_before": false,
  "tests_passing_after": true,
- "summary": "Fixed test assertion and verified it passes."}}
+ "summary_markdown": "Fixed test assertion and verified it passes."}}
 
 Fields:
-- changes: list of attempted changes, each with kind (IMPROVE_TEST, FIX_TEST,
-  FIX_IMPL, FIX_TUTORIAL), status (SUCCEEDED, FAILED, BLOCKED), and summary.
+- changes: object keyed by change kind (IMPROVE_TEST, FIX_TEST, FIX_IMPL,
+  FIX_TUTORIAL). Each value has status (SUCCEEDED, FAILED, BLOCKED) and
+  summary_markdown. One entry per kind -- do not duplicate kinds.
 - errored: true only for infrastructure errors that prevented you from working.
 - tests_passing_before: were tests passing before you made any changes?
 - tests_passing_after: are tests passing now, after all your changes?
-- summary: overall markdown summary of what happened.
+- summary_markdown: overall markdown summary of what happened.
 """
     if prompt_suffix:
         prompt += f"\n{prompt_suffix}\n"
@@ -561,32 +562,32 @@ def read_agent_result(
     try:
         raw = host.read_text_file(result_path)
         data = json.loads(raw)
-        changes = tuple(
-            Change(
-                kind=ChangeKind(c["kind"]),
-                status=ChangeStatus(c["status"]),
-                summary=c.get("summary", ""),
+        raw_changes = data.get("changes", {})
+        changes: dict[ChangeKind, Change] = {
+            ChangeKind(kind_str): Change(
+                status=ChangeStatus(entry["status"]),
+                summary_markdown=entry.get("summary_markdown", entry.get("summary", "")),
             )
-            for c in data.get("changes", ())
-        )
+            for kind_str, entry in raw_changes.items()
+        }
         return TestResult(
             changes=changes,
             errored=data.get("errored", False),
             tests_passing_before=data.get("tests_passing_before"),
             tests_passing_after=data.get("tests_passing_after"),
-            summary=data.get("summary", ""),
+            summary_markdown=data.get("summary_markdown", ""),
         )
     except HostError as exc:
         logger.warning("Lost connection to agent {} while fetching result file: {}", agent_detail.name, exc)
         return TestResult(
             errored=True,
-            summary=f"Connection lost while fetching result file from agent host: {exc}",
+            summary_markdown=f"Connection lost while fetching result file from agent host: {exc}",
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
         return TestResult(
             errored=True,
-            summary=f"Failed to read agent result: {exc}",
+            summary_markdown=f"Failed to read agent result: {exc}",
         )
 
 
@@ -627,13 +628,13 @@ def read_integrator_result(
             merged=tuple(data.get("merged", ())),
             failed=tuple(data.get("failed", ())),
             branch_name=branch_name,
-            summary=data.get("summary", ""),
+            summary_markdown=data.get("summary_markdown", data.get("summary", "")),
         )
     except (HostError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
         logger.warning("Failed to read integrator result: {}", exc)
         return IntegratorResult(
             branch_name=branch_name,
-            summary=f"Failed to read integrator result: {exc}",
+            summary_markdown=f"Failed to read integrator result: {exc}",
         )
 
 
@@ -738,7 +739,7 @@ def _collect_agent_results(
                     test_node_id=agent_info.test_node_id,
                     agent_name=agent_info.agent_name,
                     errored=True,
-                    summary="Agent was stopped because the timeout was reached.",
+                    summary_markdown="Agent was stopped because the timeout was reached.",
                 )
             )
             continue
@@ -751,7 +752,7 @@ def _collect_agent_results(
                     test_node_id=agent_info.test_node_id,
                     agent_name=agent_info.agent_name,
                     errored=missing_detail_errored,
-                    summary=missing_detail_summary,
+                    summary_markdown=missing_detail_summary,
                 )
             )
             continue
@@ -765,7 +766,7 @@ def _collect_agent_results(
                 errored=test_result.errored,
                 tests_passing_before=test_result.tests_passing_before,
                 tests_passing_after=test_result.tests_passing_after,
-                summary=test_result.summary,
+                summary_markdown=test_result.summary_markdown,
                 branch_name=detail.initial_branch,
             )
         )
@@ -784,9 +785,10 @@ def gather_results(
 ) -> list[TestMapReduceResult]:
     """Gather results from all finished agents, pulling branches where appropriate.
 
-    If base_commit is provided, a local branch is created from that commit before
-    pulling each agent's changes. This is needed for remote agents whose branches
-    don't exist locally.
+    If base_commit is provided (remote providers), a local branch is created from
+    that commit before pulling each agent's changes. For local providers,
+    base_commit should be None and branches are not pulled (they already exist
+    as git worktrees).
     """
     results = _collect_agent_results(
         agents=agents,
@@ -797,13 +799,15 @@ def gather_results(
         missing_detail_summary="Agent details not found after polling",
     )
 
-    # Pull branches for agents whose changes should be kept
-    for result in results:
-        if should_pull_changes(result):
-            agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
-            detail = final_details.get(agent_id_str)
-            if detail is not None:
-                pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
+    # Pull branches from remote agents whose changes should be kept.
+    # For local agents (base_commit is None), branches already exist as worktrees.
+    if base_commit is not None:
+        for result in results:
+            if should_pull_changes(result):
+                agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
+                detail = final_details.get(agent_id_str)
+                if detail is not None:
+                    pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
 
     return results
 
@@ -901,8 +905,8 @@ def _build_integrator_section(integrator: IntegratorResult | None) -> str:
         for b in integrator.failed:
             section += f"    <li><code>{html.escape(b)}</code></li>\n"
         section += "  </ul>\n"
-    if integrator.summary:
-        section += f'  <div class="md">{_render_markdown(integrator.summary)}</div>\n'
+    if integrator.summary_markdown:
+        section += f'  <div class="md">{_render_markdown(integrator.summary_markdown)}</div>\n'
     return section
 
 
@@ -930,8 +934,12 @@ def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
         sections += "</tr>\n    </thead>\n    <tbody>\n"
         for r in group:
             branch_cell = r.branch_name if r.branch_name else "-"
-            summary_html = _render_markdown(r.summary)
-            changes_cell = ", ".join(f"{c.kind.value}/{c.status.value}" for c in r.changes) if r.changes else "-"
+            summary_html = _render_markdown(r.summary_markdown)
+            changes_cell = (
+                ", ".join(f"{kind.value}/{change.status.value}" for kind, change in r.changes.items())
+                if r.changes
+                else "-"
+            )
             sections += f"""      <tr>
         <td>{html.escape(r.test_node_id)}</td>
         <td>{html.escape(changes_cell)}</td>
