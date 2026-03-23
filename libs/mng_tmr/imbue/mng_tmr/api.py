@@ -178,41 +178,19 @@ def _build_agent_prompt(
 
     prompt = f"""Run the test with: {run_cmd}
 
-If the test succeeds, think about how the test can be improved:
-
-- We want the command run in the tests to match the demo script as much as possible.
-  Remember that this is an E2E test, so we want to be as realistic as possible.
-  We can afford to run real Claude Code sessions and even real Modal instances.
-
-- We want the assertions to be complete and reflect things that can be easily
-  tested in a real-world situation - note that the check is usually not part of
-  the demo script, so you need to come up with the check yourself. For example,
-  if a command is supposed to have an effect on Git, use Git commands to check
-  the outcome. If a command is supposed to create a file, check the actual file.
-
-- We also want the test to go a little bit beyond what the demo script literally
-  says. Sometimes a simple command will work a little bit differently depending
-  on the exact circumstances. In those cases, err on the side of having more tests
-  rather than fewer. You can attach the same demo block to multiple tests.
+If the test succeeds, consider whether the test can be improved: are the
+assertions thorough enough? Are there interesting edge cases worth covering?
 
 If you make improvements, record each as a change with kind "IMPROVE_TEST". If
 you identify an improvement that needs a larger-scale intervention, use status
 "BLOCKED". If no improvements are needed, leave the changes list empty.
 
-If the test fails:
-
-Read the output carefully for any debugging instructions. There should be
-instructions for how to keep the test environment alive to debug it. While the
-test environment is alive, debug agents "interactively" by using commands like
-`mng capture` and `mng message` to get a good idea of what's happening inside
-agents.
-
-Then try to fix it. You can make multiple kinds of changes -- they are not
-mutually exclusive:
+If the test fails, try to fix it. You can make multiple kinds of changes -- they
+are not mutually exclusive:
 
 - Fix the test code (including fixtures): record a change with kind "FIX_TEST".
 - Fix the program being tested: record a change with kind "FIX_IMPL".
-- Fix the tutorial/demo block: record a change with kind "FIX_TUTORIAL".
+- Fix related documentation or configuration: record a change with kind "FIX_TUTORIAL".
 
 Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
 but could not complete it, or "BLOCKED" if the issue needs larger intervention
