@@ -222,14 +222,7 @@ fi
 info "Installing mng..."
 uv tool install mng
 
-UV_TOOL_BIN="$(uv tool dir --bin)"
-MNG_BIN="${UV_TOOL_BIN}/mng"
-
-if ! command -v mng &>/dev/null; then
-    warn "mng was installed but is not on PATH."
-    warn "You may need to add ${UV_TOOL_BIN} to your PATH:"
-    printf '  export PATH="%s:$PATH"\n' "$UV_TOOL_BIN"
-fi
+MNG_BIN="$(uv tool dir --bin)/mng"
 
 # ── Plugin install wizard ─────────────────────────────────────────────────────
 
