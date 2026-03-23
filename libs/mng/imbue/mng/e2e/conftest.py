@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mng.utils.polling import poll_until
-from imbue.mng.utils.testing import get_short_random_string
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -324,9 +323,3 @@ def e2e(
         timeout=10.0,
     )
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
-
-
-@pytest.fixture
-def agent_name() -> str:
-    """Return a unique agent name for use in e2e tests."""
-    return f"e2e-{get_short_random_string()}"

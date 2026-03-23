@@ -61,7 +61,7 @@ def test_list_json_with_no_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_named_agent(e2e: E2eSession, agent_name: str) -> None:
+def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
     mng create my-task
@@ -69,19 +69,19 @@ def test_create_named_agent(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(rf"{agent_name}\s+(RUNNING|WAITING)")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_json_output(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
     mng create my-task --no-connect --format json
@@ -89,7 +89,7 @@ def test_create_with_json_output(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
+            "mng create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
             comment="you can control output format for scripting",
         )
     ).to_succeed()
@@ -102,7 +102,7 @@ def test_create_with_json_output(e2e: E2eSession, agent_name: str) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_headless(e2e: E2eSession, agent_name: str) -> None:
+def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mng is very much meant to be used for scripting and automation, so nothing requires interactivity.
     # if you want to be sure that interactivity is disabled, you can use the --headless flag:
@@ -110,67 +110,66 @@ def test_create_headless(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean --headless",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --headless",
             comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_and_destroy_agent(e2e: E2eSession, agent_name: str) -> None:
+def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="Create agent to be destroyed",
         )
     ).to_succeed()
 
-    destroy_result = e2e.run(f"mng destroy {agent_name} --force", comment="Destroy the agent")
+    destroy_result = e2e.run("mng destroy my-task --force", comment="Destroy the agent")
     expect(destroy_result).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).not_to_contain(agent_name)
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_and_rename_agent(e2e: E2eSession, agent_name: str) -> None:
+def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="Create agent to be renamed",
         )
     ).to_succeed()
 
-    new_name = f"e2e-renamed-{agent_name.split('-')[-1]}"
     rename_result = e2e.run(
-        f"mng rename {agent_name} {new_name}",
-        comment=f"Rename agent to {new_name}",
+        "mng rename my-task renamed-task",
+        comment="Rename agent to renamed-task",
     )
     expect(rename_result).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify only the new name appears")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(new_name)
-    expect(list_result.stdout).not_to_contain(agent_name)
+    expect(list_result.stdout).to_contain("renamed-task")
+    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_label(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:
     mng create my-task --label team=backend --host-label env=staging
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
             comment="you can add labels to organize your agents and tags for host metadata",
         )
     ).to_succeed()
@@ -179,6 +178,6 @@ def test_create_with_label(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching_agents = [a for a in agents if a["name"] == agent_name]
+    matching_agents = [a for a in agents if a["name"] == "my-task"]
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"

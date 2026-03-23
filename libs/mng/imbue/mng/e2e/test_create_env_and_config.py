@@ -8,7 +8,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_env(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can set environment variables for the agent:
     mng create my-task --env DEBUG=true
@@ -16,13 +16,13 @@ def test_create_with_env(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --env DEBUG=true --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --env DEBUG=true --command 'sleep 99999' --no-ensure-clean",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
 
     env_result = e2e.run(
-        f"mng exec {agent_name} 'printenv DEBUG'",
+        "mng exec my-task 'printenv DEBUG'",
         comment="Verify DEBUG env var is set inside the agent",
     )
     expect(env_result).to_succeed()
@@ -31,7 +31,7 @@ def test_create_with_env(e2e: E2eSession, agent_name: str) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_pass_env(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_pass_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
     export API_KEY=abc123
@@ -40,18 +40,18 @@ def test_create_with_pass_env(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"API_KEY=abc123 mng create {agent_name} --pass-env API_KEY --command 'sleep 99999' --no-ensure-clean",
+            "API_KEY=abc123 mng create my-task --pass-env API_KEY --command 'sleep 99999' --no-ensure-clean",
             comment="it is *strongly encouraged* to use either use --env-file or --pass-env",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent created with --pass-env")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
-def test_create_with_template_modal_disabled(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use templates to quickly apply a set of preconfigured options:
     echo '[create_templates.my_modal_template]' >> .mng/settings.local.toml
@@ -77,7 +77,7 @@ def test_create_with_template_modal_disabled(e2e: E2eSession, agent_name: str) -
 
     # The template sets provider=modal which is disabled, so create should fail
     result = e2e.run(
-        f"mng create {agent_name} --template my_modal_template --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --template my_modal_template --command 'sleep 99999' --no-ensure-clean",
         comment="templates are defined in your config",
     )
     # Expect failure because the modal provider is disabled in the test environment
@@ -89,13 +89,13 @@ def test_create_with_template_modal_disabled(e2e: E2eSession, agent_name: str) -
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_plugin_flags(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can enable or disable specific plugins:
     mng create my-task --plugin my-plugin --disable-plugin other-plugin
     """)
     result = e2e.run(
-        f"mng create {agent_name} --plugin my-plugin --disable-plugin other-plugin --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --plugin my-plugin --disable-plugin other-plugin --command 'sleep 99999' --no-ensure-clean",
         comment="you can enable or disable specific plugins",
     )
     # The plugin flags should be accepted by the CLI (no "No such option" error).
@@ -110,7 +110,7 @@ def test_create_with_plugin_flags(e2e: E2eSession, agent_name: str) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_in_place_alias_target(e2e: E2eSession, agent_name: str) -> None:
+def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
     echo "alias mc='mng create --in-place'" >> ~/.bashrc && source ~/.bashrc
@@ -118,14 +118,14 @@ def test_create_in_place_alias_target(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --in-place --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent created with --in-place")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release

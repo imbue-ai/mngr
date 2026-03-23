@@ -11,7 +11,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_source_path(e2e: E2eSession, agent_name: str, tmp_path: Path) -> None:
+def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
     # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
     mng create my-task --source-path /path/to/some/other/project
@@ -22,26 +22,26 @@ def test_create_with_source_path(e2e: E2eSession, agent_name: str, tmp_path: Pat
 
     expect(
         e2e.run(
-            f"mng create {agent_name} --source-path {source_dir} --command 'sleep 99999' --no-ensure-clean",
+            f"mng create my-task --source-path {source_dir} --command 'sleep 99999' --no-ensure-clean",
             comment="the agent uses the data from its current git repo (if any) or folder, but you can specify a different source",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_project_label(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_project_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
     mng create my-task --project my-project
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --project my-project --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --project my-project --command 'sleep 99999' --no-ensure-clean",
             comment="by default the agent is tagged with a project label that matches the name of the current git repo (or folder), but you can specify a different project",
         )
     ).to_succeed()
@@ -50,14 +50,14 @@ def test_create_with_project_label(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert matching[0]["labels"]["project"] == "my-project"
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_source_path_no_git(e2e: E2eSession, agent_name: str, tmp_path: Path) -> None:
+def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
     e2e.write_tutorial_block("""
     # mng doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
     mkdir -p /tmp/my_random_folder
@@ -70,19 +70,19 @@ def test_create_with_source_path_no_git(e2e: E2eSession, agent_name: str, tmp_pa
 
     expect(
         e2e.run(
-            f"mng create {agent_name} --source-path {source_dir} --command 'sleep 99999' --no-ensure-clean",
+            f"mng create my-task --source-path {source_dir} --command 'sleep 99999' --no-ensure-clean",
             comment="mng doesn't require git at all--if there's no git repo, it will just use the files from the folder",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_default_branch(e2e: E2eSession, agent_name: str) -> None:
+def test_create_default_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # however, if you do use git, mng makes that convenient
     # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
@@ -91,19 +91,19 @@ def test_create_default_branch(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="by default, it creates a new git branch for each agent",
         )
     ).to_succeed()
 
     branch_result = e2e.run("git branch", comment="Check that the mng branch was created")
     expect(branch_result).to_succeed()
-    expect(branch_result.stdout).to_contain(f"mng/{agent_name}")
+    expect(branch_result.stdout).to_contain("mng/my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_custom_branch_pattern(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # --branch controls branch creation. the default is :mng/* which creates a new branch named mng/{agent_name}
     # you can change the pattern (the * is replaced by the agent name):
@@ -112,19 +112,19 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession, agent_name: str) -> 
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --branch ':feature/*' --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --branch ':feature/*' --command 'sleep 99999' --no-ensure-clean",
             comment="you can change the pattern (the * is replaced by the agent name)",
         )
     ).to_succeed()
 
     branch_result = e2e.run("git branch", comment="Check that the feature branch was created")
     expect(branch_result).to_succeed()
-    expect(branch_result.stdout).to_contain(f"feature/{agent_name}")
+    expect(branch_result.stdout).to_contain("feature/my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_base_branch(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_base_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different base branch (instead of the current branch):
     mng create my-task --branch "main:mng/*"
@@ -141,38 +141,38 @@ def test_create_with_base_branch(e2e: E2eSession, agent_name: str) -> None:
 
     expect(
         e2e.run(
-            f"mng create {agent_name} --branch '{current_branch}:mng/*' --command 'sleep 99999' --no-ensure-clean",
+            f"mng create my-task --branch '{current_branch}:mng/*' --command 'sleep 99999' --no-ensure-clean",
             comment="you can also specify a different base branch (instead of the current branch)",
         )
     ).to_succeed()
 
     branch_result = e2e.run("git branch", comment="Check that the branch was created from the base")
     expect(branch_result).to_succeed()
-    expect(branch_result.stdout).to_contain(f"mng/{agent_name}")
+    expect(branch_result.stdout).to_contain("mng/my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_explicit_branch_name(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or set the new branch name explicitly:
     mng create my-task --branch ":feature/my-task"
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --branch ':feature/{agent_name}' --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --branch ':feature/my-task' --command 'sleep 99999' --no-ensure-clean",
             comment="or set the new branch name explicitly",
         )
     ).to_succeed()
 
     branch_result = e2e.run("git branch", comment="Check that the exact branch name was created")
     expect(branch_result).to_succeed()
-    expect(branch_result.stdout).to_contain(f"feature/{agent_name}")
+    expect(branch_result.stdout).to_contain("feature/my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_copy(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_copy(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can create a copy instead of a worktree:
     mng create my-task --copy
@@ -180,19 +180,19 @@ def test_create_with_copy(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --copy --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --copy --command 'sleep 99999' --no-ensure-clean",
             comment="you can create a copy instead of a worktree",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_copy_with_existing_branch(e2e: E2eSession, agent_name: str) -> None:
+def test_create_copy_with_existing_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
     mng create my-task --copy --branch main
@@ -206,38 +206,38 @@ def test_create_copy_with_existing_branch(e2e: E2eSession, agent_name: str) -> N
 
     expect(
         e2e.run(
-            f"mng create {agent_name} --copy --branch {current_branch} --command 'sleep 99999' --no-ensure-clean",
+            f"mng create my-task --copy --branch {current_branch} --command 'sleep 99999' --no-ensure-clean",
             comment="you can disable new branch creation entirely by omitting the :NEW part",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_clone(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_clone(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
     mng create my-task --clone
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --clone --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --clone --command 'sleep 99999' --no-ensure-clean",
             comment='you can create a "clone" instead of worktree or copy',
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_shallow_depth(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_shallow_depth(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can make a shallow clone for faster setup:
     mng create my-task --depth 1
@@ -245,37 +245,34 @@ def test_create_with_shallow_depth(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --depth 1 --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --depth 1 --command 'sleep 99999' --no-ensure-clean",
             comment="you can make a shallow clone for faster setup",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent appears in list")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_from_another_agent(e2e: E2eSession, agent_name: str) -> None:
+def test_create_from_another_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can clone from an existing agent's work directory:
     mng create my-task --from other-agent
     # (--source, --source-agent, and --source-host are alternative forms for more specific control)
     """)
-    source_agent = f"{agent_name}-source"
-
     expect(
         e2e.run(
-            f"mng create {source_agent} --command 'sleep 99999' --no-ensure-clean",
+            "mng create other-agent --command 'sleep 99999' --no-ensure-clean",
             comment="Create source agent to clone from",
         )
     ).to_succeed()
 
-    derived_agent = f"{agent_name}-derived"
     expect(
         e2e.run(
-            f"mng create {derived_agent} --from {source_agent} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --from other-agent --command 'sleep 99999' --no-ensure-clean",
             comment="you can clone from an existing agent's work directory",
         )
     ).to_succeed()
@@ -284,5 +281,5 @@ def test_create_from_another_agent(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agent_names = [a["name"] for a in parsed["agents"]]
-    assert source_agent in agent_names
-    assert derived_agent in agent_names
+    assert "other-agent" in agent_names
+    assert "my-task" in agent_names

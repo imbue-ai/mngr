@@ -10,7 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_custom_command(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_custom_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can run *any* literal command instead of a named agent type:
     mng create my-task --command python -- my_script.py
@@ -18,14 +18,14 @@ def test_create_with_custom_command(e2e: E2eSession, agent_name: str) -> None:
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="you can run *any* literal command instead of a named agent type",
         )
     ).to_succeed()
 
     # Verify the custom command is actually running inside the agent
     ps_result = e2e.run(
-        f"mng exec {agent_name} 'ps aux | grep sleep'",
+        "mng exec my-task 'ps aux | grep sleep'",
         comment="Verify the custom command (sleep) is running",
     )
     expect(ps_result).to_succeed()
@@ -34,7 +34,7 @@ def test_create_with_custom_command(e2e: E2eSession, agent_name: str) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_idle_mode_and_timeout(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
     # this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
@@ -43,7 +43,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession, agent_name: str) -> 
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean --idle-mode run --idle-timeout 60",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --idle-mode run --idle-timeout 60",
             comment="this enables some pretty interesting use cases, like running servers or other programs",
         )
     ).to_succeed()
@@ -53,14 +53,14 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession, agent_name: str) -> 
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert matching[0]["idle_timeout"] == 60
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_extra_tmux_windows(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # alternatively, you can simply add extra tmux windows that run alongside your agent:
     mng create my-task -w server="npm run dev" -w logs="tail -f app.log"
@@ -68,7 +68,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession, agent_name: str) -> Non
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean -w extra=\"sleep 99999\"",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean -w extra=\"sleep 99999\"",
             comment="you can simply add extra tmux windows that run alongside your agent",
         )
     ).to_succeed()
@@ -76,12 +76,12 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession, agent_name: str) -> Non
     # Verify the extra tmux window exists by listing tmux windows
     list_result = e2e.run("mng list --format json", comment="Verify agent was created")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_no_ensure_clean(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # by default, mng aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
     mng create my-task --no-ensure-clean
@@ -93,26 +93,26 @@ def test_create_with_no_ensure_clean(e2e: E2eSession, agent_name: str) -> None:
 
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
             comment="by default, mng aborts the create command if the working tree has uncommitted changes",
         )
     ).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify agent created despite dirty working tree")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain(agent_name)
+    expect(list_result.stdout).to_contain("my-task")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_connect_command(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_connect_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
     mng create my-task --connect-command "my_script.sh"
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean --connect-command \"echo connected\" --no-connect",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --connect-command \"echo connected\" --no-connect",
             comment="you can use a custom connect command instead of the default",
         )
     ).to_succeed()
@@ -122,20 +122,20 @@ def test_create_with_connect_command(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_message(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_message(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can send a message when starting the agent (great for scripting):
     mng create my-task --no-connect --message "Do the thing"
     """)
     expect(
         e2e.run(
-            f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean --no-connect --message \"Do the thing\"",
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --no-connect --message \"Do the thing\"",
             comment="you can send a message when starting the agent (great for scripting)",
         )
     ).to_succeed()
@@ -145,5 +145,5 @@ def test_create_with_message(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1

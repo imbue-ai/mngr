@@ -71,7 +71,7 @@ Each subagent writes its tests and returns the result. After all subagents finis
 
 When writing or updating tests, follow these two principles:
 
-**Run the actual commands from the script block.** The test must run commands that match the script block as closely as possible. For example, if the script block demonstrates `mng create --foo`, the test must run `mng create --foo` (with optional extra flags) -- it must NOT simply run `mng create --help` and verify that `--foo` is a supported flag.
+**Run the actual commands from the script block.** The test must run commands that match the script block as closely as possible. For example, if the script block demonstrates `mng create --foo`, the test must run `mng create --foo` (with optional extra flags) -- it must NOT simply run `mng create --help` and verify that `--foo` is a supported flag. Remember that the test fixture already sets up an isolated environment for mng to run, so using hardcoded agent names are fine.
 
 **Verify the actual behavior, not just surface-level output.** The script blocks usually don't contain verification code, but the test must verify the exact desired behavior as thoroughly as possible. For example, if a script block creates an agent in a specific directory, it is not sufficient to only verify that the agent appears in the result of `mng list` -- you must also verify that the agent is running in that directory, e.g. by running `mng exec $agent_name pwd` and checking its output. Think about what the command is supposed to accomplish and assert on the concrete effects.
 

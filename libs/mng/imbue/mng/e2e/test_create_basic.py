@@ -10,7 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_default(e2e: E2eSession, agent_name: str) -> None:
+def test_create_default(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # running mng create is strictly better than running claude! It's less letters to type :-D
     # running this command launches claude (Claude Code) immediately *in a new worktree*
@@ -18,7 +18,7 @@ def test_create_default(e2e: E2eSession, agent_name: str) -> None:
     # the defaults are the following: agent=claude, provider=local, project=current dir
     """)
     result = e2e.run(
-        f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --command 'sleep 99999' --no-ensure-clean",
         comment="running mng create is strictly better than running claude!",
     )
     expect(result).to_succeed()
@@ -27,12 +27,12 @@ def test_create_default(e2e: E2eSession, agent_name: str) -> None:
         "mng list", comment="the defaults are the following: agent=claude, provider=local, project=current dir"
     )
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(rf"{agent_name}\s+(RUNNING|WAITING)")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_in_place(e2e: E2eSession, agent_name: str) -> None:
+def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
     mng create --in-place
@@ -40,7 +40,7 @@ def test_create_in_place(e2e: E2eSession, agent_name: str) -> None:
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        f"mng create {agent_name} --in-place --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
@@ -52,7 +52,7 @@ def test_create_in_place(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent_work_dir = matching[0]["work_dir"]
     # With --in-place, the work directory should be the session cwd (the temp git repo),
@@ -62,37 +62,35 @@ def test_create_in_place(e2e: E2eSession, agent_name: str) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_short_forms(e2e: E2eSession, agent_name: str) -> None:
+def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
     mng create my-task claude
     mng c my-task
     """)
     # Test "mng create <name>" form (claude is the default type, --command substitutes for the real agent)
-    name_full = f"{agent_name}-full"
     result_full = e2e.run(
-        f"mng create {name_full} --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --command 'sleep 99999' --no-ensure-clean",
         comment="you can use a short form for most commands (like create) as well",
     )
     expect(result_full).to_succeed()
 
-    # Test "mng c <name>" short form
-    name_short = f"{agent_name}-short"
+    # Test "mng c <name>" short form (needs a different name since my-task already exists)
     result_short = e2e.run(
-        f"mng c {name_short} --command 'sleep 99999' --no-ensure-clean",
+        "mng c my-other-task --command 'sleep 99999' --no-ensure-clean",
         comment="the above command is the same as these",
     )
     expect(result_short).to_succeed()
 
     list_result = e2e.run("mng list", comment="Verify both agents are running")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(rf"{name_full}\s+(RUNNING|WAITING)")
-    expect(list_result.stdout).to_match(rf"{name_short}\s+(RUNNING|WAITING)")
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+    expect(list_result.stdout).to_match(r"my-other-task\s+(RUNNING|WAITING)")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_codex_agent(e2e: E2eSession, agent_name: str) -> None:
+def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)
     mng create my-task codex
@@ -106,7 +104,7 @@ def test_create_codex_agent(e2e: E2eSession, agent_name: str) -> None:
     ).to_succeed()
 
     result = e2e.run(
-        f"mng create {agent_name} codex --no-ensure-clean",
+        "mng create my-task codex --no-ensure-clean",
         comment="you can also specify a different agent (ex: codex)",
     )
     expect(result).to_succeed()
@@ -115,14 +113,14 @@ def test_create_codex_agent(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert matching[0]["type"] == "codex"
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_agent_args(e2e: E2eSession, agent_name: str) -> None:
+def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mng)
     # by using `--` to separate the agent arguments from the mng arguments:
@@ -130,7 +128,7 @@ def test_create_with_agent_args(e2e: E2eSession, agent_name: str) -> None:
     # that command launches claude with the "opus" model instead of the default
     """)
     result = e2e.run(
-        f"mng create {agent_name} --command 'sleep 99999' --no-ensure-clean -- --model opus",
+        "mng create my-task --command 'sleep 99999' --no-ensure-clean -- --model opus",
         comment="you can specify the arguments to the *agent* by using `--` to separate the agent arguments",
     )
     expect(result).to_succeed()
@@ -139,6 +137,6 @@ def test_create_with_agent_args(e2e: E2eSession, agent_name: str) -> None:
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
-    matching = [a for a in agents if a["name"] == agent_name]
+    matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert "--model opus" in matching[0]["command"]
