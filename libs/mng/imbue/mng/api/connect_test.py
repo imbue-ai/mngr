@@ -484,6 +484,26 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
     assert parsed == ["bash", "-c", wrapper_script]
 
 
+def test_build_ssh_activity_wrapper_script_quotes_agent_command_with_metacharacters() -> None:
+    """Test that agent_command is shell-quoted to prevent syntax errors.
+
+    When agent_command contains shell metacharacters (e.g. '(' from a command
+    like '( script.sh ... ) &'), it must be quoted so that pkill -f receives
+    it as a literal pattern rather than as shell syntax.
+    """
+    script = _build_ssh_activity_wrapper_script("mng-test", Path("/mng"), "(")
+
+    # The '(' should be quoted (e.g. as '(') so bash doesn't interpret it as subshell syntax
+    assert "pkill -SIGWINCH -f '('" in script
+
+
+def test_build_ssh_activity_wrapper_script_quotes_normal_agent_command() -> None:
+    """Test that even normal agent_command values are properly quoted."""
+    script = _build_ssh_activity_wrapper_script("mng-test", Path("/mng"), "claude")
+
+    assert "pkill -SIGWINCH -f claude" in script
+
+
 # =========================================================================
 # Tests for nested tmux detection in connect_to_agent (local host)
 # =========================================================================

@@ -1,12 +1,21 @@
+from enum import auto
 from pathlib import Path
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mng.config.data_types import ProviderInstanceConfig
 from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderBackendName
 from imbue.mng.primitives import UserId
+
+
+class ModalMode(UpperCaseStrEnum):
+    """Mode for the Modal provider backend."""
+
+    DIRECT = auto()
+    TESTING = auto()
 
 
 class ModalProviderConfig(ProviderInstanceConfig):
@@ -15,6 +24,10 @@ class ModalProviderConfig(ProviderInstanceConfig):
     backend: ProviderBackendName = Field(
         default=ProviderBackendName("modal"),
         description="Provider backend (always 'modal' for this type)",
+    )
+    mode: ModalMode = Field(
+        default=ModalMode.DIRECT,
+        description=("Modal interface mode. DIRECT calls the Modal SDK directly (bring your own key)."),
     )
     user_id: UserId | None = Field(
         default=None,

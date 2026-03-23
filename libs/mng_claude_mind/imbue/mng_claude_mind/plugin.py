@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -21,6 +23,7 @@ from imbue.mng_claude.claude_config import build_readiness_hooks_config
 from imbue.mng_claude.claude_config import merge_hooks_config
 from imbue.mng_claude.plugin import ClaudeAgent
 from imbue.mng_claude.plugin import ClaudeAgentConfig
+from imbue.mng_claude.plugin import build_claude_json_for_agent
 from imbue.mng_claude_mind.provisioning import build_stop_hook_config
 from imbue.mng_claude_mind.provisioning import create_mind_symlinks
 from imbue.mng_claude_mind.provisioning import provision_claude_settings
@@ -32,11 +35,13 @@ from imbue.mng_claude_mind.settings import load_settings_from_host
 from imbue.mng_llm.data_types import ProvisioningSettings
 from imbue.mng_llm.plugin import set_llm_model_env_var
 from imbue.mng_llm.plugin import set_uv_tool_env_vars
+from imbue.mng_llm.provisioning import check_llm_toolchain
 from imbue.mng_llm.provisioning import configure_llm_user_path
-from imbue.mng_llm.provisioning import create_daily_conversation
+from imbue.mng_llm.provisioning import create_first_daily_conversation
 from imbue.mng_llm.provisioning import create_mind_conversations_table
 from imbue.mng_llm.provisioning import create_slack_notifications_conversation
 from imbue.mng_llm.provisioning import create_system_notifications_conversation
+from imbue.mng_llm.provisioning import create_work_log_conversation
 from imbue.mng_llm.provisioning import install_llm_toolchain
 from imbue.mng_llm.provisioning import provision_llm_tools
 from imbue.mng_llm.provisioning import provision_supporting_services
@@ -232,6 +237,8 @@ class ClaudeMindAgent(ClaudeAgent):
 
         if config.install_llm:
             install_llm_toolchain(host, provisioning)
+        else:
+            check_llm_toolchain(host, provisioning)
 
         provision_link_skills_script_file(host, self.work_dir, provisioning)
         run_link_skills_script(host, self.work_dir, active_role, provisioning)
@@ -250,11 +257,11 @@ class ClaudeMindAgent(ClaudeAgent):
         configure_llm_user_path(host, agent_state_dir, provisioning)
         create_mind_conversations_table(host, agent_state_dir, provisioning)
 
-        if config.install_llm:
-            create_system_notifications_conversation(host, agent_state_dir, provisioning)
-            create_slack_notifications_conversation(host, agent_state_dir, provisioning)
-            chat_model = settings.chat.model or "claude-opus-4.6"
-            create_daily_conversation(host, agent_state_dir, provisioning, chat_model)
+        create_system_notifications_conversation(host, agent_state_dir, provisioning)
+        create_slack_notifications_conversation(host, agent_state_dir, provisioning)
+        chat_model = settings.chat.model or "claude-opus-4.6"
+        create_work_log_conversation(host, agent_state_dir, provisioning, chat_model)
+        create_first_daily_conversation(host, agent_state_dir, provisioning, chat_model, settings.chat.welcome_message)
 
         setup_memory_directory(host, self.work_dir, active_role, provisioning)
 
@@ -262,6 +269,21 @@ class ClaudeMindAgent(ClaudeAgent):
         data = super()._build_per_agent_claude_json(options, config)
         # FOLLOWUP: we can remove this eventually (once the agents are started inside VMs, it will be set properly anyway)
         data["bypassPermissionsModeAccepted"] = True
+        # approve the API key so that the agent doesnt get blocked
+        user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        conf_key = user_claude_json_data.get("primaryApiKey", "")
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if env_key or conf_key:
+            approved_section = data.setdefault("customApiKeyResponses", {})
+            approved_list = approved_section.get("approved", [])
+            if api_key[-20:] not in approved_list:
+                approved_list.append(api_key[-20:])
+            if conf_key[-20:] not in approved_list:
+                approved_list.append(conf_key[-20:])
+            approved_section["approved"] = approved_list
+            approved_section["rejected"] = []
+
         return data
 
 

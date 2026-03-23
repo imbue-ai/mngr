@@ -51,7 +51,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path, agent_
         f"sleep 5; done) & "
         "MNG_ACTIVITY_PID=$!; "
         # resize all tmux windows to be the correct size and signal the agent that it needs to redraw. We do this with a delay so that it happens after attaching.
-        f"(sleep 5 && tmux list-windows -t '{session_name}' -F '#I' | xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A && sleep 1 && pkill -SIGWINCH -f {agent_command}) & "
+        f"(sleep 5 && tmux list-windows -t '{session_name}' -F '#I' | xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A && sleep 1 && pkill -SIGWINCH -f {shlex.quote(agent_command)}) & "
         # actually attach
         f"tmux attach -t '{session_name}'; "
         "kill $MNG_ACTIVITY_PID 2>/dev/null; "

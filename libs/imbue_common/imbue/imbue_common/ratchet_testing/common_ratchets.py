@@ -60,7 +60,7 @@ PREVENT_TODOS = RegexRatchetRule(
 PREVENT_EXEC = RegexRatchetRule(
     rule_name="exec() usages",
     rule_description="exec() should not be used due to security and maintainability concerns",
-    pattern_string=r"(?<!\.)\bexec\s*\(",
+    pattern_string=r"(?<!def )(?<!\.)\bexec\s*\(",
 )
 
 PREVENT_EVAL = RegexRatchetRule(

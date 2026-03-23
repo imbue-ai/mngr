@@ -230,8 +230,13 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             return AgentLifecycleState.STOPPED
 
     def _get_command_basename(self, command: CommandString) -> str:
-        """Extract the basename from a command string."""
-        return command.split()[0].split("/")[-1] if command else ""
+        """Extract the basename from a command string.
+
+        Strips leading shell subshell syntax (e.g. '( script.sh ... ) &')
+        to find the actual command name.
+        """
+        stripped = str(command).lstrip("( ")
+        return stripped.split()[0].split("/")[-1] if stripped else ""
 
     def get_expected_process_name(self) -> str:
         """Get the expected process name for lifecycle state detection.

@@ -41,6 +41,9 @@ from imbue.mng_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mng_modal.config import ModalProviderConfig
 from imbue.mng_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mng_modal.instance import ModalProviderInstance
+from imbue.mng_modal.testing import make_testing_modal_interface
+from imbue.mng_modal.testing import make_testing_provider
+from imbue.modal_proxy.testing import TestingModalInterface
 
 
 def make_modal_provider_real(
@@ -446,3 +449,36 @@ def modal_session_cleanup() -> Generator[None, None, None]:
             + "\n\n".join(errors)
             + "\n\nThese resources have been cleaned up, but tests should not leak!\n"
         )
+
+
+# =============================================================================
+# Testing Modal Interface fixtures
+#
+# These fixtures provide a ModalProviderInstance backed by TestingModalInterface
+# for testing mng_modal business logic without Modal credentials or SSH.
+# =============================================================================
+
+
+@pytest.fixture
+def testing_modal(tmp_path: Path, cg: ConcurrencyGroup) -> TestingModalInterface:
+    return make_testing_modal_interface(tmp_path, cg)
+
+
+@pytest.fixture
+def testing_provider(
+    temp_mng_ctx: MngContext,
+    testing_modal: TestingModalInterface,
+) -> Generator[ModalProviderInstance, None, None]:
+    provider = make_testing_provider(temp_mng_ctx, testing_modal)
+    yield provider
+    testing_modal.cleanup()
+
+
+@pytest.fixture
+def testing_provider_no_host_volume(
+    temp_mng_ctx: MngContext,
+    testing_modal: TestingModalInterface,
+) -> Generator[ModalProviderInstance, None, None]:
+    provider = make_testing_provider(temp_mng_ctx, testing_modal, is_host_volume_created=False)
+    yield provider
+    testing_modal.cleanup()

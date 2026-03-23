@@ -13,17 +13,81 @@ logger = logging.getLogger(__name__)
 
 _LATCHKEY_COMMAND_TIMEOUT_SECONDS = 60
 _LATCHKEY_COMMAND_WARNING_THRESHOLD_SECONDS = 15
+_RATE_LIMIT_MAX_RETRIES = 7
+_RATE_LIMIT_INITIAL_BACKOFF_SECONDS = 2.0
+_RATE_LIMIT_MAX_BACKOFF_SECONDS = 60.0
+
+
+def _is_transient_latchkey_error(error: LatchkeyInvocationError) -> bool:
+    """Check if a latchkey error is transient and worth retrying."""
+    # curl exit code 35 = SSL connection error (e.g. "Connection reset by peer")
+    # curl exit code 56 = failure in receiving network data
+    # curl exit code 7 = failed to connect to host
+    # curl exit code 28 = operation timed out (distinct from our subprocess timeout)
+    transient_curl_exit_codes = {7, 28, 35, 56}
+    return error.return_code in transient_curl_exit_codes
+
+
+def retry_on_transient_error(
+    api_caller: Callable[[str, dict[str, str] | None], dict[str, Any]],
+    sleep_fn: Callable[[float], None],
+    method: str,
+    query_params: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Call an API method with exponential backoff retry on transient errors.
+
+    Retries on Slack rate limit errors and transient network errors (SSL resets,
+    connection failures, etc.). Retries up to _RATE_LIMIT_MAX_RETRIES times
+    (~3 minutes total). Non-transient errors are raised immediately.
+    """
+    backoff = _RATE_LIMIT_INITIAL_BACKOFF_SECONDS
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            return api_caller(method, query_params)
+        except SlackApiError as e:
+            if e.error != "ratelimited" or attempt == _RATE_LIMIT_MAX_RETRIES:
+                raise
+            logger.warning(
+                "Rate limited by Slack API (%s), retrying in %.0fs (attempt %d/%d)",
+                method,
+                backoff,
+                attempt + 1,
+                _RATE_LIMIT_MAX_RETRIES,
+            )
+        except LatchkeyInvocationError as e:
+            if not _is_transient_latchkey_error(e) or attempt == _RATE_LIMIT_MAX_RETRIES:
+                raise
+            logger.warning(
+                "Transient network error calling %s (exit %d), retrying in %.0fs (attempt %d/%d)",
+                method,
+                e.return_code,
+                backoff,
+                attempt + 1,
+                _RATE_LIMIT_MAX_RETRIES,
+            )
+        sleep_fn(backoff)
+        backoff = min(backoff * 2, _RATE_LIMIT_MAX_BACKOFF_SECONDS)
+    raise AssertionError("unreachable")
 
 
 def call_slack_api(
     method: str,
     query_params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Call a Slack API method via latchkey curl and return the parsed JSON response.
+    """Call a Slack API method via latchkey curl, with automatic retry on transient errors.
 
-    Raises LatchkeyInvocationError if the subprocess fails, or SlackApiError if
-    the Slack API returns ok=false.
+    Retries with exponential backoff on rate limit and network errors (up to ~3 minutes).
+    Raises LatchkeyInvocationError if the subprocess fails with a non-transient error,
+    or SlackApiError if the Slack API returns a non-rate-limit error.
     """
+    return retry_on_transient_error(_call_slack_api_once, time.sleep, method, query_params)
+
+
+def _call_slack_api_once(
+    method: str,
+    query_params: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Execute a single Slack API call via latchkey curl."""
     url = f"https://slack.com/api/{method}"
     if query_params:
         url = f"{url}?{urlencode(query_params)}"

@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mng==0.1.7",
     "modal==1.3.1",
+    "modal-proxy",
     "dockerfile-parse>=2.0.0",
 ]
 
@@ -22,6 +23,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 mng = { workspace = true }
+modal-proxy = { workspace = true }
 
 [tool.pytest.ini_options]
 timeout_func_only = true

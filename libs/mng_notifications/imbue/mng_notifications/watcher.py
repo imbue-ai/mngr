@@ -6,6 +6,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.api.events import parse_event_line
 from imbue.mng.api.observe import get_agent_states_events_path
+from imbue.mng.api.observe import get_default_events_base_dir
 from imbue.mng.config.data_types import MngContext
 from imbue.mng_notifications.config import NotificationsPluginConfig
 from imbue.mng_notifications.notifier import Notifier
@@ -29,7 +30,7 @@ def watch_for_waiting_agents(
     if stop_event is None:
         stop_event = threading.Event()
 
-    events_path = get_agent_states_events_path(mng_ctx.config)
+    events_path = get_agent_states_events_path(get_default_events_base_dir(mng_ctx.config))
     logger.info("Watching for agent state transitions in {}", events_path)
 
     last_size = _get_file_size(events_path)

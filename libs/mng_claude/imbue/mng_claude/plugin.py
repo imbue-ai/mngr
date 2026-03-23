@@ -238,7 +238,7 @@ def _build_settings_json_content(sync_local: bool) -> str:
     return json.dumps(data, indent=2) + "\n"
 
 
-def _build_claude_json_for_agent(
+def build_claude_json_for_agent(
     sync_local: bool, work_dir: Path, version: str | None, current_time: datetime | None = None
 ) -> dict[str, Any]:
     """Build .claude.json data for the per-agent config dir.
@@ -1258,7 +1258,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         realpath_result = host.execute_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
         if realpath_result.success and realpath_result.stdout.strip():
             resolved_work_dir = Path(realpath_result.stdout.strip())
-        claude_json_data = _build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
+        claude_json_data = build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
         file_transfers.append(
             (config_dir / ".claude.json", (json.dumps(claude_json_data, indent=2) + "\n").encode("utf-8"))
         )
@@ -1688,9 +1688,9 @@ def get_files_for_deploy(
     # we set the time to a constant for better caching:
     FIXED_TIME = datetime(2026, 2, 23, 3, 4, 7, tzinfo=timezone.utc)
     # it's a little silly to pass in repo_root here, but whatever, it will also get reset when we're provisioning
-    claude_json_data = _build_claude_json_for_agent(False, repo_root, None, current_time=FIXED_TIME)
+    claude_json_data = build_claude_json_for_agent(False, repo_root, None, current_time=FIXED_TIME)
     # also inject our API key here, since deployed versions need it
-    user_claude_json_data = _build_claude_json_for_agent(True, Path("."), None)
+    user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
     api_key = user_claude_json_data.get("primaryApiKey", os.environ.get("ANTHROPIC_API_KEY", ""))
     if api_key:
         approved_keys = claude_json_data.setdefault("customApiKeyResponses", {})
@@ -1730,7 +1730,7 @@ def modify_env_vars_for_deploy(
     env_vars: dict[str, str],
 ) -> None:
     if "ANTHROPIC_API_KEY" not in env_vars:
-        user_claude_json_data = _build_claude_json_for_agent(True, Path("."), None)
+        user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
         token = user_claude_json_data.get("primaryApiKey", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         if not token:
             raise UserInputError(

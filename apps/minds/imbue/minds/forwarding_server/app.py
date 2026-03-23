@@ -280,7 +280,8 @@ def _handle_landing_page(
 
     # No agents exist: show the create form
     git_url = request.query_params.get("git_url", "")
-    html = render_create_form(git_url=git_url)
+    branch = request.query_params.get("branch", "")
+    html = render_create_form(git_url=git_url, branch=branch)
     return HTMLResponse(content=html)
 
 
@@ -710,11 +711,12 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     form = await request.form()
     git_url = str(form.get("git_url", "")).strip()
     agent_name = str(form.get("agent_name", "")).strip()
+    branch = str(form.get("branch", "")).strip()
     if not git_url:
-        html = render_create_form(git_url="", agent_name=agent_name)
+        html = render_create_form(git_url="", agent_name=agent_name, branch=branch)
         return HTMLResponse(content=html, status_code=400)
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name)
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch)
     return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
 
 
@@ -727,7 +729,8 @@ def _handle_create_page(
         return Response(status_code=403, content="Not authenticated")
 
     git_url = request.query_params.get("git_url", "")
-    html = render_create_form(git_url=git_url)
+    branch = request.query_params.get("branch", "")
+    html = render_create_form(git_url=git_url, branch=branch)
     return HTMLResponse(content=html)
 
 
@@ -753,6 +756,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         )
     git_url = str(body.get("git_url", "")).strip()
     agent_name = str(body.get("agent_name", "")).strip()
+    branch = str(body.get("branch", "")).strip()
     if not git_url:
         return Response(
             status_code=400,
@@ -760,7 +764,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name)
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch)
     return Response(
         content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
         media_type="application/json",

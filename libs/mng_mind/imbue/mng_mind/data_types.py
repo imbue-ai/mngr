@@ -124,3 +124,13 @@ class WatcherSettings(FrozenModel):
         description="IANA timezone name (e.g. 'America/New_York', 'Europe/London'). "
         "Used for scheduled events and local time reporting in idle events.",
     )
+    # The path should be relative to the repo root, since the event watcher runs
+    # in a tmux window whose working directory is the agent's work_dir (the repo root).
+    event_batch_filter_script: str | None = Field(
+        default=None,
+        description="Optional path to a script that filters event batches before delivery. "
+        "The script receives JSONL lines on stdin (one event per line) and must output "
+        "the same number of lines on stdout. To filter out an event, the script should "
+        "output an empty line or '{}' for that position. If all events are filtered out, "
+        "the batch is skipped entirely.",
+    )
