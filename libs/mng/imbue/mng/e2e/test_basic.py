@@ -74,9 +74,46 @@ def test_create_named_agent(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mng list", comment="Verify agent appears in list")
+    # Verify agent details via JSON output
+    list_result = e2e.run("mng list --format json", comment="Verify agent appears with correct details")
     expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1
+    assert matching[0]["state"] in ("RUNNING", "WAITING")
+    assert matching[0]["initial_branch"] == "mng/my-task"
+
+    # Verify git branch was actually created
+    branch_result = e2e.run("git branch", comment="Verify git branch was created")
+    expect(branch_result).to_succeed()
+    expect(branch_result.stdout).to_contain("mng/my-task")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_unnamed_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
+    mng create my-task
+    # that command give the agent a name of "my-task". If you don't specify a name, mng will generate a random one for you.
+    """)
+    expect(
+        e2e.run(
+            "mng create --command 'sleep 99999' --no-ensure-clean",
+            comment="If you don't specify a name, mng will generate a random one for you",
+        )
+    ).to_succeed()
+
+    # Verify agent was created with an auto-generated name
+    list_result = e2e.run("mng list --format json", comment="Verify unnamed agent was created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    assert len(agents) == 1
+    # The auto-generated name should be non-empty
+    assert agents[0]["name"]
+    assert agents[0]["state"] in ("RUNNING", "WAITING")
 
 
 @pytest.mark.release
