@@ -40,6 +40,7 @@ from imbue.mng_tmr.api import launch_all_test_agents
 from imbue.mng_tmr.api import launch_integrator_agent
 from imbue.mng_tmr.api import poll_until_all_done
 from imbue.mng_tmr.api import pull_agent_branch
+from imbue.mng_tmr.api import pull_test_outputs
 from imbue.mng_tmr.api import read_integrator_result
 from imbue.mng_tmr.api import should_pull_changes
 from imbue.mng_tmr.api import wait_for_integrator
@@ -285,7 +286,7 @@ def _emit_summary(results: list[TestMapReduceResult], output_opts: OutputOptions
     "--output-html",
     default=None,
     type=click.Path(),
-    help="Path for the HTML report [default: tmr_reports/tmr-report-<timestamp>.html]",
+    help="Path for the HTML report [default: tmr_<timestamp>/index.html]",
 )
 @click.option(
     "--source",
@@ -347,12 +348,15 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     )
     _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 5: Compute html_path before polling
+    # Step 5: Compute output directory and html_path before polling
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if opts.output_html is not None:
         html_path = Path(opts.output_html)
+        output_dir = html_path.parent
     else:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        html_path = Path("tmr_reports") / f"tmr-report-{timestamp}.html"
+        output_dir = Path(f"tmr_{timestamp}")
+        html_path = output_dir / "index.html"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 6: Write initial report (all PENDING)
     initial_results = build_current_results(agent_infos, {}, set(), agent_hosts)
@@ -382,10 +386,17 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         base_commit=base_commit if is_remote_provider else None,
     )
 
-    # Step 9: Write report with final results
+    # Step 9: Pull .test_output from each finished agent
+    for agent_info in agent_infos:
+        agent_id_str = str(agent_info.agent_id)
+        detail = final_details.get(agent_id_str)
+        if detail is not None and agent_id_str in agent_hosts:
+            pull_test_outputs(detail, agent_hosts[agent_id_str], source_host, output_dir)
+
+    # Step 10: Write report with final results
     generate_html_report(results, html_path)
 
-    # Step 10: Build integrator config (defaults to local provider) and integrate
+    # Step 11: Build integrator config (defaults to local provider) and integrate
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,

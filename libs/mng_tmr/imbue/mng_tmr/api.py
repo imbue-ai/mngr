@@ -612,6 +612,27 @@ def read_agent_result(
         )
 
 
+def pull_test_outputs(
+    agent_detail: AgentDetails,
+    host: OnlineHostInterface,
+    local_host: OnlineHostInterface,
+    destination_dir: Path,
+) -> None:
+    """Pull the .test_output directory from an agent's work_dir to a local directory."""
+    remote_test_output = agent_detail.work_dir / ".test_output"
+    local_dest = destination_dir / str(agent_detail.name)
+    local_dest.mkdir(parents=True, exist_ok=True)
+    try:
+        local_host.copy_directory(
+            source_host=host,
+            source_path=remote_test_output,
+            target_path=local_dest,
+        )
+        logger.info("Pulled .test_output from agent '{}' to {}", agent_detail.name, local_dest)
+    except (MngError, HostError, OSError) as exc:
+        logger.warning("Failed to pull .test_output from agent '{}': {}", agent_detail.name, exc)
+
+
 def read_integrator_result(
     agent_detail: AgentDetails,
     host: OnlineHostInterface,
