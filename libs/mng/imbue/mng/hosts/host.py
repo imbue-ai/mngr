@@ -1616,15 +1616,14 @@ class Host(BaseHost, OnlineHostInterface):
 
             result = self.execute_command(cmd)
             if not result.success:
-                branch_to_check = new_branch_name or base_branch
                 stderr = result.stderr or ""
-                if ("already checked out" in stderr or "already used by worktree" in stderr) and branch_to_check:
+                if "already checked out" in stderr or "already used by worktree" in stderr:
+                    # Extract git's message (which names the correct branch) and add syntax help
+                    git_msg = stderr.strip().split("\n")[-1].removeprefix("fatal: ").strip()
                     raise UserInputError(
-                        f"Branch '{branch_to_check}' is already checked out in another worktree. "
-                        f"To create a new branch based on it, use --branch {branch_to_check}: "
-                        f"or --branch {branch_to_check}:explicit-new-name"
+                        f"{git_msg}\nTo create a new branch instead, use --branch BASE: or --branch BASE:new-name"
                     )
-                raise MngError(f"Failed to create git worktree: {result.stderr}")
+                raise MngError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)

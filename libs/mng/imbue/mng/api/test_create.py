@@ -499,7 +499,7 @@ def test_worktree_already_checked_out_gives_helpful_error(
         ),
     )
 
-    with pytest.raises(UserInputError, match=f"Branch '{current_branch}' is already checked out"):
+    with pytest.raises(UserInputError, match="To create a new branch instead, use --branch BASE:"):
         create(
             source_location=source_location,
             target_host=local_host,
