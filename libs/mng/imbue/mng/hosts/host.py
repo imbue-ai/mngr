@@ -1616,7 +1616,7 @@ class Host(BaseHost, OnlineHostInterface):
 
             result = self.execute_command(cmd)
             if not result.success:
-                branch_to_check = base_branch or new_branch_name
+                branch_to_check = new_branch_name or base_branch
                 stderr = result.stderr or ""
                 if ("already checked out" in stderr or "already used by worktree" in stderr) and branch_to_check:
                     raise UserInputError(
