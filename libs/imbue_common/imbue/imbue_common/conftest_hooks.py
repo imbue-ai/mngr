@@ -1,7 +1,7 @@
 """Shared pytest conftest hooks for all projects in the monorepo.
 
 Provides common test infrastructure:
-- Global test locking (prevents parallel pytest processes from conflicting)
+- Per-worktree test locking (prevents parallel pytest processes in the same worktree from conflicting)
 - Test suite timing limits (configurable via PYTEST_MAX_DURATION env var)
 - xdist parallelism override (configurable via PYTEST_NUMPROCESSES env var)
 - Output file redirection (slow tests report, coverage report)
@@ -32,6 +32,7 @@ by pytest. Without the guard, pytest_addoption would fail with duplicate option 
 """
 
 import fcntl
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -94,8 +95,11 @@ importlib.metadata.entry_points = _cached_entry_points  # type: ignore[assignmen
 # Relative to wherever pytest is invoked from.
 _TEST_OUTPUTS_DIR: Final[Path] = Path(".test_output")
 
-# The lock file path - a constant location in /tmp so all pytest processes can find it
-_GLOBAL_TEST_LOCK_PATH: Final[Path] = Path("/tmp/pytest_global_test_lock")
+# Directory for per-worktree lock files. Each worktree gets its own lock (derived
+# from the rootpath hash) so that agents in separate worktrees can run tests in
+# parallel, while concurrent pytest invocations within the same worktree are still
+# serialized.
+_LOCK_DIR: Final[Path] = Path("/tmp/pytest_worktree_locks")
 
 # Attribute name used to store the lock file handle on the session object.
 # The handle must stay open for the duration of the test session so the flock is held.
@@ -275,8 +279,10 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
     By the time our pytest_configure runs, pytest-cov has already copied the cov_report options.
     We modify the CovController here to ensure the terminal report is suppressed.
 
-    The lock prevents multiple parallel pytest processes (e.g., from different worktrees)
-    from running tests concurrently, which can cause timing-related flaky tests.
+    The lock prevents multiple parallel pytest processes within the same worktree
+    from running tests concurrently, which can cause coverage file conflicts and
+    timing-related flaky tests. The lock is scoped per-worktree (derived from
+    rootpath) so that agents in separate worktrees can run tests in parallel.
 
     The lock is acquired at session start (before collection) because with xdist,
     the controller process doesn't run pytest_collection_finish - only workers do.
@@ -305,8 +311,15 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
     if _is_xdist_worker():
         setattr(session, "start_time", time.time())  # noqa: B010
     else:
+        # Derive a per-worktree lock path from the rootpath so separate worktrees
+        # can run tests in parallel while same-worktree runs are serialized.
+        rootpath = str(session.config.rootpath)
+        path_hash = hashlib.sha256(rootpath.encode()).hexdigest()[:16]
+        _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = _LOCK_DIR / f"pytest_lock_{path_hash}"
+
         # Acquire the lock and store the handle on the session to keep it open
-        lock_handle = _acquire_global_test_lock(lock_path=_GLOBAL_TEST_LOCK_PATH)
+        lock_handle = _acquire_global_test_lock(lock_path=lock_path)
         setattr(session, _SESSION_LOCK_HANDLE_ATTR, lock_handle)  # noqa: B010
 
         # Record start time AFTER acquiring the lock so wait time isn't counted
