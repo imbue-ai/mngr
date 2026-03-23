@@ -1618,10 +1618,9 @@ class Host(BaseHost, OnlineHostInterface):
             if not result.success:
                 stderr = result.stderr or ""
                 if "already checked out" in stderr or "already used by worktree" in stderr:
-                    # Extract git's message (which names the correct branch) and add syntax help
-                    git_msg = stderr.strip().split("\n")[-1].removeprefix("fatal: ").strip()
                     raise UserInputError(
-                        f"{git_msg}\nTo create a new branch instead, use --branch BASE: or --branch BASE:new-name"
+                        f"{stderr.strip()}\n"
+                        f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name"
                     )
                 raise MngError(f"Failed to create git worktree: {stderr}")
 
