@@ -170,9 +170,11 @@ def _build_agent_prompt(
     pytest_flags: tuple[str, ...],
     prompt_suffix: str = "",
 ) -> str:
-    # Human-sanctioned: prompt is currently specific to mng's E2E tutorial tests.
-    # This should be made generic in the future, but is acceptable for now.
-    """Build the prompt/initial message for a test-running agent."""
+    """Build the prompt/initial message for a test-running agent.
+
+    Human-sanctioned: prompt is currently specific to mng's E2E tutorial tests.
+    This should be made generic in the future, but is acceptable for now.
+    """
     flags_str = " ".join(pytest_flags)
     run_cmd = f"pytest {test_node_id}"
     if flags_str:

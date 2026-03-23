@@ -1,10 +1,11 @@
 """Data types for the test-mapreduce plugin."""
 
-from enum import Enum
+from enum import auto
 from pathlib import Path
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
 from imbue.mng.interfaces.host import AgentLabelOptions
@@ -16,21 +17,21 @@ from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
 
 
-class ChangeKind(str, Enum):
+class ChangeKind(UpperCaseStrEnum):
     """What kind of change the agent attempted."""
 
-    IMPROVE_TEST = "IMPROVE_TEST"
-    FIX_TEST = "FIX_TEST"
-    FIX_IMPL = "FIX_IMPL"
-    FIX_TUTORIAL = "FIX_TUTORIAL"
+    IMPROVE_TEST = auto()
+    FIX_TEST = auto()
+    FIX_IMPL = auto()
+    FIX_TUTORIAL = auto()
 
 
-class ChangeStatus(str, Enum):
+class ChangeStatus(UpperCaseStrEnum):
     """Whether the change succeeded."""
 
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    BLOCKED = "BLOCKED"
+    SUCCEEDED = auto()
+    FAILED = auto()
+    BLOCKED = auto()
 
 
 class Change(FrozenModel):
@@ -40,15 +41,15 @@ class Change(FrozenModel):
     summary_markdown: str = Field(description="Markdown description of what was done or attempted")
 
 
-class DisplayCategory(str, Enum):
+class DisplayCategory(UpperCaseStrEnum):
     """Derived display category for HTML report grouping and coloring."""
 
-    PENDING = "PENDING"
-    FIXED = "FIXED"
-    REGRESSED = "REGRESSED"
-    STUCK = "STUCK"
-    ERRORED = "ERRORED"
-    CLEAN_PASS = "CLEAN_PASS"
+    PENDING = auto()
+    FIXED = auto()
+    REGRESSED = auto()
+    STUCK = auto()
+    ERRORED = auto()
+    CLEAN_PASS = auto()
 
 
 class TestResult(FrozenModel):
