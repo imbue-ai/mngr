@@ -460,6 +460,10 @@ def test_worktree_with_existing_branch(
                 check=True,
             )
             assert branch_result.stdout.strip() == existing_branch
+
+            # Existing branch was checked out, not created -- must be None so
+            # 'mng destroy --remove-created-branch' does not delete it.
+            assert agent.get_created_branch_name() is None
         finally:
             if worktree_path is not None:
                 subprocess.run(
