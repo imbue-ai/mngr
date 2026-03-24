@@ -1,8 +1,8 @@
 """Tests for remote agent creation (Modal/Docker) from the tutorial.
 
-These tests verify that agents can be created on remote providers. Modal tests
-actually exercise the Modal provider; Docker tests assert that the provider is
-disabled (Docker remains disabled in the test fixture).
+These tests verify that agents can be created on remote providers. Both Modal
+and Docker providers are enabled in the test fixture so these tests actually
+exercise them.
 
 The tests are intentionally kept as separate functions (not parametrized) so that
 each one has a 1:1 correspondence with a tutorial script block. This makes it
@@ -14,15 +14,6 @@ import pytest
 
 from imbue.mng.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
-
-_DOCKER_DISABLED_PATTERN = r"(?i)docker.*(not authorized|not enabled|disabled|not available|not installed)"
-
-
-def _assert_docker_disabled(result) -> None:
-    """Assert a command failed because the Docker provider is disabled."""
-    expect(result).to_fail()
-    combined = result.stdout + result.stderr
-    expect(combined).to_match(_DOCKER_DISABLED_PATTERN)
 
 
 @pytest.mark.release
@@ -225,12 +216,11 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     mng create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
-    _assert_docker_disabled(
-        e2e.run(
-            'mng create my-task --provider docker -s "--gpus all" --no-ensure-clean',
-            comment="some providers (like docker), take start args as well as build args",
-        )
+    result = e2e.run(
+        'mng create my-task --provider docker -s "--gpus all" --no-connect --no-ensure-clean',
+        comment="some providers (like docker), take start args as well as build args",
     )
+    expect(result).to_succeed()
 
 
 @pytest.mark.release

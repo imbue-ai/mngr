@@ -23,6 +23,7 @@ from imbue.mng.cli.output_helpers import write_human_line
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
+from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostName
@@ -30,22 +31,22 @@ from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import gather_results
-from imbue.mng_tmr.api import generate_html_report
 from imbue.mng_tmr.api import get_base_commit
 from imbue.mng_tmr.api import launch_all_test_agents
+from imbue.mng_tmr.api import launch_and_poll_agents
 from imbue.mng_tmr.api import launch_integrator_agent
-from imbue.mng_tmr.api import poll_until_all_done
 from imbue.mng_tmr.api import pull_agent_branch
 from imbue.mng_tmr.api import pull_test_outputs
 from imbue.mng_tmr.api import read_integrator_result
 from imbue.mng_tmr.api import should_pull_changes
 from imbue.mng_tmr.api import wait_for_integrator
 from imbue.mng_tmr.data_types import IntegratorResult
+from imbue.mng_tmr.data_types import TestAgentInfo
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TmrLaunchConfig
+from imbue.mng_tmr.report import generate_html_report
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
@@ -65,6 +66,7 @@ class TmrCliOptions(CommonCliOptions):
     use_snapshot: bool
     snapshot: str | None
     max_parallel: int
+    max_agents: int
     launch_delay: float
     poll_interval: float
     timeout: float
@@ -237,7 +239,15 @@ def _run_integrator_phase(
     default=4,
     show_default=True,
     type=int,
-    help="Maximum number of agents to launch concurrently",
+    help="Maximum number of agents to launch concurrently (launch-time parallelism)",
+)
+@click.option(
+    "--max-agents",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Maximum number of agents running at any one time (0 = no limit). "
+    "When set, agents are launched incrementally as earlier ones finish.",
 )
 @click.option(
     "--launch-delay",
@@ -258,7 +268,7 @@ def _run_integrator_phase(
     default=_DEFAULT_TIMEOUT_SECONDS,
     show_default=True,
     type=float,
-    help="Maximum seconds to wait for agents after launch (stops all pending agents when reached)",
+    help="Maximum seconds each agent can run before being stopped (per-agent timeout)",
 )
 @click.option(
     "--integrator-timeout",
@@ -320,20 +330,8 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         label_options=label_options,
         snapshot=provided_snapshot,
     )
-    # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
-    agent_infos, agent_hosts, _snapshot_name = launch_all_test_agents(
-        test_node_ids=test_node_ids,
-        config=config,
-        mng_ctx=mng_ctx,
-        pytest_flags=testing_flags,
-        prompt_suffix=opts.prompt_suffix or "",
-        use_snapshot=opts.use_snapshot and provided_snapshot is None,
-        max_parallel=opts.max_parallel,
-        launch_delay_seconds=opts.launch_delay,
-    )
-    _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 5: Compute output directory and html_path before polling
+    # Step 5: Compute output directory and html_path before launching
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if opts.output_html is not None:
         html_path = Path(opts.output_html)
@@ -343,20 +341,44 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 6: Write initial report (all PENDING)
-    initial_results = build_current_results(agent_infos, {}, set(), agent_hosts)
-    generate_html_report(initial_results, html_path)
+    # Step 6: Launch and poll agents
+    # When max_agents > 0, agents are launched incrementally as earlier ones finish.
+    # Otherwise, all agents are launched up front and then polled via the same function.
+    use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
 
-    # Step 7: Poll until all agents are done (or timeout), updating report continuously
-    deadline = time.monotonic() + opts.timeout
-    final_details, timed_out_ids = poll_until_all_done(
-        agents=agent_infos,
+    if use_batched:
+        agent_infos: list[TestAgentInfo] = []
+        agent_hosts: dict[str, OnlineHostInterface] = {}
+        remaining_node_ids = test_node_ids
+    else:
+        # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
+        agent_infos, agent_hosts, _snapshot_name = launch_all_test_agents(
+            test_node_ids=test_node_ids,
+            config=config,
+            mng_ctx=mng_ctx,
+            pytest_flags=testing_flags,
+            prompt_suffix=opts.prompt_suffix or "",
+            use_snapshot=opts.use_snapshot and provided_snapshot is None,
+            max_parallel=opts.max_parallel,
+            launch_delay_seconds=opts.launch_delay,
+        )
+        remaining_node_ids = []
+
+    final_details, timed_out_ids = launch_and_poll_agents(
+        test_node_ids=remaining_node_ids,
+        config=config,
         mng_ctx=mng_ctx,
+        pytest_flags=testing_flags,
+        prompt_suffix=opts.prompt_suffix or "",
+        max_agents=opts.max_agents,
+        agent_timeout_seconds=opts.timeout,
         poll_interval_seconds=opts.poll_interval,
-        hosts=agent_hosts,
-        deadline=deadline,
         report_path=html_path,
+        all_agents=agent_infos,
+        all_hosts=agent_hosts,
     )
+
+    _emit_agents_launched(len(agent_infos), output_opts)
 
     # Step 8: Gather final results (read result.json, pull branches for fixes)
     # Only pass base_commit for remote providers -- local worktree branches already exist
@@ -404,7 +426,7 @@ CommandHelpMetadata(
 1. Collects tests using pytest --collect-only, passing through all arguments.
 2. Launches one agent per test. Each agent runs the test and, if it fails,
    attempts to diagnose and fix either the test code or the implementation.
-3. Polls agents until all finish (stops agents when they enter WAITING state).
+3. Polls agents until all finish or individually time out (per-agent timeout).
    An HTML report is updated continuously during polling.
 4. For successful fixes, pulls the agent's code changes into branches
    named mng-tmr/*.
@@ -426,6 +448,7 @@ Use --use-snapshot with remote providers to build and provision one host first,
 snapshot it, then launch all remaining agents from the snapshot (much faster).
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
+Use --max-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to $MNG_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
@@ -437,6 +460,7 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Use Docker provider", "mng tmr --provider docker tests/"),
         ("Modal with snapshot", "mng tmr --provider modal --use-snapshot tests/"),
         ("Pass env vars and labels", "mng tmr --env API_KEY=xxx --label batch=run1"),
+        ("Limit to 4 concurrent agents", "mng tmr --max-agents 4 tests/"),
         ("Custom poll interval", "mng tmr --poll-interval 30"),
         ("Specify output location", "mng tmr --output-html report.html"),
     ),

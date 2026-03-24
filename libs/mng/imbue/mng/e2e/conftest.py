@@ -224,7 +224,7 @@ def e2e(
     - Isolated TMUX_TMPDIR (own tmux server, separate from the one the parent
       autouse fixture creates for the in-process test environment)
     - A temporary git repo as the working directory
-    - Disabled Docker provider via settings.local.toml (Modal is left enabled)
+    - Remote providers (Modal, Docker) left enabled for e2e testing
     - A custom connect_command that records tmux sessions via asciinema
 
     Output is saved to .test_output/e2e/<timestamp>/<test_name>/ (relative to repo root).
@@ -253,8 +253,8 @@ def e2e(
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start and disable Docker provider
-    # (Modal is left enabled so that remote-provider e2e tests actually exercise it)
+    # Configure connect_command for create/start
+    # Remote providers (Modal, Docker) are left enabled so that e2e tests exercise them
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -262,9 +262,6 @@ def e2e(
         "\n"
         "[commands.start]\n"
         'connect_command = "mng-e2e-connect"\n'
-        "\n"
-        "[providers.docker]\n"
-        "is_enabled = false\n"
     )
 
     session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)

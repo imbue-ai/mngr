@@ -76,6 +76,7 @@ class TestAgentInfo(FrozenModel):
     test_node_id: str = Field(description="The pytest node ID for the test (e.g. tests/test_foo.py::test_bar)")
     agent_id: AgentId = Field(description="The ID of the launched agent")
     agent_name: AgentName = Field(description="The name of the launched agent")
+    created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
 
 
 class TmrLaunchConfig(FrozenModel):

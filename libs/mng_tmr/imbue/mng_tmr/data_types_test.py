@@ -85,6 +85,7 @@ def test_test_agent_info_construction() -> None:
         test_node_id="tests/test_foo.py::test_bar",
         agent_id=AgentId.generate(),
         agent_name=AgentName("tmr-test-bar"),
+        created_at=0.0,
     )
     assert info.test_node_id == "tests/test_foo.py::test_bar"
     assert str(info.agent_name) == "tmr-test-bar"

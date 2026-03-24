@@ -1,18 +1,15 @@
 """Core logic for the test-mapreduce plugin.
 
 Implements the map-reduce pattern: collect tests via pytest, launch an agent per
-test, poll for completion, gather results, pull code changes, and generate an
-HTML report.
+test, poll for completion, gather results, and pull code changes.
 """
 
-import html
 import json
 import secrets
 import time
 from pathlib import Path
 
 from loguru import logger
-from markdown_it import MarkdownIt
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
@@ -20,6 +17,7 @@ from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.api.create import create as api_create
 from imbue.mng.api.data_types import CreateAgentResult
+from imbue.mng.api.list import ListResult
 from imbue.mng.api.list import list_agents
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.api.pull import pull_git
@@ -49,12 +47,12 @@ from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng_tmr.data_types import Change
 from imbue.mng_tmr.data_types import ChangeKind
 from imbue.mng_tmr.data_types import ChangeStatus
-from imbue.mng_tmr.data_types import DisplayCategory
 from imbue.mng_tmr.data_types import IntegratorResult
 from imbue.mng_tmr.data_types import TestAgentInfo
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TestResult
 from imbue.mng_tmr.data_types import TmrLaunchConfig
+from imbue.mng_tmr.report import generate_html_report
 
 PLUGIN_NAME = "test-map-reduce"
 
@@ -66,29 +64,25 @@ _TERMINAL_STATES = frozenset(
     }
 )
 
-_DISPLAY_COLORS: dict[DisplayCategory, str] = {
-    DisplayCategory.PENDING: "rgb(3, 169, 244)",
-    DisplayCategory.FIXED: "rgb(33, 150, 243)",
-    DisplayCategory.REGRESSED: "rgb(255, 152, 0)",
-    DisplayCategory.STUCK: "rgb(244, 67, 54)",
-    DisplayCategory.ERRORED: "rgb(158, 158, 158)",
-    DisplayCategory.CLEAN_PASS: "rgb(76, 175, 80)",
-}
-
-_DISPLAY_GROUP_ORDER: list[DisplayCategory] = [
-    DisplayCategory.PENDING,
-    DisplayCategory.FIXED,
-    DisplayCategory.REGRESSED,
-    DisplayCategory.STUCK,
-    DisplayCategory.ERRORED,
-    DisplayCategory.CLEAN_PASS,
-]
-
 _SHORT_ID_LENGTH = 6
 
 _MISSING_AGENT_MAX_ROUNDS = 30
 
-_md = MarkdownIt()
+
+def _try_list_agents(mng_ctx: MngContext) -> ListResult | None:
+    """List agents, returning None on transient errors.
+
+    Human-sanctioned broad catch: polling must survive transient provider errors.
+    """
+    try:
+        return list_agents(
+            mng_ctx=mng_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+    except Exception as exc:
+        logger.warning("Polling failed (will retry next cycle): {}", exc)
+        return None
 
 
 def should_pull_changes(result: TestMapReduceResult) -> bool:
@@ -104,22 +98,6 @@ def should_pull_changes(result: TestMapReduceResult) -> bool:
     if result.tests_passing_before is True and result.tests_passing_after is not True:
         return False
     return True
-
-
-def display_category_of(result: TestMapReduceResult) -> DisplayCategory:
-    """Derive a display category from a result for report grouping/coloring."""
-    if result.errored:
-        return DisplayCategory.ERRORED
-    if result.tests_passing_before is None and result.tests_passing_after is None and not result.changes:
-        return DisplayCategory.PENDING
-    has_succeeded = any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values())
-    if has_succeeded:
-        if result.tests_passing_before is True and result.tests_passing_after is not True:
-            return DisplayCategory.REGRESSED
-        return DisplayCategory.FIXED
-    if not result.changes and result.tests_passing_after is True:
-        return DisplayCategory.CLEAN_PASS
-    return DisplayCategory.STUCK
 
 
 class CollectTestsError(MngError, RuntimeError):
@@ -364,6 +342,7 @@ def launch_test_agent(
             test_node_id=test_node_id,
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
+            created_at=time.monotonic(),
         ),
         create_result.host,
     )
@@ -469,58 +448,126 @@ def launch_all_test_agents(
     return agents, agent_hosts, launch_config.snapshot
 
 
-def poll_until_all_done(
-    agents: list[TestAgentInfo],
+def _launch_agents_up_to_limit(
+    remaining_tests: list[str],
+    pending_ids: set[str],
+    max_agents: int,
+    config: TmrLaunchConfig,
     mng_ctx: MngContext,
+    pytest_flags: tuple[str, ...],
+    prompt_suffix: str,
+    all_agents: list[TestAgentInfo],
+    all_hosts: dict[str, OnlineHostInterface],
+    agent_id_to_info: dict[str, TestAgentInfo],
+) -> None:
+    """Launch agents from remaining_tests until we hit max_agents running.
+
+    Mutates remaining_tests (pops from front), pending_ids, all_agents,
+    all_hosts, and agent_id_to_info in place.
+    """
+    while remaining_tests and len(pending_ids) < max_agents:
+        test_node_id = remaining_tests.pop(0)
+        info, host = launch_test_agent(test_node_id, config, mng_ctx, pytest_flags, prompt_suffix)
+        all_agents.append(info)
+        all_hosts[str(info.agent_id)] = host
+        agent_id_to_info[str(info.agent_id)] = info
+        pending_ids.add(str(info.agent_id))
+
+
+def launch_and_poll_agents(
+    test_node_ids: list[str],
+    config: TmrLaunchConfig,
+    mng_ctx: MngContext,
+    pytest_flags: tuple[str, ...],
+    prompt_suffix: str,
+    max_agents: int,
+    agent_timeout_seconds: float,
     poll_interval_seconds: float,
-    hosts: dict[str, OnlineHostInterface],
-    deadline: float,
-    report_path: Path | None = None,
+    report_path: Path | None,
+    all_agents: list[TestAgentInfo],
+    all_hosts: dict[str, OnlineHostInterface],
 ) -> tuple[dict[str, AgentDetails], set[str]]:
-    """Poll agents until all have reached a terminal state or the deadline is reached.
+    """Launch agents incrementally and poll until all finish.
+
+    Handles two modes depending on arguments:
+
+    1. Incremental launching (max_agents > 0, test_node_ids non-empty): launches
+       up to max_agents at a time, polling and launching more as capacity opens.
+    2. Pre-launched polling (test_node_ids empty, all_agents pre-populated):
+       polls the already-launched agents without launching any new ones.
+
+    all_agents and all_hosts are input/output parameters: pre-existing entries
+    are tracked from the start, and newly launched agents are appended during
+    execution.
 
     Returns (final_details, timed_out_ids) where final_details maps agent_id
     strings to AgentDetails, and timed_out_ids is the set of agent_id strings
-    that were still running when the deadline was reached.
-
-    The hosts dict maps agent_id strings to their respective hosts. This is
-    needed because agents may be running on different hosts (e.g. separate
-    Docker containers or Modal instances).
-
-    Agents that disappear from listings are treated as errors after a grace period.
-    Agents entering WAITING state are stopped after being recorded.
-    When the deadline is reached, all pending agents are stopped unconditionally.
-
-    If report_path is provided, an intermediate HTML report is written after each
-    polling round and before returning on timeout.
+    that were stopped because they exceeded agent_timeout_seconds.
     """
-    pending_ids = {str(info.agent_id) for info in agents}
-    agent_id_to_info = {str(info.agent_id): info for info in agents}
+    remaining_tests = list(test_node_ids)
+    pending_ids: set[str] = set()
+    agent_id_to_info: dict[str, TestAgentInfo] = {}
     final_details: dict[str, AgentDetails] = {}
+    timed_out_ids: set[str] = set()
     missing_rounds: dict[str, int] = {}
 
-    while pending_ids:
-        if time.monotonic() >= deadline:
-            logger.warning("Timeout reached with {} agent(s) still pending, stopping them", len(pending_ids))
-            for agent_id_str in pending_ids:
-                info = agent_id_to_info[agent_id_str]
-                _stop_agent_on_host(hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
-            if report_path is not None:
-                current_results = build_current_results(agents, final_details, set(pending_ids), hosts)
-                generate_html_report(current_results, report_path)
-            return final_details, set(pending_ids)
+    # Initialize tracking from any pre-launched agents already in all_agents
+    for info in all_agents:
+        agent_id_str = str(info.agent_id)
+        agent_id_to_info[agent_id_str] = info
+        pending_ids.add(agent_id_str)
+
+    launch_args = (
+        remaining_tests,
+        pending_ids,
+        max_agents,
+        config,
+        mng_ctx,
+        pytest_flags,
+        prompt_suffix,
+        all_agents,
+        all_hosts,
+        agent_id_to_info,
+    )
+
+    # Launch initial batch (no-op when remaining_tests is empty)
+    _launch_agents_up_to_limit(*launch_args)
+
+    if report_path is not None:
+        current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
+        generate_html_report(current_results, report_path)
+
+    while pending_ids or remaining_tests:
+        # Check per-agent timeouts
+        now = time.monotonic()
+        timed_out_this_round = False
+        for agent_id_str in list(pending_ids):
+            info = agent_id_to_info[agent_id_str]
+            elapsed = now - info.created_at
+            if elapsed >= agent_timeout_seconds:
+                logger.warning("Agent '{}' timed out after {:.0f}s, stopping", info.agent_name, elapsed)
+                _stop_agent_on_host(all_hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
+                pending_ids.discard(agent_id_str)
+                timed_out_ids.add(agent_id_str)
+                timed_out_this_round = True
+
+        # Launch new agents if capacity opened up
+        _launch_agents_up_to_limit(*launch_args)
+
+        if timed_out_this_round and report_path is not None:
+            current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
+            generate_html_report(current_results, report_path)
+
+        if not pending_ids and not remaining_tests:
+            break
+
+        if not pending_ids:
+            continue
 
         pending_names = [agent_id_to_info[aid].agent_name for aid in pending_ids]
         logger.info("Polling {} pending agent(s): {}", len(pending_ids), ", ".join(str(n) for n in pending_names))
-        try:
-            list_result = list_agents(
-                mng_ctx=mng_ctx,
-                is_streaming=False,
-                error_behavior=ErrorBehavior.CONTINUE,
-            )
-        # Human-sanctioned broad catch: polling must survive transient provider errors
-        except Exception as exc:
-            logger.warning("Polling failed (will retry next cycle): {}", exc)
+        list_result = _try_list_agents(mng_ctx)
+        if list_result is None:
             time.sleep(poll_interval_seconds)
             continue
 
@@ -534,18 +581,14 @@ def poll_until_all_done(
             if agent_detail.state not in _TERMINAL_STATES:
                 continue
 
-            logger.info(
-                "Agent '{}' finished (state={})",
-                agent_detail.name,
-                agent_detail.state,
-            )
+            logger.info("Agent '{}' finished (state={})", agent_detail.name, agent_detail.state)
             final_details[agent_id_str] = agent_detail
             pending_ids.discard(agent_id_str)
             missing_rounds.pop(agent_id_str, None)
             changed = True
 
             if agent_detail.state == AgentLifecycleState.WAITING:
-                _stop_agent_on_host(hosts[agent_id_str], agent_detail.id, agent_detail.name)
+                _stop_agent_on_host(all_hosts[agent_id_str], agent_detail.id, agent_detail.name)
 
         for agent_id_str in list(pending_ids):
             if agent_id_str not in seen_ids:
@@ -556,14 +599,17 @@ def poll_until_all_done(
                     pending_ids.discard(agent_id_str)
                     changed = True
 
-        if changed and report_path is not None:
-            current_results = build_current_results(agents, final_details, set(), hosts)
+        # Launch new agents if capacity opened up from finished agents
+        _launch_agents_up_to_limit(*launch_args)
+
+        if (changed or timed_out_this_round) and report_path is not None:
+            current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
             generate_html_report(current_results, report_path)
 
-        if pending_ids:
+        if pending_ids or remaining_tests:
             time.sleep(poll_interval_seconds)
 
-    return final_details, set()
+    return final_details, timed_out_ids
 
 
 def _stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name: AgentName) -> None:
@@ -853,155 +899,6 @@ def build_current_results(
     )
 
 
-def generate_html_report(
-    results: list[TestMapReduceResult],
-    output_path: Path,
-    integrator: IntegratorResult | None = None,
-) -> Path:
-    """Generate an HTML report summarizing test-mapreduce results."""
-    counts: dict[DisplayCategory, int] = {}
-    for r in results:
-        cat = display_category_of(r)
-        counts[cat] = counts.get(cat, 0) + 1
-
-    summary_parts = [f"{cat.value}: {count}" for cat, count in sorted(counts.items(), key=lambda x: x[0].value)]
-    summary_text = ", ".join(summary_parts)
-
-    bar_html = _build_stacked_bar(counts, len(results))
-    tables_html = _build_grouped_tables(results)
-    integrator_html = _build_integrator_section(integrator)
-
-    css = _html_report_css()
-    report_html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Test Map-Reduce Report</title>
-  <style>
-{css}
-  </style>
-</head>
-<body>
-  <h1>Test Map-Reduce Report</h1>
-  <p class="summary">{len(results)} test(s) -- {summary_text}</p>
-{bar_html}
-{tables_html}
-{integrator_html}
-</body>
-</html>
-"""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report_html)
-    logger.info("HTML report written to {}", output_path)
-    return output_path
-
-
-def _build_stacked_bar(counts: dict[DisplayCategory, int], total: int) -> str:
-    """Build an HTML stacked bar showing display category distribution."""
-    if total == 0:
-        return ""
-    segments = ""
-    for cat in _DISPLAY_GROUP_ORDER:
-        count = counts.get(cat, 0)
-        if count == 0:
-            continue
-        pct = count / total * 100
-        color = _DISPLAY_COLORS.get(cat, "rgb(158, 158, 158)")
-        segments += f'    <div style="width: {pct:.1f}%; background: {color};" title="{cat.value}: {count}"></div>\n'
-    return f'  <div class="bar">\n{segments}  </div>'
-
-
-def _build_integrator_section(integrator: IntegratorResult | None) -> str:
-    """Build the HTML section for the integrator agent results."""
-    if integrator is None:
-        return ""
-    section = '  <h2 class="integrator-header">Integrator</h2>\n'
-    if integrator.branch_name is not None:
-        escaped = html.escape(integrator.branch_name)
-        section += f'  <p class="integrator">Integrated branch: <code>{escaped}</code></p>\n'
-    if integrator.merged:
-        section += "  <p>Merged:</p>\n  <ul>\n"
-        for b in integrator.merged:
-            section += f"    <li><code>{html.escape(b)}</code></li>\n"
-        section += "  </ul>\n"
-    if integrator.failed:
-        section += '  <p style="color: rgb(244, 67, 54);">Failed to merge:</p>\n  <ul>\n'
-        for b in integrator.failed:
-            section += f"    <li><code>{html.escape(b)}</code></li>\n"
-        section += "  </ul>\n"
-    if integrator.summary_markdown:
-        section += f'  <div class="md">{_render_markdown(integrator.summary_markdown)}</div>\n'
-    return section
-
-
-def _render_markdown(text: str) -> str:
-    """Render markdown text to HTML."""
-    return _md.render(text)
-
-
-def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
-    """Build HTML tables grouped by display category, with CLEAN_PASS last."""
-    grouped: dict[DisplayCategory, list[TestMapReduceResult]] = {}
-    for r in results:
-        cat = display_category_of(r)
-        grouped.setdefault(cat, []).append(r)
-
-    sections = ""
-    for cat in _DISPLAY_GROUP_ORDER:
-        group = grouped.get(cat)
-        if not group:
-            continue
-        color = _DISPLAY_COLORS.get(cat, "rgb(158, 158, 158)")
-        sections += f'  <h2 style="color: {color};">{cat.value} ({len(group)})</h2>\n'
-        sections += "  <table>\n    <thead>\n      <tr>"
-        sections += "<th>Test</th><th>Changes</th><th>Summary</th><th>Agent</th><th>Branch</th>"
-        sections += "</tr>\n    </thead>\n    <tbody>\n"
-        for r in group:
-            branch_cell = r.branch_name if r.branch_name else "-"
-            summary_html = _render_markdown(r.summary_markdown)
-            changes_cell = (
-                ", ".join(f"{kind.value}/{change.status.value}" for kind, change in r.changes.items())
-                if r.changes
-                else "-"
-            )
-            sections += f"""      <tr>
-        <td>{html.escape(r.test_node_id)}</td>
-        <td>{html.escape(changes_cell)}</td>
-        <td class="md">{summary_html}</td>
-        <td><code>{html.escape(str(r.agent_name))}</code></td>
-        <td><code>{html.escape(branch_cell)}</code></td>
-      </tr>
-"""
-        sections += "    </tbody>\n  </table>\n"
-
-    return sections
-
-
-def _html_report_css() -> str:
-    """Return the CSS stylesheet for the HTML report.
-
-    Uses rgb() colors instead of hex to avoid ratchet false positives.
-    """
-    return (
-        "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 2rem; }\n"
-        "    h1 { color: rgb(51, 51, 51); }\n"
-        "    h2 { margin-top: 1.5rem; font-size: 1.1rem; }\n"
-        "    .summary { margin-bottom: 0.5rem; color: rgb(102, 102, 102); }\n"
-        "    .bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden;"
-        " margin-bottom: 1.5rem; }\n"
-        "    .bar > div { min-width: 2px; }\n"
-        "    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }\n"
-        "    th, td { border: 1px solid rgb(221, 221, 221); padding: 8px 12px; text-align: left; }\n"
-        "    th { background: rgb(245, 245, 245); font-weight: 600; }\n"
-        "    tr:hover { background: rgb(250, 250, 250); }\n"
-        "    td.md p { margin: 0.25em 0; }\n"
-        "    td.md p:first-child { margin-top: 0; }\n"
-        "    td.md p:last-child { margin-bottom: 0; }\n"
-        "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }\n"
-        "    .integrator { color: rgb(33, 150, 243); font-weight: 600; }"
-    )
-
-
 def launch_integrator_agent(
     fix_branches: list[str],
     config: TmrLaunchConfig,
@@ -1039,6 +936,7 @@ Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
             test_node_id="integrator",
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
+            created_at=time.monotonic(),
         ),
         create_result.host,
     )
@@ -1059,15 +957,8 @@ def wait_for_integrator(
     agent_id_str = str(integrator.agent_id)
 
     while time.monotonic() < deadline:
-        try:
-            list_result = list_agents(
-                mng_ctx=mng_ctx,
-                is_streaming=False,
-                error_behavior=ErrorBehavior.CONTINUE,
-            )
-        # Human-sanctioned broad catch: polling must survive transient provider errors
-        except Exception as exc:
-            logger.warning("Integrator polling failed (will retry next cycle): {}", exc)
+        list_result = _try_list_agents(mng_ctx)
+        if list_result is None:
             time.sleep(poll_interval_seconds)
             continue
 
