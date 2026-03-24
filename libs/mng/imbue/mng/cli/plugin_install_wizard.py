@@ -11,7 +11,6 @@ from typing import Final
 import click
 from loguru import logger
 from pydantic import ConfigDict
-from pydantic import Field
 from urwid.display.raw import Screen
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.event_loop.main_loop import MainLoop
@@ -26,7 +25,6 @@ from urwid.widget.wimp import CheckBox
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.cli.common_opts import add_common_options
@@ -34,35 +32,11 @@ from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.plugin_catalog import RECOMMENDED_PLUGINS
+from imbue.mng.plugin_catalog import RecommendedPlugin
 from imbue.mng.uv_tool import build_uv_tool_install_add_many
 from imbue.mng.uv_tool import read_receipt
 from imbue.mng.uv_tool import require_uv_tool_receipt
-
-
-class RecommendedPlugin(FrozenModel):
-    """A plugin available for selection in the install wizard."""
-
-    package_name: str = Field(description="PyPI package name")
-    description: str = Field(description="Human-readable description")
-    is_preselected: bool = Field(default=False, description="Whether pre-selected by default")
-
-
-# Descriptions sourced from each plugin's pyproject.toml.
-RECOMMENDED_PLUGINS: Final[tuple[RecommendedPlugin, ...]] = (
-    RecommendedPlugin(
-        package_name="mng-opencode",
-        description="OpenCode agent type plugin for mng",
-    ),
-    RecommendedPlugin(
-        package_name="mng-pair",
-        description="Pair command plugin for mng - continuous file sync between agent and local directory",
-    ),
-    RecommendedPlugin(
-        package_name="mng-tutor",
-        description="Interactive tutorial plugin for mng",
-        is_preselected=True,
-    ),
-)
 
 
 class _WizardState(MutableModel):

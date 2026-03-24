@@ -1,9 +1,9 @@
 from urwid.widget.wimp import CheckBox
 
-from imbue.mng.cli.plugin_install_wizard import RECOMMENDED_PLUGINS
-from imbue.mng.cli.plugin_install_wizard import RecommendedPlugin
 from imbue.mng.cli.plugin_install_wizard import _filter_already_installed
 from imbue.mng.cli.plugin_install_wizard import _get_selected_package_names
+from imbue.mng.plugin_catalog import RECOMMENDED_PLUGINS
+from imbue.mng.plugin_catalog import RecommendedPlugin
 
 # =============================================================================
 # Tests for RECOMMENDED_PLUGINS
