@@ -34,7 +34,7 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
@@ -291,8 +291,8 @@ def test_create_agent_with_worktree(
                 agent_type=AgentTypeName("worktree-test"),
                 name=agent_name,
                 command=CommandString("sleep 527146"),
+                transfer_mode=TransferMode.GIT_WORKTREE,
                 git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
                     new_branch_name=f"mng/{agent_name}",
                 ),
             )
@@ -363,8 +363,8 @@ def test_worktree_with_custom_branch_name(
                 agent_type=AgentTypeName("worktree-test"),
                 name=agent_name,
                 command=CommandString("sleep 60"),
+                transfer_mode=TransferMode.GIT_WORKTREE,
                 git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
                     base_branch=current_branch,
                     new_branch_name=custom_branch,
                 ),
@@ -422,6 +422,7 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
             agent_type=AgentTypeName("in-place-test"),
             name=agent_name,
             command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.NONE,
         )
 
         result = create(
@@ -475,11 +476,12 @@ def test_in_place_removes_previously_generated_work_dir(
         certified_data = local_host.get_certified_data()
         assert str(temp_work_dir) in certified_data.generated_work_dirs
 
-        # Create an in-place agent (git=None means in-place, no copy)
+        # Create an in-place agent (transfer_mode=NONE means in-place, no transfer)
         agent_options = CreateAgentOptions(
             agent_type=AgentTypeName("in-place-remove-test"),
             name=agent_name,
             command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.NONE,
         )
 
         create(
@@ -520,8 +522,8 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
                 agent_type=AgentTypeName("worktree-gen-test"),
                 name=agent_name,
                 command=CommandString("sleep 60"),
+                transfer_mode=TransferMode.GIT_WORKTREE,
                 git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
                     new_branch_name=f"mng/{agent_name}",
                 ),
             )
@@ -581,6 +583,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
             name=agent_name,
             command=CommandString("sleep 60"),
             target_path=target_dir,
+            transfer_mode=TransferMode.RSYNC,
         )
 
         result = create(

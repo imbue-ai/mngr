@@ -194,7 +194,7 @@ def run_mng_create(
         "--disable-plugin",
         "ttyd",
         "--yes",
-        "--in-place",
+        "--transfer=none",
     ]
 
     for env_var in pass_env:

@@ -113,17 +113,17 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
-    echo "alias mc='mng create --in-place'" >> ~/.bashrc && source ~/.bashrc
+    echo "alias mc='mng create --transfer=none'" >> ~/.bashrc && source ~/.bashrc
     # or use a more sophisticated tool, like Espanso
     """)
     expect(
         e2e.run(
-            "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
 
-    list_result = e2e.run("mng list", comment="Verify agent created with --in-place")
+    list_result = e2e.run("mng list", comment="Verify agent created with --transfer=none")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 

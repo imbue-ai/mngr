@@ -75,7 +75,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
@@ -1050,14 +1050,37 @@ class Host(BaseHost, OnlineHostInterface):
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
         """Create the work_dir directory for a new agent."""
-        copy_mode = options.git.copy_mode if options.git else WorkDirCopyMode.COPY
-        with log_span("Creating agent work directory", copy_mode=str(copy_mode)):
-            if copy_mode == WorkDirCopyMode.WORKTREE:
+        transfer_mode = options.transfer_mode
+        with log_span("Creating agent work directory", transfer_mode=str(transfer_mode)):
+            if transfer_mode == TransferMode.NONE:
+                return self._create_work_dir_in_place(host, path, options)
+            elif transfer_mode == TransferMode.GIT_WORKTREE:
                 return self._create_work_dir_as_git_worktree(host, path, options)
-            elif copy_mode in (WorkDirCopyMode.COPY, WorkDirCopyMode.CLONE):
+            elif transfer_mode in (TransferMode.RSYNC, TransferMode.GIT_MIRROR):
                 return self._create_work_dir_as_copy(host, path, options)
             else:
-                raise SwitchError(f"Unsupported work dir copy mode: {copy_mode}")
+                raise SwitchError(f"Unsupported transfer mode: {transfer_mode}")
+
+    def _create_work_dir_in_place(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Use the source directory directly as the work_dir (no transfer)."""
+        target_path = options.target_path or source_path
+
+        self._mkdir(target_path)
+
+        # Actively remove from generated_work_dirs in case a previous agent had
+        # registered this path (e.g., a worktree agent created this directory,
+        # then the user ran --transfer=none from it). Without this removal,
+        # GC would treat the directory as orphaned and delete it after the
+        # in-place agent is destroyed.
+        self._remove_generated_work_dir(target_path)
+
+        logger.debug("Skipped file transfer: transfer mode is none (in-place)")
+        return CreateWorkDirResult(path=target_path)
 
     def _create_work_dir_as_copy(
         self,
@@ -1087,10 +1110,7 @@ class Host(BaseHost, OnlineHostInterface):
 
         # Track generated work directories at the host level.
         # When running in-place, actively remove from generated_work_dirs in case
-        # a previous agent had registered this path (e.g., a worktree agent created
-        # this directory, then the user ran --in-place from it). Without this removal,
-        # GC would treat the directory as orphaned and delete it after the in-place
-        # agent is destroyed.
+        # a previous agent had registered this path.
         if is_generated_work_dir:
             self._add_generated_work_dir(target_path)
         else:

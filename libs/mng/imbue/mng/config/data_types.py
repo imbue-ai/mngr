@@ -752,10 +752,7 @@ class CreateCliOptions(CommonCliOptions):
     source_path: str | None
     target: str | None
     target_path: str | None
-    in_place: bool
-    copy_source: bool
-    clone: bool
-    worktree: bool
+    transfer: str | None
     rsync: bool | None
     rsync_args: str | None
     include_git: bool

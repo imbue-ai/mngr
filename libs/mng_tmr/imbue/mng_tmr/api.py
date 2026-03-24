@@ -44,8 +44,8 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
+from imbue.mng.primitives import TransferMode
 from imbue.mng.primitives import UncommittedChangesMode
-from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng_tmr.data_types import Change
 from imbue.mng_tmr.data_types import ChangeKind
 from imbue.mng_tmr.data_types import ChangeStatus
@@ -274,15 +274,15 @@ def _sanitize_test_name_for_agent(test_node_id: str) -> str:
     return sanitized.strip("-").lower()[:40]
 
 
-def _copy_mode_for_provider(provider_name: ProviderInstanceName) -> WorkDirCopyMode:
-    """Determine the git copy mode based on the provider.
+def _transfer_mode_for_provider(provider_name: ProviderInstanceName) -> TransferMode:
+    """Determine the transfer mode based on the provider.
 
-    WORKTREE only works when source and target are on the same host, so it is
+    GIT_WORKTREE only works when source and target are on the same host, so it is
     only usable with the local provider. Remote providers (docker, modal, etc.)
-    use CLONE to transfer git history efficiently.
+    use GIT_MIRROR to transfer git history efficiently.
     """
     is_local = provider_name.lower() == LOCAL_PROVIDER_NAME
-    return WorkDirCopyMode.WORKTREE if is_local else WorkDirCopyMode.CLONE
+    return TransferMode.GIT_WORKTREE if is_local else TransferMode.GIT_MIRROR
 
 
 def _build_agent_options(
@@ -292,14 +292,14 @@ def _build_agent_options(
     initial_message: str | None = None,
 ) -> CreateAgentOptions:
     """Build CreateAgentOptions for a tmr agent."""
-    copy_mode = _copy_mode_for_provider(config.provider_name)
+    transfer_mode = _transfer_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
         initial_message=initial_message,
+        transfer_mode=transfer_mode,
         git=AgentGitOptions(
-            copy_mode=copy_mode,
             new_branch_name=branch_name,
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),

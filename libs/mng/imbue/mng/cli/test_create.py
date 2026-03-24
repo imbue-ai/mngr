@@ -1004,14 +1004,14 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
 
 
 @pytest.mark.tmux
-def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
+def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     temp_host_dir: Path,
     mng_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Ensure-clean check is skipped with an explicit base branch even in copy mode (not just worktree)."""
+    """Ensure-clean check is skipped with an explicit base branch even in git-mirror mode (not just worktree)."""
     # Create a second branch to use as base
     subprocess.run(
         ["git", "branch", "other-branch"],
@@ -1038,7 +1038,8 @@ def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
                 str(temp_git_repo),
                 "--branch",
                 "other-branch:mng/*",
-                "--copy",
+                "--transfer",
+                "git-mirror",
                 "--no-connect",
             ],
             obj=plugin_manager,
@@ -1050,3 +1051,89 @@ def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
 
         # Wait for background session so cleanup can properly kill it
         wait_for_agent_session(session_name)
+
+
+# =============================================================================
+# Tests for --transfer flag validation
+# =============================================================================
+
+
+def test_transfer_rsync_rejected_for_git_repo(
+    cli_runner: CliRunner,
+    temp_git_repo: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=rsync should be rejected when the source is a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-rsync-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_git_repo),
+            "--transfer",
+            "rsync",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "rsync" in result.output.lower()
+
+
+def test_transfer_git_mirror_rejected_for_non_git(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=git-mirror should be rejected when the source is not a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-mirror-no-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--transfer",
+            "git-mirror",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "git repository" in result.output.lower()
+
+
+def test_transfer_git_worktree_rejected_for_non_git(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=git-worktree should be rejected when the source is not a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-worktree-no-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--transfer",
+            "git-worktree",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "git repository" in result.output.lower()

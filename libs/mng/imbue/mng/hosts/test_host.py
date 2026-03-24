@@ -48,6 +48,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import TransferMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
@@ -1609,6 +1610,7 @@ def test_create_work_dir_copy_without_git(host_with_temp_dir: tuple[Host, Path])
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1639,6 +1641,7 @@ def test_create_work_dir_copy_with_git(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1682,6 +1685,7 @@ def test_create_work_dir_copy_with_git_copies_info_exclude(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
     )
 
     host.create_agent_work_dir(host, source_path, options)
@@ -1710,6 +1714,7 @@ def test_create_work_dir_copy_excludes_git_when_disabled(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         git=AgentGitOptions(is_git_synced=False),
     )
 
@@ -1752,6 +1757,7 @@ def test_create_work_dir_copy_with_untracked_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1787,6 +1793,7 @@ def test_create_work_dir_copy_with_gitignored_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_gitignored=True),
     )
 
@@ -1821,6 +1828,7 @@ def test_create_work_dir_copy_with_renamed_file(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1852,6 +1860,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/new-branch-test"),
     )
 
@@ -1900,6 +1909,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/origin-test"),
     )
 
@@ -1940,6 +1950,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/no-origin-test"),
     )
 
@@ -2321,6 +2332,7 @@ def test_rsync_extra_args_parsing(host_with_temp_dir: tuple[Host, Path]) -> None
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--exclude exclude_me.txt",
@@ -2355,6 +2367,7 @@ def test_rsync_extra_args_with_spaces(host_with_temp_dir: tuple[Host, Path]) -> 
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args='--exclude "file with spaces.txt"',
@@ -2394,6 +2407,7 @@ def test_transfer_extra_files_with_many_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_git_synced=True, is_include_unclean=True),
     )
 
@@ -2557,6 +2571,7 @@ def test_rsync_does_not_delete_existing_files_by_default(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2591,6 +2606,7 @@ def test_rsync_with_delete_removes_extra_files(host_with_temp_dir: tuple[Host, P
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--delete",
@@ -2657,6 +2673,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-one"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2671,6 +2688,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-two"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
