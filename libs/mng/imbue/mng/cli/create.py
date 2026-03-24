@@ -28,6 +28,7 @@ from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.data_types import SourceLocation
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.find import ResolvedSource
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import get_host_from_list_by_id
@@ -92,7 +93,6 @@ from imbue.mng.utils.editor import EditorSession
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
-from imbue.mng.utils.git_utils import get_git_remote_url
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.name_generator import generate_agent_name
@@ -533,14 +533,13 @@ def _setup_create(
     agent_and_host_loader = _CachedAgentHostLoader(mng_ctx=mng_ctx)
 
     # figure out where the source data is coming from
-    source_location, source_agent_id = _resolve_source_location(
-        opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host
-    )
+    resolved_source = _resolve_source_location(opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host)
 
     # derive metadata from the source location for auto-labeling
+    remote_url = _get_source_remote_url(resolved_source.location)
     source_metadata = _SourceMetadata(
-        project=_parse_project_name(source_location, opts, address, mng_ctx),
-        remote=_parse_remote_url(source_location, mng_ctx.concurrency_group),
+        project=_parse_project_name(resolved_source, opts, mng_ctx),
+        remote=remote_url,
     )
 
     # Parse host lifecycle options (these go on the host, not the agent)
@@ -551,8 +550,8 @@ def _setup_create(
         initial_message=initial_message,
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
-        source_location=source_location,
-        source_agent_id=source_agent_id,
+        source_location=resolved_source.location,
+        source_agent_id=resolved_source.agent_id,
         source_metadata=source_metadata,
         host_lifecycle=host_lifecycle,
         plugin_cli_params=plugin_cli_params or {},
@@ -776,43 +775,28 @@ def _handle_editor_message(
         logger.debug("Message sent successfully")
 
 
+def _get_source_remote_url(source_location: HostLocation) -> str | None:
+    """Get the git remote origin URL from the source location via execute_command."""
+    result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
+    if result.success and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
 def _parse_project_name(
-    source_location: HostLocation, opts: CreateCliOptions, address: AgentAddress, mng_ctx: MngContext
+    resolved_source: ResolvedSource,
+    opts: CreateCliOptions,
+    mng_ctx: MngContext,
 ) -> str:
     if opts.project:
         return opts.project
 
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement the below function so that it works via HostInterface calls instead!"
-        )
+    # If creating from an existing agent, inherit its project label
+    source_project = resolved_source.agent_labels.get("project")
+    if source_project is not None:
+        return source_project
 
-    source_project = derive_project_name_from_path(source_location.path, mng_ctx.concurrency_group)
-
-    # When creating a new host from an external source (--source-agent or --source-host),
-    # validate that the project inferred from the source matches the project inferred from
-    # the local working directory. If they differ, the user must specify --project explicitly
-    # to avoid silently tagging the agent with the wrong project.
-    is_external_source = opts.source_agent is not None or opts.source_host is not None
-    is_creating_new_host = _is_creating_new_host(address, opts.new_host)
-    if is_external_source and is_creating_new_host:
-        local_git_root = find_git_worktree_root(None, mng_ctx.concurrency_group)
-        local_path = local_git_root if local_git_root is not None else Path(os.getcwd())
-        local_project = derive_project_name_from_path(local_path, mng_ctx.concurrency_group)
-        if source_project != local_project:
-            raise UserInputError(
-                f"Project mismatch: source infers project '{source_project}' but local directory infers "
-                f"'{local_project}'. Use --project to specify which project name to use."
-            )
-
-    return source_project
-
-
-def _parse_remote_url(source_location: HostLocation, cg: ConcurrencyGroup) -> str | None:
-    """Get the git remote origin URL from the source location, if available."""
-    if not source_location.host.is_local:
-        return None
-    return get_git_remote_url(source_location.path, "origin", cg)
+    return derive_project_name_from_path(resolved_source.location.path, mng_ctx.concurrency_group)
 
 
 def _try_reuse_existing_agent(
@@ -889,12 +873,8 @@ def _resolve_source_location(
     mng_ctx: MngContext,
     *,
     is_start_desired: bool,
-) -> tuple[HostLocation, AgentId | None]:
-    """Resolve the source location and optionally the source agent ID.
-
-    Returns (source_location, source_agent_id) where source_agent_id is set
-    when the source was resolved from an agent (--from-agent / --source-agent).
-    """
+) -> ResolvedSource:
+    """Resolve the source location and optionally the source agent ID and labels."""
     # figure out the agent source data
     if opts.source is None and opts.source_agent is None and opts.source_host is None:
         # easy, source location is on current host
@@ -905,7 +885,7 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Parse the source first to check if it's just a local path.
     # When --source is a plain filesystem path (no agent or host component),
@@ -929,11 +909,11 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
     agents_by_host = agent_and_host_loader()
-    resolved = resolve_source_location(
+    return resolve_source_location(
         opts.source,
         opts.source_agent,
         opts.source_host,
@@ -942,7 +922,6 @@ def _resolve_source_location(
         mng_ctx,
         is_start_desired=is_start_desired,
     )
-    return resolved.location, resolved.agent_id
 
 
 def _resolve_target_host(

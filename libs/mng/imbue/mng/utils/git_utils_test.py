@@ -7,7 +7,6 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
-from imbue.mng.utils.git_utils import _parse_project_name_from_url
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.git_utils import find_git_worktree_root
@@ -17,61 +16,62 @@ from imbue.mng.utils.git_utils import get_git_author_info
 from imbue.mng.utils.git_utils import get_git_remote_url
 from imbue.mng.utils.git_utils import get_head_commit
 from imbue.mng.utils.git_utils import is_git_repository
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.git_utils import parse_worktree_git_file
 
 
 def test_github_https_url() -> None:
     """Test parsing a GitHub HTTPS URL."""
     url = "https://github.com/owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_https_url_without_git_suffix() -> None:
     """Test parsing a GitHub HTTPS URL without .git suffix."""
     url = "https://github.com/owner/my-project"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_ssh_url() -> None:
     """Test parsing a GitHub SSH URL."""
     url = "git@github.com:owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_ssh_url_without_git_suffix() -> None:
     """Test parsing a GitHub SSH URL without .git suffix."""
     url = "git@github.com:owner/my-project"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_gitlab_https_url() -> None:
     """Test parsing a GitLab HTTPS URL."""
     url = "https://gitlab.com/owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_gitlab_ssh_url() -> None:
     """Test parsing a GitLab SSH URL."""
     url = "git@gitlab.com:owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_nested_project_path() -> None:
     """Test parsing a URL with nested project path."""
     url = "https://github.com/org/group/subgroup/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_invalid_url() -> None:
     """Test parsing an invalid URL returns None."""
     url = "not-a-valid-url"
-    assert _parse_project_name_from_url(url) is None
+    assert parse_project_name_from_url(url) is None
 
 
 def test_empty_url() -> None:
     """Test parsing an empty URL returns None."""
     url = ""
-    assert _parse_project_name_from_url(url) is None
+    assert parse_project_name_from_url(url) is None
 
 
 def test_derive_from_folder_name_when_no_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:

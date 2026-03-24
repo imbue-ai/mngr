@@ -10,18 +10,18 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.api.find import ResolvedSource
 from imbue.mng.cli.agent_addr import AgentAddress
 from imbue.mng.cli.agent_addr import parse_agent_address
 from imbue.mng.cli.create import _CreateCommand
 from imbue.mng.cli.create import _SourceMetadata
+from imbue.mng.cli.create import _get_source_remote_url
 from imbue.mng.cli.create import _is_creating_new_host
 from imbue.mng.cli.create import _parse_agent_opts
 from imbue.mng.cli.create import _parse_branch_flag
 from imbue.mng.cli.create import _parse_host_lifecycle_options
 from imbue.mng.cli.create import _parse_project_name
-from imbue.mng.cli.create import _parse_remote_url
 from imbue.mng.cli.create import _resolve_source_location
 from imbue.mng.cli.create import _resolve_target_host
 from imbue.mng.cli.create import _split_cli_args
@@ -449,16 +449,16 @@ def test_resolve_source_location_with_auto_start_enabled(
         to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
     )
 
-    result, source_agent_id = _resolve_source_location(
+    result = _resolve_source_location(
         opts,
         agent_and_host_loader=lambda: {},
         mng_ctx=temp_mng_ctx,
         is_start_desired=True,
     )
 
-    assert isinstance(result.host, OnlineHostInterface)
-    assert result.path == temp_work_dir
-    assert source_agent_id is None
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path == temp_work_dir
+    assert result.agent_id is None
 
 
 def test_resolve_target_host_with_auto_start_enabled(
@@ -495,7 +495,7 @@ def test_resolve_target_host_with_host_reference(
 
 
 # =============================================================================
-# Tests for _parse_project_name project mismatch validation
+# Tests for _parse_project_name
 # =============================================================================
 
 
@@ -505,122 +505,63 @@ def test_parse_project_name_returns_explicit_project(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
 ) -> None:
-    """When --project is specified, return it directly without validation."""
+    """When --project is specified, return it directly."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=temp_work_dir)
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=temp_work_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
     )
 
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(resolved, opts, temp_mng_ctx)
 
     assert result == "explicit-project"
 
 
-def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_agent(
+def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """Raises UserInputError when source agent project differs from local and creating a new host."""
-    # Create a source directory with a different name than the CWD project
-    different_project_dir = tmp_path / "totally-different-project"
-    different_project_dir.mkdir()
-
+    """When source agent has a project label, inherit it."""
+    some_dir = tmp_path / "local-folder"
+    some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address with provider but no host name implies new host
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
+    resolved = ResolvedSource(
+        location=HostLocation(host=local_host, path=some_dir),
+        agent_id=AgentId("agent-00000000000000000000000000000001"),
+        agent_labels={"project": "inherited-project"},
     )
 
-    with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, temp_mng_ctx)
+
+    assert result == "inherited-project"
 
 
-def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
+def test_parse_project_name_falls_back_to_derive(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
     temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """Raises UserInputError when source host project differs from local and creating a new host."""
-    different_project_dir = tmp_path / "another-different-project"
-    different_project_dir.mkdir()
-
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address with --new-host flag and a provider
-    address = AgentAddress(
-        host_name=HostName("myhost"),
-        provider_name=ProviderInstanceName("modal"),
-    )
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_host, "some-host"),
-        to_update(default_create_cli_opts.field_ref().new_host, True),
-    )
-
-    with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
-
-
-def test_parse_project_name_no_error_without_new_host(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
-    tmp_path: Path,
-) -> None:
-    """No error when source project differs but no new host is being created."""
-    different_project_dir = tmp_path / "yet-another-project"
-    different_project_dir.mkdir()
-
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address targets existing host (not new)
-    address = AgentAddress(host_name=HostName("myhost"))
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
-    )
-
-    # Should not raise - no new host means project tag doesn't matter
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
-
-    assert result == "yet-another-project"
-
-
-def test_parse_project_name_no_error_without_external_source(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
-    tmp_path: Path,
-) -> None:
-    """No error when creating a new host without an external source reference."""
+    """When no explicit project and no source agent, derive from path."""
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
-
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=some_dir)
-    # Address implies new host (provider only, no host name)
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
-    # Should not raise - no source_agent/source_host means no external source
-    result = _parse_project_name(source_location, opts=default_create_cli_opts, address=address, mng_ctx=temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, temp_mng_ctx)
 
     assert result == "some-project"
 
 
 # =============================================================================
-# Tests for _parse_remote_url
+# Tests for _get_source_remote_url
 # =============================================================================
 
 
-def test_parse_remote_url_returns_url_when_remote_exists(
+def test_get_source_remote_url_returns_url_when_remote_exists(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When source location has a git repo with a remote, return the remote URL."""
@@ -637,14 +578,13 @@ def test_parse_remote_url_returns_url_when_remote_exists(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result == "https://github.com/owner/my-repo.git"
 
 
-def test_parse_remote_url_returns_none_when_no_remote(
+def test_get_source_remote_url_returns_none_when_no_remote(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When git repo has no remote, return None."""
@@ -655,14 +595,13 @@ def test_parse_remote_url_returns_none_when_no_remote(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result is None
 
 
-def test_parse_remote_url_returns_none_when_no_git(
+def test_get_source_remote_url_returns_none_when_no_git(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When source path is not a git repo, return None."""
@@ -672,7 +611,7 @@ def test_parse_remote_url_returns_none_when_no_git(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=plain_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result is None
 
