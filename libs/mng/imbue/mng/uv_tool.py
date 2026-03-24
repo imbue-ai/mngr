@@ -9,6 +9,7 @@ while adding or removing plugins.
 
 import sys
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -196,6 +197,20 @@ def build_uv_tool_install_add_git(
     git_url = url if url.startswith("git+") else f"git+{url}"
     new_requirement = ToolRequirement(name=git_url)
     all_extras = list(receipt.extras) + [new_requirement]
+    return _build_uv_tool_install_command(receipt.base, all_extras)
+
+
+@pure
+def build_uv_tool_install_add_many(
+    receipt: ToolReceipt,
+    new_specifiers: Sequence[str],
+) -> tuple[str, ...]:
+    """Build a ``uv tool install`` command that adds multiple PyPI dependencies at once.
+
+    Preserves all existing extras and appends all new ones in a single command,
+    avoiding the overhead of reinstalling once per plugin.
+    """
+    all_extras = list(receipt.extras) + [ToolRequirement(name=s) for s in new_specifiers]
     return _build_uv_tool_install_command(receipt.base, all_extras)
 
 
