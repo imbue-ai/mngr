@@ -33,6 +33,7 @@ from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterf
 from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
 from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
+from imbue.minds.forwarding_server.proxy import generate_backend_loading_html
 from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
 from imbue.minds.forwarding_server.proxy import generate_service_worker_js
 from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
@@ -53,9 +54,6 @@ from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
-
-_BACKEND_WAIT_TIMEOUT_SECONDS: Final[float] = 30.0
-_BACKEND_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -470,20 +468,18 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        # Wait server-side for the backend to become available (handles the
-        # case where the user is redirected to an agent still starting up).
-        wait_seconds: int = request.app.state.backend_wait_timeout_seconds
-        iterations = int(wait_seconds / _BACKEND_POLL_INTERVAL_SECONDS)
-        for _ in range(iterations):
-            await asyncio.sleep(_BACKEND_POLL_INTERVAL_SECONDS)
-            backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-            if backend_url is not None:
-                break
-        if backend_url is None:
-            return Response(
-                status_code=502,
-                content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
-            )
+        # Return immediately instead of holding the connection open.
+        # For HTML-accepting requests, return a loading page that retries
+        # client-side after a short delay. This avoids saturating the
+        # browser's per-origin connection pool (typically 6 for HTTP/1.1)
+        # when a stale tab is pointed at an unavailable backend.
+        request_accept = request.headers.get("accept", "")
+        if "text/html" in request_accept:
+            return HTMLResponse(content=generate_backend_loading_html())
+        return Response(
+            status_code=502,
+            content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
+        )
 
     assert backend_url is not None
     resolved_backend_url = backend_url
@@ -905,7 +901,6 @@ def create_forwarding_server(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
-    backend_wait_timeout_seconds: int = int(_BACKEND_WAIT_TIMEOUT_SECONDS),
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
@@ -928,7 +923,6 @@ def create_forwarding_server(
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
-    app.state.backend_wait_timeout_seconds = backend_wait_timeout_seconds
     if http_client is not None:
         app.state.http_client = http_client
 
