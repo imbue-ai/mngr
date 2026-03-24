@@ -639,7 +639,7 @@ def test_get_source_remote_url_returns_none_when_no_git(
 # =============================================================================
 
 
-def test_source_metadata_dump_includes_remote_when_set() -> None:
+def test_auto_labels_dump_includes_remote_when_set() -> None:
     """model_dump includes both project and remote when remote is set."""
     meta = _AutoLabels(project="my-project", remote="https://github.com/owner/my-project.git")
 
@@ -649,7 +649,7 @@ def test_source_metadata_dump_includes_remote_when_set() -> None:
     }
 
 
-def test_source_metadata_dump_excludes_remote_when_none() -> None:
+def test_auto_labels_dump_excludes_remote_when_none() -> None:
     """model_dump omits remote when it is None."""
     meta = _AutoLabels(project="my-project")
 
