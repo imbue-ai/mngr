@@ -33,6 +33,7 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.plugin_install_wizard import install_wizard
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -879,3 +880,7 @@ specified scope.""",
     ),
 ).register()
 add_pager_help_option(plugin_disable)
+
+# -- install-wizard subcommand (defined in a separate module to keep this file manageable) --
+
+plugin.add_command(install_wizard)
