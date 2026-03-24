@@ -11,6 +11,7 @@ from typing import IO
 from typing import cast
 
 import pytest
+from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.host import Host as PyinfraHost
 
@@ -911,9 +912,10 @@ def _create_host_with_fake_connector(
         (OSError("No such file or directory"), False),
         (ValueError("Socket is closed"), False),
         (SSHException("SSH session not active"), True),
+        (ChannelException(2, "open failed"), True),
         (EOFError(), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "eof-error"],
+    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected
