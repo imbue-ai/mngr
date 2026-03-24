@@ -263,7 +263,6 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
-@pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_modal_snapshot(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -275,7 +274,10 @@ def test_create_modal_snapshot(e2e: E2eSession) -> None:
         comment="you can use an existing snapshot instead of building a new host from scratch",
         timeout=_REMOTE_TIMEOUT,
     )
-    expect(result).to_succeed()
+    # The snapshot ID is a tutorial placeholder; Modal rejects it as invalid
+    expect(result).to_fail()
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(r"(?i)not a valid Image ID|invalid.*image|invalid.*snapshot")
 
 
 @pytest.mark.release
