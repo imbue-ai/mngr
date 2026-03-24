@@ -502,7 +502,6 @@ def test_resolve_target_host_with_host_reference(
 def test_parse_project_name_returns_explicit_project(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     temp_work_dir: Path,
 ) -> None:
     """When --project is specified, return it directly."""
@@ -512,7 +511,7 @@ def test_parse_project_name_returns_explicit_project(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
     )
 
-    result = _parse_project_name(resolved, opts, temp_mng_ctx)
+    result = _parse_project_name(resolved, opts, remote_url=None)
 
     assert result == "explicit-project"
 
@@ -520,7 +519,6 @@ def test_parse_project_name_returns_explicit_project(
 def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
     """When source agent has a project label, inherit it."""
@@ -538,24 +536,39 @@ def test_parse_project_name_inherits_from_source_agent(
         ),
     )
 
-    result = _parse_project_name(resolved, default_create_cli_opts, temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
 
     assert result == "inherited-project"
 
 
-def test_parse_project_name_falls_back_to_derive(
+def test_parse_project_name_derives_from_remote_url(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """When no explicit project and no source agent, derive from path."""
+    """When remote URL is available, derive project name from it."""
+    some_dir = tmp_path / "local-folder"
+    some_dir.mkdir()
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
+
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url="https://github.com/owner/my-repo.git")
+
+    assert result == "my-repo"
+
+
+def test_parse_project_name_falls_back_to_folder_name(
+    default_create_cli_opts: CreateCliOptions,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When no remote URL, fall back to the source directory name."""
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
-    result = _parse_project_name(resolved, default_create_cli_opts, temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
 
     assert result == "some-project"
 

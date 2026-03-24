@@ -90,9 +90,9 @@ from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.utils.duration import parse_duration_to_seconds
 from imbue.mng.utils.editor import EditorSession
-from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.name_generator import generate_agent_name
@@ -549,7 +549,7 @@ def _setup_create(
         location=resolved_source.location,
         agent=resolved_source.agent,
         auto_labels=_AutoLabels(
-            project=_parse_project_name(resolved_source, opts, mng_ctx),
+            project=_parse_project_name(resolved_source, opts, remote_url),
             remote=remote_url,
         ),
     )
@@ -798,7 +798,7 @@ def _get_source_remote_url(source_location: HostLocation) -> str | None:
 def _parse_project_name(
     resolved_source: ResolvedSource,
     opts: CreateCliOptions,
-    mng_ctx: MngContext,
+    remote_url: str | None,
 ) -> str:
     if opts.project:
         return opts.project
@@ -809,7 +809,14 @@ def _parse_project_name(
         if source_project is not None:
             return source_project
 
-    return derive_project_name_from_path(resolved_source.location.path, mng_ctx.concurrency_group)
+    # Derive from the already-fetched remote URL (works for both local and remote hosts)
+    if remote_url is not None:
+        project_name = parse_project_name_from_url(remote_url)
+        if project_name is not None:
+            return project_name
+
+    # Fall back to the source directory name
+    return resolved_source.location.path.name
 
 
 def _try_reuse_existing_agent(
