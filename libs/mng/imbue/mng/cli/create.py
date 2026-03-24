@@ -788,6 +788,10 @@ def _parse_project_name(
     opts: CreateCliOptions,
     remote_url: str | None,
 ) -> str:
+    """Determine the project name for a new agent.
+
+    Priority: explicit --project flag > source agent's project label > git remote > folder name.
+    """
     if opts.project:
         return opts.project
 
