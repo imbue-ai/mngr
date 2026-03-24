@@ -551,7 +551,7 @@ def _setup_create(
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
         source_location=resolved_source.location,
-        source_agent_id=resolved_source.agent_id,
+        source_agent_id=resolved_source.agent.agent_id if resolved_source.agent else None,
         source_metadata=source_metadata,
         host_lifecycle=host_lifecycle,
         plugin_cli_params=plugin_cli_params or {},
@@ -792,9 +792,10 @@ def _parse_project_name(
         return opts.project
 
     # If creating from an existing agent, inherit its project label
-    source_project = resolved_source.agent_labels.get("project")
-    if source_project is not None:
-        return source_project
+    if resolved_source.agent is not None:
+        source_project = resolved_source.agent.labels.get("project")
+        if source_project is not None:
+            return source_project
 
     return derive_project_name_from_path(resolved_source.location.path, mng_ctx.concurrency_group)
 

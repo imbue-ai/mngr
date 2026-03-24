@@ -458,7 +458,7 @@ def test_resolve_source_location_with_auto_start_enabled(
 
     assert isinstance(result.location.host, OnlineHostInterface)
     assert result.location.path == temp_work_dir
-    assert result.agent_id is None
+    assert result.agent is None
 
 
 def test_resolve_target_host_with_auto_start_enabled(
@@ -529,8 +529,13 @@ def test_parse_project_name_inherits_from_source_agent(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     resolved = ResolvedSource(
         location=HostLocation(host=local_host, path=some_dir),
-        agent_id=AgentId("agent-00000000000000000000000000000001"),
-        agent_labels={"project": "inherited-project"},
+        agent=DiscoveredAgent(
+            host_id=local_host.id,
+            agent_id=AgentId("agent-00000000000000000000000000000001"),
+            agent_name=AgentName("source-agent"),
+            provider_name=ProviderInstanceName("local"),
+            certified_data={"labels": {"project": "inherited-project"}},
+        ),
     )
 
     result = _parse_project_name(resolved, default_create_cli_opts, temp_mng_ctx)

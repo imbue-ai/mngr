@@ -89,7 +89,7 @@ def test_resolve_source_location_resolves_host_and_path(
 
     assert isinstance(result.location.host, OnlineHostInterface)
     assert result.location.path == temp_work_dir
-    assert result.agent_id is None
+    assert result.agent is None
 
 
 def test_ensure_host_started_raises_when_start_not_desired(

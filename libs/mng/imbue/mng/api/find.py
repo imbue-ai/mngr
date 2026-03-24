@@ -182,13 +182,12 @@ def resolve_agent_reference(
 
 
 class ResolvedSource(FrozenModel):
-    """Full resolution result from resolve_source_detailed, including agent info when available."""
+    """Result of resolving a source location, including the discovered agent when available."""
 
     model_config = {"arbitrary_types_allowed": True}
 
     location: HostLocation = Field(description="The resolved host and path")
-    agent_id: AgentId | None = Field(default=None, description="The resolved source agent ID, if any")
-    agent_labels: dict[str, str] = Field(default_factory=dict, description="Labels from the source agent, if any")
+    agent: DiscoveredAgent | None = Field(default=None, description="The source agent, if resolved from one")
 
 
 @log_call
@@ -265,8 +264,7 @@ def resolve_source_location(
 
     return ResolvedSource(
         location=HostLocation(host=online_host, path=resolved_path),
-        agent_id=resolved_agent.agent_id if resolved_agent is not None else None,
-        agent_labels=resolved_agent.labels if resolved_agent is not None else {},
+        agent=resolved_agent,
     )
 
 
