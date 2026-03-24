@@ -62,7 +62,7 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
     mng create my-task --provider modal --edit-message
     """)
     result = e2e.run(
-        "mng create my-task --provider modal --edit-message --no-connect --no-ensure-clean",
+        "VISUAL=true EDITOR=true mng create my-task --provider modal --edit-message --no-connect --no-ensure-clean",
         comment="you can also edit the message *while the agent is starting up*",
         timeout=_REMOTE_TIMEOUT,
     )
