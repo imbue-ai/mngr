@@ -800,7 +800,7 @@ def _parse_project_name(
     if remote_url is not None:
         source_project = parse_project_name_from_url(remote_url)
     if source_project is None:
-        source_project = source_location.path.name
+        source_project = source_location.path.resolve().name
 
     # When creating a new host from an external source (--source-agent or --source-host),
     # validate that the project inferred from the source matches the project inferred from
