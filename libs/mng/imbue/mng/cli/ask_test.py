@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 import imbue.mng.cli.ask as ask_module
+from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.cli.ask import ClaudeBackendInterface
 from imbue.mng.cli.ask import _accumulate_chunks
 from imbue.mng.cli.ask import _build_ask_context
@@ -247,8 +248,6 @@ def test_ask_missing_headless_claude_plugin(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """When the headless_claude plugin is missing, shows an actionable error."""
-    from imbue.mng.agents.base_agent import BaseAgent
-
     monkeypatch.setattr(ask_module, "get_agent_class", lambda _agent_type: BaseAgent)
 
     result = cli_runner.invoke(ask, ["test"], obj=plugin_manager, catch_exceptions=True)
