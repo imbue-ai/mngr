@@ -463,6 +463,12 @@ def create(ctx: click.Context, **kwargs) -> None:
     _finish_create(create_result, setup, output_opts)
 
 
+class _SourceMetadata(FrozenModel):
+    """Metadata derived from the source location, used for auto-labeling agents."""
+
+    labels: dict[str, str] = Field(description="Auto-derived agent labels (project, remote, etc.)")
+
+
 class _CreateSetup(FrozenModel):
     """Per-invocation state shared between _setup_create and _create_agent."""
 
@@ -476,8 +482,7 @@ class _CreateSetup(FrozenModel):
     agent_and_host_loader: _CachedAgentHostLoader = Field(description="Lazy loader for agents grouped by host")
     source_location: HostLocation = Field(description="Resolved source location")
     source_agent_id: AgentId | None = Field(default=None, description="Resolved source agent ID (when --from-agent)")
-    project_name: str = Field(description="Project name for agent labels")
-    remote_url: str | None = Field(default=None, description="Git remote origin URL for agent labels")
+    source_metadata: _SourceMetadata = Field(description="Metadata derived from source location for auto-labeling")
     host_lifecycle: HostLifecycleOptions = Field(description="Host lifecycle options")
     plugin_cli_params: dict[str, Any] = Field(
         default_factory=dict, description="Plugin-registered CLI params to merge into plugin_data"
@@ -531,11 +536,12 @@ def _setup_create(
         opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host
     )
 
-    # figure out the project label, in case we need that
-    project_name = _parse_project_name(source_location, opts, address, mng_ctx)
-
-    # figure out the remote URL label
+    # derive metadata from the source location for auto-labeling
+    auto_labels: dict[str, str] = {"project": _parse_project_name(source_location, opts, address, mng_ctx)}
     remote_url = _parse_remote_url(source_location, mng_ctx.concurrency_group)
+    if remote_url is not None:
+        auto_labels["remote"] = remote_url
+    source_metadata = _SourceMetadata(labels=auto_labels)
 
     # Parse host lifecycle options (these go on the host, not the agent)
     host_lifecycle = _parse_host_lifecycle_options(opts)
@@ -547,8 +553,7 @@ def _setup_create(
         agent_and_host_loader=agent_and_host_loader,
         source_location=source_location,
         source_agent_id=source_agent_id,
-        project_name=project_name,
-        remote_url=remote_url,
+        source_metadata=source_metadata,
         host_lifecycle=host_lifecycle,
         plugin_cli_params=plugin_cli_params or {},
     )
@@ -567,7 +572,6 @@ def _create_agent(
     target_host = _parse_target_host(
         opts=opts,
         address=address,
-        project_name=setup.project_name,
         agent_and_host_loader=setup.agent_and_host_loader,
         lifecycle=setup.host_lifecycle,
     )
@@ -650,17 +654,12 @@ def _create_agent(
     if isinstance(resolved_target_host, OnlineHostInterface):
         _apply_host_labels(resolved_target_host, opts.host_label)
 
-    # Set the project and remote as labels on the agent (labels are agent-level, not host-level)
-    auto_labels: dict[str, str] = {}
-    if setup.project_name:
-        auto_labels["project"] = setup.project_name
-    if setup.remote_url:
-        auto_labels["remote"] = setup.remote_url
-    if auto_labels:
+    # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level)
+    if setup.source_metadata.labels:
         agent_opts = agent_opts.model_copy_update(
             to_update(
                 agent_opts.field_ref().label_options,
-                AgentLabelOptions(labels={**agent_opts.label_options.labels, **auto_labels}),
+                AgentLabelOptions(labels={**agent_opts.label_options.labels, **setup.source_metadata.labels}),
             ),
         )
 
@@ -1213,7 +1212,6 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
 def _parse_target_host(
     opts: CreateCliOptions,
     address: AgentAddress,
-    project_name: str | None,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:
