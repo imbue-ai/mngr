@@ -231,7 +231,7 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
 
 
 # --- should_pull_changes tests ---
-# Uses shared helpers from conftest: make_test_result, SUCCEEDED_FIX, FAILED_FIX, BLOCKED_FIX
+# Uses shared helpers from testing: make_test_result, SUCCEEDED_FIX, FAILED_FIX, BLOCKED_FIX
 
 
 def test_should_pull_succeeded_fix_with_tests_passing() -> None:

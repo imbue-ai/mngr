@@ -1,6 +1,6 @@
 """HTML report generation for the test-mapreduce plugin.
 
-Builds a self-contained HTML page with a stacked progress bar, per-category
+Builds a self-contained HTML page with category navigation bars, per-category
 tables, and an optional integrator section.
 """
 

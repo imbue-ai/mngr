@@ -227,6 +227,7 @@ def test_generate_html_report_empty_results(tmp_path: Path) -> None:
 def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
     results = [make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)]
     integrator = IntegratorResult(
+        agent_name=AgentName("tmr-integrator-abc123"),
         merged=("mng-tmr/a",),
         branch_name="mng-tmr/integrated-abc123",
         summary_markdown="Merged 1 branch",
@@ -237,6 +238,7 @@ def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
     assert "Integrator" in content
     assert "mng-tmr/integrated-abc123" in content
     assert "mng-tmr/a" in content
+    assert "tmr-integrator-abc123" in content
 
 
 def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
