@@ -6,6 +6,8 @@ easy to maintain the mapping between tutorial content and test coverage via the
 tutorial_matcher script.
 """
 
+import json
+
 import pytest
 
 from imbue.mng.e2e.conftest import E2eSession
@@ -218,6 +220,18 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
         timeout=_REMOTE_TIMEOUT,
     )
     expect(result).to_succeed()
+
+    list_result = e2e.run(
+        "mng list --format json",
+        comment="Verify agent and host names from address syntax",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching) == 1, f"Expected exactly one agent named 'my-task', got {len(matching)}"
+    assert matching[0]["host"]["name"] == "my-modal-box"
 
 
 @pytest.mark.release
