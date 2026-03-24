@@ -126,24 +126,30 @@ def create(
         with log_span("Calling on_after_provisioning hooks"):
             mng_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mng_ctx=mng_ctx)
 
-        # Send initial message if one is configured
-        initial_message = agent.get_initial_message()
-        if initial_message is not None:
-            # Start agent with signal-based readiness detection
-            # Raises AgentStartError if the agent doesn't signal readiness in time
-            logger.info("Starting agent {} ...", agent.name)
-            timeout = agent_options.ready_timeout_seconds
-            agent.wait_for_ready_signal(
-                is_creating=True,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=timeout,
-            )
-            logger.info("Sending initial message...")
-            agent.send_message(initial_message)
+        # Start the agent unless is_start_on_boot is explicitly False
+        # (is_start_on_boot=False means "don't auto-start"; None means "use default" which starts)
+        should_start = agent_options.lifecycle.is_start_on_boot is not False
+        if should_start:
+            # Send initial message if one is configured
+            initial_message = agent.get_initial_message()
+            if initial_message is not None:
+                # Start agent with signal-based readiness detection
+                # Raises AgentStartError if the agent doesn't signal readiness in time
+                logger.info("Starting agent {} ...", agent.name)
+                timeout = agent_options.ready_timeout_seconds
+                agent.wait_for_ready_signal(
+                    is_creating=True,
+                    start_action=lambda: host.start_agents([agent.id]),
+                    timeout=timeout,
+                )
+                logger.info("Sending initial message...")
+                agent.send_message(initial_message)
+            else:
+                # No initial message - just start the agent
+                logger.info("Starting agent {} ...", agent.name)
+                host.start_agents([agent.id])
         else:
-            # No initial message - just start the agent
-            logger.info("Starting agent {} ...", agent.name)
-            host.start_agents([agent.id])
+            logger.info("Skipping agent start (start_on_boot=False)")
 
         # Build and return the result
         result = CreateAgentResult(agent=agent, host=host)

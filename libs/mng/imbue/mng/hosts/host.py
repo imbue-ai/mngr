@@ -1669,7 +1669,7 @@ class Host(BaseHost, OnlineHostInterface):
                 "resume_message": options.resume_message,
                 "ready_timeout_seconds": options.ready_timeout_seconds,
                 "permissions": [],
-                "start_on_boot": False,
+                "start_on_boot": bool(options.lifecycle.is_start_on_boot),
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
             }
