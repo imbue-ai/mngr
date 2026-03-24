@@ -307,8 +307,13 @@ def test_create_modal_upload_and_user_command(e2e: E2eSession) -> None:
     mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
     # (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
     """)
+    # The command references ~/.ssh/config which expands to $HOME/.ssh/config.
+    # In the test environment HOME is a temp directory, so create the file there.
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    (ssh_dir / "config").write_text("# test ssh config\n")
     result = e2e.run(
-        'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo" --no-connect --no-ensure-clean',
+        'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "echo user-command-ran" --no-connect --no-ensure-clean',
         comment="you can upload files and run custom commands during host provisioning",
         timeout=_REMOTE_TIMEOUT,
     )
