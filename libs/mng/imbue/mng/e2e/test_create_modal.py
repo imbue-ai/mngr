@@ -31,6 +31,10 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
 
+    list_result = e2e.run("mng list", comment="Verify agent appears in list")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+
 
 @pytest.mark.release
 @pytest.mark.modal
