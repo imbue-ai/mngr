@@ -94,7 +94,6 @@ def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
         return False
 
 
-@pure
 def _check_local_symlink_state(source_abs: Path, target_abs: Path) -> tuple[bool, bool]:
     """Check symlink state for a local target path.
 
