@@ -241,26 +241,36 @@ elif [[ "$CONVO_NEEDED" == "true" ]]; then
     exit 2
 fi
 
-_log_to_file "INFO" "Autofix and conversation review gates passed, launching CI check..."
+_log_to_file "INFO" "Autofix and conversation review gates passed"
 
-# Launch the PR/CI check (the only remaining async child)
-"$SCRIPT_DIR/stop_hook_pr_and_ci.sh" &
-PR_CI_PID=$!
-_log_to_file "INFO" "Launched stop_hook_pr_and_ci.sh (pid=$PR_CI_PID)"
+# PR/CI gate (can be disabled via .autofix/settings.json)
+CI_ENABLED=$(read_json_config ".autofix/settings.json" "is_ci_required" "true")
 
-wait "$PR_CI_PID" && PR_CI_EXIT=0 || PR_CI_EXIT=$?
-_log_to_file "INFO" "PR/CI process (pid=$PR_CI_PID) exited with code $PR_CI_EXIT"
+if [[ "$CI_ENABLED" != "true" ]]; then
+    _log_to_file "INFO" "PR/CI check disabled via .autofix/settings.json, skipping"
+    log_info "PR/CI check disabled (is_ci_required=false in .autofix/settings.json), skipping."
+else
+    _log_to_file "INFO" "Launching CI check..."
 
-if [[ $PR_CI_EXIT -eq 2 ]]; then
-    log_error "PR/CI hook failed -- go fix the CI failures first."
-    log_error "If autofix has run, check .autofix/issues/*.jsonl for identified issues."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (PR/CI failure)"
-    exit 2
-elif [[ $PR_CI_EXIT -ne 0 ]]; then
-    log_error "PR/CI hook failed (exit code $PR_CI_EXIT)"
-    _log_to_file "ERROR" "main_stop_hook exiting with PR/CI exit code $PR_CI_EXIT"
-    notify_user || echo "No notify_user function defined, skipping."
-    exit "$PR_CI_EXIT"
+    # Launch the PR/CI check (the only remaining async child)
+    "$SCRIPT_DIR/stop_hook_pr_and_ci.sh" &
+    PR_CI_PID=$!
+    _log_to_file "INFO" "Launched stop_hook_pr_and_ci.sh (pid=$PR_CI_PID)"
+
+    wait "$PR_CI_PID" && PR_CI_EXIT=0 || PR_CI_EXIT=$?
+    _log_to_file "INFO" "PR/CI process (pid=$PR_CI_PID) exited with code $PR_CI_EXIT"
+
+    if [[ $PR_CI_EXIT -eq 2 ]]; then
+        log_error "PR/CI hook failed -- go fix the CI failures first."
+        log_error "If autofix has run, check .autofix/issues/*.jsonl for identified issues."
+        _log_to_file "INFO" "main_stop_hook exiting with code 2 (PR/CI failure)"
+        exit 2
+    elif [[ $PR_CI_EXIT -ne 0 ]]; then
+        log_error "PR/CI hook failed (exit code $PR_CI_EXIT)"
+        _log_to_file "ERROR" "main_stop_hook exiting with PR/CI exit code $PR_CI_EXIT"
+        notify_user || echo "No notify_user function defined, skipping."
+        exit "$PR_CI_EXIT"
+    fi
 fi
 
 # Success -- clear stuck tracking and upload issue data

@@ -262,6 +262,7 @@ current.tar.gz
 .autofix/plans/
 .autofix/issues/
 .autofix/config/stop-hook.local.json
+.autofix/settings.local.json
 
 # Stuck agent tracking (stop hook escape valve)
 .claude/blocked_stop_commits
