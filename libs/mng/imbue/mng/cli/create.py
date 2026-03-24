@@ -92,7 +92,7 @@ from imbue.mng.utils.editor import EditorSession
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
-from imbue.mng.utils.git_utils import get_git_remote_url
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.name_generator import generate_agent_name
@@ -538,9 +538,10 @@ def _setup_create(
     )
 
     # derive metadata from the source location for auto-labeling
+    remote_url = _get_source_remote_url(source_location)
     source_metadata = _SourceMetadata(
-        project=_parse_project_name(source_location, opts, address, mng_ctx),
-        remote=_parse_remote_url(source_location, mng_ctx.concurrency_group),
+        project=_parse_project_name(source_location, remote_url, opts, address, mng_ctx),
+        remote=remote_url,
     )
 
     # Parse host lifecycle options (these go on the host, not the agent)
@@ -776,18 +777,30 @@ def _handle_editor_message(
         logger.debug("Message sent successfully")
 
 
+def _get_source_remote_url(source_location: HostLocation) -> str | None:
+    """Get the git remote origin URL from the source location via execute_command."""
+    result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
+    if result.success and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
 def _parse_project_name(
-    source_location: HostLocation, opts: CreateCliOptions, address: AgentAddress, mng_ctx: MngContext
+    source_location: HostLocation,
+    remote_url: str | None,
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    mng_ctx: MngContext,
 ) -> str:
     if opts.project:
         return opts.project
 
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement the below function so that it works via HostInterface calls instead!"
-        )
-
-    source_project = derive_project_name_from_path(source_location.path, mng_ctx.concurrency_group)
+    # Derive project name from the remote URL, falling back to the folder name
+    source_project: str | None = None
+    if remote_url is not None:
+        source_project = parse_project_name_from_url(remote_url)
+    if source_project is None:
+        source_project = source_location.path.name
 
     # When creating a new host from an external source (--source-agent or --source-host),
     # validate that the project inferred from the source matches the project inferred from
@@ -806,15 +819,6 @@ def _parse_project_name(
             )
 
     return source_project
-
-
-def _parse_remote_url(source_location: HostLocation, cg: ConcurrencyGroup) -> str | None:
-    """Get the git remote origin URL from the source location, if available."""
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement the below function so that it works via HostInterface calls instead!"
-        )
-    return get_git_remote_url(source_location.path, "origin", cg)
 
 
 def _try_reuse_existing_agent(

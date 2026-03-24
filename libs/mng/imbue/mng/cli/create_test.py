@@ -10,18 +10,17 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.cli.agent_addr import AgentAddress
 from imbue.mng.cli.agent_addr import parse_agent_address
 from imbue.mng.cli.create import _CreateCommand
 from imbue.mng.cli.create import _SourceMetadata
+from imbue.mng.cli.create import _get_source_remote_url
 from imbue.mng.cli.create import _is_creating_new_host
 from imbue.mng.cli.create import _parse_agent_opts
 from imbue.mng.cli.create import _parse_branch_flag
 from imbue.mng.cli.create import _parse_host_lifecycle_options
 from imbue.mng.cli.create import _parse_project_name
-from imbue.mng.cli.create import _parse_remote_url
 from imbue.mng.cli.create import _resolve_source_location
 from imbue.mng.cli.create import _resolve_target_host
 from imbue.mng.cli.create import _split_cli_args
@@ -514,7 +513,7 @@ def test_parse_project_name_returns_explicit_project(
         to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
     )
 
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(source_location, None, opts, address, temp_mng_ctx)
 
     assert result == "explicit-project"
 
@@ -539,7 +538,7 @@ def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_agent(
     )
 
     with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
+        _parse_project_name(source_location, None, opts, address, temp_mng_ctx)
 
 
 def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
@@ -565,7 +564,7 @@ def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
     )
 
     with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
+        _parse_project_name(source_location, None, opts, address, temp_mng_ctx)
 
 
 def test_parse_project_name_no_error_without_new_host(
@@ -587,7 +586,7 @@ def test_parse_project_name_no_error_without_new_host(
     )
 
     # Should not raise - no new host means project tag doesn't matter
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(source_location, None, opts, address, temp_mng_ctx)
 
     assert result == "yet-another-project"
 
@@ -608,19 +607,20 @@ def test_parse_project_name_no_error_without_external_source(
     address = AgentAddress(provider_name=ProviderInstanceName("docker"))
 
     # Should not raise - no source_agent/source_host means no external source
-    result = _parse_project_name(source_location, opts=default_create_cli_opts, address=address, mng_ctx=temp_mng_ctx)
+    result = _parse_project_name(
+        source_location, None, opts=default_create_cli_opts, address=address, mng_ctx=temp_mng_ctx
+    )
 
     assert result == "some-project"
 
 
 # =============================================================================
-# Tests for _parse_remote_url
+# Tests for _get_source_remote_url
 # =============================================================================
 
 
-def test_parse_remote_url_returns_url_when_remote_exists(
+def test_get_source_remote_url_returns_url_when_remote_exists(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When source location has a git repo with a remote, return the remote URL."""
@@ -637,14 +637,13 @@ def test_parse_remote_url_returns_url_when_remote_exists(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result == "https://github.com/owner/my-repo.git"
 
 
-def test_parse_remote_url_returns_none_when_no_remote(
+def test_get_source_remote_url_returns_none_when_no_remote(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When git repo has no remote, return None."""
@@ -655,14 +654,13 @@ def test_parse_remote_url_returns_none_when_no_remote(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=repo_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result is None
 
 
-def test_parse_remote_url_returns_none_when_no_git(
+def test_get_source_remote_url_returns_none_when_no_git(
     local_provider: LocalProviderInstance,
-    cg: ConcurrencyGroup,
     tmp_path: Path,
 ) -> None:
     """When source path is not a git repo, return None."""
@@ -672,7 +670,7 @@ def test_parse_remote_url_returns_none_when_no_git(
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
     source_location = HostLocation(host=local_host, path=plain_dir)
 
-    result = _parse_remote_url(source_location, cg)
+    result = _get_source_remote_url(source_location)
 
     assert result is None
 

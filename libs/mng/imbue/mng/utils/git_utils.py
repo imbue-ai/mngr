@@ -108,14 +108,14 @@ def _get_project_name_from_git_remote(path: Path, cg: ConcurrencyGroup) -> str |
             cwd=path,
             timeout=5,
         )
-        return _parse_project_name_from_url(result.stdout.strip())
+        return parse_project_name_from_url(result.stdout.strip())
     except ProcessError as e:
         logger.trace("Failed to get project name from git remote URL: {}", e)
         return None
 
 
 @pure
-def _parse_project_name_from_url(url: str) -> str | None:
+def parse_project_name_from_url(url: str) -> str | None:
     """Parse the project name from a git remote URL.
 
     Returns None if the URL format is not recognized.
