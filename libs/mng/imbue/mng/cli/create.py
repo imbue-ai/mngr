@@ -665,13 +665,12 @@ def _create_agent(
 
     # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level)
     auto_labels = setup.source.auto_labels.model_dump(exclude_none=True)
-    if auto_labels:
-        agent_opts = agent_opts.model_copy_update(
-            to_update(
-                agent_opts.field_ref().label_options,
-                AgentLabelOptions(labels={**agent_opts.label_options.labels, **auto_labels}),
-            ),
-        )
+    agent_opts = agent_opts.model_copy_update(
+        to_update(
+            agent_opts.field_ref().label_options,
+            AgentLabelOptions(labels={**agent_opts.label_options.labels, **auto_labels}),
+        ),
+    )
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
