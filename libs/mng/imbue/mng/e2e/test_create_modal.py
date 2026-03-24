@@ -6,6 +6,8 @@ easy to maintain the mapping between tutorial content and test coverage via the
 tutorial_matcher script.
 """
 
+from pathlib import Path
+
 import pytest
 
 from imbue.mng.e2e.conftest import E2eSession
@@ -184,8 +186,8 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
-def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
+@pytest.mark.timeout(300)
+def test_create_modal_dockerfile_and_context(e2e: E2eSession, temp_git_repo: Path) -> None:
     e2e.write_tutorial_block("""
     # the most important build args for Modal are probably "--file" and "--context-dir",
     # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
@@ -194,10 +196,14 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
     # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
     # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
     """)
+    # Create the Dockerfile and context directory that the command references
+    (temp_git_repo / "Dockerfile.agent").write_text("FROM python:3.12-slim\n")
+    (temp_git_repo / "agent-context").mkdir()
+
     result = e2e.run(
         "mng create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context --no-connect --no-ensure-clean",
         comment="the most important build args for Modal are --file and --context-dir",
-        timeout=_REMOTE_TIMEOUT,
+        timeout=240.0,
     )
     expect(result).to_succeed()
 
