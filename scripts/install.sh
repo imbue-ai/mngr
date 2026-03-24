@@ -222,6 +222,12 @@ fi
 info "Installing mng..."
 uv tool install mng
 
+MNG_BIN="$(uv tool dir --bin)/mng"
+
+# ── Plugin install wizard ─────────────────────────────────────────────────────
+
+"$MNG_BIN" plugin install-wizard || warn "Plugin install wizard failed. You can run 'mng plugin install-wizard' later."
+
 # ── Shell completion ───────────────────────────────────────────────────────────
 
 if [ "$OS" = "macos" ]; then
