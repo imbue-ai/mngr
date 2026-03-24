@@ -8,7 +8,6 @@ Callers can poll creation status via get_creation_info() or stream logs
 via get_log_queue().
 """
 
-import pdb
 import queue
 import shutil
 import threading
@@ -248,8 +247,6 @@ def run_mng_create(
     mng_command.extend(["--", "--dangerously-skip-permissions"])
 
     logger.info("Running: {}", " ".join(mng_command))
-
-    pdb.set_trace()
 
     cg = ConcurrencyGroup(name="mng-create")
     with cg:
