@@ -17,6 +17,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from typing import assert_never
 from typing import cast
 from uuid import uuid4
 
@@ -35,7 +36,6 @@ from tenacity import wait_chain
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -1052,14 +1052,15 @@ class Host(BaseHost, OnlineHostInterface):
         """Create the work_dir directory for a new agent."""
         transfer_mode = options.transfer_mode
         with log_span("Creating agent work directory", transfer_mode=str(transfer_mode)):
-            if transfer_mode == TransferMode.NONE:
-                return self._create_work_dir_in_place(host, path, options)
-            elif transfer_mode == TransferMode.GIT_WORKTREE:
-                return self._create_work_dir_as_git_worktree(host, path, options)
-            elif transfer_mode in (TransferMode.RSYNC, TransferMode.GIT_MIRROR):
-                return self._create_work_dir_as_copy(host, path, options)
-            else:
-                raise SwitchError(f"Unsupported transfer mode: {transfer_mode}")
+            match transfer_mode:
+                case TransferMode.NONE:
+                    return self._create_work_dir_in_place(host, path, options)
+                case TransferMode.GIT_WORKTREE:
+                    return self._create_work_dir_as_git_worktree(host, path, options)
+                case TransferMode.RSYNC | TransferMode.GIT_MIRROR:
+                    return self._create_work_dir_as_copy(host, path, options)
+                case _ as unreachable:
+                    assert_never(unreachable)
 
     def _create_work_dir_in_place(
         self,
@@ -1109,8 +1110,9 @@ class Host(BaseHost, OnlineHostInterface):
         self._mkdir(target_path)
 
         # Track generated work directories at the host level.
-        # When running in-place, actively remove from generated_work_dirs in case
-        # a previous agent had registered this path.
+        # When same-host-same-path (no target_path specified), actively remove
+        # from generated_work_dirs in case a previous agent had registered this
+        # path (e.g., a worktree agent created this directory).
         if is_generated_work_dir:
             self._add_generated_work_dir(target_path)
         else:
