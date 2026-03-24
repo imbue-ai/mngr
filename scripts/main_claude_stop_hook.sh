@@ -220,7 +220,7 @@ if [[ "$CONVO_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/conversation/$
 fi
 
 # Build the autofix command string (may include extra args from config)
-AUTOFIX_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "autofix.append_to_autofix_prompt" "")
+AUTOFIX_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "autofix.append_to_prompt" "")
 if [[ -n "$AUTOFIX_EXTRA_ARGS" ]]; then
     AUTOFIX_CMD="/autofix ${AUTOFIX_EXTRA_ARGS}"
 else

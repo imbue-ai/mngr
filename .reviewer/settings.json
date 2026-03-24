@@ -1,7 +1,7 @@
 {
     "autofix": {
         "is_enabled": true,
-        "append_to_autofix_prompt": ""
+        "append_to_prompt": ""
     },
     "verify_conversation": {
         "is_enabled": true,
