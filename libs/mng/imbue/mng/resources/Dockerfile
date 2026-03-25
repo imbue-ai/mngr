@@ -49,6 +49,11 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
+# Create a non-root user for running tests.
+# Tests assume they are NOT running as root (e.g. filesystem permission checks
+# behave differently for root, which can cause spurious test failures).
+RUN groupadd --gid 1000 mng-test-runner && useradd --uid 1000 --gid 1000 --home-dir /mng-test-runner-home --create-home mng-test-runner
+
 # copy in all of our code:
 COPY . /code/
 
