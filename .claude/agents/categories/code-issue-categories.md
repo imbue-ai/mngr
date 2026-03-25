@@ -149,6 +149,7 @@ Repetitive or duplicate code.
 
 **Exceptions:**
 - Syntactical or logical issues in tests will be raised in other issue types and do not belong in this category.
+- Changes *to the test code itself* (ex: to a conftest.py, testing_utils.py, test_*.py or *_test.py file) do not require test coverage (they will be executed when the tests run).
 
 ---
 

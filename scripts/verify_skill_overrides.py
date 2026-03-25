@@ -86,6 +86,12 @@ CATEGORY_EXTENSIONS: list[Override] = [
 - This is particularly common in tests, where multiple test cases may duplicate setup or validation logic that could be shared (e.g. as a fixture). It is important to flag such cases as a MAJOR issue!""",
     ),
     Override(
+        issue_code="test_coverage",
+        action=OverrideAction.APPEND_EXCEPTIONS,
+        content="""\
+- Changes *to the test code itself* (ex: to a conftest.py, testing_utils.py, test_*.py or *_test.py file) do not require test coverage (they will be executed when the tests run).""",
+    ),
+    Override(
         issue_code="fails_silently",
         action=OverrideAction.APPEND_GUIDE,
         content="""\
