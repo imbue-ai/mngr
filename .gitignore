@@ -257,6 +257,8 @@ tmr_*/
 
 # Offload caches and local files
 .offload/**
+.offload-image-cache
+.offload-cache-key
 test-results/**
 current.tar.gz
 

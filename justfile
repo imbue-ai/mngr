@@ -31,6 +31,18 @@ test-offload args="":
     tmpdir=$(mktemp -d)
     trap "rm -rf $tmpdir" EXIT
 
+    # Invalidate offload's image cache when build inputs change.
+    # Offload only caches by image ID and doesn't track Dockerfile or base commit changes.
+    CACHE_KEY=$(cat .offload-base-commit libs/mng/imbue/mng/resources/Dockerfile | shasum -a 256 | cut -d' ' -f1)
+    CACHE_KEY_FILE=".offload-cache-key"
+    if [ -f "$CACHE_KEY_FILE" ] && [ "$(cat "$CACHE_KEY_FILE")" = "$CACHE_KEY" ]; then
+        echo "[test-offload] Image cache key matches, reusing cached image."
+    else
+        echo "[test-offload] Image cache key changed, clearing cached image."
+        rm -f .offload-image-cache
+        echo "$CACHE_KEY" > "$CACHE_KEY_FILE"
+    fi
+
     ./scripts/make_tar_of_repo.sh $BASE_COMMIT $tmpdir
     export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
     mkdir -p /tmp/$OFFLOAD_PATCH_UUID
