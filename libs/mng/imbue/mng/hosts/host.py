@@ -1386,7 +1386,7 @@ class Host(BaseHost, OnlineHostInterface):
                             env={**os.environ, **env},
                         )
                     except ProcessError as e:
-                        raise MngError(f"Failed to clone from remote source: {e.stderr}") from e
+                        raise MngError(f"Failed to clone from remote source: {e}") from e
                     return
         else:
             user, hostname, port, key_path = target_ssh_info
@@ -1413,14 +1413,15 @@ class Host(BaseHost, OnlineHostInterface):
                         env={**os.environ, **env},
                     )
                 except ProcessError as e:
-                    raise MngError(f"Failed to push git repo: {e.stderr}") from e
+                    raise MngError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git push --mirror from local source to target: {}", " ".join(command_args))
             else:
                 env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
                 push_cmd = f"{env_prefix} git push --no-verify --mirror {shlex.quote(git_url)}"
                 result = source_host.execute_command(push_cmd, cwd=source_path)
                 if not result.success:
-                    raise MngError(f"Failed to push git repo from remote source: {result.stderr}")
+                    output = (result.stderr + "\n" + result.stdout).strip()
+                    raise MngError(f"Failed to push git repo from remote source: {output}")
 
     def _warn_if_submodules_detected(
         self,
