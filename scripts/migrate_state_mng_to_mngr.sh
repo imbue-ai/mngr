@@ -30,22 +30,12 @@ skip()  { echo -e "  ${CYAN}skip${NC} $*"; }
 
 TOTAL_STEPS=8
 
-# Important gitignored files that live in .mng/ and need to be preserved
-IMPORTANT_FILES=(
-    "settings.local.toml"
-    "dev/secrets"
-)
-
-copy_important_files() {
+copy_missing_files() {
     local src="$1"
     local dst="$2"
-    for item in "${IMPORTANT_FILES[@]}"; do
-        if [ -e "$src/$item" ] && [ ! -e "$dst/$item" ]; then
-            mkdir -p "$(dirname "$dst/$item")"
-            cp -a "$src/$item" "$dst/$item"
-            echo -e "  ${GREEN}Copied $item from .mng/ to .mngr/${NC}"
-        fi
-    done
+    # Copy everything from src to dst that doesn't already exist in dst.
+    # Uses cp -a to preserve permissions/symlinks and -n to skip existing.
+    cp -a -n "$src"/. "$dst"/
 }
 
 migrate_dir() {
@@ -64,10 +54,10 @@ migrate_dir() {
         return
     fi
 
-    # Both exist -- copy important files first
-    copy_important_files "$mng_dir" "$mngr_dir"
+    # Both exist -- copy all missing files from old to new
+    copy_missing_files "$mng_dir" "$mngr_dir"
 
-    # Check if they still differ
+    # Check if they're now identical
     if diff -rq "$mng_dir" "$mngr_dir" > /dev/null 2>&1; then
         rm -rf "$mng_dir"
         ok "Removed $label/.mng/ (identical to .mngr/)"
