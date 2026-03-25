@@ -1141,18 +1141,14 @@ def test_create_provider_flag_redundant_with_address_is_ok(
 
 
 def test_rescue_editor_content_saves_content_to_recovery_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _rescue_editor_content saves editor content to ~/.mng/recovered-message.txt."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create(initial_content="important message to save")
 
     _rescue_editor_content(session)
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert recovery_path.exists()
     assert recovery_path.read_text() == "important message to save"
 
@@ -1160,54 +1156,42 @@ def test_rescue_editor_content_saves_content_to_recovery_file(
 
 
 def test_rescue_editor_content_does_nothing_when_temp_file_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _rescue_editor_content does nothing when the temp file is missing."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create(initial_content="some content")
     # Delete the temp file to simulate it being missing
     session.temp_file_path.unlink()
 
     _rescue_editor_content(session)
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert not recovery_path.exists()
 
 
 def test_rescue_editor_content_does_nothing_when_content_is_empty(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _rescue_editor_content does nothing when the temp file is empty."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create()
 
     _rescue_editor_content(session)
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert not recovery_path.exists()
 
     session.cleanup()
 
 
 def test_rescue_editor_content_strips_trailing_whitespace(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _rescue_editor_content strips trailing whitespace."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create(initial_content="content with trailing space  \n\n")
 
     _rescue_editor_content(session)
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert recovery_path.exists()
     assert recovery_path.read_text() == "content with trailing space"
 
@@ -1220,20 +1204,16 @@ def test_rescue_editor_content_strips_trailing_whitespace(
 
 
 def test_editor_cleanup_scope_rescues_content_on_exception(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _editor_cleanup_scope saves editor content when an exception occurs."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create(initial_content="do not lose this message")
 
     with pytest.raises(RuntimeError, match="simulated failure"):
         with _editor_cleanup_scope(session):
             raise RuntimeError("simulated failure")
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert recovery_path.exists()
     assert recovery_path.read_text() == "do not lose this message"
 
@@ -1242,19 +1222,15 @@ def test_editor_cleanup_scope_rescues_content_on_exception(
 
 
 def test_editor_cleanup_scope_does_not_rescue_on_success(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    editor_recovery_dir: Path,
 ) -> None:
     """Test that _editor_cleanup_scope does not create a recovery file on success."""
-    monkeypatch.setenv("EDITOR", "true")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
     session = EditorSession.create(initial_content="message content")
 
     with _editor_cleanup_scope(session):
         pass
 
-    recovery_path = tmp_path / ".mng" / _RECOVERED_MESSAGE_FILENAME
+    recovery_path = editor_recovery_dir / ".mng" / _RECOVERED_MESSAGE_FILENAME
     assert not recovery_path.exists()
 
     # Temp file should still be cleaned up

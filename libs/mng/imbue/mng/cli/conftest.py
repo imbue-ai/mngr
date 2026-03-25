@@ -248,6 +248,19 @@ def create_test_agent(
         cleanup_tmux_session(session_name)
 
 
+@pytest.fixture
+def editor_recovery_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Set up a fake home directory and EDITOR for editor recovery tests.
+
+    Patches Path.home() to return tmp_path and sets EDITOR=true so
+    EditorSession.create() works without a real editor. Returns the
+    tmp_path so tests can locate recovery files under it.
+    """
+    monkeypatch.setenv("EDITOR", "true")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return tmp_path
+
+
 # =============================================================================
 # Parametrized --help tests (replaces per-file test_*_help_exits_zero)
 # =============================================================================
