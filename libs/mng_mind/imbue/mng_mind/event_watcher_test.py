@@ -2073,30 +2073,43 @@ def test_synthetic_loop_onboarding_waits_for_delivery(tmp_path: Path) -> None:
     env = _create_synthetic_loop_env(mind_state_dir)
 
     delivery_mono: list[float] = [0.0]
-    delay_gate = threading.Event()
-
-    def simulate_delivery() -> None:
-        """Simulate delivery completing after a short delay."""
-        delay_gate.wait(timeout=5.0)
-        delivery_mono[0] = 1.0
-        env.stop_event.set()
+    onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
 
     settings = _EventWatcherSettings()
-    delivery_thread = threading.Thread(target=simulate_delivery)
-    delivery_thread.start()
-    # Release the delivery simulation after a brief moment
-    delay_gate.set()
 
-    _run_synthetic_events_loop(
-        settings,
-        env.event_buffer,
-        env.buffer_lock,
-        env.stop_event,
-        env.last_real_event_monotonic,
-        env.mind_state_dir,
-        last_delivery_monotonic=delivery_mono,
+    # Run the synthetic loop in a background thread so we can control timing
+    loop_thread = threading.Thread(
+        target=_run_synthetic_events_loop,
+        kwargs={
+            "settings": settings,
+            "event_buffer": env.event_buffer,
+            "buffer_lock": env.buffer_lock,
+            "stop_event": env.stop_event,
+            "last_real_event_monotonic": env.last_real_event_monotonic,
+            "mind_state_dir": env.mind_state_dir,
+            "last_delivery_monotonic": delivery_mono,
+        },
+        daemon=True,
     )
-    delivery_thread.join(timeout=5.0)
+    loop_thread.start()
+
+    # Give the loop time to enter the waiting state, then verify no
+    # onboarding has been sent while delivery_mono is still 0.0
+    time.sleep(0.3)
+    assert len(env.event_buffer) == 0, "Onboarding should be blocked while delivery has not occurred"
+    assert not onboarding_marker.exists()
+
+    # Simulate delivery completing
+    delivery_mono[0] = 1.0
+
+    # Wait for the onboarding marker to appear (proving the loop unblocked)
+    deadline = time.monotonic() + 5.0
+    while not onboarding_marker.exists():
+        assert time.monotonic() < deadline, "Timed out waiting for onboarding after delivery"
+        time.sleep(0.05)
+
+    env.stop_event.set()
+    loop_thread.join(timeout=5.0)
 
     assert len(env.event_buffer) == 1
     parsed = json.loads(env.event_buffer[0])
