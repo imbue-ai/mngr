@@ -99,6 +99,9 @@ _SOURCE_MIND_SCHEDULE: Final[str] = "mind/schedule"
 _SOURCE_MIND_ONBOARDING: Final[str] = "mind/onboarding"
 _SOURCE_MIND_FILTER_ERROR: Final[str] = "mind/filter_error"
 
+# Poll interval for the 'mng wait' subprocess used to detect agent idle state
+_IDLE_WAIT_POLL_INTERVAL: Final[str] = "2s"
+
 
 # -- Settings --
 
@@ -552,6 +555,30 @@ def _drain_stderr(
             logger.debug("Stderr reader error: {}", exc)
 
 
+def _start_agent_idle_wait(agent_id: str) -> Any:
+    """Start 'mng wait <agent_id> WAITING' as a background subprocess.
+
+    Returns immediately. The caller should poll the process via .poll()
+    and check .returncode == 0 to detect when the agent enters WAITING.
+    """
+    cmd = [*get_mng_command(), "wait", agent_id, "WAITING", "--interval", _IDLE_WAIT_POLL_INTERVAL, "--quiet"]
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _terminate_process_gracefully(process: Any) -> None:
+    """Terminate a subprocess, falling back to kill if it doesn't exit promptly."""
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
 # -- Chat event pairing --
 
 # Maximum time to wait for an assistant response before delivering the user
@@ -865,11 +892,18 @@ def _run_synthetic_events_loop(
     mind_state_dir: Path,
     time_source: Callable[[], float] = time.monotonic,
     poll_interval_seconds: float = _SYNTHETIC_POLL_INTERVAL_SECONDS,
+    agent_id: str = "",
+    start_idle_wait: Callable[[str], Any] | None = None,
 ) -> None:
     """Generate synthetic events: idle, scheduled, and onboarding.
 
     Runs as a daemon thread alongside the delivery loop. Injects events
     directly into the shared event_buffer for delivery to the agent.
+
+    When agent_id is non-empty and idle events are configured, uses
+    'mng wait' to detect when the agent enters WAITING state. Idle time
+    is counted from the moment the agent becomes idle, not from the last
+    real event time.
     """
     user_tz = _resolve_user_timezone(settings.user_timezone)
     _maybe_send_onboarding(mind_state_dir, event_buffer, buffer_lock)
@@ -877,43 +911,95 @@ def _run_synthetic_events_loop(
     idle_events_sent = 0
     last_seen_real_event_time = last_real_event_monotonic[0]
 
+    # When agent_id is provided, track when the agent actually became idle
+    # (entered WAITING state) via 'mng wait' subprocess.
+    is_idle_wait_enabled = bool(agent_id and settings.idle_event_delay_minutes_schedule)
+    agent_idle_since: float | None = None
+    wait_process: Any = None
+
+    if is_idle_wait_enabled:
+        if start_idle_wait is None:
+            start_idle_wait = _start_agent_idle_wait
+        wait_process = start_idle_wait(agent_id)
+        logger.info("Started idle wait for agent {}", agent_id)
+
     scheduled_state_file = mind_state_dir / _SCHEDULED_STATE_FILENAME
     saved_date, fired_today = _load_scheduled_events_state(scheduled_state_file)
 
-    while not stop_event.is_set():
-        stop_event.wait(timeout=poll_interval_seconds)
-        if stop_event.is_set():
-            break
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=poll_interval_seconds)
+            if stop_event.is_set():
+                break
 
-        now_monotonic = time_source()
+            now_monotonic = time_source()
 
-        with buffer_lock:
-            current_real_event_time = last_real_event_monotonic[0]
-        if current_real_event_time > last_seen_real_event_time:
-            idle_events_sent = 0
-            last_seen_real_event_time = current_real_event_time
+            with buffer_lock:
+                current_real_event_time = last_real_event_monotonic[0]
+            if current_real_event_time > last_seen_real_event_time:
+                idle_events_sent = 0
+                last_seen_real_event_time = current_real_event_time
+                if is_idle_wait_enabled:
+                    agent_idle_since = None
+                    # Terminate the existing wait and start a fresh one
+                    if wait_process is not None:
+                        _terminate_process_gracefully(wait_process)
+                    assert start_idle_wait is not None
+                    wait_process = start_idle_wait(agent_id)
+                    logger.debug("Restarted idle wait after real event")
 
-        if settings.idle_event_delay_minutes_schedule:
-            elapsed_minutes = (now_monotonic - last_seen_real_event_time) / 60.0
-            idle_events_sent = _maybe_send_idle_event(
-                settings,
-                elapsed_minutes,
-                idle_events_sent,
-                user_tz,
-                event_buffer,
-                buffer_lock,
-            )
+            # Check if the wait subprocess has completed (agent entered WAITING)
+            if is_idle_wait_enabled and wait_process is not None:
+                poll_result = wait_process.poll()
+                if poll_result is not None:
+                    if poll_result == 0 and agent_idle_since is None:
+                        agent_idle_since = now_monotonic
+                        logger.info("Agent entered idle state (WAITING)")
+                    elif poll_result != 0:
+                        logger.warning("mng wait exited with code {}, restarting", poll_result)
+                        assert start_idle_wait is not None
+                        wait_process = start_idle_wait(agent_id)
+                    else:
+                        wait_process = None
 
-        if settings.scheduled_events:
-            saved_date, fired_today = _check_scheduled_events(
-                settings,
-                user_tz,
-                saved_date,
-                fired_today,
-                scheduled_state_file,
-                event_buffer,
-                buffer_lock,
-            )
+            if settings.idle_event_delay_minutes_schedule:
+                if is_idle_wait_enabled:
+                    # Only send idle events after the agent has actually become idle
+                    if agent_idle_since is not None:
+                        elapsed_minutes = (now_monotonic - agent_idle_since) / 60.0
+                        idle_events_sent = _maybe_send_idle_event(
+                            settings,
+                            elapsed_minutes,
+                            idle_events_sent,
+                            user_tz,
+                            event_buffer,
+                            buffer_lock,
+                        )
+                else:
+                    # Fallback when no agent_id: use time since last real event
+                    elapsed_minutes = (now_monotonic - last_seen_real_event_time) / 60.0
+                    idle_events_sent = _maybe_send_idle_event(
+                        settings,
+                        elapsed_minutes,
+                        idle_events_sent,
+                        user_tz,
+                        event_buffer,
+                        buffer_lock,
+                    )
+
+            if settings.scheduled_events:
+                saved_date, fired_today = _check_scheduled_events(
+                    settings,
+                    user_tz,
+                    saved_date,
+                    fired_today,
+                    scheduled_state_file,
+                    event_buffer,
+                    buffer_lock,
+                )
+    finally:
+        if wait_process is not None:
+            _terminate_process_gracefully(wait_process)
 
 
 # -- Delivery loop helpers --
@@ -1447,14 +1533,15 @@ def main(
     # Start the synthetic events thread (idle, scheduled, onboarding)
     synthetic_thread = threading.Thread(
         target=_run_synthetic_events_loop,
-        args=(
-            settings,
-            event_buffer,
-            buffer_lock,
-            stop_event,
-            last_real_event_monotonic,
-            mind_state_dir,
-        ),
+        kwargs={
+            "settings": settings,
+            "event_buffer": event_buffer,
+            "buffer_lock": buffer_lock,
+            "stop_event": stop_event,
+            "last_real_event_monotonic": last_real_event_monotonic,
+            "mind_state_dir": mind_state_dir,
+            "agent_id": agent_id,
+        },
         daemon=True,
     )
     synthetic_thread.start()

@@ -18,9 +18,12 @@ from imbue.mng_llm.conftest import write_conversation_to_db
 from imbue.mng_llm.conftest import write_minds_settings_toml
 from imbue.mng_mind import event_watcher as event_watcher_module
 from imbue.mng_mind.conftest import EventWatcherSubprocessCapture
+from imbue.mng_mind.conftest import FakeWaitProcess
 from imbue.mng_mind.conftest import SyntheticLoopEnv
+from imbue.mng_mind.conftest import _create_fake_wait_process
 from imbue.mng_mind.conftest import _create_synthetic_loop_env
 from imbue.mng_mind.conftest import create_executable_command
+from imbue.mng_mind.conftest import make_pending_idle_wait
 from imbue.mng_mind.data_types import WatcherSettings
 from imbue.mng_mind.event_watcher import DEFAULT_CEL_FILTER
 from imbue.mng_mind.event_watcher import InvalidTimeFormatError
@@ -2071,6 +2074,217 @@ def test_synthetic_loop_resets_idle_on_real_event(synthetic_loop_env: SyntheticL
 
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
     assert len(idle_events) == 0
+
+
+# -- Idle wait integration tests --
+
+
+def test_idle_wait_no_event_until_agent_becomes_idle(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When idle wait is enabled, no idle events fire until the agent enters WAITING."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    call_count = 0
+
+    def clock_past_threshold() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 2:
+            env.stop_event.set()
+        # Well past the 1-minute threshold from the last real event, but agent is not idle
+        return 1200.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_past_threshold,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=make_pending_idle_wait,
+    )
+
+    # No idle events because the agent never entered WAITING
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) == 0
+
+
+def test_idle_wait_fires_after_agent_becomes_idle(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Idle events fire based on time since the agent entered WAITING, not since the last real event."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    # The wait process completes immediately (agent is already idle)
+    fake_process = _create_fake_wait_process(is_complete=True, returncode=0)
+
+    call_count = 0
+
+    def clock_with_idle_at_1050() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: wait process poll check -- agent becomes idle at 1050
+            return 1050.0
+        if call_count > 2:
+            env.stop_event.set()
+        # 70 seconds after agent became idle at 1050 (> 1 minute threshold)
+        return 1120.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_with_idle_at_1050,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=lambda _agent_id: fake_process,
+    )
+
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) >= 1
+    parsed = json.loads(idle_events[0])
+    assert parsed["type"] == "idle"
+    assert parsed["idle_event_number"] == 1
+    # minutes_since_last_event is measured from when the agent became idle (1050),
+    # not from the last real event (1000)
+    assert parsed["minutes_since_last_event"] >= 1.0
+
+
+def test_idle_wait_resets_on_real_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When a real event arrives, idle state resets and a new wait starts."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    wait_calls: list[str] = []
+
+    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
+        wait_calls.append(agent_id)
+        # Return a pending process (agent not yet idle)
+        return _create_fake_wait_process(is_complete=False, returncode=None)
+
+    call_count = 0
+
+    def clock_with_new_event() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Simulate a new real event arriving
+            env.last_real_event_monotonic[0] = 1100.0
+            return 1100.0
+        if call_count > 2:
+            env.stop_event.set()
+        return 1200.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_with_new_event,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=tracking_idle_wait,
+    )
+
+    # Initial wait + restart after real event = 2 calls
+    assert len(wait_calls) == 2
+    # No idle events because agent never entered WAITING
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) == 0
+
+
+def test_idle_wait_disabled_without_agent_id(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Without agent_id, falls back to old behavior (time since last real event)."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    call_count = 0
+
+    def clock_past_threshold() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            env.stop_event.set()
+        return 1061.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_past_threshold,
+        poll_interval_seconds=0.01,
+        # agent_id="" (default) -- no idle wait
+    )
+
+    # Idle events fire based on time since last real event (old behavior)
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) >= 1
+
+
+def test_idle_wait_restarts_on_nonzero_exit(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When mng wait exits with a non-zero code, it is restarted."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    wait_calls: list[str] = []
+    call_idx = 0
+
+    def wait_that_fails_then_succeeds(agent_id: str) -> FakeWaitProcess:
+        nonlocal call_idx
+        wait_calls.append(agent_id)
+        call_idx += 1
+        if call_idx == 1:
+            # First call: fail with non-zero exit code
+            return _create_fake_wait_process(is_complete=True, returncode=1)
+        # Second call: succeed
+        return _create_fake_wait_process(is_complete=True, returncode=0)
+
+    call_count = 0
+
+    def clock() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 4:
+            env.stop_event.set()
+        # Iteration 1: wait fails at T=1050, restart issued
+        # Iteration 2: wait succeeds, agent_idle_since=1100
+        # Iteration 3: T=1170 → elapsed=70s > 60s → idle event fires
+        return 1050.0 + (call_count - 1) * 50.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=wait_that_fails_then_succeeds,
+    )
+
+    # First call at startup (fails), second call is restart (succeeds)
+    assert len(wait_calls) >= 2
+    # Should have sent idle events after the restart succeeded
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) >= 1
 
 
 def _make_counting_clock(env: SyntheticLoopEnv, max_iterations: int) -> Callable[[], float]:
