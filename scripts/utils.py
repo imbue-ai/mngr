@@ -38,12 +38,12 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
         pypi_name="modal-proxy",
         internal_deps=("imbue-common", "concurrency-group", "imbue-mngr", "resource-guards"),
     ),
-    PackageInfo(dir_name="mngr_modal", pypi_name="mngr-modal", internal_deps=("imbue-mngr", "modal-proxy")),
-    PackageInfo(dir_name="mngr_claude", pypi_name="mngr-claude", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_pair", pypi_name="mngr-pair", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_opencode", pypi_name="mngr-opencode", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_kanpan", pypi_name="mngr-kanpan", internal_deps=("imbue-mngr",)),
-    PackageInfo(dir_name="mngr_tutor", pypi_name="mngr-tutor", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_modal", pypi_name="imbue-mngr-modal", internal_deps=("imbue-mngr", "modal-proxy")),
+    PackageInfo(dir_name="mngr_claude", pypi_name="imbue-mngr-claude", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_pair", pypi_name="imbue-mngr-pair", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_opencode", pypi_name="imbue-mngr-opencode", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_kanpan", pypi_name="imbue-mngr-kanpan", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_tutor", pypi_name="imbue-mngr-tutor", internal_deps=("imbue-mngr",)),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}

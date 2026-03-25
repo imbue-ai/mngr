@@ -1,5 +1,5 @@
 [project]
-name = "mngr-recursive"
+name = "imbue-mngr-recursive"
 version = "0.1.0"
 description = "Recursive mngr plugin: injects mngr config and dependencies into remote hosts during provisioning"
 readme = "README.md"

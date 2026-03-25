@@ -1,5 +1,5 @@
 [project]
-name = "mngr-opencode"
+name = "imbue-mngr-opencode"
 version = "0.1.4"
 description = "OpenCode agent type plugin for mngr"
 readme = "README.md"

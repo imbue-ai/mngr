@@ -214,16 +214,13 @@ done < <(git ls-files -z)
 
 ok "Modified $modified files"
 
-# ── 7. Fix main package PyPI name to imbue-mngr ──────────────────
+# ── 7. Fix all PyPI names to use imbue- prefix ────────────────────
 #
-# After the general mng->mngr rename, the main package's PyPI name is "mngr".
-# It should be "imbue-mngr". Plugin names (mngr-claude, etc.) stay as-is.
-#
-# Strategy: replace "mngr" (exact quoted string) with "imbue-mngr" in specific
-# files where it refers to the PyPI name. The pattern '"mngr"' does NOT match
-# '"mngr-claude"' or other plugin names, so it's safe.
+# After the general mng->mngr rename, PyPI names are "mngr", "mngr-claude", etc.
+# They should all be "imbue-mngr", "imbue-mngr-claude", etc.
+# The CLI binary stays "mngr". Directory/module names stay "mngr"/"mngr_*".
 
-step "7/7" "Fixing main package PyPI name to imbue-mngr..."
+step "7/7" "Adding imbue- prefix to all PyPI package names..."
 
 # Main package pyproject.toml: name field
 if [ -f "libs/mngr/pyproject.toml" ]; then
@@ -231,25 +228,15 @@ if [ -f "libs/mngr/pyproject.toml" ]; then
     ok "libs/mngr/pyproject.toml: name = imbue-mngr"
 fi
 
-# All pyproject.toml: dependency strings "mngr==" -> "imbue-mngr=="
-# (matches "mngr==0.1.8" but NOT "mngr-claude==0.1.0")
+# All pyproject.toml: "mngr" and "mngr-*" in quoted strings (names, deps)
+# This handles both name = "mngr-claude" and "mngr-claude==0.1.0" and "mngr==0.1.8"
 for f in libs/*/pyproject.toml apps/*/pyproject.toml; do
     [ -f "$f" ] || continue
-    if grep -q '"mngr==' "$f" 2>/dev/null; then
-        perl -pi -e 's/"mngr==/"imbue-mngr==/g' "$f"
-        ok "$f: dep mngr -> imbue-mngr"
-    fi
+    perl -pi -e 's/"mngr(?=[-=])/"imbue-mngr/g; s/"mngr"/"imbue-mngr"/g' "$f"
+    # Fix uv sources keys at start of line: mngr = {, mngr-claude = {
+    perl -pi -e 's/^mngr(?=-| = )/imbue-mngr/' "$f"
 done
-
-# All pyproject.toml: [tool.uv.sources] key "mngr = { workspace" -> "imbue-mngr = { workspace"
-# Only match workspace source entries (not [project.scripts] entries).
-for f in libs/*/pyproject.toml apps/*/pyproject.toml; do
-    [ -f "$f" ] || continue
-    if grep -q '^mngr = { workspace' "$f" 2>/dev/null; then
-        perl -pi -e 's/^mngr = \{ workspace/imbue-mngr = { workspace/' "$f"
-        ok "$f: uv source mngr -> imbue-mngr"
-    fi
-done
+ok "pyproject.toml: all PyPI names prefixed"
 
 # Fix [project.scripts]: the CLI binary should stay "mngr", not "imbue-mngr"
 if [ -f "libs/mngr/pyproject.toml" ]; then
@@ -257,16 +244,12 @@ if [ -f "libs/mngr/pyproject.toml" ]; then
     ok "libs/mngr/pyproject.toml: restored CLI name mngr"
 fi
 
-# Release scripts: replace "mngr" (exact quoted string) with "imbue-mngr"
-# This fixes dict lookups like versions["mngr"], internal_deps=("mngr",), etc.
-# NOTE: This also hits dir_name="mngr" which we fix below.
+# Release scripts: replace "mngr" and "mngr-*" PyPI names with imbue- prefix
 for f in scripts/release.py scripts/verify_publish.py scripts/utils.py; do
     [ -f "$f" ] || continue
-    if grep -q '"mngr"' "$f" 2>/dev/null; then
-        perl -pi -e 's/"mngr"/"imbue-mngr"/g' "$f"
-        ok "$f: \"mngr\" -> \"imbue-mngr\""
-    fi
+    perl -pi -e 's/"mngr(?=-)"/"imbue-mngr/g; s/"mngr"/"imbue-mngr"/g' "$f"
 done
+ok "Release scripts: PyPI names prefixed"
 
 # Fix false positive: dir_name must be the actual directory name, not the PyPI name
 if [ -f "scripts/utils.py" ]; then
@@ -274,17 +257,21 @@ if [ -f "scripts/utils.py" ]; then
     ok "scripts/utils.py: restored dir_name=\"mngr\""
 fi
 
-# Python source files: fix importlib.metadata and package name references
-# distribution("mngr") -> distribution("imbue-mngr")
-for f in $(grep -rl 'distribution("mngr")' libs/ apps/ 2>/dev/null); do
-    perl -pi -e 's/distribution\("mngr"\)/distribution("imbue-mngr")/g' "$f"
+# Python source files: fix importlib.metadata lookups
+for f in $(grep -rl 'distribution("mngr' libs/ apps/ 2>/dev/null); do
+    perl -pi -e 's/distribution\("mngr/distribution("imbue-mngr/g' "$f"
     ok "$f: distribution lookup"
 done
-# Package metadata name checks: name == "mngr" -> name == "imbue-mngr"
-# (only in files that also use importlib.metadata or package tuples)
+
+# Package metadata name checks in provisioning.py and uv_tool.py
 for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py; do
     [ -f "$f" ] || continue
-    perl -pi -e 's/name == "mngr"/name == "imbue-mngr"/g; s/name != "mngr"/name != "imbue-mngr"/g; s/name="mngr"/name="imbue-mngr"/g' "$f"
+    perl -pi -e '
+        s/name == "mngr"/name == "imbue-mngr"/g;
+        s/name != "mngr"/name != "imbue-mngr"/g;
+        s/name="mngr"/name="imbue-mngr"/g;
+        s/startswith\("mngr-"\)/startswith("imbue-mngr-")/g;
+    ' "$f"
     ok "$f: package name references"
 done
 

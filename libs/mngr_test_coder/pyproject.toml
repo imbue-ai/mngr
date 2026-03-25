@@ -1,12 +1,12 @@
 [project]
-name = "mngr-test-coder"
+name = "imbue-mngr-test-coder"
 version = "0.1.0"
 description = "Test agent type plugin for mngr - a mind agent that uses the matched-responses model for testing without API keys"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-mngr==0.1.4",
-    "mngr-claude-mind==0.1.0",
+    "imbue-mngr-claude-mind==0.1.0",
 ]
 
 [project.entry-points.mngr]
@@ -21,7 +21,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-claude-mind = { workspace = true }
+imbue-mngr-claude-mind = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

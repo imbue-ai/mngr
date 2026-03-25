@@ -1,5 +1,5 @@
 [project]
-name = "mngr-tmr"
+name = "imbue-mngr-tmr"
 version = "0.1.0"
 description = "Test map-reduce plugin for mngr - launch agents to run and fix tests in parallel"
 readme = "README.md"

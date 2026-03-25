@@ -1,5 +1,5 @@
 [project]
-name = "mngr-wait"
+name = "imbue-mngr-wait"
 version = "0.1.0"
 description = "Wait plugin for mngr - wait for agents/hosts to reach target states"
 readme = "README.md"

@@ -1,5 +1,5 @@
 [project]
-name = "mngr-ttyd"
+name = "imbue-mngr-ttyd"
 version = "0.1.0"
 description = "ttyd web terminal plugin for mngr - automatically launches a ttyd server alongside agents"
 readme = "README.md"

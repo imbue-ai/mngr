@@ -1,13 +1,13 @@
 [project]
-name = "mngr-elena-code"
+name = "imbue-mngr-elena-code"
 version = "0.1.0"
 description = "Elena Code agent plugin for mngr - a conversational AI mind powered by Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-mngr==0.1.7",
-    "mngr-claude==0.1.0",
-    "mngr-claude-mind==0.1.0",
+    "imbue-mngr-claude==0.1.0",
+    "imbue-mngr-claude-mind==0.1.0",
 ]
 
 [project.entry-points.mngr]
@@ -22,8 +22,8 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-claude = { workspace = true }
-mngr-claude-mind = { workspace = true }
+imbue-mngr-claude = { workspace = true }
+imbue-mngr-claude-mind = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

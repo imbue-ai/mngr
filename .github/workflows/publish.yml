@@ -67,22 +67,22 @@ jobs:
       - name: Build modal-proxy
         run: pyproject-build libs/modal_proxy -o dist/
 
-      - name: Build mngr-modal
+      - name: Build imbue-mngr-modal
         run: pyproject-build libs/mngr_modal -o dist/
 
-      - name: Build mngr-claude
+      - name: Build imbue-mngr-claude
         run: pyproject-build libs/mngr_claude -o dist/
 
-      - name: Build mngr-pair
+      - name: Build imbue-mngr-pair
         run: pyproject-build libs/mngr_pair -o dist/
 
-      - name: Build mngr-opencode
+      - name: Build imbue-mngr-opencode
         run: pyproject-build libs/mngr_opencode -o dist/
 
-      - name: Build mngr-kanpan
+      - name: Build imbue-mngr-kanpan
         run: pyproject-build libs/mngr_kanpan -o dist/
 
-      - name: Build mngr-tutor
+      - name: Build imbue-mngr-tutor
         run: pyproject-build libs/mngr_tutor -o dist/
 
       - name: Publish packages to PyPI

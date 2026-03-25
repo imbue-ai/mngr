@@ -1,5 +1,5 @@
 [project]
-name = "mngr-mind-chat"
+name = "imbue-mngr-mind-chat"
 version = "0.1.0"
 description = "Chat command plugin for mngr - connect to mind chat sessions"
 readme = "README.md"

@@ -1,5 +1,5 @@
 [project]
-name = "mngr-pi-coding"
+name = "imbue-mngr-pi-coding"
 version = "0.1.0"
 description = "Pi coding agent type plugin for mngr"
 readme = "README.md"

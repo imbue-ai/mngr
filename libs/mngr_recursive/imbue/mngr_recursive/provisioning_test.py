@@ -266,7 +266,7 @@ def test_agent_package_mode_builds_correct_command() -> None:
     agent = _make_mock_agent(mngr_ctx=ctx)
 
     with patch("imbue.mngr_recursive.provisioning._get_installed_mngr_packages") as mock_packages:
-        mock_packages.return_value = [("imbue-mngr", "0.1.4"), ("mngr-pair", "0.1.0")]
+        mock_packages.return_value = [("imbue-mngr", "0.1.4"), ("imbue-mngr-pair", "0.1.0")]
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
     # Find the uv tool install call
@@ -274,7 +274,7 @@ def test_agent_package_mode_builds_correct_command() -> None:
     assert len(install_calls) >= 1
     install_cmd = str(install_calls[0])
     assert "imbue-mngr==0.1.4" in install_cmd
-    assert "--with mngr-pair==0.1.0" in install_cmd
+    assert "--with imbue-mngr-pair==0.1.0" in install_cmd
 
     # Verify UV_TOOL_DIR and UV_TOOL_BIN_DIR are set to agent-specific paths
     agent_state_dir = host_dir / "agents" / "agent-123"
@@ -492,7 +492,7 @@ def test_install_package_mode_raises_when_no_mngr_package() -> None:
     """_install_mngr_package_mode should raise when mngr is not in packages list."""
     host = _make_mock_host()
     with pytest.raises(MngrError, match="mngr package not found"):
-        _install_mngr_package_mode(host, [("mngr-pair", "0.1.0")], Path("/tools"), Path("/bin"))
+        _install_mngr_package_mode(host, [("imbue-mngr-pair", "0.1.0")], Path("/tools"), Path("/bin"))
 
 
 def test_install_package_mode_retries_with_force_reinstall() -> None:

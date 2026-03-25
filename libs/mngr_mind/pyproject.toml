@@ -1,13 +1,13 @@
 [project]
-name = "mngr-mind"
+name = "imbue-mngr-mind"
 version = "0.1.0"
 description = "Common code for mind-based agents in mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-mngr==0.1.4",
-    "mngr-llm==0.1.0",
-    "mngr-recursive==0.1.0",
+    "imbue-mngr-llm==0.1.0",
+    "imbue-mngr-recursive==0.1.0",
 ]
 
 [project.entry-points.mngr]
@@ -22,8 +22,8 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-llm = { workspace = true }
-mngr-recursive = { workspace = true }
+imbue-mngr-llm = { workspace = true }
+imbue-mngr-recursive = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

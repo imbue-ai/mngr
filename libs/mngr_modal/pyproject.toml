@@ -1,5 +1,5 @@
 [project]
-name = "mngr-modal"
+name = "imbue-mngr-modal"
 version = "0.1.0"
 description = "Modal provider backend plugin for mngr"
 readme = "README.md"

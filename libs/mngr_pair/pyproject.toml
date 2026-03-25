@@ -1,5 +1,5 @@
 [project]
-name = "mngr-pair"
+name = "imbue-mngr-pair"
 version = "0.1.4"
 description = "Pair command plugin for mngr - continuous file sync between agent and local directory"
 readme = "README.md"

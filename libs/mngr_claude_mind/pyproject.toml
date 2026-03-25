@@ -1,16 +1,16 @@
 [project]
-name = "mngr-claude-mind"
+name = "imbue-mngr-claude-mind"
 version = "0.1.0"
 description = "Claude mind agent plugin for mngr - base class for mind agents built on Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-mngr==0.1.7",
-    "mngr-claude==0.1.0",
-    "mngr-llm==0.1.0",
-    "mngr-mind==0.1.0",
-    "mngr-recursive==0.1.0",
-    "mngr-ttyd==0.1.0",
+    "imbue-mngr-claude==0.1.0",
+    "imbue-mngr-llm==0.1.0",
+    "imbue-mngr-mind==0.1.0",
+    "imbue-mngr-recursive==0.1.0",
+    "imbue-mngr-ttyd==0.1.0",
     "tomlkit>=0.12.0",
     "watchdog>=4.0",
 ]
@@ -27,11 +27,11 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-claude = { workspace = true }
-mngr-llm = { workspace = true }
-mngr-mind = { workspace = true }
-mngr-recursive = { workspace = true }
-mngr-ttyd = { workspace = true }
+imbue-mngr-claude = { workspace = true }
+imbue-mngr-llm = { workspace = true }
+imbue-mngr-mind = { workspace = true }
+imbue-mngr-recursive = { workspace = true }
+imbue-mngr-ttyd = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

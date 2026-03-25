@@ -1,5 +1,5 @@
 [project]
-name = "mngr-tutor"
+name = "imbue-mngr-tutor"
 version = "0.1.3"
 description = "Interactive tutorial plugin for mngr"
 readme = "README.md"

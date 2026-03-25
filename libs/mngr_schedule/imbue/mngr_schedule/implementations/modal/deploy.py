@@ -188,11 +188,13 @@ def detect_mngr_install_mode() -> MngrInstallMode:
     if not).
     """
     try:
-        importlib.metadata.distribution("mngr-schedule")
+        importlib.metadata.distribution("imbue-mngr-schedule")
     except importlib.metadata.PackageNotFoundError:
-        raise ScheduleDeployError("mngr-schedule package is not installed. Cannot determine install mode.") from None
+        raise ScheduleDeployError(
+            "imbue-mngr-schedule package is not installed. Cannot determine install mode."
+        ) from None
 
-    return _shared_detect_mngr_install_mode("mngr-schedule")
+    return _shared_detect_mngr_install_mode("imbue-mngr-schedule")
 
 
 def resolve_mngr_install_mode(mode: MngrInstallMode) -> MngrInstallMode:

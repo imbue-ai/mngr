@@ -1,5 +1,5 @@
 [project]
-name = "mngr-file"
+name = "imbue-mngr-file"
 version = "0.1.0"
 description = "File command plugin for mngr - read, write, and list files on agents and hosts"
 readme = "README.md"

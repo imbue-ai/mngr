@@ -105,7 +105,7 @@ def _get_installed_mngr_packages() -> list[tuple[str, str]]:
     for dist in importlib.metadata.distributions():
         name = dist.metadata["Name"]
         version = dist.metadata["Version"]
-        if name is not None and version is not None and (name == "imbue-mngr" or name.startswith("mngr-")):
+        if name is not None and version is not None and (name == "imbue-mngr" or name.startswith("imbue-mngr-")):
             packages.append((name, version))
     return packages
 

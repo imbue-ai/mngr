@@ -1,12 +1,12 @@
 [project]
-name = "mngr-llm"
+name = "imbue-mngr-llm"
 version = "0.1.0"
 description = "LLM agent plugin for mngr - runs the llm CLI tool as an agent with conversation management"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "imbue-mngr==0.1.4",
-    "mngr-recursive==0.1.0",
+    "imbue-mngr-recursive==0.1.0",
     "watchdog>=4.0",
 ]
 
@@ -22,7 +22,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-recursive = { workspace = true }
+imbue-mngr-recursive = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

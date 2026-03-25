@@ -1,5 +1,5 @@
 [project]
-name = "mngr-claude"
+name = "imbue-mngr-claude"
 version = "0.1.0"
 description = "Claude agent type plugin for mngr"
 readme = "README.md"
@@ -10,7 +10,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "mngr-modal==0.1.0",
+    "imbue-mngr-modal==0.1.0",
 ]
 
 [project.entry-points.mngr]
@@ -28,7 +28,7 @@ packages = ["imbue"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-mngr-modal = { workspace = true }
+imbue-mngr-modal = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:
