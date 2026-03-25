@@ -1471,6 +1471,9 @@ class Host(BaseHost, OnlineHostInterface):
         if check.success:
             current = self.execute_command(f"readlink -f {shlex.quote(str(target_abs))}")
             expected = self.execute_command(f"readlink -f {shlex.quote(str(source_abs))}")
+            if not current.success or not expected.success:
+                # readlink -f failed (e.g. broken symlink) -- treat as incorrect
+                return (False, False)
             return (current.stdout.strip() == expected.stdout.strip(), False)
         check_exists = self.execute_command(f"test -e {shlex.quote(str(target_abs))}")
         if check_exists.success:
