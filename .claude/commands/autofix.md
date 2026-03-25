@@ -40,15 +40,18 @@ Based on the agent's response:
 Repeat up to 10 times:
 
 1. Record the current HEAD as `pre_iteration_head`.
-2. Spawn a single `verify-and-fix` Agent, providing the base branch (`{base_branch}`) and the current HEAD hash (`{pre_iteration_head}`).
-3. Check if HEAD moved: compare `git rev-parse HEAD` to `pre_iteration_head`.
-4. If HEAD did not move, no fixes were made. The branch is clean (or remaining issues are unfixable). Stop looping.
-5. If HEAD moved, continue to the next iteration.
+2. Spawn a single `verify-and-fix` Agent in the background, providing the base branch (`{base_branch}`) and the current HEAD hash (`{pre_iteration_head}`).
+3. Wait for *either* the agent to finish, or for it to create a file at `.reviewer/outputs/autofix/issues/{pre_iteration_head}.jsonl`
+4. If the `.reviewer/outputs/autofix/issues/{pre_iteration_head}.jsonl` file exists, read it and print out A) the path to the file, and B) a summary of the issues (i.e. a short description of each issue and its severity).
+5. Once the agent is done (be sure to wait for the agent before doing this step!) check if HEAD moved: compare `git rev-parse HEAD` to `pre_iteration_head`.
+6. If HEAD did not move, no fixes were made. The branch is clean (or remaining issues are unfixable). Stop looping.
+7. If HEAD moved, continue to the next iteration.
 
 Important:
 - Do NOT explore code, plan, or fix anything yourself. The agent does all the work.
 - Each iteration gets a fresh-context agent, which is the whole point.
 - Do NOT pass the agent any information about previous iterations or previous fixes. It operates from a clean slate every time.
+- The point of printing the issues in step 4 is for the user to see what is being worked fixed.
 
 ### Phase 4: Review
 
