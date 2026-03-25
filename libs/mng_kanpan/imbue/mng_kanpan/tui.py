@@ -1427,9 +1427,10 @@ def run_kanpan(
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
     footer_right = Text(keybindings, align="right")
-    # Both sides get equal weight so the keybindings (which are longer) wrap
-    # in narrow terminals instead of the status text getting squeezed.
-    footer_columns = Columns([footer_left_attr, AttrMap(footer_right, "footer")])
+    # Pack the left side so it gets exactly the space its text needs; the right
+    # side (keybindings) gets the remainder and wraps when the terminal is narrow.
+    footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
+    footer_columns = Columns(footer_items)
     footer = Pile([Divider(), footer_columns])
 
     is_filtered = bool(include_filters or exclude_filters)
