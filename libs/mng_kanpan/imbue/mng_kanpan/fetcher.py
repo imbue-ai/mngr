@@ -137,7 +137,7 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
     """
     enriched_entries: list[AgentBoardEntry] = []
     for entry in snapshot.entries:
-        agent_repo = _repo_path_from_labels(entry.column_data.labels)
+        agent_repo = repo_path_from_labels(entry.column_data.labels)
         pr = _lookup_pr(remote, agent_repo, entry.branch)
         agent_prs_loaded = agent_repo in remote.prs_loaded_repos if agent_repo else False
         create_pr_url = (
@@ -155,6 +155,7 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
         entries=tuple(enriched_entries),
         errors=(*snapshot.errors, *remote.errors),
         prs_loaded=remote.prs_loaded,
+        prs_loaded_repos=remote.prs_loaded_repos,
         fetch_time_seconds=snapshot.fetch_time_seconds,
     )
 
@@ -235,6 +236,7 @@ def fetch_board_snapshot(
         entries=tuple(entries),
         errors=(*errors, *remote.errors),
         prs_loaded=remote.prs_loaded,
+        prs_loaded_repos=remote.prs_loaded_repos,
         fetch_time_seconds=time.monotonic() - start_time,
     )
 
@@ -245,6 +247,7 @@ def fetch_board_snapshot(
                 entries=snapshot.entries,
                 errors=(*snapshot.errors, *after_errors),
                 prs_loaded=snapshot.prs_loaded,
+                prs_loaded_repos=snapshot.prs_loaded_repos,
                 fetch_time_seconds=snapshot.fetch_time_seconds,
             )
 
@@ -388,11 +391,11 @@ def _build_create_pr_url(repo_path: str | None, branch: str | None) -> str | Non
 @pure
 def _get_agent_repo_path(agent: AgentDetails) -> str | None:
     """Get the GitHub repo path for an agent from its 'remote' label."""
-    return _repo_path_from_labels(agent.labels)
+    return repo_path_from_labels(agent.labels)
 
 
 @pure
-def _repo_path_from_labels(labels: dict[str, str]) -> str | None:
+def repo_path_from_labels(labels: dict[str, str]) -> str | None:
     """Extract GitHub 'owner/repo' from a labels dict's 'remote' entry."""
     remote_url = labels.get("remote")
     if remote_url is None:

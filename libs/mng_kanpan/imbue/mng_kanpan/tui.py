@@ -42,6 +42,7 @@ from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.data_types import RefreshHook
 from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
+from imbue.mng_kanpan.fetcher import repo_path_from_labels
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
@@ -548,6 +549,7 @@ def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: 
         entries=new_entries,
         errors=state.snapshot.errors,
         prs_loaded=state.snapshot.prs_loaded,
+        prs_loaded_repos=state.snapshot.prs_loaded_repos,
         fetch_time_seconds=state.snapshot.fetch_time_seconds,
     )
 
@@ -800,7 +802,9 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     try:
         new_snapshot = state.refresh_future.result()
         should_carry_forward = was_local_only or (
-            not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded
+            state.snapshot is not None
+            and state.snapshot.prs_loaded
+            and state.snapshot.prs_loaded_repos - new_snapshot.prs_loaded_repos
         )
         if should_carry_forward and state.snapshot is not None:
             new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
@@ -813,6 +817,7 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
                 entries=state.snapshot.entries,
                 errors=(*state.snapshot.errors, f"Refresh failed: {e}"),
                 prs_loaded=state.snapshot.prs_loaded,
+                prs_loaded_repos=state.snapshot.prs_loaded_repos,
                 fetch_time_seconds=state.snapshot.fetch_time_seconds,
             )
     finally:
@@ -843,16 +848,23 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 @pure
 def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
-    """Carry forward PR data from a previous snapshot when the new one failed to load PRs.
+    """Carry forward PR data from a previous snapshot for agents whose repo failed to load.
 
-    Matches entries by agent name and copies pr and create_pr_url from the old snapshot.
-    The new snapshot's prs_loaded is set to True since we're using valid (stale) data.
+    For each agent, if its repo was loaded in the old snapshot but not in the new one,
+    copies pr and create_pr_url from the old entry. Agents whose repo loaded successfully
+    in the new snapshot keep their fresh data.
     """
+    failed_repos = old.prs_loaded_repos - new.prs_loaded_repos
     old_by_name = {entry.name: entry for entry in old.entries}
     updated_entries = []
     for entry in new.entries:
+        agent_repo = repo_path_from_labels(entry.column_data.labels)
         old_entry = old_by_name.get(entry.name)
-        if old_entry is not None and (old_entry.pr is not None or old_entry.create_pr_url is not None):
+        if (
+            agent_repo in failed_repos
+            and old_entry is not None
+            and (old_entry.pr is not None or old_entry.create_pr_url is not None)
+        ):
             ref = entry.field_ref()
             updated = entry.model_copy_update(
                 to_update(ref.pr, old_entry.pr),
@@ -861,10 +873,12 @@ def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnaps
             updated_entries.append(updated)
         else:
             updated_entries.append(entry)
+    merged_repos = new.prs_loaded_repos | failed_repos
     return BoardSnapshot(
         entries=tuple(updated_entries),
         errors=new.errors,
-        prs_loaded=True,
+        prs_loaded=bool(merged_repos),
+        prs_loaded_repos=merged_repos,
         fetch_time_seconds=new.fetch_time_seconds,
     )
 

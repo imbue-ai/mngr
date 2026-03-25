@@ -971,6 +971,7 @@ def test_dispatch_immediate_custom_command_does_not_mark() -> None:
 
 
 def test_carry_forward_pr_data_preserves_old_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mng/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -979,8 +980,14 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
         branch="mng/agent-1",
         pr=pr,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/repo"}),
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -989,11 +996,13 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
         branch="mng/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
     new = BoardSnapshot(
         entries=(new_entry,),
         errors=("gh auth failed",),
         prs_loaded=False,
+        prs_loaded_repos=frozenset(),
         fetch_time_seconds=2.0,
     )
 
@@ -1006,6 +1015,7 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
 
 
 def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
         state=AgentLifecycleState.RUNNING,
@@ -1013,8 +1023,14 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
         branch="mng/agent-1",
         pr=None,
         create_pr_url="https://github.com/org/repo/compare/mng/agent-1?expand=1",
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/repo"}),
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1023,8 +1039,14 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
         branch="mng/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        prs_loaded=False,
+        prs_loaded_repos=frozenset(),
+        fetch_time_seconds=2.0,
+    )
 
     result = _carry_forward_pr_data(old, new)
     assert result.prs_loaded is True
@@ -1033,15 +1055,27 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
 
 
 def test_carry_forward_pr_data_handles_new_agents() -> None:
-    old = BoardSnapshot(entries=(), prs_loaded=True, fetch_time_seconds=1.0)
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
+    old = BoardSnapshot(
+        entries=(),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/repo"}),
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-new"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("modal"),
         branch="mng/agent-new",
+        column_data=repo_labels,
     )
-    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        prs_loaded=False,
+        prs_loaded_repos=frozenset(),
+        fetch_time_seconds=2.0,
+    )
 
     result = _carry_forward_pr_data(old, new)
     assert result.entries[0].pr is None
@@ -1093,6 +1127,7 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
 
 
 def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mng/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1101,8 +1136,14 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
         branch="mng/agent-1",
         pr=pr,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/repo"}),
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1111,11 +1152,13 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
         branch="mng/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
     new = BoardSnapshot(
         entries=(new_entry,),
         errors=("gh pr list failed: network error",),
         prs_loaded=False,
+        prs_loaded_repos=frozenset(),
         fetch_time_seconds=2.0,
     )
 
@@ -1128,6 +1171,74 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
     assert not _text_contains(texts, "no PR yet")
     assert not _text_contains(texts, "create PR")
     assert _text_contains(texts, "network error")
+
+
+def test_carry_forward_partial_failure_preserves_failed_repo_prs() -> None:
+    """When one repo fails in a multi-repo refresh, carry forward only agents from the failed repo."""
+    pr_good = make_pr_info(number=10, head_branch="mng/good-agent")
+    pr_bad = make_pr_info(number=20, head_branch="mng/bad-agent")
+    pr_good_refreshed = make_pr_info(number=10, head_branch="mng/good-agent", state=PrState.MERGED)
+
+    old_good_entry = AgentBoardEntry(
+        name=AgentName("good-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mng/good-agent",
+        pr=pr_good,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/good.git"}),
+    )
+    old_bad_entry = AgentBoardEntry(
+        name=AgentName("bad-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mng/bad-agent",
+        pr=pr_bad,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/bad.git"}),
+    )
+    old = BoardSnapshot(
+        entries=(old_good_entry, old_bad_entry),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/good", "org/bad"}),
+        fetch_time_seconds=1.0,
+    )
+
+    # New snapshot: good repo succeeded (PR updated to MERGED), bad repo failed (PR is None)
+    new_good_entry = AgentBoardEntry(
+        name=AgentName("good-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mng/good-agent",
+        pr=pr_good_refreshed,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/good.git"}),
+    )
+    new_bad_entry = AgentBoardEntry(
+        name=AgentName("bad-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mng/bad-agent",
+        pr=None,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/bad.git"}),
+    )
+    new = BoardSnapshot(
+        entries=(new_good_entry, new_bad_entry),
+        prs_loaded=True,
+        prs_loaded_repos=frozenset({"org/good"}),
+        fetch_time_seconds=2.0,
+    )
+
+    result = _carry_forward_pr_data(old, new)
+
+    # Good agent keeps its fresh data (MERGED)
+    assert result.entries[0].pr is not None
+    assert result.entries[0].pr.state == PrState.MERGED
+
+    # Bad agent gets its old PR carried forward
+    assert result.entries[1].pr is not None
+    assert result.entries[1].pr.number == 20
+
+    assert result.prs_loaded is True
+    assert "org/good" in result.prs_loaded_repos
+    assert "org/bad" in result.prs_loaded_repos
 
 
 # === Debounce / refresh tests ===
