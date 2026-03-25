@@ -383,8 +383,8 @@ class MngConfig(FrozenModel):
     work_dir_extra_paths: dict[str, WorkDirExtraPathMode] = Field(
         default_factory=dict,
         description="Paths to transfer into new work directories, mapped to transfer mode. "
-        "'share': symlink on same host, copy on different host. "
-        "'copy': always copy via rsync.",
+        "'SHARE': symlink on same host, copy on different host. "
+        "'COPY': always copy via rsync.",
     )
     pager: str | None = Field(
         default=None,

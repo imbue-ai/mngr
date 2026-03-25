@@ -166,13 +166,13 @@ When creating agents with `--worktree` or `--copy-source`, certain files outside
 
 **Modes:**
 
-- `"share"`: On the same host, creates a symlink from the work directory to the source path (shared source of truth). When copying to a different host, falls back to copying via rsync since symlinks across hosts are not possible.
-- `"copy"`: Always copies the path via rsync, creating an independent copy in each work directory.
+- `"SHARE"`: On the same host, creates a symlink from the work directory to the source path (shared source of truth). When copying to a different host, falls back to copying via rsync since symlinks across hosts are not possible.
+- `"COPY"`: Always copies the path via rsync, creating an independent copy in each work directory.
 
 **When to use each mode:**
 
-- Use `"share"` for config files that are the same regardless of branch, like `.mng/settings.local.toml`, or large read-only caches like `node_modules` (if you pin versions).
-- Use `"copy"` for paths that depend on branch state (like `.venv`, which reflects each branch's dependencies) or that each work directory should own independently (like test output).
+- Use `"SHARE"` for config files that are the same regardless of branch, like `.mng/settings.local.toml`, or large read-only caches like `node_modules` (if you pin versions).
+- Use `"COPY"` for paths that depend on branch state (like `.venv`, which reflects each branch's dependencies) or that each work directory should own independently (like test output).
 
 **Behavior details:**
 
