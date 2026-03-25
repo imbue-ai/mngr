@@ -1,3 +1,6 @@
+<!-- This file is auto-generated from the project-level source. Do not edit directly. -->
+<!-- To modify, edit the source file and run: uv run python scripts/make_cli_docs.py -->
+
 ---
 name: verify-conversation
 argument-hint: [options...]

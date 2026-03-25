@@ -16,9 +16,9 @@ repos:
         types: [python]
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
-        entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mng/docs/commands/ libs/mng/README.md'
+        entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mng/docs/commands/ libs/mng/README.md plugins/mng-skills/agents/verify-and-fix.md plugins/mng-skills/agents/review-conversation.md plugins/mng-skills/skills/fix-something/SKILL.md plugins/mng-skills/skills/verify-conversation/SKILL.md'
         language: system
-        files: 'libs/mng/imbue/mng/cli/.*\.py$|libs/mng/imbue/mng/main\.py$|scripts/make_cli_docs\.py$|libs/mng/docs/commands/.*\.md$|^README\.md$|^libs/mng/README\.md$'
+        files: 'libs/mng/imbue/mng/cli/.*\.py$|libs/mng/imbue/mng/main\.py$|scripts/make_cli_docs\.py$|libs/mng/docs/commands/.*\.md$|^README\.md$|^libs/mng/README\.md$|\.claude/agents/verify-and-fix\.md$|\.claude/agents/review-conversation\.md$|\.claude/skills/fix-something/SKILL\.md$|\.claude/skills/verify-conversation/SKILL\.md$|plugins/mng-skills/agents/verify-and-fix\.md$|plugins/mng-skills/agents/review-conversation\.md$|plugins/mng-skills/skills/fix-something/SKILL\.md$|plugins/mng-skills/skills/verify-conversation/SKILL\.md$'
         pass_filenames: false
     -   id: check-vet-generated-skills
         name: "Check vet-generated skill categories against vet"
