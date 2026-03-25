@@ -585,7 +585,7 @@ def launch_and_poll_agents(
 
     if report_path is not None:
         current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
-        generate_html_report(current_results, report_path)
+        generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
     while pending_ids or remaining_tests:
         # Check per-agent timeouts
@@ -617,7 +617,7 @@ def launch_and_poll_agents(
 
         if timed_out_this_round and report_path is not None:
             current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
-            generate_html_report(current_results, report_path)
+            generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if not pending_ids and not remaining_tests:
             break
@@ -696,7 +696,7 @@ def launch_and_poll_agents(
 
         if (changed or timed_out_this_round) and report_path is not None:
             current_results = build_current_results(all_agents, final_details, timed_out_ids, all_hosts)
-            generate_html_report(current_results, report_path)
+            generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
         if pending_ids or remaining_tests:
             time.sleep(poll_interval_seconds)

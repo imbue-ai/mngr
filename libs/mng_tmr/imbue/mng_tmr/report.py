@@ -186,30 +186,41 @@ def _build_grouped_tables(
                 key=lambda r: priority_order.get(r.branch_name or "", len(priority_order)),
             )
 
+        is_running = sec == ReportSection.RUNNING
         sections += f'    <h2 id="{anchor}" style="color: {color};">{label} ({len(group)})</h2>\n'
         sections += "    <table>\n      <thead>\n        <tr>"
-        sections += "<th>Test</th><th>Changes</th><th>Summary</th><th>Agent</th><th>Branch</th><th>Merged?</th>"
-        if agent_artifact_runs:
-            sections += "<th>Artifacts</th>"
+        if is_running:
+            sections += "<th>Test</th><th>Agent</th>"
+        else:
+            sections += "<th>Test</th><th>Changes</th><th>Summary</th><th>Agent</th><th>Branch</th><th>Merged?</th>"
+            if agent_artifact_runs:
+                sections += "<th>Artifacts</th>"
         sections += "</tr>\n      </thead>\n      <tbody>\n"
         for r in group:
-            branch_cell = r.branch_name if r.branch_name else "-"
-            summary_html = _render_markdown(r.summary_markdown)
-            changes_cell = (
-                ", ".join(f"{kind.value}/{change.status.value}" for kind, change in r.changes.items())
-                if r.changes
-                else "-"
-            )
             agent_name_str = str(r.agent_name)
-            merged_cell = _merged_status(r, integrator)
-            artifact_cell = ""
-            if agent_artifact_runs:
-                if agent_name_str in agent_artifact_runs:
-                    escaped = html.escape(agent_name_str)
-                    artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
-                else:
-                    artifact_cell = "<td>-</td>"
-            sections += f"""        <tr>
+            if is_running:
+                sections += f"""        <tr>
+          <td>{html.escape(r.test_node_id)}</td>
+          <td><code>{html.escape(agent_name_str)}</code></td>
+        </tr>
+"""
+            else:
+                branch_cell = r.branch_name if r.branch_name else "-"
+                summary_html = _render_markdown(r.summary_markdown)
+                changes_cell = (
+                    ", ".join(f"{kind.value}/{change.status.value}" for kind, change in r.changes.items())
+                    if r.changes
+                    else "-"
+                )
+                merged_cell = _merged_status(r, integrator)
+                artifact_cell = ""
+                if agent_artifact_runs:
+                    if agent_name_str in agent_artifact_runs:
+                        escaped = html.escape(agent_name_str)
+                        artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
+                    else:
+                        artifact_cell = "<td>-</td>"
+                sections += f"""        <tr>
           <td>{html.escape(r.test_node_id)}</td>
           <td>{html.escape(changes_cell)}</td>
           <td class="md">{summary_html}</td>
