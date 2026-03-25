@@ -2478,6 +2478,7 @@ def test_load_settings_defaults_new_fields(tmp_path: Path) -> None:
     assert settings.idle_event_delay_minutes_schedule == ()
     assert settings.scheduled_events == ()
     assert settings.user_timezone == "UTC"
+    assert settings.is_message_batching_enabled is True
     assert settings.event_batch_filter_command is None
 
 
