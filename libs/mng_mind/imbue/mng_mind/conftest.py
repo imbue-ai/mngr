@@ -187,6 +187,51 @@ def synthetic_loop_env(tmp_path: Path) -> SyntheticLoopEnv:
     return _create_synthetic_loop_env(mind_state_dir)
 
 
+class FakeWaitProcess:
+    """Controllable fake for the 'mng wait' subprocess used in idle detection.
+
+    Use the factory function ``make_pending_idle_wait`` or
+    ``_create_fake_wait_process`` to create instances. Call ``.complete()``
+    to simulate the agent entering WAITING state.
+    """
+
+    _is_complete: bool = False
+    returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self._is_complete:
+            return self.returncode
+        return None
+
+    def complete(self, returncode: int = 0) -> None:
+        self._is_complete = True
+        self.returncode = returncode
+
+    def terminate(self) -> None:
+        self._is_complete = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self._is_complete = True
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        assert self.returncode is not None
+        return self.returncode
+
+
+def _create_fake_wait_process(*, is_complete: bool, returncode: int | None) -> FakeWaitProcess:
+    process = FakeWaitProcess()
+    process._is_complete = is_complete
+    process.returncode = returncode
+    return process
+
+
+def make_pending_idle_wait(agent_id: str) -> FakeWaitProcess:
+    """Create a FakeWaitProcess that never completes (agent stays busy)."""
+    return _create_fake_wait_process(is_complete=False, returncode=None)
+
+
 class EventWatcherSubprocessCapture:
     """Records calls to subprocess.run for assertion in event watcher tests."""
 
