@@ -220,6 +220,19 @@ If you do think that the tutorial block is wrong or outdated, update both the
 tutorial block in the mega_tutorial.sh file and the test code itself, and record
 a change under the key "FIX_TUTORIAL".
 
+# Committing your changes
+
+IMPORTANT: Each change kind MUST get its own separate commit. Changes of the same
+kind should be combined in one commit. The commit message MUST start with the kind
+in brackets. Examples:
+
+  [FIX_TEST] Fix assertion to check exit code instead of stdout
+  [FIX_IMPL] Add missing timeout parameter to create command
+  [IMPROVE_TEST] Add edge case for empty agent list
+
+This means if you make both a FIX_TEST and a FIX_IMPL change, you should have
+exactly two commits. Do NOT mix different kinds in the same commit.
+
 # Writing the result
 
 In all cases, write the result to a JSON file at
@@ -921,21 +934,45 @@ def launch_integrator_agent(
     config: TmrLaunchConfig,
     mng_ctx: MngContext,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch an integrator agent that merges all fix branches into one."""
+    """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
     short_id = _short_random_id()
     agent_name = AgentName(f"tmr-integrator-{short_id}")
 
     branch_list = "\n".join(f"  - {b}" for b in fix_branches)
-    prompt = f"""Merge the following branches into one integrated branch:
+    prompt = f"""Integrate the following branches into a single linear commit stack:
 {branch_list}
 
-For each branch, run `git merge <branch>` (resolve conflicts if needed).
-After merging all branches, verify that the code still compiles/passes basic checks.
-Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
-{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary_markdown": "Merged 2 of 3 branches."}}
+# Strategy
 
-- merged: list of branch names that were successfully merged
-- failed: list of branch names that could not be merged
+Use cherry-pick (NOT merge) to build a clean linear history. The goal is a
+branch with a flat list of commits that is easy to review.
+
+# Steps
+
+1. For each branch listed above, inspect the commits. Each branch should have
+   commits prefixed with a change kind in brackets, like [FIX_TEST], [FIX_IMPL],
+   [IMPROVE_TEST], or [FIX_TUTORIAL].
+
+2. Collect all commits into two groups:
+   a) "Test/doc" commits: those tagged [FIX_TEST], [IMPROVE_TEST], or [FIX_TUTORIAL].
+   b) "Impl" commits: those tagged [FIX_IMPL].
+
+3. Cherry-pick in this order:
+   a) FIRST: cherry-pick all test/doc commits and squash them into a SINGLE commit.
+      Use a commit message like: "[TEST/DOC] Combined test and doc fixes from N agents"
+   b) THEN: cherry-pick each [FIX_IMPL] commit individually, keeping them as
+      separate commits. Before cherry-picking, READ the commit messages of all
+      FIX_IMPL commits and rank them by priority (most impactful / most important
+      fix first). Cherry-pick in that priority order.
+
+4. If a cherry-pick has conflicts, try to resolve them. If you cannot resolve
+   a conflict for a particular branch, skip it and record it as failed.
+
+5. Write the result to $MNG_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}/result.json with:
+{{"merged": ["branch1", "branch2"], "failed": ["branch3"], "summary_markdown": "Integrated 2 of 3 branches."}}
+
+- merged: list of branch names that were successfully integrated
+- failed: list of branch names that could not be integrated
 - summary_markdown: overall markdown summary
 """
 

@@ -40,7 +40,7 @@ from imbue.mng_tmr.api import launch_integrator_agent
 from imbue.mng_tmr.api import pull_agent_branch
 from imbue.mng_tmr.api import pull_test_outputs
 from imbue.mng_tmr.api import read_integrator_result
-from imbue.mng_tmr.api import should_auto_merge
+from imbue.mng_tmr.api import should_pull_changes
 from imbue.mng_tmr.api import wait_for_integrator
 from imbue.mng_tmr.data_types import IntegratorResult
 from imbue.mng_tmr.data_types import TestAgentInfo
@@ -137,13 +137,12 @@ def _run_integrator_phase(
     opts: TmrCliOptions,
     base_commit: str | None = None,
 ) -> IntegratorResult | None:
-    """Launch an integrator agent to merge test/doc fix branches.
+    """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
 
-    Only merges branches where changes are limited to test, doc, or tutorial
-    fixes (no implementation fixes). Branches with FIX_IMPL are left unmerged
-    for manual review.
+    All pullable branches are integrated. Test/doc/tutorial commits are squashed
+    into one commit; FIX_IMPL commits are kept separate and stacked by priority.
     """
-    fix_branches = [r.branch_name for r in results if should_auto_merge(r) and r.branch_name is not None]
+    fix_branches = [r.branch_name for r in results if should_pull_changes(r) and r.branch_name is not None]
     if not fix_branches:
         return None
 
