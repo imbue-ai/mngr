@@ -333,6 +333,7 @@ def setup_test_mng_env(
     monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
     monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
     monkeypatch.setenv("MNG_ROOT_NAME", mng_test_root_name)
+    monkeypatch.delenv("MNG_PROJECT_DIR", raising=False)
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside tmp_path, which

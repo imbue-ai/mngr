@@ -74,7 +74,7 @@ def load_config(
     1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
     2. Project config (.{root_name}/settings.toml at context_dir or git root)
     3. Local config (.{root_name}/settings.local.toml at context_dir or git root)
-    4. Environment variables (MNG_ROOT_NAME, MNG_PREFIX, MNG_HOST_DIR)
+    4. Environment variables (MNG_ROOT_NAME, MNG_PREFIX, MNG_HOST_DIR, MNG_PROJECT_DIR)
     5. CLI arguments (handled by caller)
 
     MNG_ROOT_NAME is used to derive:
@@ -82,6 +82,10 @@ def load_config(
     2. Defaults for prefix and default_host_dir (if not set in config files)
 
     Explicit MNG_PREFIX/MNG_HOST_DIR values override MNG_ROOT_NAME-derived defaults.
+
+    MNG_PROJECT_DIR overrides where project settings are found. When set, project
+    and local config files are loaded from that directory instead of .{root_name}/
+    at the git root.
 
     Returns MngContext containing both the final MngConfig and a reference to the plugin manager.
     """
