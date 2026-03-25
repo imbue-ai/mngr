@@ -850,9 +850,6 @@ def _cumulative_idle_delay_minutes(schedule: tuple[int, ...], event_index: int) 
 
     For schedule [1, 10, 60] and event_index=2, returns 1+10+60=71.
     For event_index >= len(schedule), the last value repeats.
-
-    Used when there is no idle wait tracker and idle time is measured as a
-    single continuous span from the last real event.
     """
     total = 0
     for i in range(event_index + 1):
