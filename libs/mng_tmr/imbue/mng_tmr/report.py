@@ -1,7 +1,7 @@
 """HTML report generation for the test-mapreduce plugin.
 
 Builds a self-contained HTML page with category navigation bars, per-category
-tables, and an optional integrator section.
+tables, an optional integrator section, and embedded test artifacts.
 """
 
 import html
@@ -10,6 +10,11 @@ from pathlib import Path
 from loguru import logger
 from markdown_it import MarkdownIt
 
+from imbue.mng.e2e.test_detail_renderer import ASCIINEMA_PLAYER_CSS
+from imbue.mng.e2e.test_detail_renderer import ASCIINEMA_PLAYER_JS
+from imbue.mng.e2e.test_detail_renderer import DETAIL_CSS
+from imbue.mng.e2e.test_detail_renderer import render_test_detail
+from imbue.mng.primitives import AgentName
 from imbue.mng_tmr.data_types import ChangeStatus
 from imbue.mng_tmr.data_types import DisplayCategory
 from imbue.mng_tmr.data_types import IntegratorResult
@@ -56,6 +61,7 @@ def generate_html_report(
     results: list[TestMapReduceResult],
     output_path: Path,
     integrator: IntegratorResult | None = None,
+    test_artifacts_dir: Path | None = None,
 ) -> Path:
     """Generate an HTML report summarizing test-mapreduce results."""
     counts: dict[DisplayCategory, int] = {}
@@ -63,19 +69,40 @@ def generate_html_report(
         cat = display_category_of(r)
         counts[cat] = counts.get(cat, 0) + 1
 
+    # Find artifact directories per agent
+    artifact_dirs: dict[str, Path] = {}
+    if test_artifacts_dir is not None:
+        for r in results:
+            artifact_dir = _find_test_artifact_dir(test_artifacts_dir, r.agent_name)
+            if artifact_dir is not None:
+                artifact_dirs[str(r.agent_name)] = artifact_dir
+
     nav_html = _build_category_nav(counts, len(results))
-    tables_html = _build_grouped_tables(results)
+    tables_html = _build_grouped_tables(results, artifact_dirs)
     integrator_html = _build_integrator_section(integrator)
     integrator_nav = _build_integrator_nav(integrator)
+    panels_html = _build_artifact_panels(artifact_dirs)
+
+    has_artifacts = bool(artifact_dirs)
+    asciinema_head = ""
+    if has_artifacts:
+        asciinema_head = (
+            f'  <link rel="stylesheet" type="text/css" href="{ASCIINEMA_PLAYER_CSS}">\n'
+            f'  <script src="{ASCIINEMA_PLAYER_JS}"></script>'
+        )
 
     css = _html_report_css()
+    artifact_css = _artifact_panel_css() if has_artifacts else ""
+    artifact_js = _artifact_panel_js() if has_artifacts else ""
     report_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Test Map-Reduce Report</title>
+{asciinema_head}
   <style>
 {css}
+{artifact_css}
   </style>
 </head>
 <body>
@@ -85,6 +112,8 @@ def generate_html_report(
 {integrator_nav}
 {tables_html}
 {integrator_html}
+{panels_html}
+{artifact_js}
 </body>
 </html>
 """
@@ -160,8 +189,12 @@ def _render_markdown(text: str) -> str:
     return _md.render(text)
 
 
-def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
+def _build_grouped_tables(
+    results: list[TestMapReduceResult],
+    artifact_dirs: dict[str, Path] | None = None,
+) -> str:
     """Build HTML tables grouped by display category, with CLEAN_PASS last."""
+    artifact_dirs = artifact_dirs or {}
     grouped: dict[DisplayCategory, list[TestMapReduceResult]] = {}
     for r in results:
         cat = display_category_of(r)
@@ -177,6 +210,8 @@ def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
         sections += f'  <h2 id="{anchor}" style="color: {color};">{cat.value} ({len(group)})</h2>\n'
         sections += "  <table>\n    <thead>\n      <tr>"
         sections += "<th>Test</th><th>Changes</th><th>Summary</th><th>Agent</th><th>Branch</th>"
+        if artifact_dirs:
+            sections += "<th>Artifacts</th>"
         sections += "</tr>\n    </thead>\n    <tbody>\n"
         for r in group:
             branch_cell = r.branch_name if r.branch_name else "-"
@@ -186,12 +221,21 @@ def _build_grouped_tables(results: list[TestMapReduceResult]) -> str:
                 if r.changes
                 else "-"
             )
+            agent_name_str = str(r.agent_name)
+            artifact_cell = ""
+            if artifact_dirs:
+                if agent_name_str in artifact_dirs:
+                    escaped = html.escape(agent_name_str)
+                    artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
+                else:
+                    artifact_cell = "<td>-</td>"
             sections += f"""      <tr>
         <td>{html.escape(r.test_node_id)}</td>
         <td>{html.escape(changes_cell)}</td>
         <td class="md">{summary_html}</td>
-        <td><code>{html.escape(str(r.agent_name))}</code></td>
+        <td><code>{html.escape(agent_name_str)}</code></td>
         <td><code>{html.escape(branch_cell)}</code></td>
+        {artifact_cell}
       </tr>
 """
         sections += "    </tbody>\n  </table>\n"
@@ -228,5 +272,91 @@ def _html_report_css() -> str:
         "    td.md p:first-child { margin-top: 0; }\n"
         "    td.md p:last-child { margin-bottom: 0; }\n"
         "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }\n"
-        "    .integrator { color: rgb(33, 150, 243); font-weight: 600; }"
+        "    .integrator { color: rgb(33, 150, 243); font-weight: 600; }\n"
+        "    .artifacts-btn { cursor: pointer; padding: 2px 8px; font-size: 0.85em;"
+        " border: 1px solid rgb(180, 180, 180); border-radius: 3px; background: rgb(250, 250, 250); }\n"
+        "    .artifacts-btn:hover { background: rgb(235, 235, 235); }"
     )
+
+
+def _find_test_artifact_dir(artifacts_root: Path, agent_name: AgentName) -> Path | None:
+    """Find the test artifact directory for an agent.
+
+    The structure after pull_test_outputs is:
+      <artifacts_root>/<agent_name>/e2e/<run_name>/<test_name>/
+    Since each TMR agent runs one test, there should be one run and one test dir.
+    """
+    agent_dir = artifacts_root / str(agent_name)
+    if not agent_dir.is_dir():
+        return None
+    # Walk: agent_dir / e2e / <run> / <test> -- or agent_dir / <run> / <test> if no e2e subdir
+    for candidate_root in [agent_dir / "e2e", agent_dir]:
+        if not candidate_root.is_dir():
+            continue
+        for run_dir in sorted(candidate_root.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            for test_dir in sorted(run_dir.iterdir()):
+                if test_dir.is_dir() and (test_dir / "transcript.txt").exists():
+                    return test_dir
+    return None
+
+
+def _build_artifact_panels(artifact_dirs: dict[str, Path]) -> str:
+    """Build the overlay and slide-in panel divs for each agent's artifacts."""
+    if not artifact_dirs:
+        return ""
+    panels = '  <div id="artifacts-overlay" class="artifacts-overlay"></div>\n'
+    for agent_name, test_dir in artifact_dirs.items():
+        escaped_name = html.escape(agent_name)
+        prefix = f"art-{escaped_name}-"
+        content = render_test_detail(test_dir, detail_id_prefix=prefix)
+        panels += (
+            f'  <div class="artifacts-panel" id="panel-{escaped_name}">\n'
+            f'    <button class="artifacts-close">&times;</button>\n'
+            f"    <h2>{escaped_name}</h2>\n"
+            f"    {content}\n"
+            f"  </div>\n"
+        )
+    return panels
+
+
+def _artifact_panel_css() -> str:
+    """Return CSS for the artifact slide-in panels."""
+    return (
+        f"    {DETAIL_CSS}"
+        "    .artifacts-overlay { display: none; position: fixed; inset: 0;"
+        " background: rgba(0,0,0,0.3); z-index: 999; }\n"
+        "    .artifacts-panel { display: none; position: fixed; top: 0; right: 0; bottom: 0;"
+        " width: 80%; max-width: 1200px; background: rgb(250,250,250); z-index: 1000;"
+        " overflow-y: auto; padding: 2rem; box-shadow: -4px 0 20px rgba(0,0,0,0.15); }\n"
+        "    .artifacts-panel.open, .artifacts-overlay.open { display: block; }\n"
+        "    .artifacts-close { position: sticky; top: 0; float: right; font-size: 1.5rem;"
+        " cursor: pointer; background: none; border: none; padding: 0.5rem; z-index: 1001; }\n"
+    )
+
+
+def _artifact_panel_js() -> str:
+    """Return JS for opening/closing artifact panels."""
+    return """<script>
+(function() {
+  var overlay = document.getElementById('artifacts-overlay');
+  function closePanel() {
+    document.querySelectorAll('.artifacts-panel.open').forEach(function(p) { p.classList.remove('open'); });
+    if (overlay) overlay.classList.remove('open');
+  }
+  document.querySelectorAll('.artifacts-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      closePanel();
+      var agent = btn.getAttribute('data-agent');
+      var panel = document.getElementById('panel-' + agent);
+      if (panel) panel.classList.add('open');
+      if (overlay) overlay.classList.add('open');
+    });
+  });
+  if (overlay) overlay.addEventListener('click', closePanel);
+  document.querySelectorAll('.artifacts-close').forEach(function(btn) {
+    btn.addEventListener('click', closePanel);
+  });
+})();
+</script>"""

@@ -71,6 +71,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Save test artifacts (transcript, asciinema recordings, tutorial block). "
         "'yes' = always (default), 'on-failure' = only when test fails, 'no' = never",
     )
+    group.addoption(
+        "--mng-e2e-run-name",
+        default=None,
+        help="Override the auto-generated timestamp directory name for test output. "
+        "When provided, output goes to .test_output/e2e/<run_name>/ instead of a timestamp.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -117,10 +123,12 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 
 
 @pytest.fixture(scope="session")
-def e2e_run_dir() -> Path:
-    """Create a timestamped directory for this test run's output."""
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
-    run_dir = _TEST_OUTPUT_DIR / timestamp
+def e2e_run_dir(request: pytest.FixtureRequest) -> Path:
+    """Create a named or timestamped directory for this test run's output."""
+    run_name = request.config.getoption("--mng-e2e-run-name", default=None)
+    if run_name is None:
+        run_name = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_dir = _TEST_OUTPUT_DIR / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 

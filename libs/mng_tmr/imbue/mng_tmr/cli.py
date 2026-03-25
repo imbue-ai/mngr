@@ -336,8 +336,12 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         snapshot=provided_snapshot,
     )
 
-    # Step 5: Compute output directory and html_path before launching
+    # Step 5: Generate a shared run name for e2e test output and add it to testing flags
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    e2e_run_name = f"{timestamp}-tmr"
+    testing_flags = testing_flags + ("--mng-e2e-run-name", e2e_run_name)
+
+    # Step 6: Compute output directory and html_path before launching
     if opts.output_html is not None:
         html_path = Path(opts.output_html)
         output_dir = html_path.parent
@@ -346,7 +350,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 6: Launch and poll agents
+    # Step 7: Launch and poll agents
     # When max_agents > 0, agents are launched incrementally as earlier ones finish.
     # Otherwise, all agents are launched up front and then polled via the same function.
     use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
@@ -410,7 +414,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             pull_test_outputs(detail, agent_hosts[agent_id_str], source_host, output_dir)
 
     # Step 10: Write report with final results
-    generate_html_report(results, html_path)
+    generate_html_report(results, html_path, test_artifacts_dir=output_dir)
 
     # Step 11: Build integrator config (defaults to local provider) and integrate
     integrator_config = TmrLaunchConfig(
@@ -422,7 +426,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         label_options=label_options,
     )
     integrator_result = _run_integrator_phase(results, integrator_config, mng_ctx, opts, base_commit=base_commit)
-    generate_html_report(results, html_path, integrator=integrator_result)
+    generate_html_report(results, html_path, integrator=integrator_result, test_artifacts_dir=output_dir)
     _emit_report_path(html_path, output_opts)
 
 
