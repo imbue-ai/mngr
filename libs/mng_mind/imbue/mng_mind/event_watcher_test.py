@@ -20,9 +20,11 @@ from imbue.mng_mind import event_watcher as event_watcher_module
 from imbue.mng_mind.conftest import EventWatcherSubprocessCapture
 from imbue.mng_mind.conftest import FakeWaitProcess
 from imbue.mng_mind.conftest import SyntheticLoopEnv
+from imbue.mng_mind.conftest import TrackingIdleWait
 from imbue.mng_mind.conftest import _create_fake_wait_process
 from imbue.mng_mind.conftest import _create_synthetic_loop_env
 from imbue.mng_mind.conftest import create_executable_command
+from imbue.mng_mind.conftest import create_tracking_idle_wait
 from imbue.mng_mind.conftest import make_pending_idle_wait
 from imbue.mng_mind.data_types import WatcherSettings
 from imbue.mng_mind.event_watcher import DEFAULT_CEL_FILTER
@@ -43,7 +45,6 @@ from imbue.mng_mind.event_watcher import _TokenBucket
 from imbue.mng_mind.event_watcher import _apply_event_batch_filter
 from imbue.mng_mind.event_watcher import _apply_special_event_handling
 from imbue.mng_mind.event_watcher import _compute_backoff_seconds
-from imbue.mng_mind.event_watcher import _cumulative_idle_delay_minutes
 from imbue.mng_mind.event_watcher import _deliver_batch
 from imbue.mng_mind.event_watcher import _filter_catchup_events
 from imbue.mng_mind.event_watcher import _filter_ignored_sources
@@ -54,6 +55,7 @@ from imbue.mng_mind.event_watcher import _load_scheduled_events_state
 from imbue.mng_mind.event_watcher import _load_watcher_settings
 from imbue.mng_mind.event_watcher import _make_synthetic_event_line
 from imbue.mng_mind.event_watcher import _parse_time_of_day
+from imbue.mng_mind.event_watcher import _per_event_idle_delay_minutes
 from imbue.mng_mind.event_watcher import _resolve_user_timezone
 from imbue.mng_mind.event_watcher import _run_delivery_loop
 from imbue.mng_mind.event_watcher import _run_event_batch_filter_command
@@ -1936,30 +1938,30 @@ def test_make_synthetic_event_line_includes_extra_fields() -> None:
     assert parsed["minutes_since_last_event"] == 5.0
 
 
-# -- _cumulative_idle_delay_minutes tests --
+# -- _per_event_idle_delay_minutes tests --
 
 
-def test_cumulative_idle_delay_first_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 0) == 1
+def test_per_event_delay_first_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 0) == 1
 
 
-def test_cumulative_idle_delay_second_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 1) == 11
+def test_per_event_delay_second_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 1) == 10
 
 
-def test_cumulative_idle_delay_third_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 2) == 71
+def test_per_event_delay_third_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 2) == 60
 
 
-def test_cumulative_idle_delay_repeats_last_value() -> None:
-    # Index 3 is beyond the schedule, so last value (60) repeats
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 3) == 131
+def test_per_event_delay_repeats_last_value() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 3) == 60
+    assert _per_event_idle_delay_minutes((1, 10, 60), 10) == 60
 
 
-def test_cumulative_idle_delay_single_value_schedule() -> None:
-    assert _cumulative_idle_delay_minutes((5,), 0) == 5
-    assert _cumulative_idle_delay_minutes((5,), 1) == 10
-    assert _cumulative_idle_delay_minutes((5,), 2) == 15
+def test_per_event_delay_single_value_schedule() -> None:
+    assert _per_event_idle_delay_minutes((5,), 0) == 5
+    assert _per_event_idle_delay_minutes((5,), 1) == 5
+    assert _per_event_idle_delay_minutes((5,), 2) == 5
 
 
 # -- _parse_time_of_day tests --
@@ -2083,14 +2085,19 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
 
+    # The wait process completes immediately (agent is already idle)
+    fake_process = _create_fake_wait_process(is_complete=True, returncode=0)
+
     call_count = 0
 
     def clock_past_threshold() -> float:
         nonlocal call_count
         call_count += 1
-        if call_count > 1:
+        if call_count > 2:
             env.stop_event.set()
-        return 1061.0
+        # First call: agent becomes idle at 1050
+        # Second call: 70s after idle -> fires
+        return 1050.0 + (call_count - 1) * 70.0
 
     _run_synthetic_events_loop(
         settings,
@@ -2101,6 +2108,8 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
         env.mind_state_dir,
         clock_past_threshold,
         poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=lambda _agent_id: fake_process,
     )
 
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
@@ -2112,10 +2121,11 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
     assert parsed["minutes_since_last_event"] >= 1.0
 
 
-def test_synthetic_loop_resets_idle_on_real_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
-    """The idle counter resets when a real event arrives."""
+def test_synthetic_loop_no_idle_events_when_agent_not_waiting(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """No idle events fire when the agent never enters WAITING state."""
     env = synthetic_loop_env
-    env.last_real_event_monotonic[0] = 1030.0
+    env.last_real_event_monotonic[0] = 1000.0
+    env.last_non_messages_event_monotonic[0] = 1030.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
 
     call_count = 0
@@ -2136,8 +2146,12 @@ def test_synthetic_loop_resets_idle_on_real_event(synthetic_loop_env: SyntheticL
         env.mind_state_dir,
         clock_30s_after_real,
         poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=make_pending_idle_wait,
+        last_non_messages_event_monotonic=env.last_non_messages_event_monotonic,
     )
 
+    # No idle events because the agent never entered WAITING (still pending)
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
     assert len(idle_events) == 0
 
@@ -2323,8 +2337,8 @@ def test_idle_wait_restarts_after_delivery_plus_slack(synthetic_loop_env: Synthe
     assert len(wait_calls) == 2
 
 
-def test_idle_wait_disabled_without_agent_id(synthetic_loop_env: SyntheticLoopEnv) -> None:
-    """Without agent_id, falls back to old behavior (time since last real event)."""
+def test_idle_events_require_agent_id(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Without agent_id, no idle events are sent even if the schedule is configured."""
     env = synthetic_loop_env
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
@@ -2347,12 +2361,11 @@ def test_idle_wait_disabled_without_agent_id(synthetic_loop_env: SyntheticLoopEn
         env.mind_state_dir,
         clock_past_threshold,
         poll_interval_seconds=0.01,
-        # agent_id="" (default) -- no idle wait
     )
 
-    # Idle events fire based on time since last real event (old behavior)
+    # No idle events: agent_id is required for idle event generation
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
-    assert len(idle_events) >= 1
+    assert len(idle_events) == 0
 
 
 def test_idle_wait_restarts_on_nonzero_exit(synthetic_loop_env: SyntheticLoopEnv) -> None:
@@ -2404,6 +2417,190 @@ def test_idle_wait_restarts_on_nonzero_exit(synthetic_loop_env: SyntheticLoopEnv
     # Should have sent idle events after the restart succeeded
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
     assert len(idle_events) >= 1
+
+
+def _make_first_idle_cycle_clock(
+    env: SyntheticLoopEnv,
+    tracker: TrackingIdleWait,
+    delivery_mono: list[float],
+    post_reentry_steps: Callable[[int], float | None],
+) -> Callable[[], float]:
+    """Build a clock that fires the first idle event, simulates delivery, then delegates.
+
+    Implements the common 5-step idle cycle used by multiple tests:
+      1. Agent becomes idle (first wait process completes) at T=1050
+      2. 70s later (T=1120): first idle event fires (> 1 min threshold)
+      3. Delivery + conversation events arrive (messages source)
+      4. Delivery completes with slack
+      5. Agent re-enters WAITING at T=1140
+
+    For call_count >= 6, delegates to ``post_reentry_steps(call_count)``.
+    Return None from the callback to stop the loop.
+    """
+    call_count_box: list[int] = [0]
+
+    def clock() -> float:
+        call_count_box[0] += 1
+        n = call_count_box[0]
+
+        if n == 1:
+            tracker.processes[0].complete(0)
+            return 1050.0
+        if n == 2:
+            return 1120.0
+        if n == 3:
+            delivery_mono[0] = 1121.0
+            env.last_real_event_monotonic[0] = 1130.0
+            return 1130.0
+        if n == 4:
+            delivery_mono[0] = 1131.0
+            return 1137.0
+        if n == 5:
+            if len(tracker.processes) >= 2:
+                tracker.processes[-1].complete(0)
+            return 1140.0
+
+        result = post_reentry_steps(n)
+        if result is None:
+            env.stop_event.set()
+            return 1900.0
+        return result
+
+    return clock
+
+
+def _run_idle_cycle_loop(
+    env: SyntheticLoopEnv,
+    settings: _EventWatcherSettings,
+    tracker: TrackingIdleWait,
+    delivery_mono: list[float],
+    clock: Callable[[], float],
+) -> list[dict[str, Any]]:
+    """Run the synthetic events loop with standard idle-cycle parameters.
+
+    Returns parsed idle events from the buffer.
+    """
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=tracker,
+        last_delivery_monotonic=delivery_mono,
+        last_non_messages_event_monotonic=env.last_non_messages_event_monotonic,
+    )
+    return [json.loads(line) for line in env.event_buffer if '"mind/idle"' in line]
+
+
+def test_idle_wait_preserves_counter_across_messages_events(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """After sending an idle event, conversation events (messages source) do NOT
+    reset idle_events_sent because last_non_messages_event_monotonic is unchanged.
+
+    This tests the full backoff cycle: send idle event -> agent processes it
+    and generates messages events -> agent re-enters WAITING -> next idle event
+    uses the incremented counter (longer delay).
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # 5 min after re-entry, not enough for 10 min delay
+            return 1440.0
+        if n == 7:
+            # 11 min after re-entry, second idle event fires
+            return 1800.0
+        if n > 8:
+            return None
+        return 1900.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    assert idle_events[1]["idle_event_number"] == 2
+
+
+def test_idle_wait_resets_counter_on_non_messages_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When a non-messages event arrives, the idle counter resets to 0.
+
+    Events from sources other than "messages" (e.g. mng/agents, monitor)
+    are genuinely new external events and should reset the backoff.
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # A genuinely new non-messages event arrives -- resets counter
+            env.last_real_event_monotonic[0] = 1200.0
+            env.last_non_messages_event_monotonic[0] = 1200.0
+            return 1200.0
+        if n == 7:
+            delivery_mono[0] = 1202.0
+            return 1210.0
+        if n == 8:
+            # New wait process starts and completes (agent idle again)
+            if len(tracker.processes) >= 3:
+                tracker.processes[-1].complete(0)
+            return 1220.0
+        if n == 9:
+            # 70s from new idle: first event fires again
+            return 1290.0
+        if n > 10:
+            return None
+        return 1400.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    # Counter was reset by the genuinely new event, so this is event 1 again
+    assert idle_events[1]["idle_event_number"] == 1
+
+
+def test_idle_wait_uses_per_event_delay(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Delays are per-event (not cumulative).
+
+    Schedule [1, 10]: first event after 1 min, second after 10 min
+    from the new WAITING time, not 11 min cumulative.
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # T=1140 + 5 min, not enough for 10 min delay
+            return 1440.0
+        if n == 7:
+            # T=1140 + 11 min, second idle event fires
+            return 1800.0
+        if n > 8:
+            return None
+        return 1900.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    assert idle_events[1]["idle_event_number"] == 2
 
 
 def _make_counting_clock(env: SyntheticLoopEnv, max_iterations: int) -> Callable[[], float]:

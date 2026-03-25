@@ -161,6 +161,7 @@ class SyntheticLoopEnv:
     buffer_lock: threading.Lock
     stop_event: threading.Event
     last_real_event_monotonic: list[float]
+    last_non_messages_event_monotonic: list[float]
 
 
 def _create_synthetic_loop_env(mind_state_dir: Path) -> SyntheticLoopEnv:
@@ -171,6 +172,7 @@ def _create_synthetic_loop_env(mind_state_dir: Path) -> SyntheticLoopEnv:
     env.buffer_lock = threading.Lock()
     env.stop_event = threading.Event()
     env.last_real_event_monotonic = [time.monotonic()]
+    env.last_non_messages_event_monotonic = [0.0]
     return env
 
 
@@ -230,6 +232,31 @@ def _create_fake_wait_process(*, is_complete: bool, returncode: int | None) -> F
 def make_pending_idle_wait(agent_id: str) -> FakeWaitProcess:
     """Create a FakeWaitProcess that never completes (agent stays busy)."""
     return _create_fake_wait_process(is_complete=False, returncode=None)
+
+
+class TrackingIdleWait:
+    """A start_idle_wait callback that records every process it creates.
+
+    Use as the ``start_idle_wait`` argument to ``_run_synthetic_events_loop``.
+    The ``processes`` attribute accumulates each FakeWaitProcess created,
+    allowing tests to inspect and control individual wait processes.
+
+    Create via ``create_tracking_idle_wait()`` factory function.
+    """
+
+    processes: list[FakeWaitProcess]
+
+    def __call__(self, agent_id: str) -> FakeWaitProcess:
+        process = _create_fake_wait_process(is_complete=False, returncode=None)
+        self.processes.append(process)
+        return process
+
+
+def create_tracking_idle_wait() -> TrackingIdleWait:
+    """Create a TrackingIdleWait with an empty process list."""
+    tracker = TrackingIdleWait()
+    tracker.processes = []
+    return tracker
 
 
 class EventWatcherSubprocessCapture:
