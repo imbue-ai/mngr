@@ -24,6 +24,7 @@ from imbue.mng_mind.conftest import _create_fake_wait_process
 from imbue.mng_mind.conftest import _create_synthetic_loop_env
 from imbue.mng_mind.conftest import create_executable_command
 from imbue.mng_mind.conftest import make_pending_idle_wait
+from imbue.mng_mind.conftest import make_tracking_idle_wait
 from imbue.mng_mind.data_types import WatcherSettings
 from imbue.mng_mind.event_watcher import DEFAULT_CEL_FILTER
 from imbue.mng_mind.event_watcher import InvalidTimeFormatError
@@ -2443,13 +2444,7 @@ def test_idle_wait_preserves_counter_across_idle_response(synthetic_loop_env: Sy
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
 
-    wait_processes: list[FakeWaitProcess] = []
-
-    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
-        process = _create_fake_wait_process(is_complete=False, returncode=None)
-        wait_processes.append(process)
-        return process
-
+    wait_processes, tracking_idle_wait = make_tracking_idle_wait()
     delivery_mono: list[float] = [1000.0]
 
     call_count = 0
@@ -2529,13 +2524,7 @@ def test_idle_wait_resets_counter_on_genuinely_new_event(synthetic_loop_env: Syn
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
 
-    wait_processes: list[FakeWaitProcess] = []
-
-    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
-        process = _create_fake_wait_process(is_complete=False, returncode=None)
-        wait_processes.append(process)
-        return process
-
+    wait_processes, tracking_idle_wait = make_tracking_idle_wait()
     delivery_mono: list[float] = [1000.0]
 
     call_count = 0
@@ -2627,13 +2616,7 @@ def test_idle_wait_uses_per_event_delay_with_tracker(synthetic_loop_env: Synthet
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10))
 
-    wait_processes: list[FakeWaitProcess] = []
-
-    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
-        process = _create_fake_wait_process(is_complete=False, returncode=None)
-        wait_processes.append(process)
-        return process
-
+    wait_processes, tracking_idle_wait = make_tracking_idle_wait()
     delivery_mono: list[float] = [1000.0]
 
     call_count = 0

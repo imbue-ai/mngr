@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import types
+from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,23 @@ def _create_fake_wait_process(*, is_complete: bool, returncode: int | None) -> F
 def make_pending_idle_wait(agent_id: str) -> FakeWaitProcess:
     """Create a FakeWaitProcess that never completes (agent stays busy)."""
     return _create_fake_wait_process(is_complete=False, returncode=None)
+
+
+def make_tracking_idle_wait() -> tuple[list[FakeWaitProcess], Callable[[str], FakeWaitProcess]]:
+    """Create a start_idle_wait callback that records every process it creates.
+
+    Returns (processes, start_fn) where ``processes`` accumulates each
+    FakeWaitProcess created by ``start_fn``, allowing tests to inspect
+    and control individual wait processes.
+    """
+    processes: list[FakeWaitProcess] = []
+
+    def start(agent_id: str) -> FakeWaitProcess:
+        process = _create_fake_wait_process(is_complete=False, returncode=None)
+        processes.append(process)
+        return process
+
+    return processes, start
 
 
 class EventWatcherSubprocessCapture:
