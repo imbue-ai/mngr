@@ -2620,7 +2620,7 @@ def test_idle_wait_resets_counter_on_genuinely_new_event(synthetic_loop_env: Syn
 def test_idle_wait_uses_per_event_delay_with_tracker(synthetic_loop_env: SyntheticLoopEnv) -> None:
     """With the idle wait tracker, delays are per-event (not cumulative).
 
-    Schedule [1, 10, 60]: first event after 1 min, second after 10 min
+    Schedule [1, 10]: first event after 1 min, second after 10 min
     from the new WAITING time, not 11 min cumulative.
     """
     env = synthetic_loop_env
