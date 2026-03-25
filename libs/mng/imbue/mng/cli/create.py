@@ -1042,6 +1042,7 @@ def _resolve_transfer_mode(
     elif is_git_repo and is_remote:
         transfer_mode = TransferMode.GIT_MIRROR
     else:
+        # Non-git project: use rsync (generates a target directory if needed)
         transfer_mode = TransferMode.RSYNC
 
     # Validate the transfer mode against the context

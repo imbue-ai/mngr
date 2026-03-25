@@ -1642,6 +1642,7 @@ def test_create_work_dir_copy_with_git(
         command=CommandString("sleep 1"),
         target_path=target_path,
         transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1686,6 +1687,7 @@ def test_create_work_dir_copy_with_git_copies_info_exclude(
         command=CommandString("sleep 1"),
         target_path=target_path,
         transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     host.create_agent_work_dir(host, source_path, options)
