@@ -101,7 +101,7 @@ The diff should not include excessive changes, or changes unrelated to the user'
 - If a component's functionality is significantly changed, the name of the component should be updated to reflect the new functionality, if it is not already clear from the context.
 
 **Exceptions:**
-- Short names for local variables (especially as allowed for in a style guide) are usually okay.
+- Short names for local variables are usually okay.
 
 ---
 
@@ -135,9 +135,8 @@ Repetitive or duplicate code.
 **Examples:**
 - New functionality that is orthogonal to the existing functionality in a function is inserted into the existing function's body instead of being separated out into its own function.
 - A class mixes two different use cases that could be separated into two classes.
-- A function that returns a value that can be either a valid result or an error state (e.g. None, False, -1) instead of raising an exception for the error case. This is bad because the caller can forget to check for the error state.
-- A class that has a "name" attribute that is just a string, instead of having a proper Name class (eg, that inherits from NonEmptyString).
-- A class with a bare string or uuid as an "id" attribute, instead of having a proper ID class
+- A function that returns a value that can be either a valid result or an error state (e.g. None, False, -1) instead of raising an exception for the error case.
+- A class that has a "name" attribute that is just a string, instead of having a proper Name class.
 - An if/elif/.../else construct that dispatches on the value of an enum, instead of using a match statement.
 
 ---
@@ -150,7 +149,6 @@ Repetitive or duplicate code.
 
 **Exceptions:**
 - Syntactical or logical issues in tests will be raised in other issue types and do not belong in this category.
-- Changes *to the test code itself* (ex: to a conftest.py, testing_utils.py, test_*.py or *_test.py file) do not require test coverage (they will be executed when the tests run).
 
 ---
 
@@ -222,21 +220,17 @@ Any tests added in the diff should be of high quality individually, and should c
 
 ## fails_silently
 
-Code that fails silently is code that ignores errors without reporting them or properly handling them.
-
-This includes behaviors like catching exceptions without logging them as warnings/errors (or re-raising them), returning inappropriate default values during an error condition, returning None instead of raising an error when there is a legitimate error, or otherwise allowing errors to occur without any indication to the user or developer.
+Code that fails silently is code that ignores errors without reporting them.
+- Any "except" clause that does *not* log the error (at least at "trace" level) and/or report it to an error tracking system. Real error conditions should be logged at least at warning level, and anything that violates a program invariant should generally be raised.
+- Any except clause must either log the error (if it is handling the error), or re-raise the error (if it is not handling the error).
 
 **Examples:**
-- The code indiscriminately captures exceptions of all types (e.g. Exception) or multiple types and continues execution without taking any action to handle the error
-- Overly broad "except" clauses that catch many different types of errors and simply continue execution (rather than raising it so that invalid states are not silently ignored)
-- Any "except" clause that does *not* log the error (at least at "trace" level) and/or report it to an error tracking system (e.g. Sentry). Real error conditions should be logged at *least* at warning level, and anything that violates a program invariant (eg, is an unexpected condition) should generally be raised.
-- Returning None or an inappropriate default value when an error occurs instead of raising an exception. This can lead to downstream errors that are harder to debug because the original error is obscured.
-- Any except clause *must* either log the error (if it is handling the error), or re-raise the error (if it is not handling the error). If an except clause does neither of these things, it is a silent failure (it's ok if the logging is at trace level, but it must be present).
-- The return value of a function that returns an error value in case of a failure is not checked by the caller
+- Overly broad exception handlers (e.g. bare 'except' or 'except Exception') that catch errors and continue execution without handling, logging, or re-raising them.
+- The return value of a function that returns an error value in case of a failure is not checked by the caller.
 
 **Exceptions:**
-- There are certain cases where broad exception handlers are acceptable, such as in an executor class or in a main loop that iterates over several tasks. Such cases should still properly log and report the errors
-- Do not raise issues related to potential program crashes
+- There are certain cases where broad exception handlers are acceptable, such as in an executor class or in a main loop that iterates over several tasks. Such cases should still properly log and report the errors.
+- Do not raise issues related to potential program crashes.
 
 ---
 
