@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Web interface for managing AI coding agents via mngr"
 requires-python = ">=3.11"
 dependencies = [
-    "mngr",
+    "imbue-mngr",
     "python-fasthtml>=0.10.0",
 ]
 

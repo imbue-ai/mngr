@@ -1837,10 +1837,10 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "imbue-common" },
+    { name = "imbue-mngr" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "loguru" },
-    { name = "mngr" },
     { name = "mngr-claude-mind" },
     { name = "modal" },
     { name = "paramiko" },
@@ -1858,10 +1858,10 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },
-    { name = "mngr" },
     { name = "mngr-claude-mind", editable = "libs/mngr_claude_mind" },
     { name = "modal", specifier = ">=1.3.1" },
     { name = "paramiko", specifier = ">=3.0" },
@@ -1870,12 +1870,6 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=13.0" },
 ]
-
-[[package]]
-name = "mngr"
-version = "0.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e7/b1/90ad456084a6494a4f29290d07ba7efb9c4ab7410824aa9dc93ea9d9ce76/mngr-0.0.1.tar.gz", hash = "sha256:2e27f87890c3b05c30c66cf54d47703f6f066f723b016913b271cecc46555d0d", size = 1105, upload-time = "2019-09-10T12:03:48.08Z" }
 
 [[package]]
 name = "mngr-claude"
@@ -2118,7 +2112,7 @@ source = { editable = "libs/mngr_schedule" }
 dependencies = [
     { name = "click-option-group" },
     { name = "imbue-common" },
-    { name = "mngr" },
+    { name = "imbue-mngr" },
     { name = "mngr-modal" },
     { name = "modal" },
     { name = "python-dotenv" },
@@ -2129,7 +2123,7 @@ dependencies = [
 requires-dist = [
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-common", editable = "libs/imbue_common" },
-    { name = "mngr" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "mngr-modal", editable = "libs/mngr_modal" },
     { name = "modal", specifier = ">=1.3.1" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -3111,13 +3105,13 @@ name = "sculptor-web"
 version = "0.1.0"
 source = { editable = "apps/sculptor_web" }
 dependencies = [
-    { name = "mngr" },
+    { name = "imbue-mngr" },
     { name = "python-fasthtml" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mngr" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "python-fasthtml", specifier = ">=0.10.0" },
 ]
 

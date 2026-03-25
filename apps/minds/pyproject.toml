@@ -14,7 +14,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "jinja2>=3.1.0",
     "loguru",
-    "mngr",
+    "imbue-mngr",
     "mngr-claude-mind",
     "modal>=1.3.1",
     "paramiko>=3.0",

@@ -5,7 +5,7 @@ description = "Schedule command plugin for mngr - schedule remote invocations of
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mngr",
+    "imbue-mngr",
     "imbue-common",
     "mngr-modal",
     "click-option-group>=0.5.6",
