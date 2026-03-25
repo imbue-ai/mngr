@@ -173,7 +173,8 @@ class _KanpanState(MutableModel):
     frame: Any  # urwid Frame widget
     footer_left_text: Any  # urwid Text widget (left side of footer)
     footer_left_attr: Any  # urwid AttrMap wrapping footer_left_text
-    footer_right: Any  # urwid Text widget (right side of footer)
+    footer_marks: Any  # urwid Text widget (mark keybindings row)
+    footer_actions: Any  # urwid Text widget (action keybindings row)
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
     refresh_future: Future[BoardSnapshot] | None = None
@@ -1416,20 +1417,27 @@ def run_kanpan(
     commands = _build_command_map(mng_ctx)
     plugin_config = mng_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
 
-    # Build footer keybindings, visually separating mark-related from action commands
+    # Build footer keybindings, visually separating mark-related from action commands.
+    # The footer is a vertical Pile so that wrapping happens between logical sections
+    # (status, marks, actions) rather than mid-text in the status line.
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
     mark_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if cmd.markable or key in mark_keys]
     mark_parts.append("U: unmark all")
     action_parts = [f"{key}: {cmd.name}" for key, cmd in commands.items() if not cmd.markable and key not in mark_keys]
     action_parts.append("q: quit")
-    keybindings = "  ".join(mark_parts + ["|"] + action_parts) + "  "
 
     footer_left_text = Text("  Loading...")
     footer_left_attr = AttrMap(footer_left_text, "footer")
-    footer_right = Text(keybindings, align="right")
-    pack: int = len(keybindings)
-    footer_columns = Columns([footer_left_attr, (pack, AttrMap(footer_right, "footer"))])
-    footer = Pile([Divider(), footer_columns])
+    footer_marks = Text("  ".join(mark_parts) + "  ", align="right")
+    footer_actions = Text("  ".join(action_parts) + "  ", align="right")
+    footer = Pile(
+        [
+            Divider(),
+            footer_left_attr,
+            AttrMap(footer_marks, "footer"),
+            AttrMap(footer_actions, "footer"),
+        ]
+    )
 
     is_filtered = bool(include_filters or exclude_filters)
     header_title = "Kanpan - all-seeing agent tracker - 看 πᾶν"
@@ -1461,7 +1469,8 @@ def run_kanpan(
         frame=frame,
         footer_left_text=footer_left_text,
         footer_left_attr=footer_left_attr,
-        footer_right=footer_right,
+        footer_marks=footer_marks,
+        footer_actions=footer_actions,
         commands=commands,
         on_before_refresh=on_before_refresh,
         on_after_refresh=on_after_refresh,
