@@ -22,6 +22,9 @@ class BaseProviderInstance(ProviderInstanceInterface):
     Useful because it communicates that the concrete Host class (not HostInterface) is returned from these methods.
     """
 
+    def reset_caches(self) -> None:
+        pass
+
     def create_host(
         self,
         name: HostName,

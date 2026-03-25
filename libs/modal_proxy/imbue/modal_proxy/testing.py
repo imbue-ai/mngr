@@ -61,9 +61,10 @@ class TestingExecProcess(ExecProcess):
             return TestingExecOutput(output_text=self._running_process.read_stdout())
         return TestingExecOutput(output_text=self._completed_text)
 
-    def wait(self) -> None:
+    def wait(self) -> int:
         if self._running_process is not None:
-            self._running_process.wait()
+            return self._running_process.wait()
+        return 0
 
 
 class TestingSecret(SecretInterface):

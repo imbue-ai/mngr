@@ -4,11 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.pre_readers import get_local_config_name
 from imbue.mng.config.pre_readers import get_project_config_name
 from imbue.mng.config.pre_readers import get_user_config_path
+from imbue.mng.config.pre_readers import load_local_config
+from imbue.mng.config.pre_readers import load_project_config
 from imbue.mng.config.pre_readers import read_default_command
 from imbue.mng.config.pre_readers import read_disabled_plugins
+from imbue.mng.config.pre_readers import resolve_project_config_dir
 from imbue.mng.config.pre_readers import try_load_toml
 
 # =============================================================================
@@ -170,3 +174,133 @@ def test_read_disabled_plugins_multiple_plugins(
     assert "modal" in result
     assert "docker" in result
     assert "local" not in result
+
+
+# =============================================================================
+# Tests for resolve_project_config_dir
+# =============================================================================
+
+
+def test_resolve_project_config_dir_uses_env_var_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    temp_git_repo_cwd: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """resolve_project_config_dir should use MNG_PROJECT_DIR when set."""
+    custom_dir = tmp_path / "custom_project_config"
+    custom_dir.mkdir()
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+
+    result = resolve_project_config_dir(None, "mng", cg)
+    assert result == custom_dir
+
+
+def test_resolve_project_config_dir_falls_back_to_git_root_when_env_var_not_set(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_git_repo_cwd: Path,
+    mng_test_root_name: str,
+    cg: ConcurrencyGroup,
+) -> None:
+    """resolve_project_config_dir should use <git_root>/.<root_name> when MNG_PROJECT_DIR is not set."""
+    monkeypatch.delenv("MNG_PROJECT_DIR", raising=False)
+
+    result = resolve_project_config_dir(None, mng_test_root_name, cg)
+    assert result == temp_git_repo_cwd / f".{mng_test_root_name}"
+
+
+def test_resolve_project_config_dir_context_dir_overrides_git_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mng_test_root_name: str,
+    cg: ConcurrencyGroup,
+) -> None:
+    """resolve_project_config_dir should use context_dir when provided and MNG_PROJECT_DIR is not set."""
+    monkeypatch.delenv("MNG_PROJECT_DIR", raising=False)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+
+    result = resolve_project_config_dir(context_dir, mng_test_root_name, cg)
+    assert result == context_dir / f".{mng_test_root_name}"
+
+
+def test_resolve_project_config_dir_env_var_takes_precedence_over_context_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mng_test_root_name: str,
+    cg: ConcurrencyGroup,
+) -> None:
+    """resolve_project_config_dir should prefer MNG_PROJECT_DIR over context_dir."""
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+
+    result = resolve_project_config_dir(context_dir, mng_test_root_name, cg)
+    assert result == custom_dir
+
+
+# =============================================================================
+# Tests for MNG_PROJECT_DIR affecting config loading
+# =============================================================================
+
+
+def test_load_project_config_uses_mng_project_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """load_project_config should load settings.toml from MNG_PROJECT_DIR when set."""
+    custom_dir = tmp_path / "custom_project"
+    custom_dir.mkdir()
+    (custom_dir / "settings.toml").write_text('prefix = "custom-"\n')
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+
+    result = load_project_config(None, "mng", cg)
+    assert result is not None
+    assert result["prefix"] == "custom-"
+
+
+def test_load_local_config_uses_mng_project_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """load_local_config should load settings.local.toml from MNG_PROJECT_DIR when set."""
+    custom_dir = tmp_path / "custom_project"
+    custom_dir.mkdir()
+    (custom_dir / "settings.local.toml").write_text('prefix = "local-custom-"\n')
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+
+    result = load_local_config(None, "mng", cg)
+    assert result is not None
+    assert result["prefix"] == "local-custom-"
+
+
+def test_read_default_command_uses_mng_project_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """read_default_command should find config from MNG_PROJECT_DIR."""
+    custom_dir = tmp_path / "custom_project"
+    custom_dir.mkdir()
+    (custom_dir / "settings.toml").write_text('[commands.mng]\ndefault_subcommand = "create"\n')
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+    monkeypatch.setenv("MNG_HOST_DIR", str(tmp_path / "nonexistent"))
+
+    assert read_default_command("mng") == "create"
+
+
+def test_read_disabled_plugins_uses_mng_project_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """read_disabled_plugins should find config from MNG_PROJECT_DIR."""
+    custom_dir = tmp_path / "custom_project"
+    custom_dir.mkdir()
+    (custom_dir / "settings.toml").write_text("[plugins.modal]\nenabled = false\n")
+    monkeypatch.setenv("MNG_PROJECT_DIR", str(custom_dir))
+    monkeypatch.setenv("MNG_HOST_DIR", str(tmp_path / "nonexistent"))
+
+    assert "modal" in read_disabled_plugins()

@@ -99,6 +99,13 @@ _SOURCE_MIND_SCHEDULE: Final[str] = "mind/schedule"
 _SOURCE_MIND_ONBOARDING: Final[str] = "mind/onboarding"
 _SOURCE_MIND_FILTER_ERROR: Final[str] = "mind/filter_error"
 
+# Poll interval for the 'mng wait' subprocess used to detect agent idle state
+_IDLE_WAIT_POLL_INTERVAL: Final[str] = "2s"
+
+# Seconds to wait after event delivery before starting 'mng wait', to avoid
+# a race where the agent hasn't received the events yet and appears idle.
+_IDLE_WAIT_SLACK_SECONDS: Final[float] = 5.0
+
 
 # -- Settings --
 
@@ -117,7 +124,8 @@ class _EventWatcherSettings:
     idle_event_delay_minutes_schedule: tuple[int, ...] = ()
     scheduled_events: tuple[tuple[str, str], ...] = ()
     user_timezone: str = "UTC"
-    event_batch_filter_script: str | None = None
+    is_message_batching_enabled: bool = True
+    event_batch_filter_command: str | None = None
 
 
 def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
@@ -139,7 +147,8 @@ def _load_watcher_settings(agent_work_dir: Path) -> _EventWatcherSettings:
         idle_event_delay_minutes_schedule=tuple(watchers.get("idle_event_delay_minutes_schedule", ())),
         scheduled_events=tuple((k, v) for k, v in raw_scheduled.items()),
         user_timezone=watchers.get("user_timezone", "UTC"),
-        event_batch_filter_script=watchers.get("event_batch_filter_script", None),
+        is_message_batching_enabled=watchers.get("is_message_batching_enabled", True),
+        event_batch_filter_command=watchers.get("event_batch_filter_command", None),
     )
 
 
@@ -482,9 +491,12 @@ def _notify_user(events_dir: Path, message: str, level: str = "WARNING") -> None
     _send_chat_notification(events_dir, message)
 
 
-def _compute_backoff_seconds(consecutive_failures: int) -> float:
+def _compute_backoff_seconds(
+    consecutive_failures: int,
+    base_seconds: float = _BACKOFF_BASE_SECONDS,
+) -> float:
     """Compute exponential backoff duration based on the number of consecutive failures."""
-    return min(_BACKOFF_BASE_SECONDS * (2 ** (consecutive_failures - 1)), _BACKOFF_MAX_SECONDS)
+    return min(base_seconds * (2 ** (consecutive_failures - 1)), _BACKOFF_MAX_SECONDS)
 
 
 # -- Subprocess management --
@@ -511,11 +523,17 @@ def _read_events_from_subprocess(
     buffer_lock: threading.Lock,
     stop_event: threading.Event,
     last_real_event_monotonic: list[float] | None = None,
+    last_non_messages_event_monotonic: list[float] | None = None,
 ) -> None:
     """Read JSONL lines from subprocess stdout into the event buffer (thread target).
 
     If last_real_event_monotonic is provided, updates it (under buffer_lock)
     whenever a real event is received, enabling idle detection.
+
+    If last_non_messages_event_monotonic is provided, updates it only for
+    events whose source is not "messages". This allows the synthetic events
+    loop to distinguish genuinely new external events from conversation
+    events (which include the agent's response to idle events).
     """
     assert process.stdout is not None
     try:
@@ -526,9 +544,17 @@ def _read_events_from_subprocess(
             if not stripped:
                 continue
             with buffer_lock:
+                now = time.monotonic()
                 event_buffer.append(stripped)
                 if last_real_event_monotonic is not None:
-                    last_real_event_monotonic[0] = time.monotonic()
+                    last_real_event_monotonic[0] = now
+                if last_non_messages_event_monotonic is not None:
+                    try:
+                        parsed = json.loads(stripped)
+                        if parsed.get("source") != "messages":
+                            last_non_messages_event_monotonic[0] = now
+                    except json.JSONDecodeError:
+                        logger.debug("Failed to parse event line for source check: {}", stripped[:200])
     except Exception as exc:
         if not stop_event.is_set():
             logger.error("Error reading from events subprocess: {}", exc)
@@ -550,6 +576,148 @@ def _drain_stderr(
     except Exception as exc:
         if not stop_event.is_set():
             logger.debug("Stderr reader error: {}", exc)
+
+
+def _start_agent_idle_wait(agent_id: str) -> subprocess.Popen[str]:
+    """Start 'mng wait <agent_id> WAITING' as a background subprocess.
+
+    Returns immediately. The caller should poll the process via .poll()
+    and check .returncode == 0 to detect when the agent enters WAITING.
+    """
+    cmd = [*get_mng_command(), "wait", agent_id, "WAITING", "--interval", _IDLE_WAIT_POLL_INTERVAL, "--quiet"]
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _terminate_process_gracefully(process: Any) -> None:
+    """Terminate a subprocess, falling back to kill if it doesn't exit promptly."""
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+@dataclasses.dataclass
+class _IdleWaitTracker:
+    """Manages the 'mng wait' subprocess used to detect when the agent enters WAITING.
+
+    Encapsulates process lifecycle (start, poll, restart on failure, cleanup)
+    and tracks the monotonic timestamp when the agent became idle.
+    """
+
+    _agent_id: str
+    _start_idle_wait: Callable[[str], Any]
+    _slack_seconds: float = _IDLE_WAIT_SLACK_SECONDS
+    _process: Any = dataclasses.field(default=None, init=False)
+    _idle_since: float | None = dataclasses.field(default=None, init=False)
+    # Whether we're waiting for events to be delivered before starting
+    # the next 'mng wait'. Set True by on_real_event() or
+    # notify_idle_event_sent(), cleared when maybe_start_after_delivery()
+    # successfully starts the wait.
+    _awaiting_delivery: bool = dataclasses.field(default=False, init=False)
+
+    def start(self) -> None:
+        """Launch the initial 'mng wait' subprocess."""
+        self._process = self._start_idle_wait(self._agent_id)
+        logger.info("Started idle wait for agent {}", self._agent_id)
+
+    def on_real_event(self) -> None:
+        """Reset idle state when a real event arrives.
+
+        Does NOT immediately start a new wait -- the event hasn't been
+        delivered to the agent yet. Call maybe_start_after_delivery()
+        once delivery is confirmed to start the next wait.
+        """
+        self._reset_idle_state("Reset idle state after real event, awaiting delivery")
+
+    def notify_idle_event_sent(self) -> None:
+        """Clear idle state after sending an idle event to the agent.
+
+        The agent will wake up to process it, so it is no longer idle.
+        The wait process is killed and a new one will be started after
+        the idle event is delivered (via maybe_start_after_delivery).
+        """
+        self._reset_idle_state("Idle event sent, awaiting delivery before restarting wait")
+
+    def _reset_idle_state(self, log_message: str) -> None:
+        """Clear idle tracking and prepare to restart after delivery.
+
+        Shared by on_real_event() and notify_idle_event_sent(): both
+        need to mark the agent as no longer idle and wait for delivery
+        confirmation before starting a new 'mng wait'.
+        """
+        self._idle_since = None
+        self._awaiting_delivery = True
+        if self._process is not None:
+            _terminate_process_gracefully(self._process)
+            self._process = None
+        logger.debug(log_message)
+
+    def maybe_start_after_delivery(
+        self,
+        last_delivery_monotonic: float,
+        last_real_event_time: float,
+        now_monotonic: float,
+    ) -> None:
+        """Start 'mng wait' if events have been delivered and slack time has elapsed.
+
+        Only acts when we are awaiting delivery (on_real_event or
+        notify_idle_event_sent was called) and the delivery loop has
+        delivered events that arrived after the last real event we saw,
+        plus a slack period to ensure the agent has had time to receive
+        and begin processing them.
+        """
+        if not self._awaiting_delivery:
+            return
+        if self._process is not None:
+            return
+        # Delivery must have happened after the real event arrived
+        if last_delivery_monotonic <= last_real_event_time:
+            return
+        # Wait for slack time after delivery
+        if now_monotonic - last_delivery_monotonic < self._slack_seconds:
+            return
+        self._awaiting_delivery = False
+        self._process = self._start_idle_wait(self._agent_id)
+        logger.debug("Started idle wait after delivery + {:.0f}s slack", self._slack_seconds)
+
+    def poll(self, now_monotonic: float) -> None:
+        """Check whether the wait subprocess has completed.
+
+        If the process exited with code 0, records the current time as the
+        moment the agent became idle. If it exited with a non-zero code,
+        restarts the wait.
+        """
+        if self._process is None:
+            return
+        poll_result = self._process.poll()
+        if poll_result is None:
+            return
+        if poll_result == 0 and self._idle_since is None:
+            self._idle_since = now_monotonic
+            logger.info("Agent entered idle state (WAITING)")
+        elif poll_result != 0:
+            logger.warning("mng wait exited with code {}, restarting", poll_result)
+            self._process = self._start_idle_wait(self._agent_id)
+        else:
+            # Process already reported idle; stop polling it
+            self._process = None
+
+    @property
+    def idle_since(self) -> float | None:
+        """Monotonic timestamp when the agent entered WAITING, or None if not idle."""
+        return self._idle_since
+
+    def cleanup(self) -> None:
+        """Terminate any running wait subprocess."""
+        if self._process is not None:
+            _terminate_process_gracefully(self._process)
+            self._process = None
 
 
 # -- Chat event pairing --
@@ -684,19 +852,21 @@ def _make_synthetic_event_line(
     return json.dumps(event, separators=(",", ":"))
 
 
-def _cumulative_idle_delay_minutes(schedule: tuple[int, ...], event_index: int) -> int:
-    """Calculate the cumulative delay in minutes for the nth idle event (0-indexed).
+def _per_event_idle_delay_minutes(schedule: tuple[int, ...], event_index: int) -> int:
+    """Return the delay in minutes before sending the event_index-th idle event.
 
-    For schedule [1, 10, 60] and event_index=2, returns 1+10+60=71.
-    For event_index >= len(schedule), the last value repeats.
+    For schedule [1, 10, 60]:
+    - event_index=0: 1 minute
+    - event_index=1: 10 minutes
+    - event_index=2+: 60 minutes (repeats last value)
+
+    Used with the idle wait tracker, where each idle event resets the idle
+    timer (because the agent wakes up to process the event and then re-enters
+    WAITING). The delay is measured from the most recent WAITING timestamp.
     """
-    total = 0
-    for i in range(event_index + 1):
-        if i < len(schedule):
-            total += schedule[i]
-        else:
-            total += schedule[-1]
-    return total
+    if event_index < len(schedule):
+        return schedule[event_index]
+    return schedule[-1]
 
 
 def _parse_time_of_day(time_str: str) -> tuple[int, int, int]:
@@ -750,11 +920,27 @@ def _maybe_send_onboarding(
     mind_state_dir: Path,
     event_buffer: list[str],
     buffer_lock: threading.Lock,
+    stop_event: threading.Event,
+    last_delivery_monotonic: list[float] | None = None,
 ) -> None:
-    """Send a mind/onboarding event if none has ever been sent (marker file absent)."""
+    """Send a mind/onboarding event if none has ever been sent (marker file absent).
+
+    When *last_delivery_monotonic* is provided, blocks until a delivery has
+    occurred (the value becomes positive) before sending, so that the
+    onboarding event arrives after initial conversation events.
+    """
     onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
     if onboarding_marker.exists():
         return
+
+    # Wait for at least one event delivery before sending onboarding, so
+    # the onboarding event arrives after initial conversation events.
+    if last_delivery_monotonic is not None:
+        while len(last_delivery_monotonic) == 0 or last_delivery_monotonic[0] <= 0.0:
+            if stop_event.is_set():
+                return
+            time.sleep(0.1)
+
     logger.info("Sending mind/onboarding event (first run)")
     line = _make_synthetic_event_line("onboarding", _SOURCE_MIND_ONBOARDING)
     with buffer_lock:
@@ -767,8 +953,8 @@ def _maybe_send_onboarding(
 
 
 def _maybe_send_idle_event(
-    settings: _EventWatcherSettings,
     elapsed_minutes: float,
+    delay_threshold_minutes: int,
     idle_events_sent: int,
     user_tz: ZoneInfo,
     event_buffer: list[str],
@@ -778,8 +964,7 @@ def _maybe_send_idle_event(
 
     Returns the updated idle_events_sent count.
     """
-    cumulative_minutes = _cumulative_idle_delay_minutes(settings.idle_event_delay_minutes_schedule, idle_events_sent)
-    if elapsed_minutes < cumulative_minutes:
+    if elapsed_minutes < delay_threshold_minutes:
         return idle_events_sent
 
     now_utc = datetime.now(timezone.utc)
@@ -856,6 +1041,20 @@ def _check_scheduled_events(
     return saved_date, fired_today
 
 
+def _compute_idle_elapsed_minutes(
+    now_monotonic: float,
+    idle_wait_tracker: _IdleWaitTracker,
+) -> float | None:
+    """Return the elapsed idle minutes, or None if the agent is not yet idle.
+
+    Idle time is measured from the moment the agent entered WAITING state
+    (as detected by the idle wait tracker).
+    """
+    if idle_wait_tracker.idle_since is None:
+        return None
+    return (now_monotonic - idle_wait_tracker.idle_since) / 60.0
+
+
 def _run_synthetic_events_loop(
     settings: _EventWatcherSettings,
     event_buffer: list[str],
@@ -865,55 +1064,120 @@ def _run_synthetic_events_loop(
     mind_state_dir: Path,
     time_source: Callable[[], float] = time.monotonic,
     poll_interval_seconds: float = _SYNTHETIC_POLL_INTERVAL_SECONDS,
+    agent_id: str = "",
+    start_idle_wait: Callable[[str], Any] | None = None,
+    last_delivery_monotonic: list[float] | None = None,
+    last_non_messages_event_monotonic: list[float] | None = None,
 ) -> None:
     """Generate synthetic events: idle, scheduled, and onboarding.
 
     Runs as a daemon thread alongside the delivery loop. Injects events
     directly into the shared event_buffer for delivery to the agent.
+
+    When agent_id is non-empty and idle events are configured, uses
+    'mng wait' to detect when the agent enters WAITING state. Idle time
+    is counted from the moment the agent becomes idle, not from the last
+    real event time. The wait is only started after events have been
+    delivered (via last_delivery_monotonic) plus a slack period, to avoid
+    a race where the agent appears idle before it receives the events.
+
+    The idle event counter (idle_events_sent) is reset only when a
+    non-messages event arrives (via last_non_messages_event_monotonic).
+    Events from the "messages" source (which includes the agent's own
+    conversation output in response to idle events) do NOT reset the
+    counter, which preserves the exponential backoff between idle events.
     """
     user_tz = _resolve_user_timezone(settings.user_timezone)
-    _maybe_send_onboarding(mind_state_dir, event_buffer, buffer_lock)
+    _maybe_send_onboarding(mind_state_dir, event_buffer, buffer_lock, stop_event, last_delivery_monotonic)
 
     idle_events_sent = 0
     last_seen_real_event_time = last_real_event_monotonic[0]
+    last_seen_non_messages_event_time = (
+        last_non_messages_event_monotonic[0] if last_non_messages_event_monotonic is not None else 0.0
+    )
+
+    # Track when the agent actually became idle (entered WAITING state)
+    # via 'mng wait' subprocess.
+    idle_wait_tracker: _IdleWaitTracker | None = None
+    if agent_id and settings.idle_event_delay_minutes_schedule:
+        idle_wait_tracker = _IdleWaitTracker(
+            agent_id,
+            start_idle_wait if start_idle_wait is not None else _start_agent_idle_wait,
+        )
+        idle_wait_tracker.start()
 
     scheduled_state_file = mind_state_dir / _SCHEDULED_STATE_FILENAME
     saved_date, fired_today = _load_scheduled_events_state(scheduled_state_file)
 
-    while not stop_event.is_set():
-        stop_event.wait(timeout=poll_interval_seconds)
-        if stop_event.is_set():
-            break
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=poll_interval_seconds)
+            if stop_event.is_set():
+                break
 
-        now_monotonic = time_source()
+            now_monotonic = time_source()
 
-        with buffer_lock:
-            current_real_event_time = last_real_event_monotonic[0]
-        if current_real_event_time > last_seen_real_event_time:
-            idle_events_sent = 0
-            last_seen_real_event_time = current_real_event_time
+            # Check for new real events from the mng events subprocess
+            with buffer_lock:
+                current_real_event_time = last_real_event_monotonic[0]
+            if current_real_event_time > last_seen_real_event_time:
+                last_seen_real_event_time = current_real_event_time
+                if idle_wait_tracker is not None:
+                    idle_wait_tracker.on_real_event()
 
-        if settings.idle_event_delay_minutes_schedule:
-            elapsed_minutes = (now_monotonic - last_seen_real_event_time) / 60.0
-            idle_events_sent = _maybe_send_idle_event(
-                settings,
-                elapsed_minutes,
-                idle_events_sent,
-                user_tz,
-                event_buffer,
-                buffer_lock,
-            )
+            # Reset the idle counter only when a non-messages event arrives.
+            # Events from the "messages" source include the agent's own
+            # conversation output (including responses to our idle events),
+            # so they should not reset the backoff.
+            if last_non_messages_event_monotonic is not None:
+                with buffer_lock:
+                    current_non_messages_time = last_non_messages_event_monotonic[0]
+                if current_non_messages_time > last_seen_non_messages_event_time:
+                    idle_events_sent = 0
+                    last_seen_non_messages_event_time = current_non_messages_time
 
-        if settings.scheduled_events:
-            saved_date, fired_today = _check_scheduled_events(
-                settings,
-                user_tz,
-                saved_date,
-                fired_today,
-                scheduled_state_file,
-                event_buffer,
-                buffer_lock,
-            )
+            if idle_wait_tracker is not None:
+                # Start the wait only after events have been delivered + slack
+                if last_delivery_monotonic is not None:
+                    idle_wait_tracker.maybe_start_after_delivery(
+                        last_delivery_monotonic[0],
+                        last_seen_real_event_time,
+                        now_monotonic,
+                    )
+                idle_wait_tracker.poll(now_monotonic)
+
+            if settings.idle_event_delay_minutes_schedule and idle_wait_tracker is not None:
+                elapsed_minutes = _compute_idle_elapsed_minutes(
+                    now_monotonic,
+                    idle_wait_tracker,
+                )
+                if elapsed_minutes is not None:
+                    delay = _per_event_idle_delay_minutes(settings.idle_event_delay_minutes_schedule, idle_events_sent)
+                    previous_idle_events_sent = idle_events_sent
+                    idle_events_sent = _maybe_send_idle_event(
+                        elapsed_minutes,
+                        delay,
+                        idle_events_sent,
+                        user_tz,
+                        event_buffer,
+                        buffer_lock,
+                    )
+                    if idle_events_sent > previous_idle_events_sent:
+                        idle_wait_tracker.notify_idle_event_sent()
+
+            if settings.scheduled_events:
+                saved_date, fired_today = _check_scheduled_events(
+                    settings,
+                    user_tz,
+                    saved_date,
+                    fired_today,
+                    scheduled_state_file,
+                    event_buffer,
+                    buffer_lock,
+                )
+    finally:
+        if idle_wait_tracker is not None:
+            idle_wait_tracker.cleanup()
 
 
 # -- Delivery loop helpers --
@@ -965,49 +1229,47 @@ def _write_events_file(event_lines: list[str], directory: Path) -> Path | None:
         return None
 
 
-def _run_event_batch_filter_script(
+def _run_event_batch_filter_command(
     deliverable_lines: list[str],
-    script_path: str,
+    filter_command: str,
 ) -> list[str] | None:
-    """Run the event_batch_filter_script, passing lines on stdin and reading filtered lines from stdout.
+    """Run the event_batch_filter_command, passing lines on stdin and reading filtered lines from stdout.
 
-    The script must output exactly the same number of lines as provided on stdin.
+    The command must output exactly the same number of lines as provided on stdin.
     Lines that are empty or '{}' are treated as filtered out by the caller.
 
-    Returns the filtered lines on success, or None if the script fails (in which
+    Returns the filtered lines on success, or None if the command fails (in which
     case the original lines should be used unmodified).
     """
     stdin_data = "\n".join(deliverable_lines) + "\n"
     try:
         result = subprocess.run(
-            [script_path],
+            filter_command,
             input=stdin_data,
             capture_output=True,
             text=True,
+            shell=True,
             timeout=_EVENT_BATCH_FILTER_TIMEOUT_SECONDS,
         )
-    except FileNotFoundError:
-        logger.error("Event batch filter script not found: {}", script_path)
-        return None
     except subprocess.TimeoutExpired:
         logger.error(
-            "Event batch filter script timed out after {}s: {}", _EVENT_BATCH_FILTER_TIMEOUT_SECONDS, script_path
+            "Event batch filter command timed out after {}s: {}", _EVENT_BATCH_FILTER_TIMEOUT_SECONDS, filter_command
         )
         return None
     except OSError as exc:
-        logger.error("Failed to run event batch filter script {}: {}", script_path, exc)
+        logger.error("Failed to run event batch filter command {}: {}", filter_command, exc)
         return None
 
     if result.returncode != 0:
         logger.error(
-            "Event batch filter script returned non-zero ({}): {}",
+            "Event batch filter command returned non-zero ({}): {}",
             result.returncode,
             result.stderr[:500],
         )
         return None
 
     # Split output into lines, preserving empty lines but stripping the final trailing newline.
-    # The script is expected to output exactly len(deliverable_lines) lines terminated by newlines.
+    # The command is expected to output exactly len(deliverable_lines) lines terminated by newlines.
     raw_output = result.stdout
     if raw_output.endswith("\n"):
         raw_output = raw_output[:-1]
@@ -1015,7 +1277,7 @@ def _run_event_batch_filter_script(
 
     if len(output_lines) != len(deliverable_lines):
         logger.error(
-            "Event batch filter script output {} lines but expected {} lines, ignoring filter",
+            "Event batch filter command output {} lines but expected {} lines, ignoring filter",
             len(output_lines),
             len(deliverable_lines),
         )
@@ -1026,21 +1288,24 @@ def _run_event_batch_filter_script(
 
 def _apply_event_batch_filter(
     deliverable_lines: list[str],
-    script_path: str,
+    filter_command: str,
 ) -> list[str]:
-    """Apply the event_batch_filter_script and remove filtered-out events.
+    """Apply the event_batch_filter_command and remove filtered-out events.
 
-    Lines that the script outputs as empty or '{}' are dropped.
-    If the script fails, a filter_error event is prepended to the original
+    Lines that the command outputs as empty or '{}' are dropped.
+    If the command fails, a filter_error event is prepended to the original
     (unfiltered) lines so the agent knows the filter broke.
     """
-    filtered_lines = _run_event_batch_filter_script(deliverable_lines, script_path)
+    filtered_lines = _run_event_batch_filter_command(deliverable_lines, filter_command)
     if filtered_lines is None:
-        # Prepend a failure event so the agent knows the filter script broke
+        # Prepend a failure event so the agent knows the filter command broke
         error_event = _make_synthetic_event_line(
             "filter_error",
             _SOURCE_MIND_FILTER_ERROR,
-            {"script_path": script_path, "message": "Event batch filter script failed; delivering unfiltered events"},
+            {
+                "filter_command": filter_command,
+                "message": "Event batch filter command failed; delivering unfiltered events",
+            },
         )
         return [error_event, *deliverable_lines]
 
@@ -1205,6 +1470,8 @@ def _run_delivery_loop(
     event_lists_dir: Path,
     ignored_sources_state: _IgnoredSourcesState,
     send_message: Callable[[str, str], bool] = _send_message,
+    last_delivery_monotonic: list[float] | None = None,
+    backoff_base_seconds: float = _BACKOFF_BASE_SECONDS,
 ) -> None:
     """Main delivery loop: drain buffer, rate-limit, format, and deliver to agent.
 
@@ -1236,7 +1503,7 @@ def _run_delivery_loop(
     while not stop_event.is_set():
         # If we're in a failure state, wait with exponential backoff
         if consecutive_failures > 0:
-            backoff = _compute_backoff_seconds(consecutive_failures)
+            backoff = _compute_backoff_seconds(consecutive_failures, base_seconds=backoff_base_seconds)
             logger.debug("Backing off for {:.1f}s after {} consecutive failures", backoff, consecutive_failures)
             stop_event.wait(timeout=backoff)
             if stop_event.is_set():
@@ -1257,7 +1524,7 @@ def _run_delivery_loop(
 
         if not pending:
             # Even with no new events, check for timed-out held chat messages
-            if held_user_messages:
+            if settings.is_message_batching_enabled and held_user_messages:
                 deliverable_lines = _separate_chat_events([], held_user_messages)
                 if deliverable_lines:
                     last_parsed = {}
@@ -1279,11 +1546,12 @@ def _run_delivery_loop(
             )
 
             # Separate chat events: hold user messages until assistant responds
-            deliverable_lines = _separate_chat_events(deliverable_lines, held_user_messages)
+            if settings.is_message_batching_enabled:
+                deliverable_lines = _separate_chat_events(deliverable_lines, held_user_messages)
 
-        # Apply custom event batch filter script (drops events and fields before aggregation)
-        if settings.event_batch_filter_script and deliverable_lines:
-            deliverable_lines = _apply_event_batch_filter(deliverable_lines, settings.event_batch_filter_script)
+        # Apply custom event batch filter command (drops events and fields before aggregation)
+        if settings.event_batch_filter_command and deliverable_lines:
+            deliverable_lines = _apply_event_batch_filter(deliverable_lines, settings.event_batch_filter_command)
             if not deliverable_lines:
                 continue
 
@@ -1338,6 +1606,9 @@ def _run_delivery_loop(
         )
 
         if success:
+            # Signal to the synthetic events loop that events have been delivered
+            if last_delivery_monotonic is not None:
+                last_delivery_monotonic[0] = time.monotonic()
             if has_notified_user:
                 _notify_user(
                     events_dir,
@@ -1377,6 +1648,7 @@ def main(
     start_subprocess: Callable[[str, str], Any] = _start_events_subprocess,
     stop_event: threading.Event | None = None,
     send_message: Callable[[str, str], bool] = _send_message,
+    subprocess_restart_delay_seconds: float = _SUBPROCESS_RESTART_DELAY_SECONDS,
 ) -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
@@ -1420,7 +1692,8 @@ def main(
     logger.info("  Idle schedule: {}", settings.idle_event_delay_minutes_schedule)
     logger.info("  Scheduled events: {}", settings.scheduled_events)
     logger.info("  User timezone: {}", settings.user_timezone)
-    logger.info("  Event batch filter script: {}", settings.event_batch_filter_script or "(none)")
+    logger.info("  Message batching enabled: {}", settings.is_message_batching_enabled)
+    logger.info("  Event batch filter command: {}", settings.event_batch_filter_command or "(none)")
 
     # Resolve the ignored_sources.txt path: $MNG_AGENT_WORK_DIR/$ROLE/ignored_sources.txt
     role = os.environ.get("ROLE", "")
@@ -1439,6 +1712,18 @@ def main(
     # Updated by the reader thread, read by the synthetic events thread.
     last_real_event_monotonic: list[float] = [time.monotonic()]
 
+    # Shared monotonic timestamp of the last event from a non-"messages" source.
+    # Updated by the reader thread, read by the synthetic events thread to
+    # decide when to reset the idle event counter. Events from the "messages"
+    # source include the agent's conversation output (including responses to
+    # idle events) and should not reset the backoff.
+    last_non_messages_event_monotonic: list[float] = [0.0]
+
+    # Shared monotonic timestamp of the last successful event delivery.
+    # Updated by the delivery thread, read by the synthetic events thread
+    # to know when it's safe to start the idle wait subprocess.
+    last_delivery_monotonic: list[float] = [0.0]
+
     # Directory for synthetic event state files (onboarding marker, scheduled state)
     mind_state_dir = agent_state_dir / "mind"
     mind_state_dir.mkdir(parents=True, exist_ok=True)
@@ -1446,14 +1731,17 @@ def main(
     # Start the synthetic events thread (idle, scheduled, onboarding)
     synthetic_thread = threading.Thread(
         target=_run_synthetic_events_loop,
-        args=(
-            settings,
-            event_buffer,
-            buffer_lock,
-            stop_event,
-            last_real_event_monotonic,
-            mind_state_dir,
-        ),
+        kwargs={
+            "settings": settings,
+            "event_buffer": event_buffer,
+            "buffer_lock": buffer_lock,
+            "stop_event": stop_event,
+            "last_real_event_monotonic": last_real_event_monotonic,
+            "mind_state_dir": mind_state_dir,
+            "agent_id": agent_id,
+            "last_delivery_monotonic": last_delivery_monotonic,
+            "last_non_messages_event_monotonic": last_non_messages_event_monotonic,
+        },
         daemon=True,
     )
     synthetic_thread.start()
@@ -1473,6 +1761,7 @@ def main(
             event_lists_dir,
             ignored_sources_state,
             send_message,
+            last_delivery_monotonic,
         ),
         daemon=True,
     )
@@ -1485,7 +1774,14 @@ def main(
             # Reader thread feeds subprocess stdout into the shared buffer
             reader_thread = threading.Thread(
                 target=_read_events_from_subprocess,
-                args=(active_process, event_buffer, buffer_lock, stop_event, last_real_event_monotonic),
+                args=(
+                    active_process,
+                    event_buffer,
+                    buffer_lock,
+                    stop_event,
+                    last_real_event_monotonic,
+                    last_non_messages_event_monotonic,
+                ),
                 daemon=True,
             )
             reader_thread.start()
@@ -1506,8 +1802,8 @@ def main(
             if stop_event.is_set():
                 break
 
-            logger.info("Restarting events subprocess in {}s", _SUBPROCESS_RESTART_DELAY_SECONDS)
-            stop_event.wait(timeout=_SUBPROCESS_RESTART_DELAY_SECONDS)
+            logger.info("Restarting events subprocess in {}s", subprocess_restart_delay_seconds)
+            stop_event.wait(timeout=subprocess_restart_delay_seconds)
 
     except KeyboardInterrupt:
         logger.info("Event watcher stopping (KeyboardInterrupt)")

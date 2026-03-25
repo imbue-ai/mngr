@@ -1,5 +1,8 @@
 import secrets
+import time
+import webbrowser
 from pathlib import Path
+from threading import Thread
 from typing import Final
 
 import uvicorn
@@ -55,7 +58,17 @@ def start_forwarding_server(
         agent_creator=agent_creator,
     )
 
+    thread = Thread(target=_sleep_then_open, args=(login_url,))
+    thread.daemon = True
+    thread.start()
+
     try:
         uvicorn.run(app, host=host, port=port)
     finally:
         stream_manager.stop()
+
+
+def _sleep_then_open(url: str, delay: float = 1.0) -> None:
+    """Sleep for a short delay and then open the given URL in the default web browser."""
+    time.sleep(delay)
+    webbrowser.open(url)

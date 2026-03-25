@@ -217,21 +217,12 @@ node_modules/
 # Frontend build artifacts
 frontend-dist/
 
-# ignore review files
-.reviews/
-
-# files necessary to smuggle session id into reviewers
-.claude/sessionid
-
 # Claude Code local settings (session-specific permissions)
 .claude/settings.local.json
 
 # PR status and URL files written by main_claude_stop_hook.sh for status line display
 .claude/pr_url
 .claude/pr_status
-
-# History of commits reviewed by main_claude_stop_hook.sh (to detect stuck agents)
-.claude/reviewed_commits
 
 # Local Claude settings backup files
 .claude/*.bak
@@ -263,8 +254,12 @@ current.tar.gz
 # Minds deploy-time build artifacts
 .minds/
 
-# Autofix working artifacts
-.autofix/
+# Autofix session artifacts
+.reviewer/outputs/
+.reviewer/settings.local.json
+
+# Stuck agent tracking (stop hook escape valve)
+.claude/blocked_stop_commits
 
 # Demo recordings (asciinema .cast, .txt, and scripts)
 .demos/

@@ -52,6 +52,7 @@ def offline_host(fake_provider: MockProviderInstance, temp_mng_ctx: MngContext) 
         activity_sources=(ActivitySource.SSH, ActivitySource.CREATE, ActivitySource.START, ActivitySource.BOOT),
         image="test-image:latest",
         plugin={"my_plugin": {"key": "value"}},
+        user_tags={"env": "test"},
         created_at=now,
         updated_at=now,
     )

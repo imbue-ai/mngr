@@ -45,8 +45,8 @@ class ExecProcess(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def wait(self) -> None:
-        """Block until the command completes."""
+    def wait(self) -> int:
+        """Block until the command completes and return the exit code."""
         ...
 
 

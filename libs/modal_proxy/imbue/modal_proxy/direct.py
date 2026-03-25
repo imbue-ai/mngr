@@ -184,8 +184,8 @@ class DirectExecProcess(ExecProcess):
     def get_stdout(self) -> ExecOutput:
         return DirectExecOutput.model_construct(stream=self.process.stdout)
 
-    def wait(self) -> None:
-        self.process.wait()
+    def wait(self) -> int:
+        return self.process.wait()
 
 
 class DirectSecret(SecretInterface):

@@ -22,6 +22,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 class AgentNameStyle(UpperCaseStrEnum):
     """Style for auto-generated agent names."""
 
+    COOLNAME = auto()
     ENGLISH = auto()
     FANTASY = auto()
     SCIFI = auto()
@@ -37,6 +38,7 @@ class AgentNameStyle(UpperCaseStrEnum):
 class HostNameStyle(UpperCaseStrEnum):
     """Style for auto-generated host names."""
 
+    COOLNAME = auto()
     ASTRONOMY = auto()
     PLACES = auto()
     CITIES = auto()

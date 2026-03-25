@@ -195,7 +195,7 @@ def test_observer_command_is_parseable_as_named_command() -> None:
 
 def _make_host_stub() -> Any:
     """Create a host stub that supports execute_command for settings loading."""
-    # execute_command is called by load_settings_from_host to check for minds.toml
+    # execute_command is called by load_from_host to check for minds.toml
     stub = SimpleNamespace(
         host_dir=Path("/home/user/.mng"),
         execute_command=lambda cmd, **kwargs: SimpleNamespace(success=False, stdout="", stderr=""),
@@ -213,10 +213,10 @@ def test_modify_env_vars_sets_uv_tool_dirs() -> None:
         work_dir=Path("/home/user/work"),
     )
     env_vars = {"MNG_AGENT_STATE_DIR": "/home/user/.mng/agents/abc"}
-    agent.modify_env_vars(cast(Any, host_stub), env_vars)
+    agent.modify_env_vars(host_stub, env_vars)
     assert env_vars["UV_TOOL_DIR"] == "/home/user/.mng/agents/abc/tools"
     assert env_vars["UV_TOOL_BIN_DIR"] == "/home/user/.mng/agents/abc/bin"
-    assert env_vars["MNG_LLM_MODEL"] == "claude-opus-4.6"
+    assert env_vars["MNG_LLM_MODEL"] == "claude-haiku-4.5"
 
 
 def test_modify_env_vars_noop_without_state_dir() -> None:
@@ -229,11 +229,11 @@ def test_modify_env_vars_noop_without_state_dir() -> None:
         work_dir=Path("/home/user/work"),
     )
     env_vars: dict[str, str] = {}
-    agent.modify_env_vars(cast(Any, host_stub), env_vars)
+    agent.modify_env_vars(host_stub, env_vars)
     assert "UV_TOOL_DIR" not in env_vars
     assert "UV_TOOL_BIN_DIR" not in env_vars
     # MNG_LLM_MODEL should still be set even without state dir
-    assert env_vars["MNG_LLM_MODEL"] == "claude-opus-4.6"
+    assert env_vars["MNG_LLM_MODEL"] == "claude-haiku-4.5"
 
 
 # -- assemble_command tests --

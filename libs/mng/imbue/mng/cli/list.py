@@ -608,7 +608,7 @@ class _StreamingTemplateEmitter(MutableModel):
             self._count += 1
 
 
-# Minimum column widths for streaming output (left-justified, not truncated).
+# Minimum column widths for streaming output.
 # These are the minimum data widths; actual column width is max(min_width, header_length).
 _MIN_COLUMN_WIDTHS: Final[dict[str, int]] = {
     "name": 15,
@@ -621,10 +621,9 @@ _MIN_COLUMN_WIDTHS: Final[dict[str, int]] = {
     "host.tags": 10,
 }
 _DEFAULT_MIN_COLUMN_WIDTH: Final[int] = 10
-# Columns that get extra space when the terminal is wider than the minimum
-_EXPANDABLE_COLUMNS: Final[set[str]] = {"name", "labels", "labels.project"}
 _MAX_COLUMN_WIDTHS: Final[dict[str, int]] = {}
 _COLUMN_SEPARATOR: Final[str] = "  "
+_TRUNCATION_SUFFIX: Final[str] = "... "
 
 
 @pure
@@ -710,8 +709,8 @@ class _StreamingHumanRenderer(MutableModel):
                 self.output.write(header_line + "\n")
                 self._is_header_written = True
 
-            # Write the agent row
-            row_line = _format_streaming_agent_row(agent, self.fields, self._column_widths)
+            # Write the agent row (truncate only in TTY mode to prevent line wrapping)
+            row_line = _format_streaming_agent_row(agent, self.fields, self._column_widths, is_truncate=self.is_tty)
             self.output.write(row_line + "\n")
             self._count += 1
 
@@ -765,15 +764,14 @@ def _compute_column_widths(
     min_total = sum(width_by_field.values()) + separator_total
     extra_space = max(terminal_width - min_total, 0)
 
-    # Distribute extra space to expandable columns, respecting max widths.
+    # Distribute extra space evenly across all columns, respecting max widths.
     # Process columns sorted by tightest max cap first so capped leftovers flow to less
     # constrained columns in a single pass.
-    expandable_in_fields = [f for f in fields if f in _EXPANDABLE_COLUMNS]
-    if expandable_in_fields and extra_space > 0:
-        sorted_expandable = sorted(expandable_in_fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(f, float("inf")))
+    if fields and extra_space > 0:
+        sorted_fields = sorted(fields, key=lambda f: _MAX_COLUMN_WIDTHS.get(f, float("inf")))
         remaining = extra_space
-        for idx, field in enumerate(sorted_expandable):
-            fields_left = len(sorted_expandable) - idx
+        for idx, field in enumerate(sorted_fields):
+            fields_left = len(sorted_fields) - idx
             per_column = remaining // fields_left
             extra = 1 if (remaining % fields_left) > 0 else 0
             bonus = per_column + extra
@@ -800,15 +798,31 @@ def _format_streaming_header_row(
 
 
 @pure
-def _format_streaming_agent_row(agent: AgentDetails, fields: Sequence[str], column_widths: dict[str, int]) -> str:
+def _truncate_to_width(value: str, width: int) -> str:
+    """Truncate a value to fit within the given width, appending a suffix if truncated."""
+    if len(value) <= width:
+        return value.ljust(width)
+    truncated_content_width = width - len(_TRUNCATION_SUFFIX)
+    if truncated_content_width <= 0:
+        return value[:width]
+    return value[:truncated_content_width] + _TRUNCATION_SUFFIX
+
+
+@pure
+def _format_streaming_agent_row(
+    agent: AgentDetails,
+    fields: Sequence[str],
+    column_widths: dict[str, int],
+    # Truncate values that exceed column width (only needed for TTY to prevent line wrapping)
+    is_truncate: bool = True,
+) -> str:
     """Format a single agent as a streaming output row."""
     parts: list[str] = []
     for field in fields:
         width = column_widths.get(field, _DEFAULT_MIN_COLUMN_WIDTH)
         value = _get_field_value(agent, field)
-        # Values are padded but intentionally not truncated: full values are preferred
-        # over truncated ones, so columns may appear ragged when values exceed the width.
-        parts.append(value.ljust(width))
+        formatted = _truncate_to_width(value, width) if is_truncate else value.ljust(width)
+        parts.append(formatted)
     return _COLUMN_SEPARATOR.join(parts)
 
 
@@ -1445,6 +1459,7 @@ def _write_unfiltered_full_snapshot(mng_ctx: MngContext, error_behavior: ErrorBe
         mng_ctx=mng_ctx,
         is_streaming=False,
         error_behavior=error_behavior,
+        reset_caches=True,
     )
 
 

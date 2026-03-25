@@ -16,12 +16,15 @@ from imbue.mng.cli.agent_addr import AgentAddress
 from imbue.mng.cli.agent_addr import parse_agent_address
 from imbue.mng.cli.create import _AutoLabels
 from imbue.mng.cli.create import _CreateCommand
+from imbue.mng.cli.create import _RECOVERED_MESSAGE_FILENAME
+from imbue.mng.cli.create import _editor_cleanup_scope
 from imbue.mng.cli.create import _get_source_remote_url
 from imbue.mng.cli.create import _is_creating_new_host
 from imbue.mng.cli.create import _parse_agent_opts
 from imbue.mng.cli.create import _parse_branch_flag
 from imbue.mng.cli.create import _parse_host_lifecycle_options
 from imbue.mng.cli.create import _parse_project_name
+from imbue.mng.cli.create import _rescue_editor_content
 from imbue.mng.cli.create import _resolve_source_location
 from imbue.mng.cli.create import _resolve_target_host
 from imbue.mng.cli.create import _split_cli_args
@@ -45,6 +48,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.providers.local.instance import LocalProviderInstance
+from imbue.mng.utils.editor import EditorSession
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -1176,3 +1180,107 @@ def test_create_provider_flag_redundant_with_address_is_ok(
     )
 
     assert result.exit_code == 0
+
+
+# =============================================================================
+# Tests for _rescue_editor_content
+# =============================================================================
+
+
+def test_rescue_editor_content_saves_content_to_recovery_file(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _rescue_editor_content saves editor content to the recovery directory."""
+    session = EditorSession.create(initial_content="important message to save")
+
+    _rescue_editor_content(session, recovery_dir=editor_recovery_dir)
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert recovery_path.exists()
+    assert recovery_path.read_text() == "important message to save"
+
+    session.cleanup()
+
+
+def test_rescue_editor_content_does_nothing_when_temp_file_missing(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _rescue_editor_content does nothing when the temp file is missing."""
+    session = EditorSession.create(initial_content="some content")
+    # Delete the temp file to simulate it being missing
+    session.temp_file_path.unlink()
+
+    _rescue_editor_content(session, recovery_dir=editor_recovery_dir)
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert not recovery_path.exists()
+
+    session.cleanup()
+
+
+def test_rescue_editor_content_does_nothing_when_content_is_empty(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _rescue_editor_content does nothing when the temp file is empty."""
+    session = EditorSession.create()
+
+    _rescue_editor_content(session, recovery_dir=editor_recovery_dir)
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert not recovery_path.exists()
+
+    session.cleanup()
+
+
+def test_rescue_editor_content_strips_trailing_whitespace(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _rescue_editor_content strips trailing whitespace."""
+    session = EditorSession.create(initial_content="content with trailing space  \n\n")
+
+    _rescue_editor_content(session, recovery_dir=editor_recovery_dir)
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert recovery_path.exists()
+    assert recovery_path.read_text() == "content with trailing space"
+
+    session.cleanup()
+
+
+# =============================================================================
+# Tests for _editor_cleanup_scope
+# =============================================================================
+
+
+def test_editor_cleanup_scope_rescues_content_on_exception(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _editor_cleanup_scope saves editor content when an exception occurs."""
+    session = EditorSession.create(initial_content="do not lose this message")
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        with _editor_cleanup_scope(session, recovery_dir=editor_recovery_dir):
+            raise RuntimeError("simulated failure")
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert recovery_path.exists()
+    assert recovery_path.read_text() == "do not lose this message"
+
+    # Temp file should be cleaned up by the finally block
+    assert not session.temp_file_path.exists()
+
+
+def test_editor_cleanup_scope_does_not_rescue_on_success(
+    editor_recovery_dir: Path,
+) -> None:
+    """Test that _editor_cleanup_scope does not create a recovery file on success."""
+    session = EditorSession.create(initial_content="message content")
+
+    with _editor_cleanup_scope(session, recovery_dir=editor_recovery_dir):
+        pass
+
+    recovery_path = editor_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+    assert not recovery_path.exists()
+
+    # Temp file should still be cleaned up
+    assert not session.temp_file_path.exists()

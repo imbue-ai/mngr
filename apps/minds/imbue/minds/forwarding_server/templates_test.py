@@ -7,6 +7,7 @@ from imbue.minds.forwarding_server.templates import render_create_form
 from imbue.minds.forwarding_server.templates import render_landing_page
 from imbue.minds.forwarding_server.templates import render_login_page
 from imbue.minds.forwarding_server.templates import render_login_redirect_page
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
@@ -86,6 +87,7 @@ def test_render_create_form_has_default_values() -> None:
     assert "simple_mind" in html
     assert "agent_name" in html
     assert "main" in html
+    assert "launch_mode" in html
 
 
 def test_render_create_form_prefills_values() -> None:
@@ -93,6 +95,23 @@ def test_render_create_form_prefills_values() -> None:
     assert "https://custom/repo" in html
     assert "my-bot" in html
     assert "feature/test" in html
+
+
+def test_render_create_form_contains_all_launch_modes() -> None:
+    html = render_create_form()
+    for mode in LaunchMode:
+        assert mode.value.lower() in html
+
+
+def test_render_create_form_selects_local_by_default() -> None:
+    html = render_create_form()
+    assert 'value="LOCAL" selected' in html
+
+
+def test_render_create_form_selects_specified_launch_mode() -> None:
+    html = render_create_form(launch_mode=LaunchMode.DEV)
+    assert 'value="DEV" selected' in html
+    assert 'value="LOCAL" selected' not in html
 
 
 def test_render_login_page_shows_prompt() -> None:

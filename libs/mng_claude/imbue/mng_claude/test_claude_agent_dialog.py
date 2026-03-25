@@ -49,6 +49,9 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
     the important thing is that it gets past the dialog check.
     """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
+    # Use a short submission timeout so the test does not block for 60s waiting
+    # for a tmux wait-for signal that will never arrive (no real Claude process)
+    agent.enter_submission_timeout_seconds = 1.0
     session_name = agent.session_name
 
     try:

@@ -35,7 +35,9 @@ During agent creation, external repositories can be added as git subtrees under 
 
 Local repos must be "clean" (no uncommitted changes or untracked files) before they can be vendored.
 
-When no `[[vendor]]` section exists, the system falls back to vendoring the `mng` repo (using the local checkout in development mode, or the GitHub URL otherwise).
+When no `[[vendor]]` section exists, the system falls back to vendoring the `mng` repo from its public GitHub URL.
+
+For development, the `MINDS_VENDOR_PATH` environment variable can override vendor sources with local paths. Format: `name@/path/to/repo:other@/another/path`. Each entry overrides (or adds) a vendor config to use a local path instead of whatever was configured.
 
 ```toml
 # minds.toml

@@ -260,6 +260,13 @@ def temp_mng_ctx(
 
 
 @pytest.fixture
+def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
+    """Provide an active ConcurrencyGroup for tests that construct MngContext directly."""
+    with ConcurrencyGroup(name="test") as cg:
+        yield cg
+
+
+@pytest.fixture
 def local_provider(temp_host_dir: Path, temp_mng_ctx: MngContext) -> LocalProviderInstance:
     """Create a LocalProviderInstance with a temporary host directory."""
     return LocalProviderInstance(
@@ -326,6 +333,7 @@ def setup_test_mng_env(
     monkeypatch.setenv("MNG_HOST_DIR", str(temp_host_dir))
     monkeypatch.setenv("MNG_PREFIX", mng_test_prefix)
     monkeypatch.setenv("MNG_ROOT_NAME", mng_test_root_name)
+    monkeypatch.delenv("MNG_PROJECT_DIR", raising=False)
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside tmp_path, which

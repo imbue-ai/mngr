@@ -7,9 +7,11 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import DirtyRepoError
 from imbue.minds.errors import VendorError
 from imbue.minds.forwarding_server.vendor_mng import VENDOR_DIR_NAME
+from imbue.minds.forwarding_server.vendor_mng import VENDOR_PATH_ENV_VAR
+from imbue.minds.forwarding_server.vendor_mng import apply_vendor_overrides
 from imbue.minds.forwarding_server.vendor_mng import check_repo_is_clean
 from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
-from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
+from imbue.minds.forwarding_server.vendor_mng import parse_vendor_path_env
 from imbue.minds.forwarding_server.vendor_mng import update_vendor_repos
 from imbue.minds.forwarding_server.vendor_mng import vendor_repos
 from imbue.minds.testing import add_and_commit_git_repo
@@ -26,11 +28,13 @@ def _make_mind_repo(tmp_path: Path) -> Path:
     return mind_dir
 
 
-def test_find_mng_repo_root_returns_path() -> None:
-    """When running from within the mng monorepo, finds the root."""
-    root = find_mng_repo_root()
-    assert root is not None
-    assert (root / "libs" / "mng").is_dir()
+def test_default_vendor_configs_returns_mng_github_url() -> None:
+    """Default config uses the public GitHub URL for the mng repo."""
+    configs = default_vendor_configs()
+    assert len(configs) == 1
+    assert configs[0].name == "mng"
+    assert configs[0].url is not None
+    assert configs[0].path is None
 
 
 def test_vendor_repos_skips_when_vendor_dir_exists(tmp_path: Path) -> None:
@@ -174,23 +178,99 @@ def test_check_repo_is_clean_raises_for_untracked_file(tmp_path: Path) -> None:
         check_repo_is_clean(source)
 
 
-def test_default_vendor_configs_dev_mode() -> None:
-    """In dev mode, default config uses a local path to the mng repo."""
-    mng_root = Path("/fake/mng")
-    configs = default_vendor_configs(mng_root)
-    assert len(configs) == 1
-    assert configs[0].name == "mng"
-    assert configs[0].path == str(mng_root)
-    assert configs[0].url is None
+def test_parse_vendor_path_env_single_entry() -> None:
+    result = parse_vendor_path_env("mng@/path/to/mng")
+    assert result == {"mng": Path("/path/to/mng")}
 
 
-def test_default_vendor_configs_production_mode() -> None:
-    """In production mode, default config uses the GitHub URL."""
-    configs = default_vendor_configs(None)
-    assert len(configs) == 1
-    assert configs[0].name == "mng"
-    assert configs[0].url is not None
-    assert configs[0].path is None
+def test_parse_vendor_path_env_multiple_entries() -> None:
+    result = parse_vendor_path_env("mng@/path/to/mng:other@/other/path")
+    assert result == {"mng": Path("/path/to/mng"), "other": Path("/other/path")}
+
+
+def test_parse_vendor_path_env_empty_string() -> None:
+    result = parse_vendor_path_env("")
+    assert result == {}
+
+
+def test_parse_vendor_path_env_whitespace_entries() -> None:
+    result = parse_vendor_path_env("mng@/path : other@/other")
+    assert result == {"mng": Path("/path"), "other": Path("/other")}
+
+
+def test_parse_vendor_path_env_raises_on_missing_at() -> None:
+    with pytest.raises(VendorError, match="Malformed"):
+        parse_vendor_path_env("no-at-sign")
+
+
+def test_parse_vendor_path_env_raises_on_empty_name() -> None:
+    with pytest.raises(VendorError, match="non-empty"):
+        parse_vendor_path_env("@/some/path")
+
+
+def test_parse_vendor_path_env_raises_on_empty_path() -> None:
+    with pytest.raises(VendorError, match="non-empty"):
+        parse_vendor_path_env("mng@")
+
+
+def test_apply_vendor_overrides_no_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns configs unchanged when MINDS_VENDOR_PATH is not set."""
+    monkeypatch.delenv(VENDOR_PATH_ENV_VAR, raising=False)
+    configs = (VendorRepoConfig(name=NonEmptyStr("mng"), url="https://github.com/imbue-ai/mng.git"),)
+    result = apply_vendor_overrides(configs)
+    assert result == configs
+
+
+def test_apply_vendor_overrides_replaces_matching_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overrides an existing vendor entry with a local path."""
+    monkeypatch.setenv(VENDOR_PATH_ENV_VAR, "mng@/local/mng")
+    configs = (VendorRepoConfig(name=NonEmptyStr("mng"), url="https://github.com/imbue-ai/mng.git"),)
+    result = apply_vendor_overrides(configs)
+    assert len(result) == 1
+    assert result[0].name == "mng"
+    assert result[0].path == "/local/mng"
+    assert result[0].url is None
+
+
+def test_apply_vendor_overrides_adds_new_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adds a new vendor entry when the name is not already configured."""
+    monkeypatch.setenv(VENDOR_PATH_ENV_VAR, "extra@/path/to/extra")
+    configs = (VendorRepoConfig(name=NonEmptyStr("mng"), url="https://github.com/imbue-ai/mng.git"),)
+    result = apply_vendor_overrides(configs)
+    assert len(result) == 2
+    assert result[0].name == "mng"
+    assert result[0].url == "https://github.com/imbue-ai/mng.git"
+    assert result[1].name == "extra"
+    assert result[1].path == "/path/to/extra"
+
+
+def test_apply_vendor_overrides_replaces_and_adds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Can both replace existing entries and add new ones in a single invocation."""
+    monkeypatch.setenv(VENDOR_PATH_ENV_VAR, "mng@/local/mng:new-lib@/path/to/new")
+    configs = (VendorRepoConfig(name=NonEmptyStr("mng"), url="https://github.com/imbue-ai/mng.git"),)
+    result = apply_vendor_overrides(configs)
+    assert len(result) == 2
+    assert result[0].name == "mng"
+    assert result[0].path == "/local/mng"
+    assert result[1].name == "new-lib"
+    assert result[1].path == "/path/to/new"
+
+
+def test_apply_vendor_overrides_preserves_non_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entries not mentioned in the env var are left unchanged."""
+    monkeypatch.setenv(VENDOR_PATH_ENV_VAR, "other@/other/path")
+    configs = (
+        VendorRepoConfig(name=NonEmptyStr("mng"), url="https://github.com/imbue-ai/mng.git"),
+        VendorRepoConfig(name=NonEmptyStr("lib"), path="/existing/lib"),
+    )
+    result = apply_vendor_overrides(configs)
+    assert len(result) == 3
+    assert result[0].name == "mng"
+    assert result[0].url == "https://github.com/imbue-ai/mng.git"
+    assert result[1].name == "lib"
+    assert result[1].path == "/existing/lib"
+    assert result[2].name == "other"
+    assert result[2].path == "/other/path"
 
 
 def test_vendor_repos_remote_adds_subtree(tmp_path: Path) -> None:

@@ -1,0 +1,16 @@
+{
+    "autofix": {
+        "is_enabled": true,
+        "append_to_prompt": ""
+    },
+    "verify_conversation": {
+        "is_enabled": true,
+        "include_tracked_sessions": true,
+        "include_current_session": true,
+        "include_all_agent_sessions": true,
+        "include_subagents": true
+    },
+    "ci": {
+        "is_enabled": true
+    }
+}

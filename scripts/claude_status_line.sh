@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Status line script for Claude Code
-# Outputs: [time user@host dir] branch | PR: url (status) | Issues: N
+# Outputs: [time user@host dir] branch | PR: url (status)
 
 # Get basic info
 TIME=$(date +%H:%M:%S)
@@ -27,21 +27,6 @@ if [[ -f .claude/pr_status ]]; then
     PR_STATUS=$(cat .claude/pr_status 2>/dev/null || echo "")
 fi
 
-# Count serious issues from .reviews/final_issue_json/*.json
-# Serious issues: severity is CRITICAL or MAJOR and confidence >= 0.7
-# Note: Files are JSONL format (one JSON object per line), so use jq -s to slurp into array
-ISSUES_COUNT=0
-REVIEW_DIR=".reviews/final_issue_json"
-if [[ -d "$REVIEW_DIR" ]]; then
-    for json_file in "$REVIEW_DIR"/*.json; do
-        if [[ -f "$json_file" ]]; then
-            # Use jq -s to slurp JSONL lines into array, then count matching issues
-            COUNT=$(jq -s '[.[] | select((.severity == "CRITICAL" or .severity == "MAJOR") and .confidence >= 0.7)] | length' "$json_file" 2>/dev/null || echo 0)
-            ISSUES_COUNT=$((ISSUES_COUNT + COUNT))
-        fi
-    done
-fi
-
 # Build the status line
 STATUS_LINE="[$TIME $USER@$HOST $DIR]"
 
@@ -57,11 +42,6 @@ if [[ -n "$PR_URL" ]]; then
     else
         STATUS_LINE="$STATUS_LINE | PR: $PR_URL"
     fi
-fi
-
-# Add issues count if there are serious issues
-if [[ $ISSUES_COUNT -gt 0 ]]; then
-    STATUS_LINE="$STATUS_LINE | Issues: $ISSUES_COUNT"
 fi
 
 printf '%s' "$STATUS_LINE"

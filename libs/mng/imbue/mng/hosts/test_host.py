@@ -21,6 +21,8 @@ import pluggy
 import pytest
 from pyinfra.api.command import StringCommand
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -447,6 +449,69 @@ def test_lock_timeout(host_with_temp_dir: tuple[Host, Path]) -> None:
         thread.join()
 
 
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_removes_lock_file_on_error(
+    ssh_host_factory: Callable[[str], Host],
+) -> None:
+    """Remote host lock_cooperatively should remove the lock file when an error occurs."""
+    host = ssh_host_factory("lock-err-cleanup")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with pytest.raises(RuntimeError):
+        with host.lock_cooperatively(timeout_seconds=5.0):
+            # Verify the lock file was created
+            result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+            assert "exists" in result.stdout
+            raise RuntimeError("simulated failure")
+
+    # After the error, the lock file should have been removed
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "missing" in result.stdout
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
+    ssh_host_factory: Callable[[str], Host],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remote host lock_cooperatively should retain the lock file on error when MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
+    monkeypatch.setenv("MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
+    host = ssh_host_factory("lock-err-retain")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with pytest.raises(RuntimeError):
+        with host.lock_cooperatively(timeout_seconds=5.0):
+            raise RuntimeError("simulated failure")
+
+    # With the env var set, the lock file should still exist
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "exists" in result.stdout
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_removes_lock_file_on_success(
+    ssh_host_factory: Callable[[str], Host],
+) -> None:
+    """Remote host lock_cooperatively should remove the lock file on successful exit."""
+    host = ssh_host_factory("lock-success")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with host.lock_cooperatively(timeout_seconds=5.0):
+        # Lock file should exist while locked
+        result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+        assert "exists" in result.stdout
+
+    # After successful exit, the lock file should be removed
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "missing" in result.stdout
+
+
 # =============================================================================
 # Certified Data Tests
 # =============================================================================
@@ -645,6 +710,7 @@ def test_unset_vars_applied_during_agent_start(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that unset_vars config is applied when starting agents."""
     config_with_unset = MngConfig(
@@ -653,7 +719,12 @@ def test_unset_vars_applied_during_agent_start(
         unset_vars=["HISTFILE", "PROFILE"],
     )
 
-    mng_ctx_with_unset = MngContext(config=config_with_unset, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx_with_unset = MngContext(
+        config=config_with_unset,
+        pm=plugin_manager,
+        profile_dir=temp_profile_dir,
+        concurrency_group=active_concurrency_group,
+    )
     provider_with_unset = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -761,10 +832,13 @@ def test_stop_agent_kills_single_pane_processes(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that stop_agents kills all processes in a single-pane session."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -816,10 +890,13 @@ def test_stop_agent_kills_multi_pane_processes(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that stop_agents kills all processes in a multi-pane session."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -879,10 +956,13 @@ def test_start_agent_creates_process_group(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents creates tmux sessions in their own process group."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -937,10 +1017,13 @@ def test_start_agent_starts_process_activity_monitor(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents launches a process activity monitor that writes PROCESS activity."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1001,23 +1084,11 @@ def test_start_agent_starts_process_activity_monitor(
 
 
 def test_additional_commands_stored_in_agent_data(
-    temp_host_dir: Path,
-    per_host_dir: Path,
+    host_with_temp_dir: tuple[Host, Path],
     temp_work_dir: Path,
-    temp_profile_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-    mng_test_prefix: str,
 ) -> None:
     """Test that additional_commands are stored in the agent's data.json."""
-    config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
-    provider = LocalProviderInstance(
-        name=ProviderInstanceName("local"),
-        host_dir=per_host_dir,
-        mng_ctx=mng_ctx,
-    )
-    host = provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
+    host, _temp_dir = host_with_temp_dir
 
     agent = host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -1051,10 +1122,13 @@ def test_start_agent_creates_additional_tmux_windows(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents creates additional tmux windows for additional_commands."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1109,10 +1183,13 @@ def test_start_agent_additional_windows_run_commands(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that additional tmux windows actually run the specified commands."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1395,10 +1472,12 @@ def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[H
         ),
     )
 
-    with pytest.raises(MngError) as exc_info:
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
         host.provision_agent(agent, options, host.mng_ctx)
 
-    assert "User command failed" in str(exc_info.value)
+    assert exc_info.value.main_exception is not None
+    assert isinstance(exc_info.value.main_exception, MngError)
+    assert "User command failed" in str(exc_info.value.main_exception)
 
 
 def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path], tmp_path: Path) -> None:
@@ -2087,6 +2166,7 @@ def test_start_agent_has_access_to_env_vars(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that started agents have access to environment variables.
 
@@ -2095,7 +2175,9 @@ def test_start_agent_has_access_to_env_vars(
     that prints an env var to a file to verify this.
     """
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -2152,6 +2234,7 @@ def test_new_tmux_window_inherits_env_vars(
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
     tmp_home_dir: Path,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that new tmux windows created by the user also have env vars.
 
@@ -2169,7 +2252,9 @@ def test_new_tmux_window_inherits_env_vars(
     (tmp_home_dir / ".bashrc").write_text(f"PS1='{prompt_sentinel} '\n")
 
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,

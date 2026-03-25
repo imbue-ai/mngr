@@ -34,13 +34,16 @@ class LocalVolume(BaseVolume):
         resolved = self._resolve(path)
         if not resolved.is_dir():
             return []
+        # Use the resolved root so that relative_to works even when
+        # root_path is (or traverses) a symlink.
+        root_resolved = self.root_path.resolve()
         entries: list[VolumeFile] = []
         for child in sorted(resolved.iterdir()):
             stat = child.stat()
             file_type = VolumeFileType.DIRECTORY if child.is_dir() else VolumeFileType.FILE
             entries.append(
                 VolumeFile(
-                    path=str(child.relative_to(self.root_path)),
+                    path=str(child.resolve().relative_to(root_resolved)),
                     file_type=file_type,
                     mtime=int(stat.st_mtime),
                     size=stat.st_size,

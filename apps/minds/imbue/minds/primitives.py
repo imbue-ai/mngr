@@ -1,6 +1,17 @@
+from enum import auto
+
 from pydantic import SecretStr
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+
+
+class LaunchMode(UpperCaseStrEnum):
+    """How a mind agent should be launched."""
+
+    LOCAL = auto()
+    CLOUD = auto()
+    DEV = auto()
 
 
 class AgentName(NonEmptyStr):

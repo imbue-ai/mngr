@@ -195,12 +195,7 @@ class OnlineHostInterface(HostInterface, ABC):
         ...
 
     @abstractmethod
-    def write_file(
-        self,
-        path: Path,
-        content: bytes,
-        mode: str | None = None,
-    ) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes content to a file."""
         ...
 
@@ -855,7 +850,7 @@ class NewHostOptions(FrozenModel):
         description="Name for the new host (None means use provider default or auto-generate)",
     )
     name_style: HostNameStyle = Field(
-        default=HostNameStyle.ASTRONOMY,
+        default=HostNameStyle.COOLNAME,
         description="Style for auto-generated host name (used when name is None and provider has no default)",
     )
     tags: dict[str, str] = Field(

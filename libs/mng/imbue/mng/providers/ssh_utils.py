@@ -4,6 +4,7 @@ import socket
 import time
 from pathlib import Path
 
+import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -179,19 +180,31 @@ def add_host_to_known_hosts(
 def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> None:
     """Wait for sshd to be ready to accept connections.
 
-    Uses socket timeouts to pace connection attempts without explicit sleep calls.
+    Attempts a full SSH transport handshake (key exchange) rather than just
+    checking for the SSH banner. This prevents race conditions where the banner
+    is available but the key exchange hasn't completed yet, which causes
+    "No existing session" errors on the subsequent real connection.
     """
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.settimeout(2.0)
-                sock.connect((hostname, port))
-                banner = sock.recv(256)
-                if banner.startswith(b"SSH-"):
-                    return
-            except (socket.error, socket.timeout):
-                pass
+        transport = None
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(min(5.0, max(1.0, timeout_seconds - (time.time() - start_time))))
+            sock.connect((hostname, port))
+            transport = paramiko.Transport(sock)
+            transport.connect()
+            return
+        except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
+            pass
+        finally:
+            if transport is not None:
+                try:
+                    transport.close()
+                except (OSError, paramiko.SSHException):
+                    pass
+            else:
+                sock.close()
     raise MngError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 

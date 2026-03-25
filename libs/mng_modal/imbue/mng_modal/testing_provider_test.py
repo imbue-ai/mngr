@@ -1089,7 +1089,7 @@ def test_create_host_raises_on_ssh_setup_failure(
     Modal), but SSH setup fails because the testing sandbox can't start sshd
     as a non-root user. This verifies the error propagation path.
     """
-    with pytest.raises((MngError, OSError)):
+    with pytest.raises((MngError, OSError, ExceptionGroup)):
         testing_provider.create_host(HostName("will-fail"))
 
 

@@ -3,7 +3,6 @@ import json
 import queue
 import re
 import shlex
-import subprocess
 import tempfile
 import threading
 import time
@@ -14,7 +13,6 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import IO
 from uuid import uuid4
 
 from loguru import logger
@@ -26,7 +24,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.connect import build_ssh_base_args
 from imbue.mng.api.discover import discover_all_hosts_and_agents
 from imbue.mng.api.find import resolve_agent_reference
 from imbue.mng.api.find import resolve_host_reference
@@ -40,8 +37,6 @@ from imbue.mng.interfaces.volume import Volume
 from imbue.mng.primitives import HostId
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.cel_utils import apply_cel_filters_to_context
-from imbue.mng.utils.interactive_subprocess import popen_interactive_subprocess
-from imbue.mng.utils.polling import run_periodically
 
 FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
@@ -302,220 +297,23 @@ def _read_event_content_via_host(
 
 
 # =============================================================================
-# Head/tail filtering
+# Source filtering
 # =============================================================================
 
 
 @pure
-def apply_head_or_tail(
-    content: str,
-    head_count: int | None,
-    tail_count: int | None,
-) -> str:
-    """Apply head or tail line filtering to content."""
-    if head_count is None and tail_count is None:
-        return content
-    lines = content.splitlines(keepends=True)
-    if head_count is not None:
-        lines = lines[:head_count]
-    else:
-        # tail_count is guaranteed non-None here (early return above handles both-None case)
-        assert tail_count is not None
-        lines = lines[-tail_count:]
-    return "".join(lines)
+def filter_sources_by_name(
+    sources: list[EventSourceInfo],
+    source_filters: Sequence[str],
+) -> list[EventSourceInfo]:
+    """Filter event sources to only those matching the given source names.
 
-
-# =============================================================================
-# Follow event file
-# =============================================================================
-
-
-class _FollowState(MutableModel):
-    """Mutable state for the follow polling loop."""
-
-    previous_length: int = Field(description="Length of content at last check")
-
-
-def _check_for_new_content(
-    target: EventsTarget,
-    event_file_name: str,
-    on_new_content: Callable[[str], None],
-    state: _FollowState,
-) -> bool:
-    """Check for new content and emit it. Always returns False to keep polling."""
-    try:
-        current_content = read_event_content(target, event_file_name)
-    except (MngError, OSError) as e:
-        logger.trace("Failed to read event file during follow: {}", e)
-        return False
-    current_length = len(current_content)
-    if current_length > state.previous_length:
-        new_content = current_content[state.previous_length :]
-        on_new_content(new_content)
-        state.previous_length = current_length
-    elif current_length < state.previous_length:
-        # File was truncated, re-read from the start
-        logger.debug("Event file was truncated, re-reading from start")
-        on_new_content(current_content)
-        state.previous_length = current_length
-    else:
-        pass
-    return False
-
-
-def follow_event_file(
-    target: EventsTarget,
-    event_file_name: str,
-    # Callback invoked with new content each time the file changes
-    on_new_content: Callable[[str], None],
-    tail_count: int | None,
-) -> None:
-    """Follow an event file, streaming new content as it appears.
-
-    When the target has an online host, uses tail -f for real-time streaming
-    (locally or via SSH). Otherwise falls back to volume-based polling.
+    If source_filters is empty, returns all sources unchanged.
     """
-    # Prefer host-based tail -f for real-time streaming
-    if target.online_host is not None and target.events_path is not None:
-        _follow_event_file_via_host(
-            target.online_host,
-            target.events_path / event_file_name,
-            on_new_content,
-            tail_count,
-        )
-        return
-
-    # Fall back to volume-based polling
-    if target.volume is not None:
-        _follow_event_file_via_volume(target, event_file_name, on_new_content, tail_count)
-        return
-
-    raise MngError(f"Cannot follow event file for {target.display_name}: no volume or online host available")
-
-
-def _follow_event_file_via_volume(
-    target: EventsTarget,
-    event_file_name: str,
-    on_new_content: Callable[[str], None],
-    tail_count: int | None,
-) -> None:
-    """Follow an event file using volume-based polling."""
-    assert target.volume is not None
-
-    # Read initial content
-    try:
-        content = read_event_content(target, event_file_name)
-    except (MngError, OSError) as e:
-        logger.debug("Failed to read initial event content: {}", e)
-        content = ""
-
-    # Show initial content (with optional tail)
-    initial_content = apply_head_or_tail(content, head_count=None, tail_count=tail_count)
-    if initial_content:
-        on_new_content(initial_content)
-
-    state = _FollowState(previous_length=len(content))
-
-    # Run indefinitely until interrupted (KeyboardInterrupt propagates out)
-    run_periodically(
-        fn=lambda: _check_for_new_content(target, event_file_name, on_new_content, state),
-        interval=FOLLOW_POLL_INTERVAL_SECONDS,
-    )
-
-
-def _follow_event_file_via_host(
-    online_host: OnlineHostInterface,
-    event_file_path: Path,
-    on_new_content: Callable[[str], None],
-    tail_count: int | None,
-) -> None:
-    """Follow an event file using tail -f on the host (locally or via SSH).
-
-    For local hosts, runs tail -f directly as a subprocess.
-    For remote hosts, runs tail -f via SSH for real-time streaming.
-    """
-    tail_args = _build_tail_args(event_file_path, tail_count)
-
-    if online_host.is_local:
-        # Local host: run tail directly
-        cmd = tail_args
-    else:
-        # Remote host: wrap in SSH
-        tail_cmd_str = " ".join(shlex.quote(a) for a in tail_args)
-        ssh_args = build_ssh_base_args(online_host)
-        cmd = ssh_args + [tail_cmd_str]
-
-    logger.debug("Following event file via host: {}", " ".join(cmd))
-
-    # Retry loop: if the file doesn't exist yet, wait and try again.
-    # This handles the race where we start following before the file is created.
-    _RETRY_DELAY_SECONDS = 2.0
-    has_logged = False
-    attempt = 0
-    while attempt < float("inf"):
-        attempt += 1
-        process = popen_interactive_subprocess(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            assert process.stdout is not None
-            assert process.stderr is not None
-
-            # Drain stderr in a background thread to prevent pipe buffer deadlock
-            stderr_chunks: list[bytes] = []
-            stderr_thread = threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_chunks), daemon=True)
-            stderr_thread.start()
-
-            # Stream stdout line by line
-            for raw_line in iter(process.stdout.readline, b""):
-                on_new_content(raw_line.decode("utf-8", errors="replace"))
-
-            # The stdout loop ended because the process exited; check for errors
-            process.wait()
-            stderr_thread.join(timeout=5)
-            if process.returncode != 0:
-                stderr_output = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-                if "No such file or directory" in stderr_output:
-                    if not has_logged:
-                        logger.info("Event file not found yet, retrying in {}s", _RETRY_DELAY_SECONDS)
-                        has_logged = True
-                    # FIXME: remove this--this is effectively a sleep.  Also, make a ratchet that prevents future such constructs (eg, ratchet against "Event().wait(")
-                    #  Instead, here we should just be using tenacity to continually retry this type of error, log when it happens once, etc
-                    threading.Event().wait(timeout=_RETRY_DELAY_SECONDS)
-                    continue
-                raise MngError(
-                    f"Failed to follow event file (exit code {process.returncode}): {stderr_output.strip()}"
-                )
-            return
-        except KeyboardInterrupt:
-            raise
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-
-
-def _drain_pipe(pipe: IO[bytes], chunks: list[bytes]) -> None:
-    """Read all data from a pipe and append to chunks. Used as a thread target."""
-    chunks.append(pipe.read())
-
-
-@pure
-def _build_tail_args(event_file_path: Path, tail_count: int | None) -> list[str]:
-    """Build the command-line args for tail -f."""
-    args = ["tail"]
-    if tail_count is not None:
-        args.extend(["-n", str(tail_count)])
-    else:
-        # Show entire file then follow (equivalent to cat + tail -f)
-        args.extend(["-n", "+1"])
-    args.extend(["-f", str(event_file_path)])
-    return args
+    if not source_filters:
+        return sources
+    allowed = set(source_filters)
+    return [s for s in sources if s.source_path in allowed]
 
 
 # =============================================================================
@@ -883,10 +681,11 @@ def _collect_historical_events(
     state: _AllEventsStreamState,
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
+    source_filters: Sequence[str],
 ) -> tuple[list[EventRecord], list[EventSourceInfo], dict[str, int]]:
     """Discover sources and read all historical/archived events (Phases 1 and 3)."""
     with log_span("Reading historical events for {}", target.display_name):
-        sources = discover_event_sources(target)
+        sources = filter_sources_by_name(discover_event_sources(target), source_filters)
         all_events, initial_byte_offsets = read_all_historical_events(
             target, sources, cel_include_filters, cel_exclude_filters
         )
@@ -956,6 +755,7 @@ def stream_all_events(
     tail_count: int | None,
     head_count: int | None,
     is_follow: bool,
+    source_filters: Sequence[str] = (),
 ) -> None:
     """Stream all events from all sources."""
     state = _AllEventsStreamState(
@@ -970,7 +770,7 @@ def stream_all_events(
     try:
         # Discover sources and read all historical events
         all_events, sources, initial_byte_offsets = _collect_historical_events(
-            target, state, cel_include_filters, cel_exclude_filters
+            target, state, cel_include_filters, cel_exclude_filters, source_filters
         )
 
         # Start tail threads for follow mode
@@ -990,7 +790,7 @@ def stream_all_events(
         # Rotation guard: re-scan for newly rotated files that appeared during startup
         with log_span("Checking for newly rotated files"):
             rotation_guard_events = _check_for_new_archived_events(
-                target, state, cel_include_filters, cel_exclude_filters
+                target, state, cel_include_filters, cel_exclude_filters, source_filters
             )
             all_events.extend(rotation_guard_events)
             all_events = sort_events_by_timestamp(all_events)
@@ -1012,6 +812,7 @@ def stream_all_events(
             stop_event=stop_event,
             tail_threads=tail_threads,
             offset_dir_path=Path(offset_dir.name) if offset_dir is not None else None,
+            source_filters=source_filters,
         )
 
     finally:
@@ -1027,6 +828,7 @@ def _check_for_new_archived_events(
     state: _AllEventsStreamState,
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
+    source_filters: Sequence[str] = (),
 ) -> list[EventRecord]:
     """Re-scan for rotated files that appeared since the initial scan.
 
@@ -1035,7 +837,7 @@ def _check_for_new_archived_events(
     are read and their events returned.
     """
     try:
-        current_sources = discover_event_sources(target)
+        current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
     except (MngError, OSError) as e:
         logger.trace("Failed to re-scan for rotated files: {}", e)
         return []
@@ -1236,6 +1038,7 @@ def _consume_event_queue(
     stop_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
+    source_filters: Sequence[str] = (),
 ) -> None:
     """Consume events from the queue, periodically re-scanning for new sources and checking online/offline."""
     state.last_source_scan_time = time.monotonic()
@@ -1259,6 +1062,7 @@ def _consume_event_queue(
                     stop_event=stop_event,
                     tail_threads=tail_threads,
                     offset_dir_path=offset_dir_path,
+                    source_filters=source_filters,
                 )
                 state.last_source_scan_time = now
 
@@ -1294,10 +1098,11 @@ def _rescan_and_start_new_tail_threads(
     stop_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
+    source_filters: Sequence[str] = (),
 ) -> None:
     """Re-scan for new event source directories and start tail threads for them."""
     try:
-        current_sources = discover_event_sources(target)
+        current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
     except (MngError, OSError) as e:
         logger.trace("Failed to re-scan event sources: {}", e)
         return

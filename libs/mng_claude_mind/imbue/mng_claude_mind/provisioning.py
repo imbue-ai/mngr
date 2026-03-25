@@ -7,6 +7,7 @@ from typing import Any
 from typing import Final
 
 import tomlkit
+import tomlkit.exceptions
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span

@@ -37,6 +37,7 @@ class MockProviderInstance(BaseProviderInstance):
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
     deleted_hosts: list[HostId] = Field(default_factory=list)
+    deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -104,7 +105,8 @@ class MockProviderInstance(BaseProviderInstance):
         raise NotImplementedError()
 
     def delete_snapshot(self, host: HostInterface | HostId, snapshot_id: SnapshotId) -> None:
-        raise NotImplementedError()
+        host_id = host.id if isinstance(host, HostInterface) else host
+        self.deleted_snapshots.append((host_id, snapshot_id))
 
     def list_volumes(self) -> list[VolumeInfo]:
         return []

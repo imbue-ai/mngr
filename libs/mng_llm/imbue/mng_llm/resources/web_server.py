@@ -642,9 +642,9 @@ def _get_most_recent_conversation_id() -> str | None:
 
 
 def _get_default_chat_model() -> str:
-    """Read the default chat model from minds.toml, falling back to claude-opus-4.6."""
+    """Read the default chat model from minds.toml, falling back to claude-haiku-4.5."""
     if not AGENT_WORK_DIR:
-        return "claude-opus-4.6"
+        return "claude-haiku-4.5"
     settings_path = Path(AGENT_WORK_DIR) / "minds.toml"
     try:
         if settings_path.exists():
@@ -654,7 +654,7 @@ def _get_default_chat_model() -> str:
                 return str(model)
     except (OSError, tomllib.TOMLDecodeError) as e:
         _log(f"Failed to load chat model from settings: {e}")
-    return "claude-opus-4.6"
+    return "claude-haiku-4.5"
 
 
 def _build_template() -> str | None:

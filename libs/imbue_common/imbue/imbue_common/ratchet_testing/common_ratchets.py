@@ -293,7 +293,7 @@ PREVENT_FSTRING_LOGGING = RegexRatchetRule(
         "Do not use f-strings with loguru. Use loguru-style placeholder syntax instead: "
         "logger.info('message {}', var) instead of logger.info(f'message {var}')"
     ),
-    pattern_string=r"logger\.(trace|debug|info|warning|error|exception)\(f",
+    pattern_string=r"logger\.(trace|debug|info|warning|error|exception)\(f[\"']",
 )
 
 PREVENT_CLICK_ECHO = RegexRatchetRule(

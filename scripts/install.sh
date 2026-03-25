@@ -206,6 +206,23 @@ else
     esac
 fi
 
+# ── Verify bash 4+ is on PATH (post-install) ─────────────────────────────────
+# Re-check after deps were installed. Collect warnings for printing at the end
+# (see DEFERRED_WARNINGS below).
+
+DEFERRED_WARNINGS=""
+
+if [ "$_NEED_MODERN_BASH" = true ]; then
+    _POST_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
+    if [ "$_POST_BASH_VER" -lt 4 ] 2>/dev/null; then
+        if [ "$OS" = "macos" ]; then
+            DEFERRED_WARNINGS="${DEFERRED_WARNINGS}PATH-resolved bash is still version $_POST_BASH_VER after install.\nEnsure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH.\n"
+        else
+            DEFERRED_WARNINGS="${DEFERRED_WARNINGS}PATH-resolved bash is still version $_POST_BASH_VER after install.\nEnsure the newly installed bash is before the old one in your PATH.\n"
+        fi
+    fi
+fi
+
 # ── Verify uv is available ─────────────────────────────────────────────────────
 
 if ! command -v uv &>/dev/null; then
@@ -223,6 +240,10 @@ info "Installing mng..."
 uv tool install mng
 
 MNG_BIN="$(uv tool dir --bin)/mng"
+
+if ! command -v mng &>/dev/null; then
+    DEFERRED_WARNINGS="${DEFERRED_WARNINGS}mng was installed but is not on PATH.\nYou may need to add ~/.local/bin to your PATH:\n  export PATH=\"\$HOME/.local/bin:\$PATH\"\n"
+fi
 
 # ── Plugin install wizard ─────────────────────────────────────────────────────
 
@@ -271,29 +292,14 @@ else
     esac
 fi
 
-# ── Post-install warnings ─────────────────────────────────────────────────────
+info "Get started with: mng --help"
+
 # IMPORTANT: Instructions that require user action after installation (e.g.
 # adding something to PATH) must always be printed last, so they remain visible
-# when the script exits. Do not add informational output after this section.
-
-# Re-check bash version after deps were installed. Warn if still too old.
-if [ "$_NEED_MODERN_BASH" = true ]; then
-    _POST_BASH_VER="$(bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null || echo 0)"
-    if [ "$_POST_BASH_VER" -lt 4 ] 2>/dev/null; then
-        if [ "$OS" = "macos" ]; then
-            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
-            warn "Ensure /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel) is before /bin in your PATH."
-        else
-            warn "PATH-resolved bash is still version $_POST_BASH_VER after install."
-            warn "Ensure the newly installed bash is before the old one in your PATH."
-        fi
-    fi
+# when the script exits.
+if [ -n "$DEFERRED_WARNINGS" ]; then
+    printf "\n"
+    printf "%b" "$DEFERRED_WARNINGS" | while IFS= read -r line; do
+        warn "$line"
+    done
 fi
-
-if ! command -v mng &>/dev/null; then
-    warn "mng was installed but is not on PATH."
-    warn "You may need to add ~/.local/bin to your PATH:"
-    printf '  export PATH="$HOME/.local/bin:$PATH"\n'
-fi
-
-info "Get started with: mng --help"

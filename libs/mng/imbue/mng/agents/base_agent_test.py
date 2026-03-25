@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1009,13 +1010,17 @@ class _StubHost:
 def _create_agent_with_stub_host(
     temp_mng_ctx: MngContext,
     stub: _StubHost,
+    cls: type[BaseAgent] = BaseAgent,
+    **kwargs: Any,
 ) -> BaseAgent:
-    """Create a BaseAgent that uses a stub host for command recording.
+    """Create an agent with a stub host for command recording.
 
     Uses model_construct to bypass Pydantic validation so the stub host
     (which does not implement the full OnlineHostInterface) can be used.
+    Accepts a cls parameter to create subclass instances and **kwargs
+    for additional fields (e.g. enter_submission_timeout_seconds).
     """
-    return BaseAgent.model_construct(
+    return cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("stub-agent"),
         agent_type=AgentTypeName("test"),
@@ -1025,6 +1030,7 @@ def _create_agent_with_stub_host(
         host=stub,
         mng_ctx=temp_mng_ctx,
         agent_config=AgentTypeConfig(command=CommandString("sleep 1000")),
+        **kwargs,
     )
 
 

@@ -23,8 +23,8 @@ from imbue.minds.errors import MngCommandError
 from imbue.minds.forwarding_server.agent_creator import load_creation_settings
 from imbue.minds.forwarding_server.parent_tracking import fetch_and_merge_parent
 from imbue.minds.forwarding_server.parent_tracking import read_parent_info
+from imbue.minds.forwarding_server.vendor_mng import apply_vendor_overrides
 from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
-from imbue.minds.forwarding_server.vendor_mng import find_mng_repo_root
 from imbue.minds.forwarding_server.vendor_mng import update_vendor_repos
 from imbue.mng.primitives import AgentId
 
@@ -137,8 +137,7 @@ def update(agent_name: str) -> None:
 
     logger.info("Updating vendored subtrees...")
     settings = load_creation_settings(record.work_dir)
-    mng_repo_root = find_mng_repo_root()
-    vendor_configs = settings.vendor if settings.vendor else default_vendor_configs(mng_repo_root)
+    vendor_configs = apply_vendor_overrides(settings.vendor if settings.vendor else default_vendor_configs())
     update_vendor_repos(record.work_dir, vendor_configs)
     logger.info("Vendored subtrees updated ({} configured)", len(vendor_configs))
 

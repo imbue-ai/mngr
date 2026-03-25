@@ -1,12 +1,15 @@
 import json
 import os
 import re
+import selectors
 import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import time
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -15,6 +18,7 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Final
+from typing import IO
 from uuid import uuid4
 
 import pluggy
@@ -227,20 +231,120 @@ def get_subprocess_test_env(
     return env
 
 
+def _get_test_verbose_level() -> int:
+    """Read the test verbosity level from the MNG_TEST_VERBOSE env var.
+
+    Returns the number of -v flags to inject (0, 1, or 2).
+    Reads from the *current* process environment, not the subprocess env.
+    """
+    raw = os.environ.get("MNG_TEST_VERBOSE", "0")
+    try:
+        return max(0, min(int(raw), 2))
+    except ValueError:
+        return 0
+
+
 def run_mng_subprocess(
     *args: str,
     timeout: float = 120,
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    verbose: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a mng CLI command via subprocess."""
-    return subprocess.run(
-        ["uv", "run", "mng", *args],
-        capture_output=True,
+    """Run a mng CLI command via subprocess, streaming output with a prefix.
+
+    Output from the subprocess is printed to the test's stdout/stderr in
+    real-time, prefixed with the mng command name so it is easy to
+    distinguish from the outer test output.  The full stdout and stderr
+    are still captured and returned in the CompletedProcess.
+
+    The verbose parameter controls how many -v flags are injected into the
+    mng command. If None (the default), the value is read from the
+    MNG_TEST_VERBOSE environment variable (0, 1, or 2).
+    """
+    if verbose is None:
+        verbose = _get_test_verbose_level()
+
+    # Inject verbose flags after the subcommand name (click requires
+    # options to follow their command, not the top-level group).
+    args_list = list(args)
+    verbose_flags = ["-v"] * verbose
+    first_positional_idx = next(
+        (i for i, a in enumerate(args_list) if not a.startswith("-")),
+        0,
+    )
+    # Insert after the first positional arg (the subcommand name)
+    insert_at = first_positional_idx + 1
+    for i, flag in enumerate(verbose_flags):
+        args_list.insert(insert_at + i, flag)
+    cmd = ["uv", "run", "mng", *args_list]
+
+    # Determine a short label for the prefix from the first non-flag arg
+    command_label = next((a for a in args if not a.startswith("-")), "mng")
+    prefix = f"[mng {command_label}] "
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
         env=env,
         cwd=cwd,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    deadline = time.monotonic() + timeout
+
+    # Map file objects to their stream name for the select loop.
+    # We track the IO objects separately from the selector to avoid
+    # type narrowing issues with SelectorKey.fileobj.
+    streams: dict[int, tuple[IO[str], str]] = {}
+    sel = selectors.DefaultSelector()
+    if proc.stdout is not None:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        streams[proc.stdout.fileno()] = (proc.stdout, "stdout")
+    if proc.stderr is not None:
+        sel.register(proc.stderr, selectors.EVENT_READ)
+        streams[proc.stderr.fileno()] = (proc.stderr, "stderr")
+
+    try:
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            ready = sel.select(timeout=min(0.1, remaining))
+            for key, _ in ready:
+                fd = key.fd
+                stream_io, stream_name = streams[fd]
+                line = stream_io.readline()
+                if not line:
+                    sel.unregister(key.fileobj)
+                    continue
+                if stream_name == "stdout":
+                    stdout_lines.append(line)
+                else:
+                    stderr_lines.append(line)
+                sys.stderr.write(f"{prefix}{line}")
+                sys.stderr.flush()
+    finally:
+        sel.close()
+
+    remaining = deadline - time.monotonic()
+    try:
+        proc.wait(timeout=max(0, remaining))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise subprocess.TimeoutExpired(cmd, timeout) from None
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
     )
 
 

@@ -428,7 +428,7 @@ def test_run_background_partial_line_handling() -> None:
 
 def test_run_background_thread_safety() -> None:
     """Test that RunningProcess is thread-safe for concurrent access."""
-    process = run_background(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 0.02; done"])
+    process = run_background(["sh", "-c", "for i in 1 2 3; do echo $i; done"])
 
     results: dict[str, list] = {"poll": [], "is_finished": [], "stdout": [], "stderr": []}
     errors: list[Exception] = []

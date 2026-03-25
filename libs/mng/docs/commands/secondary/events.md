@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng events TARGET [EVENT_FILE] [--filter CEL] [--follow] [--tail N] [--head N]
+mng events TARGET [SOURCES...] [--source SOURCE] [--filter CEL] [--follow] [--tail N] [--head N]
 ```
 
 View events from an agent or host.
@@ -14,11 +14,10 @@ View events from an agent or host.
 TARGET identifies an agent (by name or ID) or a host (by name or ID).
 The command first tries to match TARGET as an agent, then as a host.
 
-If EVENT_FILE is not specified, streams all events from all sources in
-date-sorted order. Use --filter to restrict which events are included
-via a CEL expression. Use --follow to continuously stream new events.
-
-If EVENT_FILE is specified, prints its contents directly.
+Streams all events from all sources in date-sorted order. Use --source
+or positional SOURCES arguments to restrict which event sources to include.
+Use --filter to further restrict events via a CEL expression. Use --follow
+to continuously stream new events.
 
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
@@ -28,12 +27,12 @@ Press Ctrl+C to stop.
 **Usage:**
 
 ```text
-mng events [OPTIONS] TARGET [EVENT_FILENAME]
+mng events [OPTIONS] TARGET [SOURCES]...
 ```
 ## Arguments
 
 - `TARGET`: Agent or host name/ID whose events to view
-- `EVENT_FILE`: Name of a specific event file to view (optional; streams all events if omitted)
+- `SOURCES`: Event sources to include (optional; includes all sources if omitted). These are paths relative to the target's events/ directory (e.g. 'messages', 'logs/mng').
 
 **Options:**
 
@@ -42,13 +41,14 @@ mng events [OPTIONS] TARGET [EVENT_FILENAME]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--follow`, `--no-follow` | boolean | Continue running and print new events as they appear | `False` |
-| `--tail` | integer range | Print the last N events (or lines when viewing a specific file) | None |
-| `--head` | integer range | Print the first N events (or lines when viewing a specific file) | None |
+| `--tail` | integer range | Print the last N events | None |
+| `--head` | integer range | Print the first N events | None |
 
 ## Filtering
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--source` | text | Event source to include, relative to events/ (e.g. 'messages', 'logs/mng'). Can be repeated. | None |
 | `--filter` | text | CEL expression to filter which events to include (e.g. 'source == "messages"') | None |
 
 ## Common
@@ -84,7 +84,25 @@ $ mng events my-agent
 **Stream only message events**
 
 ```bash
-$ mng events my-agent --filter 'source == "messages"'
+$ mng events my-agent messages
+```
+
+**Stream events from multiple sources**
+
+```bash
+$ mng events my-agent messages logs/mng
+```
+
+**Same thing using --source**
+
+```bash
+$ mng events my-agent --source messages --source logs/mng
+```
+
+**Filter within a source**
+
+```bash
+$ mng events my-agent messages --filter 'data.role == "user"'
 ```
 
 **View last 100 events**
@@ -97,16 +115,4 @@ $ mng events my-agent --tail 100
 
 ```bash
 $ mng events my-agent --follow
-```
-
-**View a specific event file**
-
-```bash
-$ mng events my-agent messages/events.jsonl
-```
-
-**Follow a specific event file**
-
-```bash
-$ mng events my-agent messages/events.jsonl --follow
 ```

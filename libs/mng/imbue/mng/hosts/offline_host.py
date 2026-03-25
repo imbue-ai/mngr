@@ -142,7 +142,8 @@ class BaseHost(HostInterface):
 
     def get_tags(self) -> dict[str, str]:
         """Get tags from the provider."""
-        return self.provider_instance.get_host_tags(self)
+        all_data = self.get_certified_data()
+        return {**all_data.user_tags}
 
     # =========================================================================
     # Agent Information

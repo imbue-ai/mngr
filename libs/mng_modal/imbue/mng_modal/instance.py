@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -22,11 +23,13 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import trace_span
 from imbue.imbue_common.model_update import to_update
@@ -84,8 +87,10 @@ from imbue.mng.providers.ssh_host_setup import build_start_activity_watcher_comm
 from imbue.mng.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mng.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mng_modal.config import ModalProviderConfig
+from imbue.mng_modal.errors import ModalSandboxTimeoutMngError
 from imbue.mng_modal.errors import NoSnapshotsModalMngError
 from imbue.mng_modal.routes.deployment import deploy_function
+from imbue.mng_modal.routes.deployment import get_function_url
 from imbue.mng_modal.ssh_utils import add_host_to_known_hosts
 from imbue.mng_modal.ssh_utils import create_pyinfra_host
 from imbue.mng_modal.ssh_utils import load_or_create_host_keypair
@@ -100,6 +105,7 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import SandboxInterface
@@ -137,6 +143,17 @@ _MODAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("c8f1a2b3-d4e5-6789-abc
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+
+@pure
+def _is_sandbox_timeout(exc: BaseException) -> bool:
+    """Check if an exception (or its cause chain) indicates a Modal sandbox timeout."""
+    current: BaseException | None = exc
+    while current is not None:
+        if "SandboxTimeoutError" in type(current).__name__:
+            return True
+        current = current.__cause__
+    return False
 
 
 def _parse_volume_spec(spec: str) -> tuple[str, str]:
@@ -559,6 +576,12 @@ class ModalProviderInstance(BaseProviderInstance):
     _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
     # Cache for host records read from the volume to avoid repeated reads
     _host_record_cache_by_id: dict[HostId, HostRecord] = PrivateAttr(default_factory=dict)
+    # a reference to the ssh process, just in case we ever need it (and to prevent it from being garbage collected)
+    _ssh_process: ExecProcess | None = PrivateAttr(default=None)
+    # a list of *all* currently running sandboxes for this app
+    _full_sandbox_list_cache: list[SandboxInterface] | None = PrivateAttr(default=None)
+    # FIXME: this should be used to protect access to *all* of our cache variables, not just _full_sandbox_list_cache
+    _cache_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     config: ModalProviderConfig = Field(frozen=True, description="Modal provider configuration")
     modal_app: ModalProviderApp = Field(frozen=True, description="Modal app manager")
@@ -702,7 +725,8 @@ class ModalProviderInstance(BaseProviderInstance):
         volume = self.get_state_volume()
         host_id = HostId(host_record.certified_host_data.host_id)
         path = self._get_host_record_path(host_id)
-        data = host_record.model_dump_json(indent=2)
+        # FIXME: we need to make sure that this is the same in both places that this is called. This logic should move to a method on host_record, and we should update this and Host::set_certified_data to use that method as well, to ensure consistency.
+        data = host_record.model_dump_json(by_alias=True, indent=2)
 
         volume.write_files({path: data.encode("utf-8")})
         logger.trace("Wrote host record to volume: {}", path, host_data=data)
@@ -759,7 +783,10 @@ class ModalProviderInstance(BaseProviderInstance):
 
         try:
             data = volume.read_file(path)
-            host_record = HostRecord.model_validate_json(data)
+            try:
+                host_record = HostRecord.model_validate_json(data)
+            except ValidationError as e:
+                raise MngError(f"Failed to parse host record JSON for host_id={host_id}: {e}\n{data}") from e
             logger.trace("Read host record from volume: {}", path, host_data=data.decode("utf-8"))
             # Cache the result
             self._host_record_cache_by_id[host_id] = host_record
@@ -1049,8 +1076,11 @@ class ModalProviderInstance(BaseProviderInstance):
         )
         process = sandbox.exec("sh", "-c", check_install_cmd)
 
-        # Read output (implicitly waits for completion)
+        # Read output and check exit code
         stdout = process.get_stdout().read()
+        exit_code = process.wait()
+        if exit_code != 0:
+            raise MngError(f"Failed to install required packages (exit code {exit_code}): {stdout}")
 
         # Parse warnings from output and log them
         warnings = parse_warnings_from_output(stdout)
@@ -1075,39 +1105,45 @@ class ModalProviderInstance(BaseProviderInstance):
         All setup (except starting sshd) is done via a single shell command for
         speed and to allow reuse by other providers.
         """
-        # Check for required packages and install if missing
-        self._check_and_install_packages(sandbox)
+        with log_span("Checking for required packages"):
+            # Check for required packages and install if missing
+            self._check_and_install_packages(sandbox)
 
-        with log_span("Configuring SSH keys in sandbox", ssh_user=ssh_user):
-            # Build and execute the SSH configuration command
-            configure_ssh_cmd = build_configure_ssh_command(
-                user=ssh_user,
-                client_public_key=client_public_key,
-                host_private_key=host_private_key,
-                host_public_key=host_public_key,
-            )
-            sandbox.exec("sh", "-c", configure_ssh_cmd).wait()
+        with log_span("Configuring SSH and preparing sshd in sandbox", ssh_user=ssh_user):
+            # Build a single combined command for all SSH setup + sshd prep to minimize round trips
+            setup_parts: list[str] = [
+                build_configure_ssh_command(
+                    user=ssh_user,
+                    client_public_key=client_public_key,
+                    host_private_key=host_private_key,
+                    host_public_key=host_public_key,
+                ),
+            ]
 
-        # Add known_hosts entries for outbound SSH if specified
-        if known_hosts:
-            add_known_hosts_cmd = build_add_known_hosts_command(ssh_user, tuple(known_hosts))
-            if add_known_hosts_cmd is not None:
-                with log_span("Adding {} known_hosts entries to sandbox", len(known_hosts)):
-                    sandbox.exec("sh", "-c", add_known_hosts_cmd).wait()
+            if known_hosts:
+                add_known_hosts_cmd = build_add_known_hosts_command(ssh_user, tuple(known_hosts))
+                if add_known_hosts_cmd is not None:
+                    setup_parts.append(add_known_hosts_cmd)
 
-        if authorized_keys:
-            add_authorized_keys_cmd = build_add_authorized_keys_command(ssh_user, tuple(authorized_keys))
-            if add_authorized_keys_cmd is not None:
-                with log_span("Adding {} authorized_keys entries to sandbox", len(authorized_keys)):
-                    sandbox.exec("sh", "-c", add_authorized_keys_cmd).wait()
+            if authorized_keys:
+                add_authorized_keys_cmd = build_add_authorized_keys_command(ssh_user, tuple(authorized_keys))
+                if add_authorized_keys_cmd is not None:
+                    setup_parts.append(add_authorized_keys_cmd)
+
+            # Ensure the logs directory exists before sshd starts writing to it
+            sshd_log_path = f"{self.host_dir}/logs/sshd.log"
+            setup_parts.append(f"mkdir -p '{self.host_dir}/logs'")
+            setup_parts.append(f"mkdir -p '{self.host_dir}/events/logs'")
+
+            combined_cmd = " && ".join(setup_parts)
+            exit_code = sandbox.exec("sh", "-c", combined_cmd).wait()
+            if exit_code != 0:
+                raise MngError(f"Failed to configure SSH in sandbox (exit code {exit_code})")
 
         with log_span("Starting sshd in sandbox"):
-            sshd_log_path = f"{self.host_dir}/events/logs/sshd.log"
-            # Ensure the events/logs directory exists before sshd starts writing to it
-            sandbox.exec("mkdir", "-p", f"{self.host_dir}/events/logs").wait()
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
             # stdout/stderr are suppressed so Modal doesn't track them for performance/stability reasons.
-            sandbox.exec(
+            self._ssh_process = sandbox.exec(
                 "/usr/sbin/sshd",
                 "-D",
                 "-o",
@@ -1120,7 +1156,12 @@ class ModalProviderInstance(BaseProviderInstance):
 
     def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface) -> tuple[str, int]:
         """Extract SSH connection info from a running sandbox."""
-        tunnels = sandbox.tunnels()
+        try:
+            tunnels = sandbox.tunnels()
+        except ModalProxyError as e:
+            if _is_sandbox_timeout(e):
+                raise ModalSandboxTimeoutMngError("Sandbox failed to come online fast enough") from e
+            raise
         ssh_tunnel = tunnels[CONTAINER_SSH_PORT]
         return ssh_tunnel.tcp_socket
 
@@ -1131,6 +1172,39 @@ class ModalProviderInstance(BaseProviderInstance):
     def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
         return create_pyinfra_host(hostname, port, private_key_path, self._known_hosts_path)
+
+    def _create_host_data_records_in_modal(
+        self,
+        sandbox: SandboxInterface,
+        host_id: HostId,
+        host_name: HostName,
+        user_tags: Mapping[str, str] | None,
+        config: SandboxConfig,
+        host_data: CertifiedHostData,
+        ssh_host: str,
+        ssh_port: int,
+        host_public_key: str,
+    ):
+        # Set sandbox tags
+        sandbox_tags = self._build_sandbox_tags(
+            host_id=host_id,
+            name=host_name,
+            user_tags=user_tags,
+        )
+        with log_span("Setting sandbox tags: {}", list(sandbox_tags.keys())):
+            sandbox.set_tags(sandbox_tags)
+
+        # Create and write the initial host record to the volume
+        # This must happen BEFORE host.set_certified_data() because the callback
+        # _on_certified_host_data_updated expects the host record to already exist
+        host_record = HostRecord(
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+            ssh_host_public_key=host_public_key,
+            config=config,
+            certified_host_data=host_data,
+        )
+        self._write_host_record(host_record)
 
     def _setup_sandbox_ssh_and_create_host(
         self,
@@ -1151,98 +1225,128 @@ class ModalProviderInstance(BaseProviderInstance):
         Returns a tuple of (Host, ssh_host, ssh_port, host_public_key) so callers
         can use the SSH info for creating/updating host records.
         """
-        # Get SSH keypairs
-        private_key_path, client_public_key = self._get_ssh_keypair()
-        host_key_path, host_public_key = self._get_host_keypair()
-        host_private_key = host_key_path.read_text()
 
-        # Start sshd with our host key
-        self._start_sshd_in_sandbox(
-            sandbox,
-            client_public_key,
-            host_private_key,
-            host_public_key,
-            known_hosts=known_hosts,
-            authorized_keys=authorized_keys,
-        )
+        with self.mng_ctx.concurrency_group.make_concurrency_group("start ssh and create host") as concurrency_group:
+            # For persistent apps, deploy the snapshot function and create shutdown script
+            snapshot_url_future: Future[str] | None = None
+            if self.config.is_persistent:
+                snapshot_url_future = Future()
+                if os.environ.get("MNG_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
+                    # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
+                    #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
+                    concurrency_group.start_new_thread(
+                        _set_result,
+                        (
+                            snapshot_url_future,
+                            lambda: deploy_function(
+                                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                            ),
+                        ),
+                    )
+                else:
+                    concurrency_group.start_new_thread(
+                        _set_result,
+                        (
+                            snapshot_url_future,
+                            lambda: get_function_url(
+                                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+                            ),
+                        ),
+                    )
 
-        # Get SSH connection info
-        ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
-        logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
+            # Get SSH connection info
+            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
+            logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
 
-        # Add the host to our known_hosts file before waiting for sshd
-        with log_span("Adding host to known_hosts", ssh_host=ssh_host, ssh_port=ssh_port):
-            add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key)
+            # Get SSH keypairs
+            private_key_path, client_public_key = self._get_ssh_keypair()
+            host_key_path, host_public_key = self._get_host_keypair()
+            host_private_key = host_key_path.read_text()
 
-        # Wait for sshd to be ready
-        with log_span("Waiting for sshd to be ready..."):
-            self._wait_for_sshd(ssh_host, ssh_port)
-
-        # Set sandbox tags
-        sandbox_tags = self._build_sandbox_tags(
-            host_id=host_id,
-            name=host_name,
-            user_tags=user_tags,
-        )
-        with log_span("Setting sandbox tags: {}", list(sandbox_tags.keys())):
-            sandbox.set_tags(sandbox_tags)
-
-        # Create pyinfra host and connector
-        pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
-        connector = PyinfraConnector(pyinfra_host)
-
-        # Create and write the initial host record to the volume
-        # This must happen BEFORE host.set_certified_data() because the callback
-        # _on_certified_host_data_updated expects the host record to already exist
-        host_record = HostRecord(
-            ssh_host=ssh_host,
-            ssh_port=ssh_port,
-            ssh_host_public_key=host_public_key,
-            config=config,
-            certified_host_data=host_data,
-        )
-        self._write_host_record(host_record)
-
-        # Create the Host object with callback for future certified data updates
-        host = Host(
-            id=host_id,
-            connector=connector,
-            provider_instance=self,
-            mng_ctx=self.mng_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
-        )
-
-        # Record BOOT activity for idle detection
-        host.record_activity(ActivitySource.BOOT)
-
-        # Write the host data.json (will also update volume via callback since host record already exists)
-        host.set_certified_data(host_data)
-
-        # For persistent apps, deploy the snapshot function and create shutdown script
-        if self.config.is_persistent:
-            # it's a little sad that we're constantly re-deploying this, but it's a bit too easy to make mistakes otherwise
-            #  (eg, we might end up with outdated code at that endpoint, which would be hard to debug)
-            snapshot_url = deploy_function(
-                "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
+            # set up all the data in modal:
+            modal_ops_thread = concurrency_group.start_new_thread(
+                self._create_host_data_records_in_modal,
+                (sandbox, host_id, host_name, user_tags, config, host_data, ssh_host, ssh_port, host_public_key),
             )
-            self._create_shutdown_script(host, sandbox, host_id, snapshot_url)
 
-        # Start the activity watcher. We have to start it here because we only created the shutdown script (with the hardcoded sandbox id)
-        # in the above block, thus this cannot be started any earlier.
-        # Plus we really want the boot time to be written, etc, as otherwise it can be a bit racey
-        with log_span("Starting activity watcher in sandbox"):
-            start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
-            sandbox.exec("sh", "-c", start_activity_watcher_cmd).wait()
+            # Start sshd with our host key
+            self._start_sshd_in_sandbox(
+                sandbox,
+                client_public_key,
+                host_private_key,
+                host_public_key,
+                known_hosts=known_hosts,
+                authorized_keys=authorized_keys,
+            )
 
-        # Start periodic volume sync to flush writes to the host volume (only when a host volume is mounted)
-        if self.config.is_host_volume_created:
-            with log_span("Starting volume sync in sandbox"):
-                volume_sync_cmd = build_start_volume_sync_command(HOST_VOLUME_MOUNT_PATH, str(self.host_dir))
-                sandbox.exec("sh", "-c", volume_sync_cmd).wait()
+            # Add the host to our known_hosts file before waiting for sshd
+            with log_span("Adding host to known_hosts", ssh_host=ssh_host, ssh_port=ssh_port):
+                add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key)
 
-        return host, ssh_host, ssh_port, host_public_key
+            # Wait for sshd to be ready
+            with info_span("Waiting for sshd to be ready..."):
+                self._wait_for_sshd(ssh_host, ssh_port, self.config.ssh_connect_timeout)
+
+            with log_span("Executing post-ssh operations"):
+                # Create pyinfra host and connector
+                pyinfra_host = self._create_pyinfra_host(ssh_host, ssh_port, private_key_path)
+                connector = PyinfraConnector(pyinfra_host)
+
+                # for latency reasons, we set this afterwards:
+                true_on_updated_host_data = self._on_certified_host_data_updated
+
+                # Create the Host object with callback for future certified data updates
+                host = Host(
+                    id=host_id,
+                    connector=connector,
+                    provider_instance=self,
+                    mng_ctx=self.mng_ctx,
+                    on_updated_host_data=None,
+                )
+                host._ensure_connected()
+
+                # Record BOOT activity for idle detection
+                set_boot_thread = concurrency_group.start_new_thread(host.record_activity, (ActivitySource.BOOT,))
+
+                # Write the host data.json (will also update volume via callback since host record already exists)
+                set_certified_data_thread = concurrency_group.start_new_thread(host.set_certified_data, (host_data,))
+
+                # then wait for them both, just a minor optimization to parallelize the writes
+                set_boot_thread.join(60.0)
+                set_certified_data_thread.join(60.0)
+
+            with log_span("Waiting for deploy to finish and creating shutdown script"):
+                if snapshot_url_future is not None:
+                    snapshot_url = snapshot_url_future.result(2 * 60.0)
+                    self._create_shutdown_script(host, sandbox, host_id, snapshot_url)
+
+            # Start the activity watcher. We have to start it here because we only created the shutdown script (with the hardcoded sandbox id)
+            # in the above block, thus this cannot be started any earlier.
+            # Plus we really want the boot time to be written, etc, as otherwise it can be a bit racey
+            with log_span("Starting activity watcher in sandbox"):
+                start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+                exit_code = sandbox.exec("sh", "-c", start_activity_watcher_cmd).wait()
+                if exit_code != 0:
+                    raise MngError(f"Failed to start activity watcher in sandbox (exit code {exit_code})")
+
+            # Start periodic volume sync to flush writes to the host volume (only when a host volume is mounted)
+            if self.config.is_host_volume_created:
+                with log_span("Starting volume sync in sandbox"):
+                    volume_sync_cmd = build_start_volume_sync_command(HOST_VOLUME_MOUNT_PATH, str(self.host_dir))
+                    exit_code = sandbox.exec("sh", "-c", volume_sync_cmd).wait()
+                    if exit_code != 0:
+                        raise MngError(f"Failed to start volume sync in sandbox (exit code {exit_code})")
+
+            with log_span("Waiting for modal operations to complete"):
+                # something has gone horribly wrong if those operations take longer than that
+                modal_ops_thread.join(timeout=2 * 60.0)
+
+            # update the on_updated_host_data field so that future updates will be propagated to the volume:
+            final_host = host.model_copy_update(
+                to_update(host.field_ref().on_updated_host_data, true_on_updated_host_data),
+            )
+
+            return final_host, ssh_host, ssh_port, host_public_key
 
     def _create_shutdown_script(
         self,
@@ -1286,7 +1390,7 @@ set -euo pipefail
 # Usage: shutdown.sh [stop_reason]
 #   stop_reason: 'PAUSED' (idle shutdown, default) or 'STOPPED' (user requested)
 
-LOG_FILE="{host_dir_str}/events/logs/shutdown.log"
+LOG_FILE="{host_dir_str}/logs/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -1335,12 +1439,14 @@ log "Agents: $AGENTS"
 {volume_sync_section}# Send the shutdown request with agent data and stop reason
 # Use --max-time to prevent hanging if the endpoint is slow
 log "Sending shutdown request to $SNAPSHOT_URL"
-if ! RESPONSE=$(curl -s --max-time 30 -w "\\n%{{http_code}}" -X POST "$SNAPSHOT_URL" \\
+RESPONSE=$(curl -s --max-time 30 -w "\\n%{{http_code}}" -X POST "$SNAPSHOT_URL" \\
     -H "Content-Type: application/json" \\
-    -d '{{"sandbox_id": "'"$SANDBOX_ID"'", "host_id": "'"$HOST_ID"'", "stop_reason": "'"$STOP_REASON"'", "agents": '"$AGENTS"'}}'); then
-    log "curl request failed"
-    log "=== Shutdown script completed with error ==="
-    exit 1
+    -d '{{"sandbox_id": "'"$SANDBOX_ID"'", "host_id": "'"$HOST_ID"'", "stop_reason": "'"$STOP_REASON"'", "agents": '"$AGENTS"'}}') || CURL_EXIT=$?
+if [ -n "${{CURL_EXIT:-}}" ]; then
+    log "curl request failed with exit code $CURL_EXIT"
+    log "Response (if any): $RESPONSE"
+    log "=== Shutdown script: curl failed, forcing shutdown ==="
+{volume_sync_section}    kill -9 1
 fi
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -1473,6 +1579,18 @@ log "=== Shutdown script completed ==="
         """
         return self.modal_app.get_captured_output()
 
+    def _list_all_sandboxes_for_app(self, app: AppInterface) -> list[SandboxInterface]:
+        """
+        Caches the list of all sandboxes currently running for this app so that we're not constantly polling modal
+
+        Because this is cached, you MUST call reset_caches() if you want to see a new sandbox come online.
+        """
+        with self._cache_lock:
+            if self._full_sandbox_list_cache is not None:
+                return self._full_sandbox_list_cache
+            self._full_sandbox_list_cache = self._modal_interface.sandbox_list(app_id=app.get_app_id())
+            return self._full_sandbox_list_cache
+
     def _lookup_sandbox_by_host_id_once(self, host_id: HostId) -> SandboxInterface | None:
         """Perform a single lookup of a sandbox by host_id tag.
 
@@ -1487,21 +1605,31 @@ log "=== Shutdown script completed ==="
         #     for sandbox in self._modal_interface.sandbox_list(app_id=app.get_app_id(), tags={TAG_HOST_ID: str(host_id)}):
         #         return sandbox
         #     return None
-        for sandbox in self._modal_interface.sandbox_list(app_id=app.get_app_id()):
+        for sandbox in self._list_all_sandboxes_for_app(app):
             if sandbox.get_tags().get(TAG_HOST_ID) == str(host_id):
                 return sandbox
         return None
 
     def _cache_sandbox(self, host_id: HostId, name: HostName, sandbox: SandboxInterface) -> None:
-        """Cache a sandbox by host_id and name for fast lookup."""
+        """Cache a sandbox by host_id and name for fast lookup.
+
+        Also invalidates the full sandbox list cache so that subsequent
+        discover_hosts calls will see the new sandbox.
+        """
         self._sandbox_cache_by_id[host_id] = sandbox
         self._sandbox_cache_by_name[name] = sandbox
+        self._full_sandbox_list_cache = None
 
     def _uncache_sandbox(self, host_id: HostId, name: HostName | None = None) -> None:
-        """Remove a sandbox from the caches."""
+        """Remove a sandbox from the caches.
+
+        Also invalidates the full sandbox list cache so that subsequent
+        discover_hosts calls reflect the removal.
+        """
         self._sandbox_cache_by_id.pop(host_id, None)
         if name is not None:
             self._sandbox_cache_by_name.pop(name, None)
+        self._full_sandbox_list_cache = None
 
     def _uncache_host(self, host_id: HostId) -> None:
         """Remove a host from the host cache.
@@ -1514,12 +1642,14 @@ log "=== Shutdown script completed ==="
     def reset_caches(self) -> None:
         """Reset all caches on this instance.
 
-        This is primarily used for test isolation to ensure a clean state between tests.
+        This is primarily used for "list --stream", where we need to actually see new data, and for
+        test isolation to ensure a clean state between tests
         """
         self._sandbox_cache_by_id.clear()
         self._sandbox_cache_by_name.clear()
         self._host_by_id_cache.clear()
         self._host_record_cache_by_id.clear()
+        self._full_sandbox_list_cache = None
 
     def _find_sandbox_by_host_id(
         self, host_id: HostId, timeout: float = 5.0, poll_interval: float = 1.0
@@ -1539,7 +1669,7 @@ log "=== Shutdown script completed ==="
         app = self._get_modal_app()
         # FOLLOWUP: Same Modal tag-filtering bug as _lookup_sandbox_by_host_id_once.
         # Once fixed, this should use tags={TAG_HOST_NAME: str(name)} in sandbox_list.
-        for sandbox in self._modal_interface.sandbox_list(app_id=app.get_app_id()):
+        for sandbox in self._list_all_sandboxes_for_app(app):
             if sandbox.get_tags().get(TAG_HOST_NAME) == str(name):
                 return sandbox
         return None
@@ -1577,10 +1707,11 @@ log "=== Shutdown script completed ==="
         """
         app = self._get_modal_app()
         sandboxes: list[SandboxInterface] = []
-        for sandbox in self._modal_interface.sandbox_list(app_id=app.get_app_id()):
+        for sandbox in self._list_all_sandboxes_for_app(app):
             tags = sandbox.get_tags()
             if TAG_HOST_ID in tags:
                 sandboxes.append(sandbox)
+
         logger.trace("Listed all mng sandboxes for app={} in env={}", self.app_name, self.environment_name)
         return sandboxes
 
@@ -1601,6 +1732,7 @@ log "=== Shutdown script completed ==="
 
         Returns None if the host record doesn't exist on the volume.
         """
+        # FIXME: technically this method can fail if the sandbox goes offline right then, we should return None and warn here
         tags = sandbox.get_tags()
         host_id, name, user_tags = self._parse_sandbox_tags(tags)
 
@@ -1838,16 +1970,17 @@ log "=== Shutdown script completed ==="
         )
 
         # Set up SSH and create host object using shared helper
-        host, ssh_host, ssh_port, host_public_key = self._setup_sandbox_ssh_and_create_host(
-            sandbox=sandbox,
-            host_id=host_id,
-            host_name=name,
-            user_tags=tags,
-            config=config,
-            host_data=host_data,
-            known_hosts=known_hosts,
-            authorized_keys=authorized_keys,
-        )
+        with log_span("Setting up SSH and creating Host object for {}", host_id):
+            host, ssh_host, ssh_port, host_public_key = self._setup_sandbox_ssh_and_create_host(
+                sandbox=sandbox,
+                host_id=host_id,
+                host_name=name,
+                user_tags=tags,
+                config=config,
+                host_data=host_data,
+                known_hosts=known_hosts,
+                authorized_keys=authorized_keys,
+            )
 
         return host
 
@@ -1855,7 +1988,7 @@ log "=== Shutdown script completed ==="
         # Optionally create an initial snapshot based on config
         # When enabled, this ensures the host can be restarted even after a hard kill
         if self.config.is_snapshotted_after_create:
-            with log_span("Creating initial snapshot for host", host_id=str(host.id)):
+            with info_span("Creating initial snapshot for host...", host_id=str(host.id)):
                 sandbox = self._find_sandbox_by_host_id(host.id)
                 assert sandbox is not None, "Sandbox must exist for online host"
                 self._create_initial_snapshot(sandbox, host.id)
@@ -2155,10 +2288,7 @@ log "=== Shutdown script completed ==="
                 sandbox = self._find_sandbox_by_host_id(host)
             if sandbox is not None:
                 with trace_span("Creating host object from sandbox for {}", host, _is_trace_span_enabled=False):
-                    try:
-                        host_obj = self._create_host_from_sandbox(sandbox, host_record)
-                    except HostConnectionError as e:
-                        logger.debug("Failed to create host from sandbox {}, assuming it is offline: {}", host, e)
+                    host_obj = self._create_host_from_sandbox(sandbox, host_record)
 
             if host_obj is None:
                 # No sandbox or couldn't connect - try host record (for stopped hosts)
@@ -2169,10 +2299,7 @@ log "=== Shutdown script completed ==="
             # If it's a HostName, search by name
             sandbox = self._find_sandbox_by_name(host)
             if sandbox is not None:
-                try:
-                    host_obj = self._create_host_from_sandbox(sandbox)
-                except HostConnectionError as e:
-                    logger.debug("Failed to create host from sandbox {}, assuming it is offline: {}", host, e)
+                host_obj = self._create_host_from_sandbox(sandbox)
 
             # No sandbox or couldn't connect - search host records by name (for stopped hosts)
             if host_obj is None:
@@ -2233,66 +2360,49 @@ log "=== Shutdown script completed ==="
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
 
-        # First, process host records (includes both running and stopped hosts)
-        for host_record in all_host_records:
-            host_id = HostId(host_record.certified_host_data.host_id)
-            processed_host_ids.add(host_id)
+        host_futures_with_records: list[Future[HostInterface | None]] = []
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
+        ) as executor:
+            # First, process host records (includes both running and stopped hosts)
+            for host_record in all_host_records:
+                host_id = HostId(host_record.certified_host_data.host_id)
+                processed_host_ids.add(host_id)
+                host_futures_with_records.append(
+                    executor.submit(
+                        self._construct_host_from_record_for_discovery,
+                        host_id,
+                        host_record,
+                        running_sandbox_by_host_id,
+                        include_destroyed,
+                    )
+                )
 
-            host_obj: HostInterface | None = None
-            if host_id in running_sandbox_by_host_id:
-                # Host has a running sandbox - create from sandbox
-                sandbox = running_sandbox_by_host_id[host_id]
-                try:
-                    host_obj = self._create_host_from_sandbox(sandbox)
-                    if host_obj is not None:
-                        hosts.append(host_obj)
-                except (KeyError, ValueError, HostConnectionError) as e:
-                    logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
-                    continue
-            if host_id not in running_sandbox_by_host_id or host_obj is None:
-                # Host has no running sandbox - it's stopped, failed, destroyed, or we couldn't connect
-                has_snapshots = len(host_record.certified_host_data.snapshots) > 0
-                is_failed = host_record.certified_host_data.failure_reason is not None
-
-                if is_failed:
-                    # Failed host - always include so users can warning() build failures
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                elif has_snapshots:
-                    # Stopped host (can be restarted)
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                elif include_destroyed:
-                    # Destroyed host (no snapshots, can't be restarted)
-                    try:
-                        host_obj = self._create_host_from_host_record(host_record)
-                        hosts.append(host_obj)
-                    except (OSError, IOError, ValueError, KeyError) as e:
-                        logger.warning("Failed to create host from host record {}: {}", host_id, e)
-                        continue
-                else:
-                    # Skip destroyed hosts when include_destroyed=False
-                    pass
+        for future in host_futures_with_records:
+            host_obj = future.result()
+            if host_obj is not None:
+                hosts.append(host_obj)
 
         # Second, include any running sandboxes that don't have host records yet
         # (handles eventual consistency of volume or legacy sandboxes)
-        for host_id, sandbox in running_sandbox_by_host_id.items():
-            if host_id in processed_host_ids:
-                continue
+        other_host_futures: list[tuple[HostId, Future[Host | None]]] = []
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
+        ) as executor:
+            for host_id, sandbox in running_sandbox_by_host_id.items():
+                if host_id in processed_host_ids:
+                    continue
+                other_host_futures.append((host_id, executor.submit(self._create_host_from_sandbox, sandbox)))
+
+        for future_host_id, future in other_host_futures:
             try:
-                host_obj = self._create_host_from_sandbox(sandbox)
+                host_obj = future.result()
                 if host_obj is not None:
                     hosts.append(host_obj)
             except (KeyError, ValueError, HostConnectionError) as e:
-                logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
+                if isinstance(e, HostConnectionError):
+                    self.on_connection_error(future_host_id)
+                logger.warning("Failed to create host from sandbox {}: {}", future_host_id, e)
                 continue
 
         # add these hosts to a cache so we don't need to look them up by name or id again
@@ -2300,6 +2410,58 @@ log "=== Shutdown script completed ==="
             self._host_by_id_cache[host.id] = host
 
         return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
+
+    def _construct_host_from_record_for_discovery(
+        self,
+        host_id: HostId,
+        host_record: HostRecord,
+        running_sandbox_by_host_id: dict[HostId, SandboxInterface],
+        include_destroyed: bool,
+    ) -> HostInterface | None:
+        host_obj: HostInterface | None = None
+        if host_id in running_sandbox_by_host_id:
+            # Host has a running sandbox - create from sandbox
+            sandbox = running_sandbox_by_host_id[host_id]
+            try:
+                host_obj = self._create_host_from_sandbox(sandbox, host_record=host_record)
+                if host_obj is not None:
+                    return host_obj
+            except (KeyError, ValueError, HostConnectionError) as e:
+                if isinstance(e, HostConnectionError):
+                    # must call on_connection_error when there is a connection error (to properly clear the cache)
+                    self.on_connection_error(host_id)
+                logger.warning("Failed to create host from sandbox {}: {}", host_id, e)
+                return None
+        if host_id not in running_sandbox_by_host_id or host_obj is None:
+            # Host has no running sandbox - it's stopped, failed, destroyed, or we couldn't connect
+            has_snapshots = len(host_record.certified_host_data.snapshots) > 0
+            is_failed = host_record.certified_host_data.failure_reason is not None
+
+            if is_failed:
+                # Failed host - always include so users can warning() build failures
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            elif has_snapshots:
+                # Stopped host (can be restarted)
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            elif include_destroyed:
+                # Destroyed host (no snapshots, can't be restarted)
+                try:
+                    return self._create_host_from_host_record(host_record)
+                except (OSError, IOError, ValueError, KeyError) as e:
+                    logger.warning("Failed to create host from host record {}: {}", host_id, e)
+                    return None
+            else:
+                # Skip destroyed hosts when include_destroyed=False
+                return None
+        return None
 
     def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.
@@ -2310,7 +2472,7 @@ log "=== Shutdown script completed ==="
         with log_span("Listing running sandbox host IDs for app={}", self.app_name):
             app = self._get_modal_app()
             with log_span("Listing sandboxes from Modal API (app_id={})", app.get_app_id()):
-                sandboxes = self._modal_interface.sandbox_list(app_id=app.get_app_id())
+                sandboxes = self._list_all_sandboxes_for_app(app)
             logger.debug("Found {} sandbox(es) for app={}", len(sandboxes), self.app_name)
 
             if not sandboxes:
@@ -2440,24 +2602,41 @@ log "=== Shutdown script completed ==="
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
-    ) -> tuple[HostDetails, list[AgentDetails]] | None:
+        field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
+        | None = None,
+        on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
+    ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
         with trace_span("Building host listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
             with trace_span("Reading host record for {}", host_ref.host_id, _is_trace_span_enabled=False):
                 host_record = self._read_host_record(host_ref.host_id)
 
-            with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                host = self._get_host(host_ref.host_id, host_record)
+            try:
+                with trace_span("Getting host for {}", host_ref.host_id, _is_trace_span_enabled=False):
+                    host = self._get_host(host_ref.host_id, host_record)
 
-            # For offline hosts, fall back to the default per-field collection
-            if not isinstance(host, Host):
-                return None
+                # For offline hosts, fall back to the default per-field collection
+                if not isinstance(host, Host):
+                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
 
-            # Collect all data in one SSH command
-            with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
-                raw = self._collect_all_listing_data_via_ssh(host)
-                if raw is None:
-                    return None
+                # Collect all data in one SSH command
+                with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
+                    try:
+                        raw = self._collect_all_listing_data_via_ssh(host)
+                    except MngError as e:
+                        if on_error:
+                            on_error(host_ref, e)
+                        else:
+                            raise
+            except HostConnectionError as e:
+                # must call on_connection_error when there is a connection error (to properly clear the cache)
+                self.on_connection_error(host_ref.host_id)
+                logger.debug(
+                    "Host {} unreachable during optimized listing, falling back to default: {}",
+                    host_ref.host_id,
+                    e,
+                )
+                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
 
             # Build HostDetails from cached host record + SSH-collected data
             with trace_span("Assembling host details for {}", host_ref.host_id, _is_trace_span_enabled=False):
@@ -2470,7 +2649,7 @@ log "=== Shutdown script completed ==="
 
             return host_details, agent_details_list
 
-    def _collect_all_listing_data_via_ssh(self, host: Host) -> dict[str, Any] | None:
+    def _collect_all_listing_data_via_ssh(self, host: Host) -> dict[str, Any]:
         """Execute a single SSH command to collect all data needed for listing."""
         host_dir = str(self.host_dir)
         prefix = self.mng_ctx.config.prefix
@@ -2482,8 +2661,29 @@ log "=== Shutdown script completed ==="
             result = host.execute_command(script, timeout_seconds=30.0)
 
         if not result.success:
-            logger.warning("Failed to collect listing data from host {}: {}", host.id, result.stderr)
-            return None
+            try:
+                test_result = host.execute_command("echo hello", timeout_seconds=30.0)
+            except HostConnectionError as e:
+                self.on_connection_error(host.id)
+                logger.debug(
+                    "Host {} unreachable during SSH connection test after listing collection failure: {}",
+                    host.id,
+                    e,
+                )
+                raise HostConnectionError(f"Host {host.id} is unreachable") from e
+            else:
+                if not test_result.success:
+                    logger.debug(
+                        "Host {} SSH connection test failed after listing collection failure: stdout={}, stderr={}",
+                        host.id,
+                        test_result.stdout,
+                        test_result.stderr,
+                    )
+                    raise HostConnectionError(f"Host {host.id} is unreachable (SSH test command failed)")
+                else:
+                    raise MngError(
+                        f"Failed to collect listing data from host {host.id}: {result.stdout}\n{result.stderr}"
+                    )
 
         return _parse_listing_collection_output(result.stdout)
 
@@ -2733,7 +2933,13 @@ log "=== Shutdown script completed ==="
                 list(host_record.certified_host_data.snapshots) + [new_snapshot],
             ),
         )
-        self.get_host(host_id).set_certified_data(updated_certified_data)
+        updated_host_record = host_record.model_copy_update(
+            to_update(
+                host_record.field_ref().certified_host_data,
+                updated_certified_data,
+            ),
+        )
+        self._get_host(host_id, host_record=updated_host_record).set_certified_data(updated_certified_data)
         logger.debug(
             "Created snapshot: id={}, name={}",
             snapshot_id,
@@ -3248,3 +3454,12 @@ def _build_image_from_dockerfile_contents(
                 )
 
         return modal_image
+
+
+def _set_result(future: Future, func: Callable[[], str]) -> None:
+    try:
+        result = func()
+    except Exception as e:
+        future.set_exception(e)
+    else:
+        future.set_result(result)

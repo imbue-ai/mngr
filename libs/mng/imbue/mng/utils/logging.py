@@ -1,7 +1,10 @@
 import io
 import logging
+import os
 import re
 import sys
+import threading
+import traceback
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -9,6 +12,7 @@ from typing import Final
 from typing import TextIO
 from typing import cast
 
+import paramiko.transport
 from loguru import logger
 from pydantic import Field
 
@@ -212,6 +216,121 @@ class _PyinfraToLoguruHandler(logging.Handler):
         logger.trace("[pyinfra] {}", msg)
 
 
+_PARAMIKO_EXPECTED_ERROR_RE = re.compile(
+    r"Exception \((?:client|server)\):"
+    r"|Socket exception:"
+    r"|EOF in transport thread"
+    r"|Traceback \(most recent call last\):"
+)
+"""Patterns for paramiko ERROR messages that are expected when hosts go offline.
+
+Paramiko's transport thread logs SSH connection failures in two separate _log
+calls: first the header ("Exception (client): ...") as a string, then the
+traceback body (via util.tb_strings()) as a list. We patch Transport._log to
+join the list into a single message, but the header and traceback are still
+separate records.
+
+The "Traceback" pattern catches the joined traceback body. This is safe because
+paramiko only calls tb_strings() immediately after logging an expected error
+header. For truly unexpected errors (matched by "Unknown exception:"), the
+header itself won't match this regex and will be routed to WARNING, alerting
+the user even though the traceback body goes to debug.
+"""
+
+
+def _is_paramiko_logging_enabled() -> bool:
+    return os.environ.get("MNG_ENABLE_PARAMIKO_LOGGING", "0") == "1"
+
+
+class _ParamikoToLoguruHandler(logging.Handler):
+    """Forward paramiko log messages to loguru with level-appropriate routing.
+
+    Expected connection-failure messages (SSH banner errors, socket errors,
+    EOF) are logged at debug level since mng handles these via
+    HostConnectionError. Unexpected paramiko messages are forwarded at
+    warning level to remain visible.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if record.levelno >= logging.ERROR:
+            if _PARAMIKO_EXPECTED_ERROR_RE.search(msg):
+                logger.debug("[paramiko] {}", msg)
+            else:
+                logger.warning("[paramiko] {}", msg)
+        elif record.levelno >= logging.WARNING:
+            logger.warning("[paramiko] {}", msg)
+        elif _is_paramiko_logging_enabled():
+            logger.trace("[paramiko] {}", msg)
+        else:
+            pass
+
+
+def _patched_transport_log(self: Any, level: int, msg: object, *args: object) -> None:
+    """Join list messages into a single log record, then forward to the logger.
+
+    Paramiko's original Transport._log iterates over list messages (from
+    util.tb_strings()) and calls self.logger.log() for each line at ERROR level.
+    This patch joins list messages into a single newline-separated string so our
+    handler can match the "Traceback" header and route the entire traceback to
+    debug as one record. Non-list messages pass through unchanged.
+    """
+    if isinstance(msg, list):
+        joined = "\n".join(str(line) for line in msg if line)
+        self.logger.log(level, joined)
+    elif args:
+        self.logger.log(level, msg, *args)
+    else:
+        self.logger.log(level, msg)
+
+
+_IS_TRANSPORT_LOG_PATCHED: dict[str, bool] = {"patched": False}
+
+
+def _apply_paramiko_transport_log_patch() -> None:
+    if not _IS_TRANSPORT_LOG_PATCHED["patched"]:
+        paramiko.transport.Transport._log = cast(Any, _patched_transport_log)
+        _IS_TRANSPORT_LOG_PATCHED["patched"] = True
+
+
+def _is_expected_paramiko_thread_exception(args: threading.ExceptHookArgs) -> bool:
+    """Check whether this is the known paramiko SFTP prefetch "Socket is closed" error.
+
+    Paramiko's SFTP _prefetch_thread raises an unhandled OSError("Socket is
+    closed") when the SSH connection drops during a prefetch read. This is
+    expected and harmless -- mng already handles connection loss via
+    HostConnectionError at a higher level.
+    """
+    if not (args.exc_type is OSError and args.exc_value is not None and "Socket is closed" in str(args.exc_value)):
+        return False
+    tb = args.exc_traceback
+    if tb is None:
+        return False
+    for frame_summary in traceback.extract_tb(tb):
+        filename = frame_summary.filename
+        if "/paramiko/" in filename or "\\paramiko\\" in filename:
+            return True
+    return False
+
+
+def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Route all unhandled thread exceptions through loguru instead of stderr."""
+    exc_info = (args.exc_type, args.exc_value, args.exc_traceback)
+    if _is_expected_paramiko_thread_exception(args):
+        logger.opt(exception=exc_info).debug("[paramiko] Expected exception in thread {}", args.thread)
+    else:
+        logger.opt(exception=exc_info).error("Unhandled exception in thread {}", args.thread)
+
+
+_IS_THREADING_EXCEPTHOOK_INSTALLED: dict[str, bool] = {"installed": False}
+
+
+def _install_threading_excepthook() -> None:
+    if not _IS_THREADING_EXCEPTHOOK_INSTALLED["installed"]:
+        threading.excepthook = _threading_excepthook
+        _IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = True
+
+
 def suppress_warnings() -> None:
     # Redirect all pyinfra log output to loguru at TRACE level. Pyinfra uses
     # Python's standard logging module and logs warnings during file upload
@@ -224,6 +343,30 @@ def suppress_warnings() -> None:
     pyinfra_logger.handlers.clear()
     pyinfra_logger.addHandler(_PyinfraToLoguruHandler())
     pyinfra_logger.propagate = False
+
+    # Patch paramiko's Transport._log to join list messages (tracebacks) into a
+    # single log record instead of logging each line separately. Paramiko's _log
+    # method splits traceback strings into individual lines and logs each at ERROR
+    # level. By joining them, our handler sees one record starting with "Traceback"
+    # which matches _PARAMIKO_EXPECTED_ERROR_RE and gets routed to debug.
+    _apply_paramiko_transport_log_patch()
+
+    # Redirect paramiko log output to loguru with level-appropriate routing.
+    # Paramiko's transport thread logs SSH connection failures at ERROR level
+    # with full tracebacks when hosts go offline. Mng handles these via
+    # HostConnectionError, so the raw paramiko output is noise. Expected
+    # error patterns go to debug; unexpected ones go to warning.
+    paramiko_logger = logging.getLogger("paramiko")
+    paramiko_logger.setLevel(logging.DEBUG)
+    paramiko_logger.handlers.clear()
+    paramiko_logger.addHandler(_ParamikoToLoguruHandler())
+    paramiko_logger.propagate = False
+
+    # Install a threading.excepthook to route all unhandled thread exceptions
+    # through loguru instead of printing to stderr. The specific paramiko SFTP
+    # _prefetch_thread "Socket is closed" error is logged at debug (it's
+    # expected when connections drop); everything else is logged at error.
+    _install_threading_excepthook()
 
 
 def setup_logging(

@@ -589,7 +589,7 @@ def test_restart_fails_after_hard_kill_without_initial_snapshot(
 _OFFLINE_DOCKERFILE_CONTENT = """\
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server tmux curl rsync git jq \
+    openssh-server tmux curl rsync git jq ca-certificates xxd \
     && rm -rf /var/lib/apt/lists/*
 """
 

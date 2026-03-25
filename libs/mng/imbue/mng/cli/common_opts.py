@@ -377,7 +377,7 @@ def apply_config_defaults(ctx: click.Context, config: MngConfig, command_name: s
         # Check the source of the parameter value
         source = ctx.get_parameter_source(param_name)
 
-        # Only override if the value came from the default
+        # Override if the value came from the default
         if source == ParameterSource.DEFAULT:
             # Handle empty string for tuple/list parameters (clears the list)
             current_value = ctx.params[param_name]
@@ -385,6 +385,16 @@ def apply_config_defaults(ctx: click.Context, config: MngConfig, command_name: s
                 updated_params[param_name] = ()
             else:
                 updated_params[param_name] = config_value
+        # and if this is a tuple/list parameter with a non-empty config value, we can append to it even if the source is not DEFAULT
+        elif (
+            isinstance(config_value, (list, tuple))
+            and config_value
+            and isinstance(ctx.params[param_name], (list, tuple))
+        ):
+            updated_params[param_name] = tuple(ctx.params[param_name]) + tuple(config_value)
+        else:
+            # Parameter was explicitly set on the command line; CLI value wins
+            pass
 
     return updated_params
 

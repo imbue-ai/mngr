@@ -118,6 +118,56 @@ def determine_resolved_path(
 
 
 @pure
+def find_all_matching_hosts(
+    identifier: str,
+    all_hosts: Sequence[DiscoveredHost],
+) -> list[DiscoveredHost]:
+    """Find all hosts matching the given identifier (by ID or name)."""
+    # Try as ID first
+    try:
+        host_id = HostId(identifier)
+        matches = [h for h in all_hosts if h.host_id == host_id]
+        if matches:
+            return matches
+    except ValueError:
+        pass
+
+    # Try as name
+    try:
+        host_name = HostName(identifier)
+    except ValueError:
+        return []
+    return [h for h in all_hosts if h.host_name == host_name]
+
+
+@pure
+def find_all_matching_agents(
+    identifier: str,
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+    resolved_host: DiscoveredHost | None = None,
+) -> list[tuple[DiscoveredHost, DiscoveredAgent]]:
+    """Find all agents matching the given identifier (by ID or name)."""
+    matches: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
+    for host_ref, agent_refs in agents_by_host.items():
+        if resolved_host is not None and host_ref.host_id != resolved_host.host_id:
+            continue
+
+        for agent_ref in agent_refs:
+            try:
+                agent_id = AgentId(identifier)
+                if agent_ref.agent_id == agent_id:
+                    matches.append((host_ref, agent_ref))
+            except ValueError:
+                try:
+                    agent_name = AgentName(identifier)
+                except ValueError:
+                    continue
+                if agent_ref.agent_name == agent_name:
+                    matches.append((host_ref, agent_ref))
+    return matches
+
+
+@pure
 def resolve_host_reference(
     host_identifier: str | None,
     all_hosts: Sequence[DiscoveredHost],
@@ -130,17 +180,14 @@ def resolve_host_reference(
     if host_identifier is None:
         return None
 
-    try:
-        host_id = HostId(host_identifier)
-        resolved_host = get_host_from_list_by_id(host_id, all_hosts)
-    except ValueError:
-        host_name = HostName(host_identifier)
-        resolved_host = get_unique_host_from_list_by_name(host_name, all_hosts)
+    matches = find_all_matching_hosts(host_identifier, all_hosts)
 
-    if resolved_host is None:
+    if len(matches) == 0:
         raise UserInputError(f"Could not find host with ID or name: {host_identifier}")
-
-    return resolved_host
+    elif len(matches) > 1:
+        raise UserInputError(f"Multiple hosts found with name: {host_identifier}")
+    else:
+        return matches[0]
 
 
 @pure
@@ -157,28 +204,14 @@ def resolve_agent_reference(
     if agent_identifier is None:
         return None
 
-    matching_agents: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
+    matches = find_all_matching_agents(agent_identifier, agents_by_host, resolved_host)
 
-    for host_ref, agent_refs in agents_by_host.items():
-        if resolved_host is not None and host_ref.host_id != resolved_host.host_id:
-            continue
-
-        for agent_ref in agent_refs:
-            try:
-                agent_id = AgentId(agent_identifier)
-                if agent_ref.agent_id == agent_id:
-                    matching_agents.append((host_ref, agent_ref))
-            except ValueError:
-                agent_name = AgentName(agent_identifier)
-                if agent_ref.agent_name == agent_name:
-                    matching_agents.append((host_ref, agent_ref))
-
-    if len(matching_agents) == 0:
+    if len(matches) == 0:
         raise UserInputError(f"Could not find agent with ID or name: {agent_identifier}")
-    elif len(matching_agents) > 1:
+    elif len(matches) > 1:
         raise UserInputError(f"Multiple agents found with ID or name: {agent_identifier}")
     else:
-        return matching_agents[0]
+        return matches[0]
 
 
 class ResolvedSource(FrozenModel):
@@ -440,6 +473,7 @@ def find_agents_by_identifiers_or_state(
     filter_all: bool,
     target_state: AgentLifecycleState | None,
     mng_ctx: MngContext,
+    include_destroyed: bool = False,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -450,7 +484,7 @@ def find_agents_by_identifiers_or_state(
 
     Raises AgentNotFoundError if any identifier does not match an agent.
     """
-    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
+    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=include_destroyed)
 
     # Collect candidate matches from the lightweight agent references
     candidates: list[AgentMatch] = []

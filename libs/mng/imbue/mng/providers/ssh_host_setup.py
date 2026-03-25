@@ -100,13 +100,13 @@ def build_check_and_install_packages_command(
     if host_volume_mount_path is not None:
         # Remove any existing directory (e.g., from a pre-volume snapshot) before
         # creating the symlink. ln -sfn alone won't replace an existing directory.
-        script_lines.append(
-            f"[ -L {mng_host_dir} ] || rm -rf {mng_host_dir}; ln -sfn {host_volume_mount_path} {mng_host_dir}"
-        )
+        # The subshell groups the conditional removal so && chaining works correctly.
+        script_lines.append(f"( [ -L {mng_host_dir} ] || rm -rf {mng_host_dir} )")
+        script_lines.append(f"ln -sfn {host_volume_mount_path} {mng_host_dir}")
     else:
         script_lines.append(f"mkdir -p {mng_host_dir}")
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)
 
 
 @pure
@@ -154,7 +154,7 @@ def build_configure_ssh_command(
         "chmod 644 /etc/ssh/ssh_host_ed25519_key.pub",
     ]
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)
 
 
 @pure
@@ -193,7 +193,7 @@ def build_add_known_hosts_command(
     # Set proper permissions on known_hosts file
     script_lines.append(f"chmod 600 '{known_hosts_path}'")
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)
 
 
 @pure
@@ -229,7 +229,7 @@ def build_add_authorized_keys_command(
     # Set proper permissions on authorized_keys file
     script_lines.append(f"chmod 600 '{authorized_keys_path}'")
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)
 
 
 @pure
@@ -270,7 +270,7 @@ def build_start_volume_sync_command(
     Returns a shell command string that can be executed via sh -c.
     """
     script_path = f"{mng_host_dir}/commands/volume_sync.sh"
-    log_path = f"{mng_host_dir}/events/logs/volume_sync.log"
+    log_path = f"{mng_host_dir}/logs/volume_sync.log"
 
     # The sync script content (simple loop)
     sync_script = f"#!/bin/sh\nwhile true; do sync {volume_mount_path} 2>/dev/null; sleep 60; done\n"
@@ -278,13 +278,13 @@ def build_start_volume_sync_command(
 
     script_lines = [
         f"mkdir -p '{mng_host_dir}/commands'",
-        f"mkdir -p '{mng_host_dir}/events/logs'",
+        f"mkdir -p '{mng_host_dir}/logs'",
         f"printf '%s' '{escaped_script}' > '{script_path}'",
         f"chmod +x '{script_path}'",
         f"nohup '{script_path}' > '{log_path}' 2>&1 &",
     ]
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)
 
 
 @pure
@@ -315,12 +315,12 @@ def build_start_activity_watcher_command(
 
     log_lib_path = f"{mng_host_dir}/commands/mng_log.sh"
     script_path = f"{mng_host_dir}/commands/activity_watcher.sh"
-    log_path = f"{mng_host_dir}/events/logs/activity_watcher.log"
+    log_path = f"{mng_host_dir}/logs/activity_watcher.log"
 
     script_lines = [
-        # Create commands and events directories
+        # Create commands and logs directories
         f"mkdir -p '{mng_host_dir}/commands'",
-        f"mkdir -p '{mng_host_dir}/events/logs'",
+        f"mkdir -p '{mng_host_dir}/logs'",
         # Write the shared logging library
         f"printf '%s' '{escaped_log_lib}' > '{log_lib_path}'",
         f"chmod +x '{log_lib_path}'",
@@ -332,4 +332,4 @@ def build_start_activity_watcher_command(
         f"nohup '{script_path}' '{mng_host_dir}' > '{log_path}' 2>&1 &",
     ]
 
-    return "; ".join(script_lines)
+    return " && ".join(script_lines)

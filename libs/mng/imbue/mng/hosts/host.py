@@ -21,6 +21,7 @@ from typing import cast
 from uuid import uuid4
 
 from loguru import logger
+from paramiko import ChannelException
 from paramiko import SFTPClient
 from paramiko import SSHException
 from pydantic import Field
@@ -35,8 +36,10 @@ from tenacity import wait_chain
 from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -45,6 +48,7 @@ from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
+from imbue.mng.errors import BaseMngError
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostDataSchemaError
@@ -54,7 +58,6 @@ from imbue.mng.errors import MngError
 from imbue.mng.errors import NoCommandDefinedError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.common import LOCAL_CONNECTOR_NAME
-from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.offline_host import BaseHost
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import CertifiedHostData
@@ -335,6 +338,13 @@ class Host(BaseHost, OnlineHostInterface):
                 raise
             else:
                 raise
+        except ChannelException as e:
+            # ChannelException means the server refused to open a new channel
+            # (e.g. MaxSessions limit reached), but the transport is still alive.
+            # Do NOT disconnect -- that would kill other threads' in-flight SFTP
+            # operations on the shared transport, causing hangs.
+            logger.debug("Channel open refused while reading {}: {}, retrying without disconnect", remote_filename, e)
+            raise
         except (SSHException, EOFError) as e:
             logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
             self.connector.host.disconnect()
@@ -421,6 +431,13 @@ class Host(BaseHost, OnlineHostInterface):
                 raise
             else:
                 raise
+        except ChannelException as e:
+            # ChannelException means the server refused to open a new channel
+            # (e.g. MaxSessions limit reached), but the transport is still alive.
+            # Do NOT disconnect -- that would kill other threads' in-flight SFTP
+            # operations on the shared transport, causing hangs.
+            logger.debug("Channel open refused while writing {}: {}, retrying without disconnect", remote_filename, e)
+            raise
         except (SSHException, EOFError) as e:
             logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
             self.connector.host.disconnect()
@@ -514,34 +531,47 @@ class Host(BaseHost, OnlineHostInterface):
             self._get_file(str(path), output)
             return output.getvalue()
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None) -> None:
+    # it'd be really nice to change the default for is_atomic to True, but it's actually a non-trivial performance impact the way it is implemented right now...
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes content to a file, creating parent directories as needed."""
+        if is_atomic:
+            write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+        else:
+            write_path = path
+
         # Try to write first, only create parent directory if the write fails.
         # This avoids an extra subprocess call for mkdir -p on every write.
         if self.is_local:
             try:
-                path.write_bytes(content)
+                write_path.write_bytes(content)
             except FileNotFoundError:
                 # Parent directory doesn't exist, create it and retry
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
+                write_path.parent.mkdir(parents=True, exist_ok=True)
+                write_path.write_bytes(content)
         else:
             try:
-                is_success = self._put_file(io.BytesIO(content), str(path))
+                is_success = self._put_file(io.BytesIO(content), str(write_path))
             except IOError:
                 # pyinfra/paramiko raises IOError when the parent directory doesn't exist
                 is_success = False
             if not is_success:
                 # May have failed because parent directory doesn't exist, create it and retry
-                parent_dir = str(path.parent)
+                parent_dir = str(write_path.parent)
                 result = self.execute_command(f"mkdir -p '{parent_dir}'")
                 if not result.success:
                     raise MngError(
                         f"Failed to create parent directory '{parent_dir}' on host {self.id} because: {result.stderr}"
                     )
-                is_success = self._put_file(io.BytesIO(content), str(path))
+                is_success = self._put_file(io.BytesIO(content), str(write_path))
                 if not is_success:
-                    raise MngError(f"Failed to write file '{str(path)}' on host {self.id}'")
+                    raise MngError(f"Failed to write file '{str(write_path)}' on host {self.id}'")
+        if write_path != path:
+            # Move temp file to final location atomically
+            result = self.execute_command(f"mv '{str(write_path)}' '{str(path)}'")
+            if not result.success:
+                raise MngError(
+                    f"Failed to move temp file to final location on host {self.id} because: {result.stderr}"
+                )
         if mode is not None:
             self.execute_command(f"chmod {mode} '{str(path)}'")
 
@@ -688,16 +718,41 @@ class Host(BaseHost, OnlineHostInterface):
     def lock_cooperatively(self, timeout_seconds: float = 300.0) -> Iterator[None]:
         """Context manager for acquiring and releasing the host lock.
 
-        TODO: Implement remote locking mechanism (e.g., via lock files with PIDs).
-        Currently only works for local hosts.
+        For local hosts, uses flock for process-level locking.
+        For remote hosts, writes/removes a lock file to prevent the idle shutdown script
+        from triggering during operations. On error, the lock file is removed by default
+        so the host can idle-shutdown; set MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
+        to retain it for debugging.
         """
         lock_file_path = self.host_dir / "host_lock"
 
         if not self.is_local:
-            # this is obviously not yet right--we're just making the host lock so that the shutdown script doesnt trigger while creating a host
+            # Write a lock file so the shutdown script does not trigger while we are operating on the host
             self.write_text_file(lock_file_path, str(time.time()))
-            yield
-            self.execute_command(f"rm -f '{lock_file_path}'")
+            try:
+                yield
+            except BaseException:
+                # On error, remove the lock file so the host can idle-shutdown normally,
+                # unless the user wants to retain it for debugging
+                is_retain_lock = os.environ.get("MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
+                if is_retain_lock:
+                    logger.debug(
+                        "Retaining host lock file for debugging (MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
+                    )
+                else:
+                    logger.debug(
+                        "Removing host lock file on error to allow idle shutdown (set MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
+                    )
+                    try:
+                        self.execute_command(f"rm -f '{lock_file_path}'")
+                    except (BaseMngError, OSError) as lock_removal_error:
+                        logger.warning(
+                            "Failed to remove host lock file during error cleanup: {}",
+                            lock_removal_error,
+                        )
+                raise
+            else:
+                self.execute_command(f"rm -f '{lock_file_path}'")
             return
 
         lock_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -762,6 +817,10 @@ class Host(BaseHost, OnlineHostInterface):
             return CertifiedHostData(**data)
         except FileNotFoundError:
             now = datetime.now(timezone.utc)
+            # FIXME: this is suss--we should probably just explode if data.json is missing
+            #  It just means that the host is not yet properly initialized
+            #  For hosts that are currently being created, that's fine, but otherwise this should count as a busted host
+            #  Annoyingly we'll need to understand the difference (by checking to see if, eg, this host is locked)
             return CertifiedHostData(
                 host_id=str(self.id),
                 host_name=str(self.get_name()),
@@ -773,15 +832,23 @@ class Host(BaseHost, OnlineHostInterface):
 
     def set_certified_data(self, data: CertifiedHostData) -> None:
         """Save certified data to data.json and notify the provider."""
-        # Always stamp updated_at with the current time when writing
-        stamped_data = data.model_copy_update(
-            to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        data_path = self.host_dir / "data.json"
-        self.write_text_file(data_path, json.dumps(stamped_data.model_dump(by_alias=True, mode="json"), indent=2))
-        # Notify the provider so it can update any external storage (e.g., Modal volume)
-        if self.on_updated_host_data:
-            self.on_updated_host_data(self.id, stamped_data)
+        with self.mng_ctx.concurrency_group.make_concurrency_group("set_certified_data") as concurrency_group:
+            # Always stamp updated_at with the current time when writing
+            stamped_data = data.model_copy_update(
+                to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            data_path = self.host_dir / "data.json"
+            serialized_data = json.dumps(stamped_data.model_dump(by_alias=True, mode="json"), indent=2)
+            direct_write_thread = concurrency_group.start_new_thread(
+                # must write atomically, otherwise we can get in trouble
+                self.write_file,
+                kwargs=dict(path=data_path, content=serialized_data.encode("utf-8"), mode=None, is_atomic=True),
+            )
+            # Notify the provider so it can update any external storage (e.g., Modal volume)
+            if self.on_updated_host_data:
+                self.on_updated_host_data(self.id, stamped_data)
+            # we're only doing this in parallel as a minor optimization--both the atomic write and the on_updated_host_data calls takes a meaningful amount of time
+            direct_write_thread.join(60.0)
 
     def _add_generated_work_dir(self, work_dir: Path) -> None:
         """Add a work directory to the list of generated work directories."""
@@ -984,34 +1051,35 @@ class Host(BaseHost, OnlineHostInterface):
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = self.host_dir / "agents"
-            if not self._is_directory(agents_dir):
-                logger.trace("Failed to find agents directory for host {}", self.id)
-                return []
 
             with log_span("Listing agent dir for host {}", self.id):
-                dir_listing = self._list_directory(agents_dir)
+                try:
+                    dir_listing = self._list_directory(agents_dir)
+                except FileNotFoundError:
+                    logger.trace("Failed to find agents directory for host {}", self.id)
+                    return []
 
             with log_span("Listing agent files from dir for host {}", self.id):
                 agent_refs: list[DiscoveredAgent] = []
                 for dir_name in dir_listing:
                     agent_dir = agents_dir / dir_name
-                    if self._is_directory(agent_dir):
-                        data_path = agent_dir / "data.json"
-                        try:
-                            content = self.read_text_file(data_path)
-                        except FileNotFoundError:
+                    data_path = agent_dir / "data.json"
+                    try:
+                        content = self.read_text_file(data_path)
+                    except FileNotFoundError:
+                        if not self._is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)
-                            continue
-                        try:
-                            data = json.loads(content)
-                        except json.JSONDecodeError as e:
-                            logger.warning(
-                                "Could not load agent reference from {} because json was invalid: {}", data_path, e
-                            )
-                            continue
-                        ref = self._validate_and_create_discovered_agent(data)
-                        if ref is not None:
-                            agent_refs.append(ref)
+                        continue
+                    try:
+                        data = json.loads(content)
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "Could not load agent reference from {} because json was invalid: {}", data_path, e
+                        )
+                        continue
+                    ref = self._validate_and_create_discovered_agent(data)
+                    if ref is not None:
+                        agent_refs.append(ref)
 
             logger.trace("Loaded {} agent reference(s) from host {}", len(agent_refs), self.id)
             return agent_refs
@@ -1065,26 +1133,81 @@ class Host(BaseHost, OnlineHostInterface):
         source_path: Path,
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
-        # Check if source and target are on the same host
-        source_is_same_host = source_host.id == self.id
+        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_as_copy") as concurrency_group:
+            # Check if source and target are on the same host
+            source_is_same_host = source_host.id == self.id
 
-        # If target path is specified, use it; otherwise derive one
-        if options.target_path:
-            target_path = options.target_path
-            # If target equals source and same host, it's in-place
-            is_generated_work_dir = not (source_is_same_host and source_path == target_path)
-        elif source_is_same_host:
-            # Same host, no target path: run in-place at source path
-            target_path = source_path
-            is_generated_work_dir = False
-        else:
-            # Different host (remote copy): generate a unique work directory so that
-            # multiple agents sharing the same host each get their own directory.
-            target_path = self.host_dir / "projects" / str(AgentId.generate())
-            is_generated_work_dir = True
+            # If target path is specified, use it; otherwise derive one
+            if options.target_path:
+                target_path = options.target_path
+                # If target equals source and same host, it's in-place
+                is_generated_work_dir = not (source_is_same_host and source_path == target_path)
+            elif source_is_same_host:
+                # Same host, no target path: run in-place at source path
+                target_path = source_path
+                is_generated_work_dir = False
+            else:
+                # Different host (remote copy): generate a unique work directory so that
+                # multiple agents sharing the same host each get their own directory.
+                target_path = self.host_dir / "projects" / str(AgentId.generate())
+                is_generated_work_dir = True
 
-        self._mkdir(target_path)
+            # just doing this work in a thread for latency reasons
+            mark_generated_work_dir_thread = concurrency_group.start_new_thread(
+                self._mark_generated_work_dir, (target_path, is_generated_work_dir)
+            )
 
+            created_branch_name: str | None = None
+
+            # If source and target are same path on same host, nothing to transfer
+            if source_is_same_host and source_path == target_path:
+                logger.debug("Skipped file transfer: source and target are the same path")
+                return CreateWorkDirResult(path=target_path)
+
+            # Check if source has a .git directory
+            if source_host.is_local:
+                source_has_git = (source_path / ".git").exists()
+            else:
+                result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
+                source_has_git = result.success
+
+            # Transfer files based on whether source has .git and whether we want to include it
+            is_git_synced = options.git is not None and options.git.is_git_synced
+            # Exclude .git from rsync if user has specified any git options (they're making an explicit choice)
+            # If options.git is None, include .git (simple file copy of everything)
+            has_git_options = options.git is not None
+            if is_git_synced:
+                # fall back to file copy if source is not a git repo
+                if not source_has_git:
+                    logger.warning("Source path is not a git repository, falling back to file copy")
+                    self._mkdir(target_path)
+                    self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=True)
+                # Source is a git repo, transfer via git
+                else:
+                    created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
+                    self._transfer_extra_files(source_host, source_path, target_path, options)
+
+            # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
+            # not for full directory sync. By default, rsync does NOT use --delete, so existing files
+            # in the target won't be removed. Users can add --delete to rsync_args if they want
+            # full sync behavior with file deletion.
+            # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
+            if options.data_options.is_rsync_enabled:
+                self._mkdir(target_path)
+                self._rsync_files(
+                    source_host,
+                    source_path,
+                    target_path,
+                    extra_args=options.data_options.rsync_args,
+                    exclude_git=has_git_options,
+                )
+
+            # make sure we finished updating the generated work dir state
+            mark_generated_work_dir_thread.join(60.0)
+
+        return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
+
+    def _mark_generated_work_dir(self, target_path: Path, is_generated_work_dir: bool):
         # Track generated work directories at the host level.
         # When running in-place, actively remove from generated_work_dirs in case
         # a previous agent had registered this path (e.g., a worktree agent created
@@ -1095,51 +1218,6 @@ class Host(BaseHost, OnlineHostInterface):
             self._add_generated_work_dir(target_path)
         else:
             self._remove_generated_work_dir(target_path)
-
-        created_branch_name: str | None = None
-
-        # If source and target are same path on same host, nothing to transfer
-        if source_is_same_host and source_path == target_path:
-            logger.debug("Skipped file transfer: source and target are the same path")
-            return CreateWorkDirResult(path=target_path)
-
-        # Check if source has a .git directory
-        if source_host.is_local:
-            source_has_git = (source_path / ".git").exists()
-        else:
-            result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
-            source_has_git = result.success
-
-        # Transfer files based on whether source has .git and whether we want to include it
-        is_git_synced = options.git is not None and options.git.is_git_synced
-        # Exclude .git from rsync if user has specified any git options (they're making an explicit choice)
-        # If options.git is None, include .git (simple file copy of everything)
-        has_git_options = options.git is not None
-        if is_git_synced:
-            # fall back to file copy if source is not a git repo
-            if not source_has_git:
-                logger.warning("Source path is not a git repository, falling back to file copy")
-                self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=True)
-            # Source is a git repo, transfer via git
-            else:
-                created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
-                self._transfer_extra_files(source_host, source_path, target_path, options)
-
-        # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
-        # not for full directory sync. By default, rsync does NOT use --delete, so existing files
-        # in the target won't be removed. Users can add --delete to rsync_args if they want
-        # full sync behavior with file deletion.
-        # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
-        if options.data_options.is_rsync_enabled:
-            self._rsync_files(
-                source_host,
-                source_path,
-                target_path,
-                extra_args=options.data_options.rsync_args,
-                exclude_git=has_git_options,
-            )
-
-        return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
 
     def _transfer_git_repo(
         self,
@@ -1182,28 +1260,27 @@ class Host(BaseHost, OnlineHostInterface):
                 origin_result.stdout.strip() if origin_result.success and origin_result.stdout.strip() else None
             )
 
-        with log_span(
-            "Transferring git repository",
+        with info_span(
+            "Transferring git repository...",
             source=str(source_path),
             target=str(target_path),
             base_branch=base_branch_name,
             new_branch=new_branch_name,
         ):
-            # Check if target already has a .git directory
-            if self.is_local:
-                target_has_git = (target_path / ".git").exists()
-            else:
-                result = self.execute_command(f"test -d {shlex.quote(str(target_path / '.git'))}")
-                target_has_git = result.success
-
-            if target_has_git:
-                logger.trace("Skipped git repo initialization: target already has .git")
-            else:
-                with log_span("Initializing bare git repo on target"):
-                    result = self.execute_command(f"git init --bare {shlex.quote(str(target_path / '.git'))}")
-                    if not result.success:
-                        raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
-                    add_safe_directory_on_remote(self, target_path)
+            # Ensure the target directory exists, initialize a bare git repo if
+            # needed, and on remote hosts add safe.directory. All in one command
+            # to minimize round trips. git init --bare is idempotent on an
+            # existing bare repo so we skip the existence check.
+            quoted_git_dir = shlex.quote(str(target_path / ".git"))
+            quoted_target = shlex.quote(str(target_path))
+            init_parts = [f"mkdir -p {quoted_target}", f"git init --bare {quoted_git_dir}"]
+            if not self.is_local:
+                init_parts.append(f"git config --global --add safe.directory {quoted_target}")
+            init_cmd = " && ".join(init_parts)
+            with log_span("Ensuring git repo on target"):
+                result = self.execute_command(init_cmd)
+                if not result.success:
+                    raise MngError(f"Failed to initialize git repo on target: {result.stderr}")
 
             self._git_push_to_target(source_host, source_path, target_path)
 
@@ -1229,6 +1306,16 @@ class Host(BaseHost, OnlineHostInterface):
                         f" || git remote add origin {shlex.quote(origin_url)}"
                     )
                     config_commands.append(set_or_add)
+
+                # Copy .git/info/exclude from source to target. This file is not
+                # transferred by git push --mirror since it lives outside the git
+                # object store. We read it here and include it in the config command.
+                exclude_content = self._read_source_git_info_exclude(source_host, source_path)
+                if exclude_content is not None:
+                    escaped = exclude_content.replace("'", "'\"'\"'")
+                    target_exclude = ".git/info/exclude"
+                    config_commands.append(f"printf '%s' '{escaped}' > {shlex.quote(target_exclude)}")
+
                 result = self.execute_command(
                     " && ".join(config_commands),
                     cwd=target_path,
@@ -1236,20 +1323,14 @@ class Host(BaseHost, OnlineHostInterface):
                 if not result.success:
                     raise MngError(f"Failed to configure git repo on target: {result.stderr}")
 
-            # Copy .git/info/exclude from source to target. This file is not
-            # transferred by git push --mirror since it lives outside the git
-            # object store.
-            self._transfer_git_info_exclude(source_host, source_path, target_path)
-
         return new_branch_name
 
-    def _transfer_git_info_exclude(
+    def _read_source_git_info_exclude(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
-        target_path: Path,
-    ) -> None:
-        """Copy .git/info/exclude from source to target if it exists."""
+    ) -> str | None:
+        """Read .git/info/exclude content from the source repo, or None if unavailable."""
         # Resolve the git common dir on the source so this works in worktrees,
         # where .git is a file rather than a directory.
         if source_host.is_local:
@@ -1259,27 +1340,23 @@ class Host(BaseHost, OnlineHostInterface):
                 )
             except ProcessError:
                 logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
-                return
+                return None
             git_common_dir = Path(result.stdout.strip())
         else:
             result = source_host.execute_command("git rev-parse --git-common-dir", cwd=source_path)
             if not result.success:
                 logger.trace("Could not resolve git common dir in source, skipping info/exclude transfer")
-                return
+                return None
             git_common_dir = Path(result.stdout.strip())
         if not git_common_dir.is_absolute():
             git_common_dir = source_path / git_common_dir
 
         source_exclude_path = git_common_dir / "info" / "exclude"
-        target_exclude_path = target_path / ".git" / "info" / "exclude"
         try:
-            content = source_host.read_file(source_exclude_path)
+            return source_host.read_file(source_exclude_path).decode()
         except (FileNotFoundError, NotADirectoryError):
             logger.trace("No info/exclude in source, skipping")
-            return
-
-        with log_span("Copying .git/info/exclude to target"):
-            self.write_file(target_exclude_path, content)
+            return None
 
     def _git_push_to_target(
         self,
@@ -1622,8 +1699,8 @@ class Host(BaseHost, OnlineHostInterface):
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
         agent_type = options.agent_type or AgentTypeName("claude")
-        with log_span(
-            "Creating agent state",
+        with info_span(
+            "Creating agent state...",
             agent_id=str(agent_id),
             agent_name=str(agent_name),
             agent_type=str(agent_type),
@@ -1631,7 +1708,7 @@ class Host(BaseHost, OnlineHostInterface):
             resolved = resolve_agent_type(agent_type, self.mng_ctx.config)
 
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
-            self._mkdirs([state_dir, state_dir / "events"])
+            self._mkdirs([state_dir, state_dir / "events", state_dir / "activity", state_dir / "commands"])
 
             create_time = datetime.now(timezone.utc)
 
@@ -1674,18 +1751,31 @@ class Host(BaseHost, OnlineHostInterface):
                 "created_branch_name": created_branch_name,
             }
 
-            data_path = state_dir / "data.json"
-            self.write_text_file(data_path, json.dumps(data, indent=2))
+            # this is really just here to parallelize some of the work and decrease latency to creating a host
+            with self.mng_ctx.concurrency_group.make_concurrency_group("write_agent_state") as concurrency_group:
+                threads: list[ObservableThread] = []
 
-            # Persist agent data to external storage (e.g., Modal volume)
-            self.provider_instance.persist_agent_data(self.id, data)
+                threads.append(
+                    concurrency_group.start_new_thread(
+                        self.write_text_file, (state_dir / "data.json", json.dumps(data, indent=2))
+                    )
+                )
 
-            # Record CREATE activity for idle detection
-            agent.record_activity(ActivitySource.CREATE)
+                # Persist agent data to external storage (e.g., Modal volume)
+                threads.append(
+                    concurrency_group.start_new_thread(self.provider_instance.persist_agent_data, (self.id, data))
+                )
 
-            # Notify plugins that the agent state directory was created
-            with log_span("Calling on_agent_state_dir_created hooks"):
-                self.mng_ctx.pm.hook.on_agent_state_dir_created(agent=agent, host=self)
+                # Record CREATE activity for idle detection
+                threads.append(concurrency_group.start_new_thread(agent.record_activity, (ActivitySource.CREATE,)))
+
+                # Notify plugins that the agent state directory was created
+                with log_span("Calling on_agent_state_dir_created hooks"):
+                    self.mng_ctx.pm.hook.on_agent_state_dir_created(agent=agent, host=self)
+
+                # make sure they all finish in a reasonable amount of time
+                for thread in threads:
+                    thread.join(60.0)
 
             return agent
 
@@ -1774,98 +1864,109 @@ class Host(BaseHost, OnlineHostInterface):
         """Provision an agent (install packages, configure, etc.).
 
         Applies all provisioning in a logical order:
-        1. Call agent.on_before_provisioning() (validation only)
-        2. Call agent.get_provision_file_transfers() to collect file transfers
-        3. Validate required files exist, execute file transfers
-        4. Write environment variables to agent env file (before agent.provision()
+        Call agent.on_before_provisioning() (validation only)
+        Call agent.get_provision_file_transfers() to collect file transfers
+        Validate required files exist, execute file transfers
+        Write environment variables to agent env file (before agent.provision()
            so agent provisioning can use env vars like UV_TOOL_DIR)
-        5. Ensure mng_log.sh exists at host and agent level
-        6. Call agent.provision() (agent-type-specific provisioning)
-        7. Create directories (so paths exist for uploads)
-        8. Upload files (files exist before modifications)
-        9. Append text to files
-        10. Prepend text to files
-        11. Run sudo commands (system-level setup, with env vars sourced)
-        12. Run user commands (user-level setup, with env vars sourced)
-        13. Call agent.on_after_provisioning() (finalization)
+        Ensure mng_log.sh exists at host and agent level
+        Call agent.provision() (agent-type-specific provisioning)
+        Create directories (so paths exist for uploads)
+        Upload files (files exist before modifications)
+        Append text to files
+        Prepend text to files
+        Run sudo commands (system-level setup, with env vars sourced)
+        Run user commands (user-level setup, with env vars sourced)
+        Call agent.on_after_provisioning() (finalization)
         """
-        # 1. Call pre-provisioning validation on agent
-        with log_span("Calling on_before_provisioning for agent {}", agent.name):
-            agent.on_before_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+        with self.mng_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
+            # Call pre-provisioning validation on agent
+            with log_span("Calling on_before_provisioning for agent {}", agent.name):
+                agent.on_before_provisioning(host=self, options=options, mng_ctx=mng_ctx)
 
-        # 2. Collect file transfers from agent
-        with log_span("Collecting file transfers for agent {}", agent.name):
-            all_file_transfers = list(agent.get_provision_file_transfers(host=self, options=options, mng_ctx=mng_ctx))
+            # Collect file transfers from agent
+            with log_span("Collecting file transfers for agent {}", agent.name):
+                all_file_transfers = list(
+                    agent.get_provision_file_transfers(host=self, options=options, mng_ctx=mng_ctx)
+                )
 
-        # 3. Validate required files exist and execute transfers
-        self._execute_agent_file_transfers(agent, all_file_transfers)
+            # Validate required files exist and execute transfers
+            agent_file_transfer_thread = concurrency_group.start_new_thread(
+                self._execute_agent_file_transfers, (agent, all_file_transfers)
+            )
 
-        # 4. Write environment variables to agent env file (before agent.provision()
-        # so that agent provisioning can use env vars like UV_TOOL_DIR)
-        env_vars = self._collect_agent_env_vars(agent, options)
-        self._write_agent_env_file(agent, env_vars)
+            # Write environment variables to agent env file (before agent.provision()
+            # so that agent provisioning can use env vars like UV_TOOL_DIR)
+            env_vars = self._collect_agent_env_vars(agent, options)
+            self._write_agent_env_file(agent, env_vars)
 
-        # 5. Ensure mng_log.sh exists at both host and agent level so that
-        # all bash scripts can source it for logging and timestamp utilities.
-        self._ensure_mng_log_sh(agent)
+            # Ensure mng_log.sh exists at both host and agent level so that
+            # all bash scripts can source it for logging and timestamp utilities.
+            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mng_log_sh, (agent,))
 
-        # 6. Call agent.provision() for agent-type-specific provisioning
-        with log_span("Calling provision for agent {}", agent.name):
-            agent.provision(host=self, options=options, mng_ctx=mng_ctx)
+            # files need to be there before provisioning--even making this a thread was just a minor optimization:
+            agent_file_transfer_thread.join(60.0)
 
-        provisioning = options.provisioning
-        with log_span(
-            "Applying user provisioning commands",
-            agent_name=str(agent.name),
-            dirs=len(provisioning.create_directories),
-            uploads=len(provisioning.upload_files),
-            appends=len(provisioning.append_to_files),
-            prepends=len(provisioning.prepend_to_files),
-            sudo_cmds=len(provisioning.sudo_commands),
-            user_cmds=len(provisioning.user_commands),
-        ):
-            # 7. Create directories
-            for directory in provisioning.create_directories:
-                self._mkdir(directory)
-                logger.trace("Created directory: {}", directory)
+            # Call agent.provision() for agent-type-specific provisioning
+            with log_span("Calling provision for agent {}", agent.name):
+                agent.provision(host=self, options=options, mng_ctx=mng_ctx)
 
-            # 8. Upload files (read from local filesystem, write to host)
-            for upload_spec in provisioning.upload_files:
-                # Read from local filesystem (not via host primitives)
-                local_content = upload_spec.local_path.read_bytes()
-                self.write_file(upload_spec.remote_path, local_content)
-                logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+            provisioning = options.provisioning
+            with log_span(
+                "Applying user provisioning commands",
+                agent_name=str(agent.name),
+                dirs=len(provisioning.create_directories),
+                uploads=len(provisioning.upload_files),
+                appends=len(provisioning.append_to_files),
+                prepends=len(provisioning.prepend_to_files),
+                sudo_cmds=len(provisioning.sudo_commands),
+                user_cmds=len(provisioning.user_commands),
+            ):
+                # Create directories
+                for directory in provisioning.create_directories:
+                    self._mkdir(directory)
+                    logger.trace("Created directory: {}", directory)
 
-            # 9. Append text to files
-            for append_spec in provisioning.append_to_files:
-                self._append_to_file(append_spec.remote_path, append_spec.text)
-                logger.trace("Appended to file: {}", append_spec.remote_path)
+                # Upload files (read from local filesystem, write to host)
+                for upload_spec in provisioning.upload_files:
+                    # Read from local filesystem (not via host primitives)
+                    local_content = upload_spec.local_path.read_bytes()
+                    self.write_file(upload_spec.remote_path, local_content)
+                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
 
-            # 10. Prepend text to files
-            for prepend_spec in provisioning.prepend_to_files:
-                self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
-                logger.trace("Prepended to file: {}", prepend_spec.remote_path)
+                # Append text to files
+                for append_spec in provisioning.append_to_files:
+                    self._append_to_file(append_spec.remote_path, append_spec.text)
+                    logger.trace("Appended to file: {}", append_spec.remote_path)
 
-            # Build the source prefix for commands (sources host env, then agent env)
-            source_prefix = self.build_source_env_prefix(agent)
+                # Prepend text to files
+                for prepend_spec in provisioning.prepend_to_files:
+                    self._prepend_to_file(prepend_spec.remote_path, prepend_spec.text)
+                    logger.trace("Prepended to file: {}", prepend_spec.remote_path)
 
-            # 11. Run sudo commands (with env vars sourced)
-            for cmd in provisioning.sudo_commands:
-                result = self._run_sudo_command(source_prefix + cmd)
-                logger.trace("Ran sudo command: {}", cmd)
-                if not result.success:
-                    raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
+                # Build the source prefix for commands (sources host env, then agent env)
+                source_prefix = self.build_source_env_prefix(agent)
 
-            # 12. Run user commands (with env vars sourced)
-            for cmd in provisioning.user_commands:
-                result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
-                logger.trace("Ran user command: {}", cmd)
-                if not result.success:
-                    raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+                # Run sudo commands (with env vars sourced)
+                for cmd in provisioning.sudo_commands:
+                    result = self._run_sudo_command(source_prefix + cmd)
+                    logger.trace("Ran sudo command: {}", cmd)
+                    if not result.success:
+                        raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
 
-        # 13. Call post-provisioning on agent
-        with log_span("Calling on_after_provisioning for agent {}", agent.name):
-            agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
+                # Run user commands (with env vars sourced)
+                for cmd in provisioning.user_commands:
+                    result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
+                    logger.trace("Ran user command: {}", cmd)
+                    if not result.success:
+                        raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+
+            # should be done by now
+            ensure_log_thread.join(60.0)
+
+            # Call post-provisioning on agent
+            with log_span("Calling on_after_provisioning for agent {}", agent.name):
+                agent.on_after_provisioning(host=self, options=options, mng_ctx=mng_ctx)
 
     def _ensure_mng_log_sh(self, agent: AgentInterface) -> None:
         """Write mng_log.sh to both host-level and agent-level commands directories.

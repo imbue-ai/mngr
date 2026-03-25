@@ -64,7 +64,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         ensure_clean=True,
         name=None,
         id=None,
-        name_style="english",
+        name_style="coolname",
         command=None,
         extra_window=(),
         source=None,
@@ -90,7 +90,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         pass_env=(),
         provider=None,
         new_host=False,
-        host_name_style="astronomy",
+        host_name_style="coolname",
         host_label=(),
         label=(),
         project=None,
@@ -246,6 +246,19 @@ def create_test_agent(
 
     for session_name in created_sessions:
         cleanup_tmux_session(session_name)
+
+
+@pytest.fixture
+def editor_recovery_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Provide a temporary recovery directory and EDITOR for editor recovery tests.
+
+    Sets EDITOR=true so EditorSession.create() works without a real editor.
+    Returns a recovery directory under tmp_path that tests pass to
+    _rescue_editor_content / _editor_cleanup_scope via the recovery_dir parameter.
+    """
+    monkeypatch.setenv("EDITOR", "true")
+    recovery_dir = tmp_path / ".mng"
+    return recovery_dir
 
 
 # =============================================================================
