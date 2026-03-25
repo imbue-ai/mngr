@@ -1463,6 +1463,7 @@ def _run_delivery_loop(
     ignored_sources_state: _IgnoredSourcesState,
     send_message: Callable[[str, str], bool] = _send_message,
     last_delivery_monotonic: list[float] | None = None,
+    backoff_base_seconds: float = _BACKOFF_BASE_SECONDS,
 ) -> None:
     """Main delivery loop: drain buffer, rate-limit, format, and deliver to agent.
 
@@ -1494,7 +1495,7 @@ def _run_delivery_loop(
     while not stop_event.is_set():
         # If we're in a failure state, wait with exponential backoff
         if consecutive_failures > 0:
-            backoff = _compute_backoff_seconds(consecutive_failures)
+            backoff = min(backoff_base_seconds * (2 ** (consecutive_failures - 1)), _BACKOFF_MAX_SECONDS)
             logger.debug("Backing off for {:.1f}s after {} consecutive failures", backoff, consecutive_failures)
             stop_event.wait(timeout=backoff)
             if stop_event.is_set():
@@ -1639,6 +1640,7 @@ def main(
     start_subprocess: Callable[[str, str], Any] = _start_events_subprocess,
     stop_event: threading.Event | None = None,
     send_message: Callable[[str, str], bool] = _send_message,
+    subprocess_restart_delay_seconds: float = _SUBPROCESS_RESTART_DELAY_SECONDS,
 ) -> None:
     agent_state_dir = Path(require_env("MNG_AGENT_STATE_DIR"))
     agent_work_dir = Path(require_env("MNG_AGENT_WORK_DIR"))
@@ -1792,8 +1794,8 @@ def main(
             if stop_event.is_set():
                 break
 
-            logger.info("Restarting events subprocess in {}s", _SUBPROCESS_RESTART_DELAY_SECONDS)
-            stop_event.wait(timeout=_SUBPROCESS_RESTART_DELAY_SECONDS)
+            logger.info("Restarting events subprocess in {}s", subprocess_restart_delay_seconds)
+            stop_event.wait(timeout=subprocess_restart_delay_seconds)
 
     except KeyboardInterrupt:
         logger.info("Event watcher stopping (KeyboardInterrupt)")

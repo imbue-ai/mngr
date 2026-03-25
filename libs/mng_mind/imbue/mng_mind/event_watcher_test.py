@@ -1177,7 +1177,7 @@ def test_delivery_loop_retries_on_failure(tmp_path: Path) -> None:
             event_lists_dir,
             ignored_sources_state,
         ),
-        kwargs={"send_message": failing_then_succeeding},
+        kwargs={"send_message": failing_then_succeeding, "backoff_base_seconds": 0.01},
         daemon=True,
     )
     thread.start()
@@ -1230,7 +1230,7 @@ def test_delivery_loop_writes_notification_on_repeated_failure(tmp_path: Path) -
             event_lists_dir,
             ignored_sources_state,
         ),
-        kwargs={"send_message": failing_and_tracking},
+        kwargs={"send_message": failing_and_tracking, "backoff_base_seconds": 0.01},
         daemon=True,
     )
     thread.start()
@@ -1732,7 +1732,7 @@ def test_main_restarts_subprocess_on_exit(tmp_path: Path, monkeypatch: pytest.Mo
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            # Stop after the restart to avoid waiting through multiple 5s delays
+            # Stop after the restart to avoid waiting through multiple delays
             stop_event.set()
         return _FakeEventsProcess([])
 
@@ -1742,6 +1742,7 @@ def test_main_restarts_subprocess_on_exit(tmp_path: Path, monkeypatch: pytest.Mo
             "start_subprocess": counting_factory,
             "stop_event": stop_event,
             "send_message": capture,
+            "subprocess_restart_delay_seconds": 0.01,
         },
         daemon=True,
     )
@@ -2053,7 +2054,9 @@ def test_synthetic_loop_sends_onboarding_on_first_run(tmp_path: Path) -> None:
         env.stop_event,
         env.last_real_event_monotonic,
         env.mind_state_dir,
-        last_delivery_monotonic=[0.0],
+        # Positive value: simulates that initial delivery has already happened,
+        # so the onboarding wait loop exits immediately.
+        last_delivery_monotonic=[1.0],
     )
 
     assert len(env.event_buffer) == 1
@@ -2061,6 +2064,79 @@ def test_synthetic_loop_sends_onboarding_on_first_run(tmp_path: Path) -> None:
     assert parsed["type"] == "onboarding"
     assert parsed["source"] == "mind/onboarding"
     assert (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
+
+
+def test_synthetic_loop_onboarding_waits_for_delivery(tmp_path: Path) -> None:
+    """Onboarding event is deferred until last_delivery_monotonic becomes positive."""
+    mind_state_dir = tmp_path / "mind"
+    mind_state_dir.mkdir(parents=True)
+    env = _create_synthetic_loop_env(mind_state_dir)
+
+    delivery_mono: list[float] = [0.0]
+    delay_gate = threading.Event()
+
+    def simulate_delivery() -> None:
+        """Simulate delivery completing after a short delay."""
+        delay_gate.wait(timeout=5.0)
+        delivery_mono[0] = 1.0
+        env.stop_event.set()
+
+    settings = _EventWatcherSettings()
+    delivery_thread = threading.Thread(target=simulate_delivery)
+    delivery_thread.start()
+    # Release the delivery simulation after a brief moment
+    delay_gate.set()
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        last_delivery_monotonic=delivery_mono,
+    )
+    delivery_thread.join(timeout=5.0)
+
+    assert len(env.event_buffer) == 1
+    parsed = json.loads(env.event_buffer[0])
+    assert parsed["type"] == "onboarding"
+    assert parsed["source"] == "mind/onboarding"
+
+
+def test_synthetic_loop_onboarding_exits_on_stop_without_delivery(tmp_path: Path) -> None:
+    """If stop_event fires before delivery, onboarding is not sent."""
+    mind_state_dir = tmp_path / "mind"
+    mind_state_dir.mkdir(parents=True)
+    env = _create_synthetic_loop_env(mind_state_dir)
+
+    settings = _EventWatcherSettings()
+
+    # Run the loop in a thread so we can stop it
+    loop_done = threading.Event()
+
+    def run_loop() -> None:
+        _run_synthetic_events_loop(
+            settings,
+            env.event_buffer,
+            env.buffer_lock,
+            env.stop_event,
+            env.last_real_event_monotonic,
+            env.mind_state_dir,
+            last_delivery_monotonic=[0.0],
+        )
+        loop_done.set()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+
+    # Stop the loop without delivery ever happening
+    env.stop_event.set()
+    loop_done.wait(timeout=5.0)
+    loop_thread.join(timeout=5.0)
+
+    assert len(env.event_buffer) == 0
+    assert not (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
 
 
 def test_synthetic_loop_skips_onboarding_when_marker_exists(synthetic_loop_env: SyntheticLoopEnv) -> None:
@@ -2765,27 +2841,52 @@ def test_load_settings_reads_is_message_batching_enabled(tmp_path: Path) -> None
 
 @pytest.mark.timeout(15)
 def test_main_starts_synthetic_events_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """main() starts the synthetic events thread and delivers onboarding on first run."""
+    """main() starts the synthetic events thread and delivers onboarding on first run.
+
+    Onboarding waits for last_delivery_monotonic to become positive, so we must
+    emit a real event that gets delivered first. We poll for the onboarding marker
+    rather than relying on capture timing, because last_delivery_monotonic is
+    updated after send_message returns (race window).
+    """
     agent_state_dir = _setup_main_env(tmp_path, monkeypatch, suppress_onboarding=False)
     capture = _MessageCapture()
     stop_event = threading.Event()
+    mind_state_dir = agent_state_dir / "mind"
 
-    def immediate_stop_factory(agent_id: str, cel_filter: str) -> Any:
+    events = [_make_event_line("evt-trigger", timestamp="2026-03-01T12:00:00Z")]
+    call_count = 0
+
+    def fake_start_subprocess(agent_id: str, cel_filter: str) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeEventsProcess(events)
         stop_event.set()
         return _FakeEventsProcess([])
 
-    main(
-        start_subprocess=immediate_stop_factory,
-        stop_event=stop_event,
-        send_message=capture,
+    thread = threading.Thread(
+        target=main,
+        kwargs={
+            "start_subprocess": fake_start_subprocess,
+            "stop_event": stop_event,
+            "send_message": capture,
+        },
+        daemon=True,
     )
+    thread.start()
 
-    # Verify the mind state directory was created
-    mind_state_dir = agent_state_dir / "mind"
+    # Poll for the onboarding marker (created after delivery unblocks onboarding)
+    onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
+    deadline = time.monotonic() + 5.0
+    while not onboarding_marker.exists():
+        assert time.monotonic() < deadline, "Timed out waiting for onboarding marker"
+        stop_event.wait(timeout=0.05)
+
+    stop_event.set()
+    thread.join(timeout=5.0)
+
     assert mind_state_dir.is_dir()
-
-    # Verify the onboarding marker was created (onboarding event was sent)
-    assert (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
+    assert onboarding_marker.exists()
 
 
 @pytest.mark.timeout(15)
