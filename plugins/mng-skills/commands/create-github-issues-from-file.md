@@ -1,1 +1,0 @@
-../../../.claude/commands/create-github-issues-from-file.md

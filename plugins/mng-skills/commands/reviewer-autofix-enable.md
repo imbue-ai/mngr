@@ -1,1 +1,0 @@
-../../../.claude/commands/reviewer-autofix-enable.md
