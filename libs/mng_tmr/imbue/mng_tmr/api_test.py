@@ -412,6 +412,3 @@ def test_read_integrator_result_missing_file(localhost: OnlineHostInterface) -> 
     assert result.squashed_branches == ()
     assert result.impl_priority == ()
     assert result.failed == ()
-
-
-# --- _launch_agents_up_to_limit tests ---

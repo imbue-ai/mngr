@@ -54,7 +54,8 @@ def test_report_section_blocked_all_changes_blocked() -> None:
     )
 
 
-def test_report_section_blocked_failed_changes() -> None:
+def test_report_section_failed_changes_are_non_impl() -> None:
+    """FAILED (not BLOCKED) changes route to NON_IMPL_FIXES, not BLOCKED."""
     assert (
         report_section_of(make_test_result(changes=FAILED_FIX, before=False, after=False))
         == ReportSection.NON_IMPL_FIXES
