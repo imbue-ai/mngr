@@ -292,6 +292,18 @@ else
     esac
 fi
 
+# ── Claude Code skills plugin ─────────────────────────────────────────────────
+
+if command -v claude &>/dev/null; then
+    printf "\n"
+    printf "mng provides a Claude Code plugin with code review, architecture verification,\n"
+    printf "and development workflow skills. To install it, run inside Claude Code:\n"
+    printf "\n"
+    printf "  ${BOLD}/plugin marketplace add imbue-ai/mng${RESET}\n"
+    printf "  ${BOLD}/plugin install mng-skills@mng-marketplace${RESET}\n"
+    printf "\n"
+fi
+
 info "Get started with: mng --help"
 
 # IMPORTANT: Instructions that require user action after installation (e.g.
