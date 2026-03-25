@@ -19,7 +19,7 @@ git diff <base_branch>...HEAD
 3. Understand the existing codebase patterns around the changed files.
 4. Read the issue categories from `.claude/agents/categories/code-issue-categories.md`.
 
-If the diff is empty (no changes on the branch), stop immediately -- there is nothing to verify or fix.
+If the diff is empty (no changes on the branch), create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md` then stop immediately -- there is nothing to verify or fix.
 
 # Step 2: Create Issue List
 
@@ -32,7 +32,7 @@ For each potential issue, note:
 
 Then, for each potential issue, briefly check: is this actually a problem, or does it fall under one of the listed exceptions for that issue type? Drop anything that clearly isn't a real issue. Keep everything else, regardless of severity.
 
-If there are no issues, stop here. There is nothing to fix.
+If there are no issues, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md` then stop here. There is nothing to fix.
 
 ## Record Issues
 
@@ -56,7 +56,7 @@ For each issue, do the following in order:
 1. Read the relevant source files thoroughly.
 2. Understand the surrounding code, architecture, and any related abstractions.
 3. Determine the correct fix.
-4. Get the current HEAD hash: `git rev-parse --short HEAD`. Use the Write tool, without checking if the directory exists, to create `.reviewer/autofix/plans/<hash>_<issue_number>.md` describing:
+4. Get the current HEAD hash: `git rev-parse --short HEAD`. Use the Write tool, without checking if the directory exists, to create `.reviewer/outputs/autofix/plans/<hash>_<issue_number>.md` describing:
    - What the issue is and where it is
    - Why it is a problem
    - The planned fix (specific changes to specific files)
@@ -83,3 +83,5 @@ After all fixes are committed, run the project test suite. Use whatever test com
 If tests pass, you are done.
 
 If tests fail, fix the failures and commit the fixes. Re-run the tests. Keep fixing and re-running until tests pass. The only acceptable exception is if you can prove a failure is preexisting by running the same test on the base branch and seeing it fail there too.
+
+Once tests pass, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md`

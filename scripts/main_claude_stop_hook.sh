@@ -209,7 +209,7 @@ CONVO_NEEDED=false
 # Autofix gate (inlined from check_autofix_ran.sh)
 REVIEWER_SETTINGS=".reviewer/settings.json"
 AUTOFIX_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "autofix.is_enabled" "true")
-if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/autofix/plans/${HASH}_verified.md" ]]; then
+if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/verified.md" ]]; then
     AUTOFIX_NEEDED=true
 fi
 
