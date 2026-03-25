@@ -647,6 +647,11 @@ def test_stream_manager_mixed_local_and_remote() -> None:
         ssh_line = _make_host_ssh_info_line(remote_host_id, ssh_data)
         manager._handle_discovery_line(ssh_line)
 
+        # Terminate background mng events processes before the CG exits,
+        # otherwise they time out on slow systems (e.g. Modal containers).
+        for process in manager._events_processes.values():
+            process.terminate()
+
     assert manager.resolver.get_ssh_info(_AGENT_A) is None
     ssh_info = manager.resolver.get_ssh_info(_AGENT_B)
     assert ssh_info is not None
