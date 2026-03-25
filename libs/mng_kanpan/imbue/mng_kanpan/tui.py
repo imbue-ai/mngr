@@ -1430,7 +1430,7 @@ def run_kanpan(
     # Pack the left side so it gets exactly the space its text needs; the right
     # side (keybindings) gets the remainder and wraps when the terminal is narrow.
     footer_items: list[Any] = [("pack", footer_left_attr), AttrMap(footer_right, "footer")]
-    footer_columns = Columns(footer_items)
+    footer_columns = Columns(footer_items, dividechars=1)
     footer = Pile([Divider(), footer_columns])
 
     is_filtered = bool(include_filters or exclude_filters)
