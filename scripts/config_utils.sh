@@ -32,14 +32,14 @@ read_json_config() {
 
     # Local overrides take precedence
     if [ -f "$local_path" ]; then
-        val=$(jq -r "$jq_path // empty" "$local_path" 2>/dev/null)
+        val=$(jq -r "if $jq_path == null then empty else $jq_path end" "$local_path" 2>/dev/null)
         if [ -n "$val" ]; then
             echo "$val"
             return
         fi
     fi
     if [ -f "$config_path" ]; then
-        val=$(jq -r "$jq_path // empty" "$config_path" 2>/dev/null)
+        val=$(jq -r "if $jq_path == null then empty else $jq_path end" "$local_path" 2>/dev/null)
         if [ -n "$val" ]; then
             echo "$val"
             return
