@@ -579,6 +579,66 @@ def _terminate_process_gracefully(process: Any) -> None:
         process.kill()
 
 
+@dataclasses.dataclass
+class _IdleWaitTracker:
+    """Manages the 'mng wait' subprocess used to detect when the agent enters WAITING.
+
+    Encapsulates process lifecycle (start, poll, restart on failure, cleanup)
+    and tracks the monotonic timestamp when the agent became idle.
+    """
+
+    _agent_id: str
+    _start_idle_wait: Callable[[str], Any]
+    _process: Any = dataclasses.field(default=None, init=False)
+    _idle_since: float | None = dataclasses.field(default=None, init=False)
+
+    def start(self) -> None:
+        """Launch the initial 'mng wait' subprocess."""
+        self._process = self._start_idle_wait(self._agent_id)
+        logger.info("Started idle wait for agent {}", self._agent_id)
+
+    def on_real_event(self) -> None:
+        """Reset idle state and restart the wait after a real event arrives."""
+        self._idle_since = None
+        if self._process is not None:
+            _terminate_process_gracefully(self._process)
+        self._process = self._start_idle_wait(self._agent_id)
+        logger.debug("Restarted idle wait after real event")
+
+    def poll(self, now_monotonic: float) -> None:
+        """Check whether the wait subprocess has completed.
+
+        If the process exited with code 0, records the current time as the
+        moment the agent became idle. If it exited with a non-zero code,
+        restarts the wait.
+        """
+        if self._process is None:
+            return
+        poll_result = self._process.poll()
+        if poll_result is None:
+            return
+        if poll_result == 0 and self._idle_since is None:
+            self._idle_since = now_monotonic
+            logger.info("Agent entered idle state (WAITING)")
+        elif poll_result != 0:
+            logger.warning("mng wait exited with code {}, restarting", poll_result)
+            self._process = self._start_idle_wait(self._agent_id)
+        else:
+            # Process already reported idle; stop polling it
+            self._process = None
+
+    @property
+    def idle_since(self) -> float | None:
+        """Monotonic timestamp when the agent entered WAITING, or None if not idle."""
+        return self._idle_since
+
+    def cleanup(self) -> None:
+        """Terminate any running wait subprocess."""
+        if self._process is not None:
+            _terminate_process_gracefully(self._process)
+            self._process = None
+
+
 # -- Chat event pairing --
 
 # Maximum time to wait for an assistant response before delivering the user
@@ -883,6 +943,24 @@ def _check_scheduled_events(
     return saved_date, fired_today
 
 
+def _compute_idle_elapsed_minutes(
+    now_monotonic: float,
+    idle_wait_tracker: _IdleWaitTracker | None,
+    last_seen_real_event_time: float,
+) -> float | None:
+    """Return the elapsed idle minutes, or None if the agent is not yet idle.
+
+    When an idle wait tracker is active, idle time is measured from the moment
+    the agent entered WAITING state. Otherwise, it falls back to time since
+    the last real event.
+    """
+    if idle_wait_tracker is not None:
+        if idle_wait_tracker.idle_since is None:
+            return None
+        return (now_monotonic - idle_wait_tracker.idle_since) / 60.0
+    return (now_monotonic - last_seen_real_event_time) / 60.0
+
+
 def _run_synthetic_events_loop(
     settings: _EventWatcherSettings,
     event_buffer: list[str],
@@ -913,15 +991,13 @@ def _run_synthetic_events_loop(
 
     # When agent_id is provided, track when the agent actually became idle
     # (entered WAITING state) via 'mng wait' subprocess.
-    is_idle_wait_enabled = bool(agent_id and settings.idle_event_delay_minutes_schedule)
-    agent_idle_since: float | None = None
-    wait_process: Any = None
-
-    if is_idle_wait_enabled:
-        if start_idle_wait is None:
-            start_idle_wait = _start_agent_idle_wait
-        wait_process = start_idle_wait(agent_id)
-        logger.info("Started idle wait for agent {}", agent_id)
+    idle_wait_tracker: _IdleWaitTracker | None = None
+    if agent_id and settings.idle_event_delay_minutes_schedule:
+        idle_wait_tracker = _IdleWaitTracker(
+            agent_id,
+            start_idle_wait if start_idle_wait is not None else _start_agent_idle_wait,
+        )
+        idle_wait_tracker.start()
 
     scheduled_state_file = mind_state_dir / _SCHEDULED_STATE_FILENAME
     saved_date, fired_today = _load_scheduled_events_state(scheduled_state_file)
@@ -939,45 +1015,19 @@ def _run_synthetic_events_loop(
             if current_real_event_time > last_seen_real_event_time:
                 idle_events_sent = 0
                 last_seen_real_event_time = current_real_event_time
-                if is_idle_wait_enabled:
-                    agent_idle_since = None
-                    # Terminate the existing wait and start a fresh one
-                    if wait_process is not None:
-                        _terminate_process_gracefully(wait_process)
-                    assert start_idle_wait is not None
-                    wait_process = start_idle_wait(agent_id)
-                    logger.debug("Restarted idle wait after real event")
+                if idle_wait_tracker is not None:
+                    idle_wait_tracker.on_real_event()
 
-            # Check if the wait subprocess has completed (agent entered WAITING)
-            if is_idle_wait_enabled and wait_process is not None:
-                poll_result = wait_process.poll()
-                if poll_result is not None:
-                    if poll_result == 0 and agent_idle_since is None:
-                        agent_idle_since = now_monotonic
-                        logger.info("Agent entered idle state (WAITING)")
-                    elif poll_result != 0:
-                        logger.warning("mng wait exited with code {}, restarting", poll_result)
-                        assert start_idle_wait is not None
-                        wait_process = start_idle_wait(agent_id)
-                    else:
-                        wait_process = None
+            if idle_wait_tracker is not None:
+                idle_wait_tracker.poll(now_monotonic)
 
             if settings.idle_event_delay_minutes_schedule:
-                if is_idle_wait_enabled:
-                    # Only send idle events after the agent has actually become idle
-                    if agent_idle_since is not None:
-                        elapsed_minutes = (now_monotonic - agent_idle_since) / 60.0
-                        idle_events_sent = _maybe_send_idle_event(
-                            settings,
-                            elapsed_minutes,
-                            idle_events_sent,
-                            user_tz,
-                            event_buffer,
-                            buffer_lock,
-                        )
-                else:
-                    # Fallback when no agent_id: use time since last real event
-                    elapsed_minutes = (now_monotonic - last_seen_real_event_time) / 60.0
+                elapsed_minutes = _compute_idle_elapsed_minutes(
+                    now_monotonic,
+                    idle_wait_tracker,
+                    last_seen_real_event_time,
+                )
+                if elapsed_minutes is not None:
                     idle_events_sent = _maybe_send_idle_event(
                         settings,
                         elapsed_minutes,
@@ -998,8 +1048,8 @@ def _run_synthetic_events_loop(
                     buffer_lock,
                 )
     finally:
-        if wait_process is not None:
-            _terminate_process_gracefully(wait_process)
+        if idle_wait_tracker is not None:
+            idle_wait_tracker.cleanup()
 
 
 # -- Delivery loop helpers --
