@@ -933,8 +933,8 @@ def _maybe_send_onboarding(
     if onboarding_marker.exists():
         return
 
-    # FOLLOWUP: I'm not quite sure how to make this better, but we should
-    # we wait a bit when starting because the onboarding event should come after the conversation events
+    # Wait for at least one event delivery before sending onboarding, so
+    # the onboarding event arrives after initial conversation events.
     if last_delivery_monotonic is not None:
         while len(last_delivery_monotonic) == 0 or last_delivery_monotonic[0] <= 0.0:
             if stop_event.is_set():
