@@ -77,11 +77,17 @@ _on_signal() {
 for _sig in HUP INT QUIT TERM PIPE; do
     trap "_on_signal $_sig" "$_sig"
 done
+# Set to true when the safety hatch fires so the EXIT trap does not
+# immediately re-create the stuck file (which would undo the rm -f).
+_STUCK_HATCH_FIRED=false
+
 trap '
     _exit_code=$?
     _log_to_file "INFO" "main_stop_hook EXIT trap fired (pid=$$, exit_code=$_exit_code)"
-    # Track blocked attempts for stuck agent detection
-    if [[ $_exit_code -ne 0 ]]; then
+    # Track blocked attempts for stuck agent detection (skip if the
+    # safety hatch already fired -- otherwise rm + exit + trap creates
+    # an infinite 3-block cycle)
+    if [[ $_exit_code -ne 0 ]] && [[ "$_STUCK_HATCH_FIRED" != "true" ]]; then
         mkdir -p "$(dirname "$STUCK_FILE")" 2>/dev/null || true
         echo "$HASH" >> "$STUCK_FILE" 2>/dev/null || true
     fi
@@ -115,6 +121,7 @@ if _check_stuck; then
     log_error "Stop hook has blocked 3 times at the same commit ($HASH)."
     log_error "The agent appears stuck. Please investigate manually."
     _log_to_file "ERROR" "Stuck agent detected at $HASH, exiting with error"
+    _STUCK_HATCH_FIRED=true
     rm -f "$STUCK_FILE"
     notify_user || echo "No notify_user function defined, skipping."
     exit 1

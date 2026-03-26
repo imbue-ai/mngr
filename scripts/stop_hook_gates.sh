@@ -7,6 +7,11 @@ set -euo pipefail
 # conversation review have been completed. Exits 0 if all enabled gates
 # pass, 2 if any are missing.
 #
+# Safety hatch: after 3 consecutive blocks at the same state, exits 0
+# with a warning instead of blocking forever. This prevents infinite
+# loops when the agent cannot make progress (e.g., waiting for user
+# input).
+#
 # Usage:
 #   ./stop_hook_gates.sh [COMMIT_HASH]
 #
@@ -23,6 +28,40 @@ source "$SCRIPT_DIR/config_utils.sh"
 HASH="${1:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
 
 REVIEWER_SETTINGS=".reviewer/settings.json"
+
+# ---------------------------------------------------------------------------
+# Safety hatch: prevent infinite stop-hook loops.
+#
+# Track consecutive blocks in .reviewer/.stop_hook_consecutive_blocks.
+# Each line is a commit hash from a blocked attempt. If the last 3
+# entries are all the same hash, the agent is stuck -- let it through.
+# ---------------------------------------------------------------------------
+MAX_CONSECUTIVE_BLOCKS=3
+BLOCK_TRACKER=".reviewer/.stop_hook_consecutive_blocks"
+
+_check_stuck() {
+    if [[ ! -f "$BLOCK_TRACKER" ]]; then
+        return 1
+    fi
+    local last_n entry_count unique_count
+    last_n=$(tail -n "$MAX_CONSECUTIVE_BLOCKS" "$BLOCK_TRACKER")
+    entry_count=$(echo "$last_n" | wc -l | tr -d ' ')
+    if [[ $entry_count -ge $MAX_CONSECUTIVE_BLOCKS ]]; then
+        unique_count=$(echo "$last_n" | sort -u | wc -l | tr -d ' ')
+        if [[ $unique_count -eq 1 ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+if _check_stuck; then
+    echo "SAFETY HATCH: Stop hook has blocked ${MAX_CONSECUTIVE_BLOCKS} consecutive times at the same commit ($HASH)." >&2
+    echo "Letting the agent through to prevent an infinite loop." >&2
+    echo "The review gates are still unsatisfied -- please investigate manually." >&2
+    rm -f "$BLOCK_TRACKER"
+    exit 0
+fi
 
 AUTOFIX_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "autofix.is_enabled" "true")
 CONVO_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "verify_conversation.is_enabled" "true")
@@ -65,8 +104,14 @@ if [[ "$CONVO_NEEDED" == "true" ]]; then
 fi
 
 if [[ ${#MISSING[@]} -eq 0 ]]; then
+    # All gates passed -- clear the block tracker
+    rm -f "$BLOCK_TRACKER"
     exit 0
 fi
+
+# Record this blocked attempt for stuck detection
+mkdir -p "$(dirname "$BLOCK_TRACKER")" 2>/dev/null || true
+echo "$HASH" >> "$BLOCK_TRACKER" 2>/dev/null || true
 
 echo "The following review gates have not been satisfied:" >&2
 for item in "${MISSING[@]}"; do
