@@ -72,7 +72,7 @@ _SHORT_ID_LENGTH = 6
 _MISSING_AGENT_MAX_ROUNDS = 30
 
 
-def _try_list_agents(mng_ctx: MngContext) -> ListResult | None:
+def try_list_agents(mng_ctx: MngContext) -> ListResult | None:
     """List agents, returning None on transient errors.
 
     Human-sanctioned broad catch: polling must survive transient provider errors.
@@ -404,7 +404,7 @@ def launch_and_poll_agents(
     all_hosts: dict[str, OnlineHostInterface],
     artifact_output_dir: Path | None = None,
     local_host: OnlineHostInterface | None = None,
-) -> tuple[dict[str, AgentDetails], set[str]]:
+) -> tuple[dict[str, AgentDetails], set[str], dict[str, TestResult]]:
     """Launch agents incrementally and poll until all finish.
 
     Handles two modes depending on arguments:
@@ -428,6 +428,8 @@ def launch_and_poll_agents(
     final_details: dict[str, AgentDetails] = {}
     timed_out_ids: set[str] = set()
     missing_rounds: dict[str, int] = {}
+    # Results pre-read during finalization (before stopping) to avoid connection issues
+    cached_results: dict[str, TestResult] = {}
     # Track when we last attempted to read each agent's result file directly.
     # Initialized to created_at so the first check happens result_check_interval_seconds later.
     last_result_check: dict[str, float] = {}
@@ -503,7 +505,7 @@ def launch_and_poll_agents(
 
         pending_names = [agent_id_to_info[aid].agent_name for aid in pending_ids]
         logger.info("Polling {} pending agent(s): {}", len(pending_ids), ", ".join(str(n) for n in pending_names))
-        list_result = _try_list_agents(mng_ctx)
+        list_result = try_list_agents(mng_ctx)
         if list_result is None:
             time.sleep(poll_interval_seconds)
             continue
@@ -524,7 +526,7 @@ def launch_and_poll_agents(
             missing_rounds.pop(agent_id_str, None)
             changed = True
 
-            _finalize_agent(
+            pre_read = _finalize_agent(
                 agent_id=agent_detail.id,
                 agent_name=agent_detail.name,
                 host=all_hosts[agent_id_str],
@@ -532,6 +534,8 @@ def launch_and_poll_agents(
                 local_host=local_host,
                 should_stop=agent_detail.state == AgentLifecycleState.WAITING,
             )
+            if pre_read is not None:
+                cached_results[agent_id_str] = pre_read
 
         for agent_id_str in list(pending_ids):
             if agent_id_str not in seen_ids:
@@ -559,7 +563,7 @@ def launch_and_poll_agents(
                         "Agent '{}' has result file (detected via direct check), treating as done",
                         info.agent_name,
                     )
-                    _finalize_agent(
+                    pre_read = _finalize_agent(
                         agent_id=AgentId(agent_id_str),
                         agent_name=info.agent_name,
                         host=all_hosts[agent_id_str],
@@ -567,6 +571,8 @@ def launch_and_poll_agents(
                         local_host=local_host,
                         should_stop=True,
                     )
+                    if pre_read is not None:
+                        cached_results[agent_id_str] = pre_read
                     pending_ids.discard(agent_id_str)
                     changed = True
 
@@ -577,7 +583,7 @@ def launch_and_poll_agents(
         if pending_ids or remaining_tests:
             time.sleep(poll_interval_seconds)
 
-    return final_details, timed_out_ids
+    return final_details, timed_out_ids, cached_results
 
 
 def _parse_result_json(raw: str) -> TestResult:
@@ -645,40 +651,68 @@ def _finalize_agent(
     artifact_output_dir: Path | None,
     local_host: OnlineHostInterface | None,
     should_stop: bool,
-) -> None:
-    """Pull artifacts from a finished agent and optionally stop it.
+) -> TestResult | None:
+    """Pull artifacts and pre-read result from a finished agent, then optionally stop it.
 
-    Called when an agent is detected as done (via state transition or result
-    file check). Pulls .test_output if artifact_output_dir and local_host
-    are provided.
+    Returns the pre-read TestResult if successful, or None if the result
+    could not be read. The result is read BEFORE stopping the agent to avoid
+    connection issues with remote hosts that get torn down on stop.
     """
     if artifact_output_dir is not None and local_host is not None:
         pull_test_outputs_by_id(agent_id, agent_name, host, local_host, artifact_output_dir)
+    pre_read = try_read_agent_result(agent_id, host)
     if should_stop:
         _stop_agent_on_host(host, agent_id, agent_name)
+    return pre_read
+
+
+_RESULT_READ_MAX_RETRIES = 3
+_RESULT_READ_RETRY_DELAY_SECONDS = 5.0
 
 
 def read_agent_result(
     agent_detail: AgentDetails,
     host: OnlineHostInterface,
 ) -> TestResult:
-    """Read the result.json from a finished agent's state directory."""
+    """Read the result.json from a finished agent's state directory.
+
+    Retries up to 3 times on connection errors to handle transient host issues.
+    """
     result_path = host.host_dir / "agents" / str(agent_detail.id) / "plugin" / PLUGIN_NAME / "result.json"
-    try:
-        raw = host.read_text_file(result_path)
-        return _parse_result_json(raw)
-    except HostError as exc:
-        logger.warning("Lost connection to agent {} while fetching result file: {}", agent_detail.name, exc)
-        return TestResult(
-            errored=True,
-            summary_markdown=f"Connection lost while fetching result file from agent host: {exc}",
-        )
-    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
-        return TestResult(
-            errored=True,
-            summary_markdown=f"Failed to read agent result: {exc}",
-        )
+    last_exc: HostError | None = None
+    for attempt in range(_RESULT_READ_MAX_RETRIES):
+        try:
+            raw = host.read_text_file(result_path)
+            return _parse_result_json(raw)
+        except HostError as exc:
+            last_exc = exc
+            if attempt < _RESULT_READ_MAX_RETRIES - 1:
+                logger.warning(
+                    "Connection error reading result from agent {} (attempt {}/{}), retrying: {}",
+                    agent_detail.name,
+                    attempt + 1,
+                    _RESULT_READ_MAX_RETRIES,
+                    exc,
+                )
+                time.sleep(_RESULT_READ_RETRY_DELAY_SECONDS)
+                continue
+            logger.warning(
+                "Lost connection to agent {} after {} attempts: {}", agent_detail.name, _RESULT_READ_MAX_RETRIES, exc
+            )
+            return TestResult(
+                errored=True,
+                summary_markdown=f"Connection lost while fetching result file from agent host: {exc}",
+            )
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            logger.warning("Failed to read result from agent {}: {}", agent_detail.name, exc)
+            return TestResult(
+                errored=True,
+                summary_markdown=f"Failed to read agent result: {exc}",
+            )
+    return TestResult(
+        errored=True,
+        summary_markdown=f"Connection lost while fetching result file from agent host: {last_exc}",
+    )
 
 
 def _copy_test_output(
@@ -854,6 +888,7 @@ def _collect_agent_results(
     hosts: dict[str, OnlineHostInterface],
     missing_detail_errored: bool,
     missing_detail_summary: str,
+    cached_results: dict[str, TestResult] | None = None,
 ) -> list[TestMapReduceResult]:
     """Shared iteration over agents to build result list.
 
@@ -861,6 +896,7 @@ def _collect_agent_results(
     errored flag and summary), or finished (result read from the agent's state
     directory). The hosts dict maps agent_id strings to their respective hosts.
     """
+    cached_results = cached_results or {}
     results: list[TestMapReduceResult] = []
 
     for agent_info in agents:
@@ -908,7 +944,7 @@ def _collect_agent_results(
             )
             continue
 
-        test_result = read_agent_result(detail, hosts[agent_id_str])
+        test_result = cached_results.get(agent_id_str) or read_agent_result(detail, hosts[agent_id_str])
         results.append(
             TestMapReduceResult(
                 test_node_id=agent_info.test_node_id,
@@ -934,6 +970,7 @@ def gather_results(
     source_dir: Path,
     cg: ConcurrencyGroup,
     base_commit: str | None = None,
+    cached_results: dict[str, TestResult] | None = None,
 ) -> list[TestMapReduceResult]:
     """Gather results from all finished agents, pulling branches where appropriate.
 
@@ -949,6 +986,7 @@ def gather_results(
         hosts=hosts,
         missing_detail_errored=True,
         missing_detail_summary="Agent details not found after polling",
+        cached_results=cached_results,
     )
 
     # Pull branches from remote agents whose changes should be kept.
@@ -1026,7 +1064,7 @@ def wait_for_integrator(
     agent_id_str = str(integrator.agent_id)
 
     while time.monotonic() < deadline:
-        list_result = _try_list_agents(mng_ctx)
+        list_result = try_list_agents(mng_ctx)
         if list_result is None:
             time.sleep(poll_interval_seconds)
             continue

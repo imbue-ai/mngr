@@ -44,6 +44,7 @@ from imbue.mng_tmr.api import pull_agent_branch
 from imbue.mng_tmr.api import pull_test_outputs_by_id
 from imbue.mng_tmr.api import read_integrator_result
 from imbue.mng_tmr.api import should_pull_changes
+from imbue.mng_tmr.api import try_list_agents
 from imbue.mng_tmr.api import wait_for_integrator
 from imbue.mng_tmr.data_types import IntegratorResult
 from imbue.mng_tmr.data_types import TestAgentInfo
@@ -289,12 +290,8 @@ def _run_integrator_phase(
     integrator_result: IntegratorResult | None = None
     if integrator_branch is not None:
         is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-        list_result = list_agents(
-            mng_ctx=mng_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.CONTINUE,
-        )
-        for agent_detail in list_result.agents:
+        list_result = try_list_agents(mng_ctx)
+        for agent_detail in list_result.agents if list_result is not None else []:
             if str(agent_detail.id) == str(integrator.agent_id):
                 integrator_result = read_integrator_result(agent_detail, integrator_host, integrator_branch)
                 # Only pull branches from remote providers; local worktree branches already exist
@@ -530,7 +527,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
-    final_details, timed_out_ids = launch_and_poll_agents(
+    final_details, timed_out_ids, cached_results = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
         mng_ctx=mng_ctx,
@@ -561,6 +558,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         source_dir=source_dir,
         cg=mng_ctx.concurrency_group,
         base_commit=base_commit if is_remote_provider else None,
+        cached_results=cached_results,
     )
 
     # Step 9: Write report with final results (artifacts already pulled during polling)
