@@ -35,7 +35,7 @@ def test_gc_work_dirs_dry_run(
     per_host_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test gc --work-dirs --dry-run shows orphaned directories without removing them."""
+    """Test gc --dry-run shows orphaned directories without removing them."""
     orphaned_dir = temp_host_dir / "worktrees" / "orphaned-agent-123"
     orphaned_dir.mkdir(parents=True)
 
@@ -43,7 +43,7 @@ def test_gc_work_dirs_dry_run(
 
     result = cli_runner.invoke(
         gc,
-        ["--work-dirs", "--dry-run"],
+        ["--dry-run"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -54,13 +54,13 @@ def test_gc_work_dirs_dry_run(
     assert orphaned_dir.exists(), "Directory should still exist after dry-run"
 
 
-def test_gc_work_dirs_removes_orphaned_directory(
+def test_gc_removes_orphaned_directory(
     cli_runner: CliRunner,
     temp_host_dir: Path,
     per_host_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test gc --work-dirs removes orphaned directories and updates certified data."""
+    """Test gc removes orphaned directories and updates certified data."""
     orphaned_dir = temp_host_dir / "worktrees" / "orphaned-agent-456"
     orphaned_dir.mkdir(parents=True)
 
@@ -71,7 +71,7 @@ def test_gc_work_dirs_removes_orphaned_directory(
 
     result = cli_runner.invoke(
         gc,
-        ["--work-dirs"],
+        [],
         obj=plugin_manager,
         catch_exceptions=False,
     )

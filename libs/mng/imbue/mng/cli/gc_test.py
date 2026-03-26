@@ -310,14 +310,6 @@ def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> N
 def test_gc_cli_options_can_be_instantiated() -> None:
     """Test that GcCliOptions can be instantiated with all required fields."""
     opts = GcCliOptions(
-        all_agent_resources=False,
-        machines=True,
-        snapshots=False,
-        volumes=False,
-        work_dirs=False,
-        logs=False,
-        build_cache=False,
-        machine_cache=False,
         dry_run=True,
         on_error="abort",
         all_providers=False,
@@ -334,7 +326,6 @@ def test_gc_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.machines is True
     assert opts.dry_run is True
     assert opts.on_error == "abort"
 
@@ -541,81 +532,39 @@ def test_emit_human_summary_with_all_resource_types(capsys: pytest.CaptureFixtur
 # =============================================================================
 
 
-def test_gc_no_resource_types_exits_with_error(
+def test_gc_no_args_succeeds(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that gc without resource types exits with error."""
+    """gc with no args should succeed and GC all resource types."""
     result = cli_runner.invoke(
         gc,
         [],
         obj=plugin_manager,
         catch_exceptions=True,
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 0
+    assert "Cleaning work directories" in result.output
+    assert "Cleaning machines" in result.output
+    assert "Cleaning snapshots" in result.output
+    assert "Cleaning volumes" in result.output
+    assert "Cleaning logs" in result.output
+    assert "Cleaning build cache" in result.output
 
 
-def test_gc_no_resource_types_json_format(
+def test_gc_dry_run(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that gc without resource types in JSON format outputs error."""
+    """gc with --dry-run should succeed and emit info messages for all resource types."""
     result = cli_runner.invoke(
         gc,
-        ["--format", "json"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
-    output = json.loads(result.output.strip())
-    assert "error" in output
-
-
-def test_gc_no_resource_types_jsonl_format(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that gc without resource types in JSONL format outputs error event."""
-    result = cli_runner.invoke(
-        gc,
-        ["--format", "jsonl"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
-    output = json.loads(result.output.strip())
-    assert output["event"] == "error"
-
-
-def test_gc_all_agent_resources_dry_run(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """gc with --all-agent-resources --dry-run should succeed and emit info messages."""
-    result = cli_runner.invoke(
-        gc,
-        ["--all-agent-resources", "--dry-run"],
+        ["--dry-run"],
         obj=plugin_manager,
         catch_exceptions=True,
     )
     assert result.exit_code == 0
-    # Should contain cleanup progress messages
-    assert "Cleaning" in result.output or "Garbage Collection" in result.output
-
-
-def test_gc_individual_resource_types_dry_run(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """gc with individual resource types should succeed and emit messages for each type."""
-    result = cli_runner.invoke(
-        gc,
-        ["--machines", "--snapshots", "--volumes", "--logs", "--build-cache", "--dry-run"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code == 0
-    # Each resource type should trigger a cleaning message
+    assert "Cleaning work directories" in result.output
     assert "Cleaning machines" in result.output
     assert "Cleaning snapshots" in result.output
     assert "Cleaning volumes" in result.output
