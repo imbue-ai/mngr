@@ -1600,25 +1600,25 @@ class Host(BaseHost, OnlineHostInterface):
             else:
                 rsync_paths.append(rel_path_str)
 
-        # Batch symlink creation: one command handles all symlinks
+        # Batch symlink creation: one command handles all symlinks.
+        # Errors are written directly to stderr (not accumulated in a variable)
+        # because POSIX $() strips trailing newlines, which would merge messages.
         if symlink_pairs:
-            script_parts = ['errors=""']
+            script_parts = ["had_errors=0"]
             for source_str, target_str in symlink_pairs:
                 s = shlex.quote(source_str)
                 t = shlex.quote(target_str)
                 t_parent = shlex.quote(str(Path(target_str).parent))
-                # Use printf '%s' to safely embed the target path in the error message
-                # without shell interpretation of metacharacters ($, `, \, etc.)
                 script_parts.append(
                     f"if [ -e {t} ] && [ ! -L {t} ]; then "
-                    f"errors=\"${{errors}}$(printf 'CONFLICT: %s\\n' {t})\"; "
+                    f"printf 'CONFLICT: %s\\n' {t} >&2; had_errors=1; "
                     f"elif [ ! -L {t} ] || "
                     f'[ "$(readlink -f {t} 2>/dev/null)" != "$(readlink -f {s} 2>/dev/null)" ]; then '
                     f"mkdir -p {t_parent} && ln -snf {s} {t} "
-                    f"|| errors=\"${{errors}}$(printf 'FAILED: %s\\n' {t})\"; "
+                    f"|| {{ printf 'FAILED: %s\\n' {t} >&2; had_errors=1; }}; "
                     f"fi"
                 )
-            script_parts.append('if [ -n "$errors" ]; then printf "%s" "$errors" >&2; exit 1; fi')
+            script_parts.append('[ "$had_errors" = 0 ]')
             result = self.execute_command("; ".join(script_parts))
             if not result.success:
                 stderr_lines = result.stderr.strip().split("\n")
