@@ -69,10 +69,11 @@ Only after doing all of the above should you begin writing code.
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
-# Local/remote portability
+# Remote hosts
 
 - When implementing or modifying any feature, consider whether it will work correctly for remote agents (not just local ones). Agents may be running on remote hosts where assumptions like local filesystem access, localhost networking, or same-machine process management do not hold.
 - Prefer making code naturally portable rather than branching on `is_local` (or similar implementation-discriminating checks). Everything that can naturally be done via existing host methods alone should be -- use them so that calling code works uniformly across local and remote hosts.
+- Execution on remote hosts is slow because each operation goes over the network. Batch work into as few remote operations as possible rather than making many small calls.
 
 # Ratchets
 
