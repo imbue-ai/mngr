@@ -84,11 +84,14 @@ get_last_response_id() {
 
 build_tool_args() {
     local args=""
-    if [ -f "$LLM_TOOLS_DIR/context_tool.py" ]; then
-        args="$args --functions $LLM_TOOLS_DIR/context_tool.py"
-    fi
-    if [ -f "$LLM_TOOLS_DIR/extra_context_tool.py" ]; then
-        args="$args --functions $LLM_TOOLS_DIR/extra_context_tool.py"
+    # disabling tool use by default for now, because it wasn't that helpful...
+    if [ -n "$USE_TOOLS" ]; then
+        if [ -f "$LLM_TOOLS_DIR/context_tool.py" ]; then
+            args="$args --functions $LLM_TOOLS_DIR/context_tool.py"
+        fi
+        if [ -f "$LLM_TOOLS_DIR/extra_context_tool.py" ]; then
+            args="$args --functions $LLM_TOOLS_DIR/extra_context_tool.py"
+        fi
     fi
     echo "$args"
 }
