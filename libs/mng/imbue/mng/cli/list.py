@@ -287,9 +287,21 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     format_template = output_opts.format_template
 
     # --ids / --addrs: shorthand for format templates that print one value per line
+    is_shorthand_flag = opts.ids or opts.addrs
+    if is_shorthand_flag:
+        shorthand_name = "--ids" if opts.ids else "--addrs"
+        if opts.ids and opts.addrs:
+            raise click.UsageError("--ids and --addrs are mutually exclusive")
+        if opts.stream:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --stream")
+        format_source = ctx.get_parameter_source("output_format")
+        is_format_explicit = format_source is not None and format_source != click.core.ParameterSource.DEFAULT
+        if is_format_explicit:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --format")
+
     match (opts.ids, opts.addrs):
         case (True, True):
-            raise click.UsageError("--ids and --addrs are mutually exclusive")
+            pass  # already raised above
         case (True, False):
             format_template = "{id}"
         case (False, True):
