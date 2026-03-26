@@ -674,7 +674,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "commands": {"create": {"name": "test"}},
     "create_templates": {"modal": {"new_host": "modal"}},
     "pre_command_scripts": {"create": ["echo hello"]},
-    "work_dir_extra_paths": {".venv": "share", ".test_output": "copy"},
+    "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
     "logging": {"file_level": "DEBUG"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
@@ -706,8 +706,8 @@ name = "test"
 create = ["echo hello"]
 
 [work_dir_extra_paths]
-".venv" = "share"
-".test_output" = "copy"
+".venv" = "SHARE"
+".test_output" = "COPY"
 
 [logging]
 file_level = "DEBUG"

@@ -158,28 +158,27 @@ When creating agents with `--worktree` or `--copy-source`, certain files outside
 # .mng/settings.toml
 
 [work_dir_extra_paths]
-".mng/settings.local.toml" = "copy"
-".venv" = "share"
-"node_modules" = "share"
-".test_output" = "copy"
+".mng/settings.local.toml" = "SHARE"
+".venv" = "COPY"
+".test_output" = "COPY"
 ```
 
 **Modes:**
 
-- `"share"`: On the same host, creates a symlink from the work directory to the source path (shared source of truth). When copying to a different host, falls back to copying via rsync since symlinks across hosts are not possible.
-- `"copy"`: Always copies the path via rsync, creating an independent copy in each work directory.
+- `"SHARE"`: On the same host, creates a symlink from the work directory to the source path (shared source of truth). When copying to a different host, falls back to copying via rsync since symlinks across hosts are not possible.
+- `"COPY"`: Always copies the path via rsync, creating an independent copy in each work directory.
 
 **When to use each mode:**
 
-- Use `"share"` for large, read-heavy directories like `.venv` or `node_modules` that you want to avoid duplicating.
-- Use `"copy"` for files that each work directory should own independently, like local settings or test output.
+- Use `"SHARE"` for config files that are the same regardless of branch, like `.mng/settings.local.toml`.
+- Use `"COPY"` for paths that depend on branch state (like `.venv` or `node_modules`, which reflect each branch's dependencies) or that each work directory should own independently (like test output).
 
 **Behavior details:**
 
-- Paths are relative to the project root. Absolute paths and `..` components are rejected.
+- Paths are relative to the project root. Absolute paths and paths that escape the project root are rejected.
 - If a source path does not exist, it is skipped with a warning.
 - Symlinks are idempotent: if the correct symlink already exists, it is left in place.
-- If a non-symlink file or directory already exists at the target location when `"share"` mode would create a symlink, an error is raised.
+- If a non-symlink file or directory already exists at the target location when `"SHARE"` mode would create a symlink, an error is raised.
 - Config merging follows the same per-key override behavior as `pre_command_scripts`: project config overrides user config for each path independently.
 
 ## See Also

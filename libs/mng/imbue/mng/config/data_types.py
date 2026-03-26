@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
-from enum import Enum
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -18,6 +18,7 @@ from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.errors import ConfigParseError
@@ -95,11 +96,11 @@ def merge_dict_fields(base: dict[K, V], override: dict[K, V] | None) -> dict[K, 
 # === Enums ===
 
 
-class WorkDirExtraPathMode(str, Enum):
+class WorkDirExtraPathMode(UpperCaseStrEnum):
     """Transfer mode for extra paths in new work directories."""
 
-    SHARE = "share"
-    COPY = "copy"
+    SHARE = auto()
+    COPY = auto()
 
 
 # === Value Types ===
@@ -382,8 +383,8 @@ class MngConfig(FrozenModel):
     work_dir_extra_paths: dict[str, WorkDirExtraPathMode] = Field(
         default_factory=dict,
         description="Paths to transfer into new work directories, mapped to transfer mode. "
-        "'share': symlink on same host, copy on different host. "
-        "'copy': always copy via rsync.",
+        "'SHARE': symlink on same host, copy on different host. "
+        "'COPY': always copy via rsync.",
     )
     pager: str | None = Field(
         default=None,
