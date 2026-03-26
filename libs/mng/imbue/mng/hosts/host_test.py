@@ -19,11 +19,13 @@ from imbue.mng.agents.base_agent import BaseAgent
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.config.data_types import WorkDirExtraPathMode
 from imbue.mng.errors import AgentError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostDataSchemaError
 from imbue.mng.errors import InvalidActivityTypeError
 from imbue.mng.errors import NoCommandDefinedError
+from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.host import ONBOARDING_TEXT
 from imbue.mng.hosts.host import ONBOARDING_TEXT_TMUX_USER
@@ -1887,15 +1889,15 @@ def test_host_provision_agent_with_env_vars(
     assert "DEBUG=true" in env_content
 
 
-def test_host_provision_agent_with_user_commands(
+def test_host_provision_agent_with_extra_provision_commands(
     local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
 ) -> None:
-    """provision_agent should run user commands."""
+    """provision_agent should run extra provision commands."""
     host = local_host
-    # Create a marker file via user command to verify execution
+    # Create a marker file via extra provision command to verify execution
     marker_file = temp_work_dir / "provision_marker.txt"
 
     options = CreateAgentOptions(
@@ -1903,7 +1905,7 @@ def test_host_provision_agent_with_user_commands(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=(f"echo 'provisioned' > {marker_file}",),
+            extra_provision_commands=(f"echo 'provisioned' > {marker_file}",),
         ),
     )
 
@@ -2306,3 +2308,156 @@ def test_host_get_certified_data_raises_on_invalid_json(
 
     with pytest.raises(HostDataSchemaError):
         host.get_certified_data()
+
+
+# =========================================================================
+# Tests for Host._apply_work_dir_extra_paths
+# =========================================================================
+
+
+def test_apply_work_dir_extra_paths_share_same_host_creates_symlink(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Share mode on same host should create a symlink."""
+    source_dir, work_dir = source_and_work_dirs
+    (source_dir / ".venv").mkdir()
+
+    local_host._apply_work_dir_extra_paths(local_host, source_dir, work_dir, {".venv": WorkDirExtraPathMode.SHARE})
+
+    target = work_dir / ".venv"
+    assert target.is_symlink()
+    assert target.resolve() == (source_dir / ".venv").resolve()
+
+
+def test_apply_work_dir_extra_paths_share_same_host_source_missing_warns(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Share mode should warn and skip when source path does not exist."""
+    source_dir, work_dir = source_and_work_dirs
+    # Do NOT create .venv
+
+    local_host._apply_work_dir_extra_paths(local_host, source_dir, work_dir, {".venv": WorkDirExtraPathMode.SHARE})
+
+    target = work_dir / ".venv"
+    assert not target.exists()
+
+
+def test_apply_work_dir_extra_paths_share_same_host_idempotent(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Share mode should skip if correct symlink already exists."""
+    source_dir, work_dir = source_and_work_dirs
+    (source_dir / ".venv").mkdir()
+
+    # Create correct symlink first
+    (work_dir / ".venv").symlink_to(source_dir / ".venv")
+
+    # Should not raise
+    local_host._apply_work_dir_extra_paths(local_host, source_dir, work_dir, {".venv": WorkDirExtraPathMode.SHARE})
+
+    assert (work_dir / ".venv").is_symlink()
+
+
+def test_apply_work_dir_extra_paths_share_same_host_existing_non_symlink_raises(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Share mode should raise if a non-symlink target already exists."""
+    source_dir, work_dir = source_and_work_dirs
+    (source_dir / ".venv").mkdir()
+    # Create a real directory (not a symlink) at the target location
+    (work_dir / ".venv").mkdir()
+
+    with pytest.raises(UserInputError, match="not a symlink"):
+        local_host._apply_work_dir_extra_paths(local_host, source_dir, work_dir, {".venv": WorkDirExtraPathMode.SHARE})
+
+
+@pytest.mark.rsync
+def test_apply_work_dir_extra_paths_copy_mode_copies_files(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Copy mode should copy files (not symlink) even on same host."""
+    source_dir, work_dir = source_and_work_dirs
+    test_output = source_dir / ".test_output"
+    test_output.mkdir()
+    (test_output / "results.txt").write_text("test results")
+
+    local_host._apply_work_dir_extra_paths(
+        local_host, source_dir, work_dir, {".test_output": WorkDirExtraPathMode.COPY}
+    )
+
+    target = work_dir / ".test_output"
+    assert target.exists()
+    assert not target.is_symlink()
+    assert (target / "results.txt").read_text() == "test results"
+
+
+def test_apply_work_dir_extra_paths_rejects_absolute_path(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Absolute paths should be rejected."""
+    source_dir, work_dir = source_and_work_dirs
+
+    with pytest.raises(UserInputError, match="absolute paths"):
+        local_host._apply_work_dir_extra_paths(
+            local_host, source_dir, work_dir, {"/etc/passwd": WorkDirExtraPathMode.COPY}
+        )
+
+
+def test_apply_work_dir_extra_paths_rejects_path_escaping_root(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Paths that escape the project root should be rejected."""
+    source_dir, work_dir = source_and_work_dirs
+
+    with pytest.raises(UserInputError, match="escapes project root"):
+        local_host._apply_work_dir_extra_paths(
+            local_host, source_dir, work_dir, {"../escape": WorkDirExtraPathMode.COPY}
+        )
+
+
+def test_apply_work_dir_extra_paths_nested_path_creates_parents(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+) -> None:
+    """Nested paths should have parent directories created."""
+    source_dir, work_dir = source_and_work_dirs
+    nested = source_dir / "deep" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "file.txt").write_text("content")
+
+    local_host._apply_work_dir_extra_paths(
+        local_host, source_dir, work_dir, {"deep/nested": WorkDirExtraPathMode.SHARE}
+    )
+
+    target = work_dir / "deep" / "nested"
+    assert target.is_symlink()
+    assert target.resolve() == nested.resolve()
+
+
+def test_apply_work_dir_extra_paths_share_same_host_replaces_stale_symlink(
+    local_host: Host,
+    source_and_work_dirs: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """Share mode should replace a symlink that points to the wrong target."""
+    source_dir, work_dir = source_and_work_dirs
+    (source_dir / ".venv").mkdir()
+
+    # Create a stale symlink pointing to a different location
+    stale_target = tmp_path / "old_venv"
+    stale_target.mkdir()
+    (work_dir / ".venv").symlink_to(stale_target)
+    assert (work_dir / ".venv").resolve() == stale_target.resolve()
+
+    local_host._apply_work_dir_extra_paths(local_host, source_dir, work_dir, {".venv": WorkDirExtraPathMode.SHARE})
+
+    target = work_dir / ".venv"
+    assert target.is_symlink()
+    assert target.resolve() == (source_dir / ".venv").resolve()

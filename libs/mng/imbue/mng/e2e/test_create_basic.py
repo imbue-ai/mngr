@@ -35,12 +35,12 @@ def test_create_default(e2e: E2eSession) -> None:
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
-    mng create --in-place
+    mng create --transfer=none
     # mng defaults to creating a new worktree for each agent because the whole point of mng is to let you run multiple agents in parallel.
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
@@ -55,7 +55,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent_work_dir = matching[0]["work_dir"]
-    # With --in-place, the work directory should be the session cwd (the temp git repo),
+    # With --transfer=none, the work directory should be the session cwd (the temp git repo),
     # not a generated worktree path.
     assert "worktrees" not in agent_work_dir, f"Expected in-place work_dir to not be a worktree, got: {agent_work_dir}"
 
@@ -140,3 +140,64 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     assert "--model opus" in matching[0]["command"]
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_named_agent(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
+    mng create my-task
+    # that command give the agent a name of "my-task". If you don't specify a name, mng will generate a random one for you.
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean",
+            comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mng list", comment="Verify agent appears in list")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_with_json_output(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can control output format for scripting:
+    mng create my-task --no-connect --format json
+    # (--quiet suppresses all output)
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
+            comment="you can control output format for scripting",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mng list --format json", comment="Verify agent appears in JSON list")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert len(parsed["agents"]) == 1
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_headless(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # mng is very much meant to be used for scripting and automation, so nothing requires interactivity.
+    # if you want to be sure that interactivity is disabled, you can use the --headless flag:
+    mng create my-task --headless
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --headless",
+            comment="if you want to be sure that interactivity is disabled, you can use the --headless flag",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mng list", comment="Verify headless agent appears in list")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")

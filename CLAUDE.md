@@ -69,6 +69,12 @@ Only after doing all of the above should you begin writing code.
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
+# Remote hosts
+
+- Always consider whether code will work on remote hosts, not just local ones. Don't assume local filesystem access, localhost networking, or same-machine process management.
+- Use `HostInterface`/`OnlineHostInterface` methods (e.g. `execute_command`, `read_file`, `write_file`, `copy_directory`) instead of branching on `is_local`. Code should be naturally portable.
+- Remote operations go over the network and are slow. Batch into as few calls as possible.
+
 # Ratchets
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test.

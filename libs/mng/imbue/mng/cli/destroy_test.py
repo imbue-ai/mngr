@@ -78,7 +78,6 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         sessions=(),
         include=(),
         exclude=(),
-        stdin=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -459,18 +458,18 @@ def test_destroy_invalid_cel_expression_reports_error(
 
 
 # =============================================================================
-# --stdin tests
+# stdin '-' placeholder tests
 # =============================================================================
 
 
-def test_destroy_stdin_reads_agent_names(
+def test_destroy_dash_reads_agent_names(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --stdin reads agent names from stdin and passes them as identifiers."""
+    """Test that '-' reads agent names from stdin and passes them as identifiers."""
     result = cli_runner.invoke(
         destroy,
-        ["--stdin", "--force"],
+        ["-", "--force"],
         input="agent-from-stdin\n",
         obj=plugin_manager,
         catch_exceptions=False,
@@ -479,14 +478,14 @@ def test_destroy_stdin_reads_agent_names(
     assert result.exit_code == 0
 
 
-def test_destroy_stdin_empty_input_requires_agents(
+def test_destroy_dash_empty_input_requires_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --stdin with empty stdin still requires agents."""
+    """Test that '-' with empty stdin still requires agents."""
     result = cli_runner.invoke(
         destroy,
-        ["--stdin"],
+        ["-"],
         input="",
         obj=plugin_manager,
         catch_exceptions=True,
@@ -495,14 +494,14 @@ def test_destroy_stdin_empty_input_requires_agents(
     assert "Must specify at least one agent" in result.output
 
 
-def test_destroy_stdin_multiple_names(
+def test_destroy_dash_multiple_names(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --stdin reads multiple agent names from stdin."""
+    """Test that '-' reads multiple agent names from stdin."""
     result = cli_runner.invoke(
         destroy,
-        ["--stdin", "--force"],
+        ["-", "--force"],
         input="agent-one\nagent-two\nagent-three\n",
         obj=plugin_manager,
         catch_exceptions=False,
@@ -511,14 +510,14 @@ def test_destroy_stdin_multiple_names(
     assert result.exit_code == 0
 
 
-def test_destroy_stdin_strips_whitespace(
+def test_destroy_dash_strips_whitespace(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --stdin strips whitespace from names."""
+    """Test that '-' strips whitespace from names."""
     result = cli_runner.invoke(
         destroy,
-        ["--stdin", "--force"],
+        ["-", "--force"],
         input="  agent-padded  \n\n  \n",
         obj=plugin_manager,
         catch_exceptions=False,

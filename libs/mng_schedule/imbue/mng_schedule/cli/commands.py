@@ -12,9 +12,7 @@ CommandHelpMetadata(
     key="schedule",
     one_line_description="Schedule invocations of mng commands",
     synopsis="mng schedule [add|remove|update|list|run] [OPTIONS]",
-    description="""Schedule invocations of mng commands.
-
-Manage cron-scheduled triggers that run mng commands (create, start, message,
+    description="""Manage cron-scheduled triggers that run mng commands (create, start, message,
 exec) on a specified provider at regular intervals. This is useful for setting
 up autonomous agents that run on a recurring schedule.""",
     examples=(

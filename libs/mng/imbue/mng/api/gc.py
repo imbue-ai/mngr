@@ -1,5 +1,6 @@
 import shlex
 import shutil
+from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
@@ -47,6 +48,8 @@ def gc(
     dry_run: bool,
     # Whether to abort or continue on errors
     error_behavior: ErrorBehavior,
+    # Called before each resource type is processed, with the resource type name
+    on_resource_type_start: Callable[[str], None] | None = None,
 ) -> GcResult:
     """Run garbage collection on specified resources across providers.
 
@@ -62,6 +65,8 @@ def gc(
     logger.trace("Configured GC: dry_run={} error_behavior={}", dry_run, error_behavior)
 
     if resource_types.is_work_dirs:
+        if on_resource_type_start:
+            on_resource_type_start("work_dirs")
         with log_span("Garbage collecting orphaned work directories"):
             gc_work_dirs(
                 mng_ctx=mng_ctx,
@@ -72,6 +77,8 @@ def gc(
             )
 
     if resource_types.is_machines:
+        if on_resource_type_start:
+            on_resource_type_start("machines")
         with log_span("Garbage collecting idle machines"):
             gc_machines(
                 mng_ctx=mng_ctx,
@@ -82,6 +89,8 @@ def gc(
             )
 
     if resource_types.is_snapshots:
+        if on_resource_type_start:
+            on_resource_type_start("snapshots")
         with log_span("Garbage collecting orphaned snapshots"):
             gc_snapshots(
                 providers=providers,
@@ -91,6 +100,8 @@ def gc(
             )
 
     if resource_types.is_volumes:
+        if on_resource_type_start:
+            on_resource_type_start("volumes")
         with log_span("Garbage collecting orphaned volumes"):
             gc_volumes(
                 providers=providers,
@@ -100,6 +111,8 @@ def gc(
             )
 
     if resource_types.is_logs:
+        if on_resource_type_start:
+            on_resource_type_start("logs")
         with log_span("Garbage collecting old log files"):
             gc_logs(
                 mng_ctx=mng_ctx,
@@ -110,6 +123,8 @@ def gc(
             )
 
     if resource_types.is_build_cache:
+        if on_resource_type_start:
+            on_resource_type_start("build_cache")
         with log_span("Garbage collecting build cache entries"):
             gc_build_cache(
                 mng_ctx=mng_ctx,

@@ -44,6 +44,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
+from imbue.mng.primitives import HostState
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.cel_utils import build_cel_context
 from imbue.mng.utils.cel_utils import compile_cel_sort_keys
@@ -121,6 +122,8 @@ class ListCliOptions(CommonCliOptions):
     exclude: tuple[str, ...]
     running: bool
     stopped: bool
+    archived: bool
+    active: bool
     local: bool
     remote: bool
     provider: tuple[str, ...]
@@ -133,6 +136,8 @@ class ListCliOptions(CommonCliOptions):
     sort: str
     limit: int | None
     watch: int | None
+    ids: bool
+    addrs: bool
     on_error: str
     stream: bool
 
@@ -158,6 +163,16 @@ class ListCliOptions(CommonCliOptions):
     "--stopped",
     is_flag=True,
     help="Show only stopped agents (alias for --include 'state == \"STOPPED\"')",
+)
+@optgroup.option(
+    "--archived",
+    is_flag=True,
+    help="Show only stopped agents (alias for --include 'has(labels.archived_at)')",
+)
+@optgroup.option(
+    "--active",
+    is_flag=True,
+    help="Show only stopped agents (anything not archived/destroyed/crashed/failed)",
 )
 @optgroup.option(
     "--local",
@@ -196,6 +211,16 @@ class ListCliOptions(CommonCliOptions):
 )
 @optgroup.group("Output Format")
 @optgroup.option(
+    "--ids",
+    is_flag=True,
+    help="Print only agent IDs, one per line",
+)
+@optgroup.option(
+    "--addrs",
+    is_flag=True,
+    help="Print only agent addresses (name@host.provider), one per line",
+)
+@optgroup.option(
     "--fields",
     help="Which fields to include (comma-separated)",
 )
@@ -215,6 +240,7 @@ class ListCliOptions(CommonCliOptions):
     help="Limit number of results (applied after fetching from all providers)",
 )
 @optgroup.group("Watch / Stream Mode")
+# FIXME: remove the watch option, it's pointless
 @optgroup.option(
     "-w",
     "--watch",
@@ -274,6 +300,27 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # (via --format with a template string, e.g. --format '{name}\t{state}')
     format_template = output_opts.format_template
 
+    # --ids / --addrs: shorthand for format templates that print one value per line
+    is_shorthand_flag = opts.ids or opts.addrs
+    if is_shorthand_flag:
+        shorthand_name = "--ids" if opts.ids else "--addrs"
+        if opts.ids and opts.addrs:
+            raise click.UsageError("--ids and --addrs are mutually exclusive")
+        if opts.stream:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --stream")
+        format_source = ctx.get_parameter_source("output_format")
+        is_format_explicit = format_source is not None and format_source != click.core.ParameterSource.DEFAULT
+        if is_format_explicit:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --format")
+
+    match (opts.ids, opts.addrs):
+        case (True, False):
+            format_template = "{id}"
+        case (False, True):
+            format_template = "{name}@{host.name}.{host.provider_name}"
+        case _:
+            pass
+
     # Parse fields if provided
     fields = None
     if opts.fields:
@@ -318,6 +365,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         include_filters.append(f'state == "{AgentLifecycleState.STOPPED.value}"')
     if opts.local:
         include_filters.append('host.provider == "local"')
+    if opts.archived:
+        include_filters.append("has(labels.archived_at)")
 
     # --project X: alias for --include 'labels.project == "X"'
     # Multiple values are OR'd together
@@ -353,6 +402,11 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     exclude_filters = list(opts.exclude)
     if opts.remote:
         exclude_filters.append('host.provider == "local"')
+    if opts.active:
+        exclude_filters.append("has(labels.archived_at)")
+        include_filters.append(f'host.state != "{HostState.CRASHED.value}"')
+        include_filters.append(f'host.state != "{HostState.FAILED.value}"')
+        include_filters.append(f'host.state != "{HostState.DESTROYED.value}"')
 
     # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
     compiled_sort_keys = compile_cel_sort_keys(opts.sort)

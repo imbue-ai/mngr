@@ -45,17 +45,27 @@ PRIMARY_COMMANDS = {
 }
 SECONDARY_COMMANDS = {
     "ask",
+    "capture",
+    "chat",
     "cleanup",
     "config",
+    "events",
+    "file",
     "gc",
+    "kanpan",
     "label",
     "limit",
-    "events",
     "message",
-    "provision",
+    "observe",
     "plugin",
+    "provision",
+    "schedule",
     "snapshot",
+    "tmr",
     "transcript",
+    "tutor",
+    "wait",
+    "notify",
 }
 ALIAS_COMMANDS = {
     "archive",
@@ -453,14 +463,18 @@ def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: s
 
 def generate_command_doc(command_name: str, base_dir: Path) -> None:
     """Generate markdown documentation for a single command."""
-    output_dir = get_output_dir(command_name, base_dir)
-    if output_dir is None:
-        print(f"Skipping: {command_name} (not in PRIMARY_COMMANDS or SECONDARY_COMMANDS)")
-        return
-
     cmd = cli.commands.get(command_name)
     if cmd is None:
         print(f"Warning: Command '{command_name}' not found")
+        return
+
+    # Silently skip hidden commands (internal service commands not intended for users)
+    if cmd.hidden:
+        return
+
+    output_dir = get_output_dir(command_name, base_dir)
+    if output_dir is None:
+        print(f"Skipping: {command_name} (not in PRIMARY_COMMANDS or SECONDARY_COMMANDS)")
         return
 
     prog_name = f"mng {command_name}"

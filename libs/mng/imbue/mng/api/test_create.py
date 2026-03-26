@@ -19,6 +19,7 @@ from imbue.mng.api.create import create
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import Host
 from imbue.mng.hosts.host import HostLocation
 from imbue.mng.interfaces.agent import AgentInterface
@@ -34,7 +35,7 @@ from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import LOCAL_PROVIDER_NAME
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.testing import tmux_session_cleanup
 from imbue.mng.utils.testing import tmux_session_exists
 
@@ -282,55 +283,46 @@ def test_create_agent_with_worktree(
     agent_name = AgentName(f"test-worktree-{int(time.time())}")
     session_name = f"{temp_mng_ctx.config.prefix}{agent_name}"
 
-    worktree_path: Path | None = None
     with tmux_session_cleanup(session_name):
-        try:
-            local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
+        local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
 
-            agent_options = CreateAgentOptions(
-                agent_type=AgentTypeName("worktree-test"),
-                name=agent_name,
-                command=CommandString("sleep 527146"),
-                git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
-                    new_branch_name=f"mng/{agent_name}",
-                ),
-            )
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("worktree-test"),
+            name=agent_name,
+            command=CommandString("sleep 527146"),
+            transfer_mode=TransferMode.GIT_WORKTREE,
+            git=AgentGitOptions(
+                new_branch_name=f"mng/{agent_name}",
+            ),
+        )
 
-            result = create(
-                source_location=source_location,
-                target_host=local_host,
-                agent_options=agent_options,
-                mng_ctx=temp_mng_ctx,
-            )
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mng_ctx=temp_mng_ctx,
+        )
 
-            assert result.agent.id is not None
-            assert result.host.id is not None
-            assert tmux_session_exists(session_name)
+        assert result.agent.id is not None
+        assert result.host.id is not None
+        assert tmux_session_exists(session_name)
 
-            agent = _get_agent_from_create_result(result, temp_mng_ctx)
+        agent = _get_agent_from_create_result(result, temp_mng_ctx)
 
-            worktree_path = Path(agent.work_dir)
-            assert worktree_path.exists()
-            assert (worktree_path / "README.md").exists()
+        worktree_path = Path(agent.work_dir)
+        assert worktree_path.exists()
+        assert (worktree_path / "README.md").exists()
 
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            branch_name = result.stdout.strip()
-            assert branch_name.startswith("mng/")
-            assert str(agent_name) in branch_name
-        finally:
-            if worktree_path is not None:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(worktree_path)],
-                    cwd=temp_git_repo,
-                    capture_output=True,
-                )
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branch_name = result.stdout.strip()
+        assert branch_name.startswith("mng/")
+        assert str(agent_name) in branch_name
 
 
 @pytest.mark.tmux
@@ -354,50 +346,139 @@ def test_worktree_with_custom_branch_name(
     current_branch = branch_result.stdout.strip()
 
     _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
-    worktree_path: Path | None = None
     with tmux_session_cleanup(session_name):
-        try:
-            local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
+        local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
 
-            agent_options = CreateAgentOptions(
-                agent_type=AgentTypeName("worktree-test"),
-                name=agent_name,
-                command=CommandString("sleep 60"),
-                git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
-                    base_branch=current_branch,
-                    new_branch_name=custom_branch,
-                ),
-            )
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("worktree-test"),
+            name=agent_name,
+            command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.GIT_WORKTREE,
+            git=AgentGitOptions(
+                base_branch=current_branch,
+                new_branch_name=custom_branch,
+            ),
+        )
 
-            result = create(
-                source_location=source_location,
-                target_host=local_host,
-                agent_options=agent_options,
-                mng_ctx=temp_mng_ctx,
-            )
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mng_ctx=temp_mng_ctx,
+        )
 
-            assert result.agent.id is not None
+        assert result.agent.id is not None
 
-            agent = _get_agent_from_create_result(result, temp_mng_ctx)
+        agent = _get_agent_from_create_result(result, temp_mng_ctx)
 
-            worktree_path = Path(agent.work_dir)
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            branch_name = result.stdout.strip()
-            assert branch_name == custom_branch
-        finally:
-            if worktree_path is not None:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(worktree_path)],
-                    cwd=temp_git_repo,
-                    capture_output=True,
-                )
+        worktree_path = Path(agent.work_dir)
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branch_name = result.stdout.strip()
+        assert branch_name == custom_branch
+
+
+@pytest.mark.tmux
+def test_worktree_with_existing_branch(
+    tmp_home_dir: Path,
+    temp_mng_ctx: MngContext,
+    temp_git_repo: Path,
+) -> None:
+    """Test creating a worktree that checks out an existing branch (no new branch created)."""
+    agent_name = AgentName(f"test-worktree-existing-{int(time.time())}")
+    session_name = f"{temp_mng_ctx.config.prefix}{agent_name}"
+    existing_branch = "feature/already-exists"
+
+    # Create the branch in the source repo
+    subprocess.run(
+        ["git", "branch", existing_branch],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
+
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("worktree-test"),
+            name=agent_name,
+            command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.GIT_WORKTREE,
+            git=AgentGitOptions(
+                base_branch=existing_branch,
+                # No new_branch_name -- should check out existing branch directly
+            ),
+        )
+
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mng_ctx=temp_mng_ctx,
+        )
+
+        assert result.agent.id is not None
+
+        agent = _get_agent_from_create_result(result, temp_mng_ctx)
+
+        worktree_path = Path(agent.work_dir)
+        assert worktree_path.exists()
+        assert (worktree_path / "README.md").exists()
+
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert branch_result.stdout.strip() == existing_branch
+
+        # Existing branch was checked out, not created -- must be None so
+        # 'mng destroy --remove-created-branch' does not delete it.
+        assert agent.get_created_branch_name() is None
+
+
+def test_worktree_already_checked_out_gives_helpful_error(
+    temp_mng_ctx: MngContext,
+    temp_git_repo: Path,
+) -> None:
+    """Checking out a branch that's already in use suggests --branch BASE: syntax."""
+    current_branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=temp_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("worktree-test"),
+        name=AgentName("test-already-checked-out"),
+        command=CommandString("sleep 60"),
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(
+            base_branch=current_branch,
+        ),
+    )
+
+    with pytest.raises(UserInputError, match="To create a new branch instead, use --branch BASE:"):
+        create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mng_ctx=temp_mng_ctx,
+        )
 
 
 # =============================================================================
@@ -422,6 +503,7 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
             agent_type=AgentTypeName("in-place-test"),
             name=agent_name,
             command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.NONE,
         )
 
         result = create(
@@ -448,19 +530,20 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
 
 
 @pytest.mark.tmux
-def test_in_place_removes_previously_generated_work_dir(
+def test_in_place_preserves_generated_work_dir_entry(
     temp_mng_ctx: MngContext,
     temp_work_dir: Path,
     temp_host_dir: Path,
 ) -> None:
-    """Test that in-place mode removes a previously-generated work_dir from generated_work_dirs.
+    """Test that in-place mode does not remove a previously-generated work_dir from generated_work_dirs.
 
-    This is the critical scenario: if a directory was previously created by mng (e.g., as a
-    worktree for another agent) and is already tracked in generated_work_dirs, creating an
-    in-place agent in that directory must remove it from generated_work_dirs. Otherwise, GC
-    would delete the directory after the in-place agent is destroyed.
+    If a directory was previously created by mng (e.g., as a worktree for another agent),
+    creating an in-place agent should leave the generated_work_dirs entry intact. GC already
+    handles this correctly: it only deletes directories that are in generated_work_dirs AND
+    have no living agent using them as work_dir. Removing the entry would cause a leak --
+    after both agents are destroyed, the directory would never be cleaned up.
     """
-    agent_name = AgentName(f"test-in-place-remove-{int(time.time())}")
+    agent_name = AgentName(f"test-in-place-preserve-{int(time.time())}")
     session_name = f"{temp_mng_ctx.config.prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -475,11 +558,12 @@ def test_in_place_removes_previously_generated_work_dir(
         certified_data = local_host.get_certified_data()
         assert str(temp_work_dir) in certified_data.generated_work_dirs
 
-        # Create an in-place agent (git=None means in-place, no copy)
+        # Create an in-place agent (transfer_mode=NONE means in-place, no transfer)
         agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("in-place-remove-test"),
+            agent_type=AgentTypeName("in-place-preserve-test"),
             name=agent_name,
             command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.NONE,
         )
 
         create(
@@ -489,13 +573,14 @@ def test_in_place_removes_previously_generated_work_dir(
             mng_ctx=temp_mng_ctx,
         )
 
-        # After in-place creation, the path should be REMOVED from generated_work_dirs
+        # The path should still be in generated_work_dirs -- in-place mode does not
+        # modify this list. GC safety comes from checking active agent work_dirs.
         host_data_file = local_host.host_dir / "data.json"
         post_data = json.loads(host_data_file.read_text())
         generated_work_dirs = post_data.get("generated_work_dirs", [])
-        assert str(temp_work_dir) not in generated_work_dirs, (
-            "in-place mode should remove the path from generated_work_dirs "
-            "to prevent GC from deleting the directory after the agent is destroyed"
+        assert str(temp_work_dir) in generated_work_dirs, (
+            "in-place mode should preserve generated_work_dirs entries; "
+            "GC uses active agent work_dirs to avoid deleting directories still in use"
         )
 
 
@@ -511,53 +596,42 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
     session_name = f"{temp_mng_ctx.config.prefix}{agent_name}"
 
     _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
-    worktree_path: Path | None = None
     with tmux_session_cleanup(session_name):
-        try:
-            local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
+        local_host, source_location = _get_local_host_and_location(temp_mng_ctx, temp_git_repo)
 
-            agent_options = CreateAgentOptions(
-                agent_type=AgentTypeName("worktree-gen-test"),
-                name=agent_name,
-                command=CommandString("sleep 60"),
-                git=AgentGitOptions(
-                    copy_mode=WorkDirCopyMode.WORKTREE,
-                    new_branch_name=f"mng/{agent_name}",
-                ),
-            )
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("worktree-gen-test"),
+            name=agent_name,
+            command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.GIT_WORKTREE,
+            git=AgentGitOptions(
+                new_branch_name=f"mng/{agent_name}",
+            ),
+        )
 
-            result = create(
-                source_location=source_location,
-                target_host=local_host,
-                agent_options=agent_options,
-                mng_ctx=temp_mng_ctx,
-            )
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mng_ctx=temp_mng_ctx,
+        )
 
-            agents_dir = local_host.host_dir / "agents"
-            agent_dir = agents_dir / str(result.agent.id)
-            data_file = agent_dir / "data.json"
-            assert data_file.exists(), "agent data.json should exist"
+        agents_dir = local_host.host_dir / "agents"
+        agent_dir = agents_dir / str(result.agent.id)
+        data_file = agent_dir / "data.json"
+        assert data_file.exists(), "agent data.json should exist"
 
-            data = json.loads(data_file.read_text())
-            assert data["work_dir"] != str(temp_git_repo), "work_dir should be different from source in worktree mode"
+        data = json.loads(data_file.read_text())
+        assert data["work_dir"] != str(temp_git_repo), "work_dir should be different from source in worktree mode"
 
-            agent = _get_agent_from_create_result(result, temp_mng_ctx)
-            worktree_path = Path(agent.work_dir)
+        agent = _get_agent_from_create_result(result, temp_mng_ctx)
+        worktree_path = Path(agent.work_dir)
 
-            host_data_file = local_host.host_dir / "data.json"
-            assert host_data_file.exists(), "host data.json should exist"
-            host_data = json.loads(host_data_file.read_text())
-            generated_work_dirs = host_data.get("generated_work_dirs", [])
-            assert str(worktree_path) in generated_work_dirs, (
-                "work_dir should be in generated_work_dirs for worktree mode"
-            )
-        finally:
-            if worktree_path is not None:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(worktree_path)],
-                    cwd=temp_git_repo,
-                    capture_output=True,
-                )
+        host_data_file = local_host.host_dir / "data.json"
+        assert host_data_file.exists(), "host data.json should exist"
+        host_data = json.loads(host_data_file.read_text())
+        generated_work_dirs = host_data.get("generated_work_dirs", [])
+        assert str(worktree_path) in generated_work_dirs, "work_dir should be in generated_work_dirs for worktree mode"
 
 
 @pytest.mark.tmux
@@ -581,6 +655,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
             name=agent_name,
             command=CommandString("sleep 60"),
             target_path=target_dir,
+            transfer_mode=TransferMode.RSYNC,
         )
 
         result = create(

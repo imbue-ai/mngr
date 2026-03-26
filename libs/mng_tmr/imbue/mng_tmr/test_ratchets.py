@@ -32,8 +32,10 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Ratchet at 5: 2 existing poll sleeps + 1 launch-delay + 2 retry-after-error sleeps (human-sanctioned)
-    rc.check_time_sleep(_DIR, snapshot(5))
+    # Ratchet at 6: launch_all_test_agents (1 launch-delay)
+    # + launch_and_poll_agents (2 poll sleeps) + wait_for_integrator (2 poll sleeps)
+    # + read_agent_result (1 retry delay) -- all human-sanctioned
+    rc.check_time_sleep(_DIR, snapshot(7))
 
 
 def test_prevent_global_keyword() -> None:
@@ -52,8 +54,8 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # Ratchet at 2: polling loops that must survive transient provider errors (human-sanctioned)
-    rc.check_broad_exception_catch(_DIR, snapshot(2))
+    # Ratchet at 1: _try_list_agents wraps list_agents for transient provider errors (human-sanctioned)
+    rc.check_broad_exception_catch(_DIR, snapshot(1))
 
 
 def test_prevent_base_exception_catch() -> None:

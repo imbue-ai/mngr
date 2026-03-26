@@ -2,7 +2,7 @@
 
 Desktop notifications when agents need your attention.
 
-A plugin for [mng](https://github.com/imbue-ai/mng) that adds the `mng watch` command. It monitors the event stream from `mng observe` and sends a native desktop notification whenever an agent transitions from RUNNING to WAITING.
+A plugin for [mng](https://github.com/imbue-ai/mng) that adds the `mng notify` command. It monitors the event stream from `mng observe` and sends a native desktop notification whenever an agent transitions from RUNNING to WAITING.
 
 ## Requirements
 
@@ -12,12 +12,12 @@ A plugin for [mng](https://github.com/imbue-ai/mng) that adds the `mng watch` co
 ## Usage
 
 ```bash
-mng watch
+mng notify
 ```
 
 When an agent finishes working and waits for input, you get a notification. On macOS, clicking the notification opens a terminal tab connected to that agent.
 
-If `mng observe` is not already running, `mng watch` starts it automatically in the background and stops it on exit.
+If `mng observe` is not already running, `mng notify` starts it automatically in the background and stops it on exit.
 
 ## Configuration
 

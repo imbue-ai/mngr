@@ -4,11 +4,16 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any
-from typing import cast
 
 import pytest
 from loguru import logger
+from watchdog.events import FileClosedEvent
+from watchdog.events import FileClosedNoWriteEvent
+from watchdog.events import FileCreatedEvent
+from watchdog.events import FileDeletedEvent
+from watchdog.events import FileModifiedEvent
+from watchdog.events import FileMovedEvent
+from watchdog.events import FileOpenedEvent
 
 from imbue.mng_recursive.watcher_common import ChangeHandler
 from imbue.mng_recursive.watcher_common import load_watchers_section
@@ -296,12 +301,39 @@ def test_mtime_poll_directories_handles_multiple_directories(tmp_path: Path) -> 
 # -- ChangeHandler tests --
 
 
-def test_change_handler_sets_wake_event() -> None:
+def test_change_handler_sets_wake_event_on_modification() -> None:
     wake_event = threading.Event()
     handler = ChangeHandler(wake_event)
     assert not wake_event.is_set()
-    handler.on_any_event(cast(Any, None))
+    handler.on_any_event(FileModifiedEvent("test.txt"))
     assert wake_event.is_set()
+
+
+def test_change_handler_ignores_non_change_events() -> None:
+    wake_event = threading.Event()
+    handler = ChangeHandler(wake_event)
+
+    handler.on_any_event(FileOpenedEvent("test.txt"))
+    assert not wake_event.is_set()
+
+    handler.on_any_event(FileClosedEvent("test.txt"))
+    assert not wake_event.is_set()
+
+    handler.on_any_event(FileClosedNoWriteEvent("test.txt"))
+    assert not wake_event.is_set()
+
+
+def test_change_handler_wakes_on_create_delete_move() -> None:
+    for event_cls in (FileCreatedEvent, FileDeletedEvent):
+        wake_event = threading.Event()
+        handler = ChangeHandler(wake_event)
+        handler.on_any_event(event_cls("test.txt"))
+        assert wake_event.is_set(), f"Expected wake for {event_cls.__name__}"
+
+    wake_event = threading.Event()
+    handler = ChangeHandler(wake_event)
+    handler.on_any_event(FileMovedEvent("old.txt", "new.txt"))
+    assert wake_event.is_set(), "Expected wake for FileMovedEvent"
 
 
 # -- setup_watchdog_for_directories tests --

@@ -17,6 +17,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from typing import assert_never
 from typing import cast
 from uuid import uuid4
 
@@ -37,7 +38,6 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
@@ -46,6 +46,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mng import resources as mng_resources
 from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.config.data_types import WorkDirExtraPathMode
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
 from imbue.mng.errors import BaseMngError
@@ -78,7 +79,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
@@ -102,7 +103,9 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
 
     Matches:
     - OSError with "Socket is closed" (stale socket from pyinfra)
-    - SSHException (e.g. "SSH session not active" when transport dies)
+    - SSHException (e.g. "SSH session not active" when transport dies),
+      including ChannelException (server refused to open a new channel,
+      e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
@@ -1118,106 +1121,128 @@ class Host(BaseHost, OnlineHostInterface):
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
         """Create the work_dir directory for a new agent."""
-        copy_mode = options.git.copy_mode if options.git else WorkDirCopyMode.COPY
-        with log_span("Creating agent work directory", copy_mode=str(copy_mode)):
-            if copy_mode == WorkDirCopyMode.WORKTREE:
-                return self._create_work_dir_as_git_worktree(host, path, options)
-            elif copy_mode in (WorkDirCopyMode.COPY, WorkDirCopyMode.CLONE):
-                return self._create_work_dir_as_copy(host, path, options)
-            else:
-                raise SwitchError(f"Unsupported work dir copy mode: {copy_mode}")
+        transfer_mode = options.transfer_mode
+        with log_span("Creating agent work directory", transfer_mode=str(transfer_mode)):
+            match transfer_mode:
+                case TransferMode.NONE:
+                    return self._create_work_dir_in_place(host, path, options)
+                case TransferMode.RSYNC:
+                    return self._create_work_dir_via_rsync(host, path, options)
+                case TransferMode.GIT_MIRROR:
+                    return self._create_work_dir_via_git_mirror(host, path, options)
+                case TransferMode.GIT_WORKTREE:
+                    return self._create_work_dir_as_git_worktree(host, path, options)
+                case _ as unreachable:
+                    assert_never(unreachable)
 
-    def _create_work_dir_as_copy(
+    def _create_work_dir_in_place(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
-        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_as_copy") as concurrency_group:
-            # Check if source and target are on the same host
-            source_is_same_host = source_host.id == self.id
+        """Use the source directory directly as the work_dir (no transfer).
 
-            # If target path is specified, use it; otherwise derive one
-            if options.target_path:
-                target_path = options.target_path
-                # If target equals source and same host, it's in-place
-                is_generated_work_dir = not (source_is_same_host and source_path == target_path)
-            elif source_is_same_host:
-                # Same host, no target path: run in-place at source path
-                target_path = source_path
-                is_generated_work_dir = False
-            else:
-                # Different host (remote copy): generate a unique work directory so that
-                # multiple agents sharing the same host each get their own directory.
-                target_path = self.host_dir / "projects" / str(AgentId.generate())
-                is_generated_work_dir = True
+        Does not modify generated_work_dirs. If the path was previously generated
+        by mng (e.g., as a worktree for another agent), GC already handles this
+        correctly: it only deletes directories that are in generated_work_dirs
+        AND have no living agent using them as work_dir.
+        """
+        target_path = options.target_path or source_path
+        logger.debug("Skipped file transfer: transfer mode is none (in-place)")
+        return CreateWorkDirResult(path=target_path)
 
-            # just doing this work in a thread for latency reasons
-            mark_generated_work_dir_thread = concurrency_group.start_new_thread(
-                self._mark_generated_work_dir, (target_path, is_generated_work_dir)
+    def _resolve_transfer_target(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> Path:
+        """Determine the target directory for a transfer operation.
+
+        For RSYNC and GIT_MIRROR modes, a target directory is always generated
+        if not explicitly specified. Local hosts use host_dir/copies/<id>,
+        remote hosts use host_dir/projects/<id>.
+        """
+        if options.target_path:
+            return options.target_path
+        source_is_same_host = source_host.id == self.id
+        subdir = "copies" if source_is_same_host else "projects"
+        return self.host_dir / subdir / str(AgentId.generate())
+
+    def _create_work_dir_via_rsync(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir by rsyncing files from source to target."""
+        target_path = self._resolve_transfer_target(source_host, source_path, options)
+
+        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_via_rsync") as cg:
+            self._mkdir(target_path)
+
+            # Track generated work dir in a thread to reduce latency
+            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
+
+            # Exclude .git if git options are present (the user is making an explicit
+            # choice about git handling, e.g. is_git_synced=False means "skip .git").
+            exclude_git = options.git is not None
+
+            self._rsync_files(
+                source_host,
+                source_path,
+                target_path,
+                extra_args=options.data_options.rsync_args,
+                exclude_git=exclude_git,
             )
+
+            track_thread.join(60.0)
+
+        return CreateWorkDirResult(path=target_path)
+
+    def _create_work_dir_via_git_mirror(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir by mirroring the git repo and optionally rsyncing extra files."""
+        target_path = self._resolve_transfer_target(source_host, source_path, options)
+
+        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_via_git_mirror") as cg:
+            self._mkdir(target_path)
+
+            # Track generated work dir in a thread to reduce latency
+            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
             created_branch_name: str | None = None
 
-            # If source and target are same path on same host, nothing to transfer
-            if source_is_same_host and source_path == target_path:
-                logger.debug("Skipped file transfer: source and target are the same path")
-                return CreateWorkDirResult(path=target_path)
-
-            # Check if source has a .git directory
-            if source_host.is_local:
-                source_has_git = (source_path / ".git").exists()
-            else:
-                result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
-                source_has_git = result.success
-
-            # Transfer files based on whether source has .git and whether we want to include it
             is_git_synced = options.git is not None and options.git.is_git_synced
-            # Exclude .git from rsync if user has specified any git options (they're making an explicit choice)
-            # If options.git is None, include .git (simple file copy of everything)
-            has_git_options = options.git is not None
             if is_git_synced:
-                # fall back to file copy if source is not a git repo
-                if not source_has_git:
-                    logger.warning("Source path is not a git repository, falling back to file copy")
-                    self._mkdir(target_path)
-                    self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=True)
-                # Source is a git repo, transfer via git
-                else:
-                    created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
-                    self._transfer_extra_files(source_host, source_path, target_path, options)
+                created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
+                self._transfer_extra_files(source_host, source_path, target_path, options)
 
             # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
             # not for full directory sync. By default, rsync does NOT use --delete, so existing files
             # in the target won't be removed. Users can add --delete to rsync_args if they want
             # full sync behavior with file deletion.
-            # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
             if options.data_options.is_rsync_enabled:
-                self._mkdir(target_path)
                 self._rsync_files(
                     source_host,
                     source_path,
                     target_path,
                     extra_args=options.data_options.rsync_args,
-                    exclude_git=has_git_options,
+                    exclude_git=True,
                 )
 
-            # make sure we finished updating the generated work dir state
-            mark_generated_work_dir_thread.join(60.0)
+            self._apply_work_dir_extra_paths(
+                source_host, source_path, target_path, self.mng_ctx.config.work_dir_extra_paths
+            )
+
+            track_thread.join(60.0)
 
         return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
-
-    def _mark_generated_work_dir(self, target_path: Path, is_generated_work_dir: bool):
-        # Track generated work directories at the host level.
-        # When running in-place, actively remove from generated_work_dirs in case
-        # a previous agent had registered this path (e.g., a worktree agent created
-        # this directory, then the user ran --in-place from it). Without this removal,
-        # GC would treat the directory as orphaned and delete it after the in-place
-        # agent is destroyed.
-        if is_generated_work_dir:
-            self._add_generated_work_dir(target_path)
-        else:
-            self._remove_generated_work_dir(target_path)
 
     def _transfer_git_repo(
         self,
@@ -1510,16 +1535,126 @@ class Host(BaseHost, OnlineHostInterface):
             return
 
         with log_span("Transferring extra files", count=len(files_to_include)):
-            # Write files to a temp file to avoid command line length limits
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-                files_from_path = Path(f.name)
-                for file_path in files_to_include:
-                    f.write(file_path + "\n")
+            self._rsync_paths(source_host, source_path, target_path, files_to_include, exclude_git=True)
 
-            try:
-                self._rsync_files(source_host, source_path, target_path, files_from=files_from_path, exclude_git=True)
-            finally:
-                files_from_path.unlink(missing_ok=True)
+    def _rsync_paths(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        paths: list[str],
+        *,
+        exclude_git: bool = False,
+    ) -> None:
+        """Rsync specific paths from source to target using a files-from list."""
+        if not paths:
+            return
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            files_from_path = Path(f.name)
+            for file_path in paths:
+                f.write(file_path + "\n")
+        try:
+            self._rsync_files(
+                source_host, source_path, target_path, files_from=files_from_path, exclude_git=exclude_git
+            )
+        finally:
+            files_from_path.unlink(missing_ok=True)
+
+    def _apply_work_dir_extra_paths(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        work_dir_path: Path,
+        extra_paths: dict[str, WorkDirExtraPathMode],
+    ) -> None:
+        """Apply work_dir_extra_paths config: symlink or copy paths into the work directory.
+
+        Batches all remote operations to minimize SSH round trips:
+        1. One command on source_host to check which paths exist
+        2. One command on self to create all symlinks (SHARE mode, same host)
+        3. One rsync call for all copy paths (COPY mode, or SHARE on different host)
+        """
+        same_host = source_host.id == self.id
+
+        # Validate all paths first (pure string ops, no remote calls)
+        validated: list[tuple[str, WorkDirExtraPathMode]] = []
+        for rel_path_str, mode in extra_paths.items():
+            normalized = os.path.normpath(rel_path_str)
+            if os.path.isabs(normalized):
+                raise UserInputError(f"work_dir_extra_paths: absolute paths are not allowed: {rel_path_str}")
+            if normalized.startswith(".."):
+                raise UserInputError(f"work_dir_extra_paths: path escapes project root: {rel_path_str}")
+            validated.append((rel_path_str, mode))
+
+        if not validated:
+            return
+
+        # Batch source-exists check: one command tests all paths, outputs those that exist
+        check_parts = []
+        for rel_path_str, _ in validated:
+            source_abs = source_path / rel_path_str
+            quoted = shlex.quote(str(source_abs))
+            check_parts.append(
+                f"if [ -e {quoted} ] || [ -L {quoted} ]; then printf '%s\\n' {shlex.quote(rel_path_str)}; fi"
+            )
+        result = source_host.execute_command("; ".join(check_parts))
+        if not result.success:
+            logger.warning(
+                "work_dir_extra_paths: failed to check source paths (stderr: {}), skipping all extra paths",
+                result.stderr.strip(),
+            )
+            return
+        existing_paths = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+
+        # Route each existing path to symlink or rsync
+        rsync_paths: list[str] = []
+        symlink_pairs: list[tuple[str, str]] = []
+        for rel_path_str, mode in validated:
+            if rel_path_str not in existing_paths:
+                logger.warning(
+                    "work_dir_extra_paths: source path does not exist, skipping: {}", source_path / rel_path_str
+                )
+                continue
+            if mode == WorkDirExtraPathMode.SHARE and same_host:
+                symlink_pairs.append((str(source_path / rel_path_str), str(work_dir_path / rel_path_str)))
+            else:
+                rsync_paths.append(rel_path_str)
+
+        # Batch symlink creation: one command handles all symlinks.
+        # Errors are written directly to stderr (not accumulated in a variable)
+        # because POSIX $() strips trailing newlines, which would merge messages.
+        if symlink_pairs:
+            script_parts = ["had_errors=0"]
+            for source_str, target_str in symlink_pairs:
+                s = shlex.quote(source_str)
+                t = shlex.quote(target_str)
+                t_parent = shlex.quote(str(Path(target_str).parent))
+                script_parts.append(
+                    f"if [ -e {t} ] && [ ! -L {t} ]; then "
+                    f"printf 'CONFLICT: %s\\n' {t} >&2; had_errors=1; "
+                    f"elif [ ! -L {t} ] || "
+                    f'[ "$(readlink -f {t} 2>/dev/null)" != "$(readlink -f {s} 2>/dev/null)" ]; then '
+                    f"mkdir -p {t_parent} && ln -snf {s} {t} "
+                    f"|| {{ printf 'FAILED: %s\\n' {t} >&2; had_errors=1; }}; "
+                    f"fi"
+                )
+            script_parts.append('[ "$had_errors" = 0 ]')
+            result = self.execute_command("; ".join(script_parts))
+            if not result.success:
+                stderr_lines = result.stderr.strip().split("\n")
+                conflicts = [line.removeprefix("CONFLICT: ") for line in stderr_lines if line.startswith("CONFLICT: ")]
+                failures = [line.removeprefix("FAILED: ") for line in stderr_lines if line.startswith("FAILED: ")]
+                if conflicts:
+                    msg = "work_dir_extra_paths: target already exists and is not a symlink: " + ", ".join(conflicts)
+                    if failures:
+                        msg += "; also failed to create symlinks for: " + ", ".join(failures)
+                    raise UserInputError(msg)
+                raise MngError(f"work_dir_extra_paths: failed to create symlinks: {result.stderr}")
+
+        # Rsync all copy paths in a single batch
+        if rsync_paths:
+            with log_span("Copying work_dir_extra_paths", count=len(rsync_paths)):
+                self._rsync_paths(source_host, source_path, work_dir_path, rsync_paths)
 
     def copy_directory(
         self,
@@ -1670,25 +1805,46 @@ class Host(BaseHost, OnlineHostInterface):
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
-        # Worktree mode always requires a new branch (enforced at CLI)
-        if not options.git or not options.git.new_branch_name:
-            raise UserInputError("Worktree mode requires a new branch name in git options")
-        branch_name = options.git.new_branch_name
+        new_branch_name = options.git.new_branch_name if options.git else None
+        base_branch = options.git.base_branch if options.git else None
 
-        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
-            cmd = f"mkdir -p {work_dir_path.parent} && git -C {shlex.quote(str(source_path))} worktree add {shlex.quote(str(work_dir_path))} -b {shlex.quote(branch_name)}"
+        if not new_branch_name and not base_branch:
+            raise UserInputError("Worktree mode requires a branch. Use --branch BRANCH or --branch BASE:NEW.")
 
-            if options.git and options.git.base_branch:
-                cmd += f" {shlex.quote(options.git.base_branch)}"
+        branch_label = new_branch_name or base_branch
+
+        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_label):
+            git_c = f"git -C {shlex.quote(str(source_path))}"
+            mkdir_cmd = f"mkdir -p {work_dir_path.parent}"
+
+            # git worktree add <path> [-b <new>] [<base>]
+            worktree_args = [mkdir_cmd, "&&", git_c, "worktree", "add", shlex.quote(str(work_dir_path))]
+            if new_branch_name:
+                worktree_args += ["-b", shlex.quote(new_branch_name)]
+            if base_branch:
+                worktree_args.append(shlex.quote(base_branch))
+            cmd = " ".join(worktree_args)
+            created_branch = new_branch_name
 
             result = self.execute_command(cmd)
             if not result.success:
-                raise MngError(f"Failed to create git worktree: {result.stderr}")
+                stderr = result.stderr or ""
+                if "already checked out" in stderr or "already used by worktree" in stderr:
+                    raise UserInputError(
+                        f"{stderr.strip()}\n"
+                        f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
+                        f"To work directly in the existing worktree, use --in-place from that directory"
+                    )
+                raise MngError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
 
-            return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
+            self._apply_work_dir_extra_paths(
+                host, source_path, work_dir_path, self.mng_ctx.config.work_dir_extra_paths
+            )
+
+            return CreateWorkDirResult(path=work_dir_path, created_branch_name=created_branch)
 
     def create_agent_state(
         self,
@@ -1876,8 +2032,7 @@ class Host(BaseHost, OnlineHostInterface):
         Upload files (files exist before modifications)
         Append text to files
         Prepend text to files
-        Run sudo commands (system-level setup, with env vars sourced)
-        Run user commands (user-level setup, with env vars sourced)
+        Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
         with self.mng_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
@@ -1920,8 +2075,7 @@ class Host(BaseHost, OnlineHostInterface):
                 uploads=len(provisioning.upload_files),
                 appends=len(provisioning.append_to_files),
                 prepends=len(provisioning.prepend_to_files),
-                sudo_cmds=len(provisioning.sudo_commands),
-                user_cmds=len(provisioning.user_commands),
+                extra_cmds=len(provisioning.extra_provision_commands),
             ):
                 # Create directories
                 for directory in provisioning.create_directories:
@@ -1948,19 +2102,12 @@ class Host(BaseHost, OnlineHostInterface):
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
 
-                # Run sudo commands (with env vars sourced)
-                for cmd in provisioning.sudo_commands:
-                    result = self._run_sudo_command(source_prefix + cmd)
-                    logger.trace("Ran sudo command: {}", cmd)
-                    if not result.success:
-                        raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
-
-                # Run user commands (with env vars sourced)
-                for cmd in provisioning.user_commands:
+                # Run extra provision commands (with env vars sourced)
+                for cmd in provisioning.extra_provision_commands:
                     result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
-                    logger.trace("Ran user command: {}", cmd)
+                    logger.trace("Ran extra provision command: {}", cmd)
                     if not result.success:
-                        raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+                        raise MngError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
             ensure_log_thread.join(60.0)
@@ -2039,18 +2186,6 @@ class Host(BaseHost, OnlineHostInterface):
         except FileNotFoundError:
             existing_content = ""
         self.write_text_file(path, text + existing_content)
-
-    def _run_sudo_command(self, command: str) -> CommandResult:
-        """Run a command with sudo privileges."""
-        success, output = self._run_shell_command(
-            StringCommand(command),
-            _sudo=True,
-        )
-        return CommandResult(
-            stdout=output.stdout,
-            stderr=output.stderr,
-            success=success,
-        )
 
     def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
         """Rename an agent and return the updated agent object.

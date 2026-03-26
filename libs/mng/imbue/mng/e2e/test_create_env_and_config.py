@@ -1,5 +1,7 @@
 """Tests for environment variables, config, and templates from the tutorial."""
 
+import json
+
 import pytest
 
 from imbue.mng.e2e.conftest import E2eSession
@@ -113,17 +115,17 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
-    echo "alias mc='mng create --in-place'" >> ~/.bashrc && source ~/.bashrc
+    echo "alias mc='mng create --transfer=none'" >> ~/.bashrc && source ~/.bashrc
     # or use a more sophisticated tool, like Espanso
     """)
     expect(
         e2e.run(
-            "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
+            "mng create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
             comment="you should probably use aliases for making little shortcuts for yourself",
         )
     ).to_succeed()
 
-    list_result = e2e.run("mng list", comment="Verify agent created with --in-place")
+    list_result = e2e.run("mng list", comment="Verify agent created with --transfer=none")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
@@ -179,3 +181,26 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
     )
     expect(get_result).to_succeed()
     expect(get_result.stdout).to_contain("modal")
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+def test_create_with_label(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can add labels to organize your agents and tags for host metadata:
+    mng create my-task --label team=backend --host-label env=staging
+    """)
+    expect(
+        e2e.run(
+            "mng create my-task --command 'sleep 99999' --no-ensure-clean --label team=backend --host-label env=staging",
+            comment="you can add labels to organize your agents and tags for host metadata",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mng list --format json", comment="Verify label appears in JSON output")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    matching_agents = [a for a in agents if a["name"] == "my-task"]
+    assert len(matching_agents) == 1
+    assert matching_agents[0]["labels"]["team"] == "backend"

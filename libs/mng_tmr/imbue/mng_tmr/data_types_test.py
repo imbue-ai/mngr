@@ -5,7 +5,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng_tmr.data_types import Change
 from imbue.mng_tmr.data_types import ChangeKind
 from imbue.mng_tmr.data_types import ChangeStatus
-from imbue.mng_tmr.data_types import DisplayCategory
+from imbue.mng_tmr.data_types import ReportSection
 from imbue.mng_tmr.data_types import TestAgentInfo
 from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TestResult
@@ -24,11 +24,12 @@ def test_change_status_values() -> None:
     assert ChangeStatus.BLOCKED == "BLOCKED"
 
 
-def test_display_category_values() -> None:
-    assert DisplayCategory.PENDING == "PENDING"
-    assert DisplayCategory.FIXED == "FIXED"
-    assert DisplayCategory.CLEAN_PASS == "CLEAN_PASS"
-    assert DisplayCategory.ERRORED == "ERRORED"
+def test_report_section_values() -> None:
+    assert ReportSection.NON_IMPL_FIXES == "NON_IMPL_FIXES"
+    assert ReportSection.IMPL_FIXES == "IMPL_FIXES"
+    assert ReportSection.BLOCKED == "BLOCKED"
+    assert ReportSection.CLEAN_PASS == "CLEAN_PASS"
+    assert ReportSection.RUNNING == "RUNNING"
 
 
 def test_change_construction() -> None:
@@ -85,6 +86,7 @@ def test_test_agent_info_construction() -> None:
         test_node_id="tests/test_foo.py::test_bar",
         agent_id=AgentId.generate(),
         agent_name=AgentName("tmr-test-bar"),
+        created_at=0.0,
     )
     assert info.test_node_id == "tests/test_foo.py::test_bar"
     assert str(info.agent_name) == "tmr-test-bar"

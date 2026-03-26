@@ -16,6 +16,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CleanupAction
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import ErrorBehavior
+from imbue.mng.utils.polling import wait_for
 from imbue.mng.utils.testing import make_test_agent_details
 
 
@@ -216,9 +217,12 @@ def test_execute_cleanup_stop_on_online_host(
     )
     local_host.start_agents([agent.id])
 
-    # Verify agent is alive before stop (sleep commands enter WAITING state)
-    state_before = agent.get_lifecycle_state()
-    assert state_before in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING)
+    # Wait for agent to be alive before stop (race: tmux may not have started the
+    # sleep process yet when get_lifecycle_state is called immediately)
+    wait_for(
+        lambda: agent.get_lifecycle_state() in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING),
+        error_message="Expected agent lifecycle state to be RUNNING or WAITING",
+    )
 
     # Find the agent via the API
     agents = find_agents_for_cleanup(

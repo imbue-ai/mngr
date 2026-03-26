@@ -33,7 +33,6 @@ from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.errors import UserInputError
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
-from imbue.mng.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentLifecycleState
 
@@ -47,9 +46,6 @@ class ConnectCliOptions(CommonCliOptions):
     agent: str | None
     start: bool
     reconnect: bool
-    message: str | None
-    message_file: str | None
-    ready_timeout: float
     retry: int
     retry_delay: str
     attach_command: str | None
@@ -351,17 +347,6 @@ def _build_connection_options(opts: ConnectCliOptions) -> ConnectionOptions:
     show_default=True,
     help="Automatically reconnect if dropped [future]",
 )
-@optgroup.option("--message", help="Initial message to send after connecting [future]")
-@optgroup.option(
-    "--message-file", type=click.Path(exists=True), help="File containing initial message to send [future]"
-)
-@optgroup.option(
-    "--ready-timeout",
-    type=float,
-    default=DEFAULT_AGENT_READY_TIMEOUT_SECONDS,
-    show_default=True,
-    help="Timeout in seconds to wait for agent readiness [future]",
-)
 @optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries [future]")
 @optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries [future]")
 @optgroup.option("--attach-command", help="Command to run instead of attaching to main session [future]")
@@ -380,19 +365,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         command_name="connect",
         command_class=ConnectCliOptions,
     )
-
-    # Send the specified text as an initial message after the agent starts
-    # Should wait for ready_timeout seconds for agent readiness before sending
-    if opts.message is not None:
-        raise NotImplementedError("--message is not implemented yet")
-
-    # Read initial message content from the specified file and send after agent starts
-    if opts.message_file is not None:
-        raise NotImplementedError("--message-file is not implemented yet")
-
-    # Timeout for waiting for agent readiness
-    if opts.ready_timeout != DEFAULT_AGENT_READY_TIMEOUT_SECONDS:
-        raise NotImplementedError("--ready-timeout with non-default value is not implemented yet")
 
     # Number of times to retry connection on failure before giving up
     if opts.retry != 3:
