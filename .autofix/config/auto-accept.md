@@ -1,1 +1,0 @@
-/Users/ev/.config/autofix/config/auto-accept.md
