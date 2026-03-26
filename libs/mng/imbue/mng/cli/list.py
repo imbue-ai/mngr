@@ -136,6 +136,8 @@ class ListCliOptions(CommonCliOptions):
     sort: str
     limit: int | None
     watch: int | None
+    ids: bool
+    addrs: bool
     on_error: str
     stream: bool
 
@@ -208,6 +210,16 @@ class ListCliOptions(CommonCliOptions):
     help="Read agent and host IDs or names from stdin (one per line)",
 )
 @optgroup.group("Output Format")
+@optgroup.option(
+    "--ids",
+    is_flag=True,
+    help="Print only agent IDs, one per line",
+)
+@optgroup.option(
+    "--addrs",
+    is_flag=True,
+    help="Print only agent addresses (name@host.provider), one per line",
+)
 @optgroup.option(
     "--fields",
     help="Which fields to include (comma-separated)",
@@ -287,6 +299,27 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # Format template is now resolved by the common option parsing infrastructure
     # (via --format with a template string, e.g. --format '{name}\t{state}')
     format_template = output_opts.format_template
+
+    # --ids / --addrs: shorthand for format templates that print one value per line
+    is_shorthand_flag = opts.ids or opts.addrs
+    if is_shorthand_flag:
+        shorthand_name = "--ids" if opts.ids else "--addrs"
+        if opts.ids and opts.addrs:
+            raise click.UsageError("--ids and --addrs are mutually exclusive")
+        if opts.stream:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --stream")
+        format_source = ctx.get_parameter_source("output_format")
+        is_format_explicit = format_source is not None and format_source != click.core.ParameterSource.DEFAULT
+        if is_format_explicit:
+            raise click.UsageError(f"{shorthand_name} cannot be combined with --format")
+
+    match (opts.ids, opts.addrs):
+        case (True, False):
+            format_template = "{id}"
+        case (False, True):
+            format_template = "{name}@{host.name}.{host.provider_name}"
+        case _:
+            pass
 
     # Parse fields if provided
     fields = None

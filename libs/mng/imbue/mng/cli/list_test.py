@@ -1725,6 +1725,112 @@ def test_list_command_format_template_no_agents(
     assert result.output.strip() == ""
 
 
+def test_list_command_ids_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --ids should print only agent IDs, one per line."""
+    agents = [
+        make_test_agent_details(name="alpha", state=AgentLifecycleState.RUNNING),
+        make_test_agent_details(name="bravo", state=AgentLifecycleState.STOPPED),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--ids"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 2
+    # Each line should be an agent ID (starts with "agent-")
+    for line in lines:
+        assert line.startswith("agent-")
+
+
+def test_list_command_addrs_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list --addrs should print only agent addresses (name@host.provider), one per line."""
+    agents = [
+        make_test_agent_details(name="alpha", state=AgentLifecycleState.RUNNING),
+    ]
+    _patch_list_agents(monkeypatch, agents)
+
+    result = cli_runner.invoke(
+        list_command,
+        ["--addrs"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0] == "alpha@test-host.local"
+
+
+def test_list_command_ids_and_addrs_mutually_exclusive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """list --ids --addrs should fail with a usage error."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--ids", "--addrs"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output
+
+
+@pytest.mark.parametrize(
+    "shorthand_flag",
+    ["--ids", "--addrs"],
+)
+def test_list_command_shorthand_flag_rejects_format(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    shorthand_flag: str,
+) -> None:
+    """--ids/--addrs should reject an explicit --format option."""
+    result = cli_runner.invoke(
+        list_command,
+        [shorthand_flag, "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "cannot be combined with --format" in result.output
+
+
+@pytest.mark.parametrize(
+    "shorthand_flag",
+    ["--ids", "--addrs"],
+)
+def test_list_command_shorthand_flag_rejects_stream(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    shorthand_flag: str,
+) -> None:
+    """--ids/--addrs should reject --stream."""
+    result = cli_runner.invoke(
+        list_command,
+        [shorthand_flag, "--stream"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "cannot be combined with --stream" in result.output
+
+
 def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_output with empty agents list should produce no output."""
     _emit_human_output([], fields=["name", "state"])
