@@ -269,3 +269,4 @@ current.tar.gz
 
 # ignore coverage files generated within subprojects
 cov.xml
+.reviews/

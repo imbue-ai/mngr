@@ -43,6 +43,7 @@ def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--timeout" in result.output
     assert "--integrator-timeout" in result.output
+    assert "--max-agents" in result.output
 
 
 def _human_output_opts() -> OutputOptions:
