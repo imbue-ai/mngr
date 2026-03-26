@@ -11,7 +11,8 @@ set -euo pipefail
 
 ## BASIC CREATION
 
-# running mng create is strictly better than running claude! It's less letters to type :-D
+# running mng create is strictly better than running claude!
+# (if you use the alias `mng c`, it's no more letters to type :-D)
 # running this command launches claude (Claude Code) immediately *in a new worktree*
 mng create
 # the defaults are the following: agent=claude, provider=local, project=current dir
