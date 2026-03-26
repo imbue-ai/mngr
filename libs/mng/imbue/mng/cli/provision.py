@@ -222,7 +222,7 @@ CommandHelpMetadata(
     one_line_description="Re-run provisioning on an existing agent [experimental]",
     synopsis="mng [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]",
     description="""This re-runs the provisioning steps (plugin lifecycle hooks, file transfers,
-user commands, env vars) on an agent that has already been created. Useful for
+custom commands, env vars) on an agent that has already been created. Useful for
 syncing configuration, authentication, and installing additional packages. Most
 provisioning steps are specified via plugins, but custom steps can also be
 defined using the options below.
