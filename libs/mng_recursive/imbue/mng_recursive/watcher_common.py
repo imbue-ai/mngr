@@ -302,14 +302,26 @@ def mtime_poll_directories(
     return is_changed
 
 
+_NON_CHANGE_EVENT_TYPES: Final[frozenset[str]] = frozenset(
+    {"opened", "closed", "closed_no_write"}
+)
+
+
 class ChangeHandler(FileSystemEventHandler):
-    """Watchdog handler that signals the main loop on any filesystem change."""
+    """Watchdog handler that signals the main loop on actual filesystem changes.
+
+    Ignores events that do not represent modifications (file opened, file
+    closed, file closed without write) since these are read-only operations
+    that should not trigger processing.
+    """
 
     def __init__(self, wake_event: threading.Event) -> None:
         super().__init__()
         self._wake_event = wake_event
 
     def on_any_event(self, event: FileSystemEvent) -> None:
+        if event.event_type in _NON_CHANGE_EVENT_TYPES:
+            return
         self._wake_event.set()
 
 
