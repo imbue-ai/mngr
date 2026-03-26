@@ -865,7 +865,7 @@ class ModalProviderInstance(BaseProviderInstance):
     #  If we use the cache *only for mng list*, we should be relatively safe--we can regenerate the cache after basically any command that changes it (and time it out), and then list will show you what you expect
     def _list_all_host_and_agent_records(
         self, cg: ConcurrencyGroup, is_including_agents: bool = True
-    ) -> tuple[list[HostRecord], dict[str, Any]]:
+    ) -> tuple[list[HostRecord], dict[HostId, list[dict[str, Any]]]]:
         with log_span("Listing all host/agent records from state volume"):
             volume = self.get_state_volume()
 

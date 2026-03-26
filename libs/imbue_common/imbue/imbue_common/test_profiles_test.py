@@ -65,7 +65,7 @@ def test_load_profiles_are_frozen(tmp_path: Path) -> None:
     result = load_profiles(config_path)
 
     with pytest.raises(ValidationError):
-        result[0].name = "changed"  # type: ignore[misc]
+        result[0].name = "changed"
 
 
 # -- detect_branch -----------------------------------------------------------

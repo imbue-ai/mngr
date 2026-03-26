@@ -288,7 +288,7 @@ class MethodKind(StrEnum):
 
 
 def _make_sync_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
-    def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+    def guarded(self, *args, **kwargs):
         enforce_sdk_guard(name)
         return originals[key](self, *args, **kwargs)
 
@@ -296,7 +296,7 @@ def _make_sync_wrapper(name: str, originals: dict[str, Any], key: str) -> Callab
 
 
 def _make_async_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
-    async def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+    async def guarded(self, *args, **kwargs):
         enforce_sdk_guard(name)
         return await originals[key](self, *args, **kwargs)
 
@@ -304,7 +304,7 @@ def _make_async_wrapper(name: str, originals: dict[str, Any], key: str) -> Calla
 
 
 def _make_async_gen_wrapper(name: str, originals: dict[str, Any], key: str) -> Callable[..., Any]:
-    async def guarded(self, *args, **kwargs):  # ty: ignore[invalid-type-form]
+    async def guarded(self, *args, **kwargs):
         enforce_sdk_guard(name)
         async for item in originals[key](self, *args, **kwargs):
             yield item
@@ -435,7 +435,7 @@ class _ResourceGuardPlugin:
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(
         item: pytest.Item,
-        call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
+        call: pytest.CallInfo,
     ) -> Generator[None, None, None]:
         yield from _pytest_runtest_makereport(item, call)
 
@@ -526,7 +526,7 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
 @pytest.hookimpl(hookwrapper=True)
 def _pytest_runtest_makereport(
     item: pytest.Item,
-    call: pytest.CallInfo,  # ty: ignore[invalid-type-form]
+    call: pytest.CallInfo,
 ) -> Generator[None, None, None]:
     """Enforce resource guard invariants after each test phase."""
     outcome = yield

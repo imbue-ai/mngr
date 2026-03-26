@@ -265,19 +265,19 @@ def _emit_config_list(
         return
     match output_opts.output_format:
         case OutputFormat.JSON:
-            output = {"config": config_data}
+            output: dict[str, object] = {"config": config_data}
             if scope is not None:
                 output["scope"] = scope.value.lower()
             if config_path is not None:
                 output["path"] = str(config_path)
             emit_final_json(output)
         case OutputFormat.JSONL:
-            output = {"event": "config_list", "config": config_data}
+            output_jsonl: dict[str, object] = {"event": "config_list", "config": config_data}
             if scope is not None:
-                output["scope"] = scope.value.lower()
+                output_jsonl["scope"] = scope.value.lower()
             if config_path is not None:
-                output["path"] = str(config_path)
-            emit_final_json(output)
+                output_jsonl["path"] = str(config_path)
+            emit_final_json(output_jsonl)
         case OutputFormat.HUMAN:
             if scope is not None and config_path is not None:
                 write_human_line("Config from {} ({}):", scope.value.lower(), config_path)

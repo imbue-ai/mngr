@@ -248,7 +248,7 @@ def _fetch_and_save_channel_info(
     if is_save_channel_updates and info_result.updated_channels:
         _diff_and_save(
             fresh_items=list(info_result.updated_channels),
-            existing_by_key=dict(existing_channel_by_id),
+            existing_by_key={str(k): v for k, v in existing_channel_by_id.items()},
             get_key=lambda ch: ch.channel_id,
             get_raw=lambda ch: ch.raw,
             save_fn=save_channel_events,
@@ -420,7 +420,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         fresh_channels = fetch_channel_list(api_caller, members_only=settings.members_only)
         _diff_and_save(
             fresh_items=fresh_channels,
-            existing_by_key=dict(existing_channel_by_id),
+            existing_by_key={str(k): v for k, v in existing_channel_by_id.items()},
             get_key=lambda ch: ch.channel_id,
             get_raw=lambda ch: ch.raw,
             save_fn=save_channel_events,
@@ -439,7 +439,7 @@ def run_export(settings: ExporterSettings, api_caller: SlackApiCaller) -> None:
         fresh_users = fetch_user_list(api_caller)
         _diff_and_save(
             fresh_items=fresh_users,
-            existing_by_key=dict(existing_user_by_id),
+            existing_by_key={str(k): v for k, v in existing_user_by_id.items()},
             get_key=lambda u: u.user_id,
             get_raw=lambda u: u.raw,
             save_fn=save_user_events,

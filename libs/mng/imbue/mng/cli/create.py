@@ -29,6 +29,7 @@ from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.data_types import SourceLocation
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.find import ResolvedSource
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import get_host_from_list_by_id
@@ -90,9 +91,9 @@ from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import WorkDirCopyMode
 from imbue.mng.utils.duration import parse_duration_to_seconds
 from imbue.mng.utils.editor import EditorSession
-from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.name_generator import generate_agent_name
@@ -464,6 +465,13 @@ def create(ctx: click.Context, **kwargs) -> None:
     _finish_create(create_result, setup, output_opts)
 
 
+class _AutoLabels(FrozenModel):
+    """Auto-derived agent labels. Field names are the label keys."""
+
+    project: str = Field(description="Project name (from git remote or folder name)")
+    remote: str | None = Field(default=None, description="Git remote origin URL")
+
+
 class _CreateSetup(FrozenModel):
     """Per-invocation state shared between _setup_create and _create_agent."""
 
@@ -475,9 +483,8 @@ class _CreateSetup(FrozenModel):
     )
     editor_session: EditorSession | None = Field(default=None, description="Editor session for --edit-message")
     agent_and_host_loader: _CachedAgentHostLoader = Field(description="Lazy loader for agents grouped by host")
-    source_location: HostLocation = Field(description="Resolved source location")
-    source_agent_id: AgentId | None = Field(default=None, description="Resolved source agent ID (when --from-agent)")
-    project_name: str = Field(description="Project name for agent labels")
+    resolved_source: ResolvedSource = Field(description="Resolved source location and optional source agent")
+    auto_labels: _AutoLabels = Field(description="Auto-derived labels for the new agent")
     host_lifecycle: HostLifecycleOptions = Field(description="Host lifecycle options")
     plugin_cli_params: dict[str, Any] = Field(
         default_factory=dict, description="Plugin-registered CLI params to merge into plugin_data"
@@ -527,12 +534,14 @@ def _setup_create(
     agent_and_host_loader = _CachedAgentHostLoader(mng_ctx=mng_ctx)
 
     # figure out where the source data is coming from
-    source_location, source_agent_id = _resolve_source_location(
-        opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host
-    )
+    resolved_source = _resolve_source_location(opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host)
 
-    # figure out the project label, in case we need that
-    project_name = _parse_project_name(source_location, opts, address, mng_ctx)
+    # derive auto-labels from the source location
+    remote_url = _get_source_remote_url(resolved_source.location)
+    auto_labels = _AutoLabels(
+        project=_parse_project_name(resolved_source, opts, remote_url),
+        remote=remote_url,
+    )
 
     # Parse host lifecycle options (these go on the host, not the agent)
     host_lifecycle = _parse_host_lifecycle_options(opts)
@@ -542,9 +551,8 @@ def _setup_create(
         initial_message=initial_message,
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
-        source_location=source_location,
-        source_agent_id=source_agent_id,
-        project_name=project_name,
+        resolved_source=resolved_source,
+        auto_labels=auto_labels,
         host_lifecycle=host_lifecycle,
         plugin_cli_params=plugin_cli_params or {},
     )
@@ -563,22 +571,23 @@ def _create_agent(
     target_host = _parse_target_host(
         opts=opts,
         address=address,
-        project_name=setup.project_name,
         agent_and_host_loader=setup.agent_and_host_loader,
         lifecycle=setup.host_lifecycle,
     )
 
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None
-    if setup.source_agent_id is not None:
-        source_agent_state_dir = get_agent_state_dir_path(setup.source_location.host.host_dir, setup.source_agent_id)
+    if setup.resolved_source.agent is not None:
+        source_agent_state_dir = get_agent_state_dir_path(
+            setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+        )
 
     # Parse agent options
     agent_opts, has_explicit_base = _parse_agent_opts(
         opts=opts,
         address=address,
         initial_message=setup.initial_message,
-        source_location=setup.source_location,
+        source_location=setup.resolved_source.location,
         source_agent_state_dir=source_agent_state_dir,
         mng_ctx=mng_ctx,
     )
@@ -639,7 +648,7 @@ def _create_agent(
     # are irrelevant (regardless of copy mode: worktree, clone, or copy).
     is_from_explicit_base = agent_opts.git is not None and has_explicit_base
     if opts.ensure_clean and not is_from_explicit_base:
-        _ensure_clean_work_dir(setup.source_location)
+        _ensure_clean_work_dir(setup.resolved_source.location)
 
     # figure out the target host (if we just have a reference)
     resolved_target_host = _resolve_target_host(target_host, mng_ctx, is_start_desired=opts.start_host)
@@ -649,19 +658,20 @@ def _create_agent(
     if isinstance(resolved_target_host, OnlineHostInterface):
         _apply_host_labels(resolved_target_host, opts.host_label)
 
-    # Set the project as a label on the agent (labels are agent-level, not host-level)
-    if setup.project_name:
-        agent_opts = agent_opts.model_copy_update(
-            to_update(
-                agent_opts.field_ref().label_options,
-                AgentLabelOptions(labels={**agent_opts.label_options.labels, "project": setup.project_name}),
-            ),
-        )
+    # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level).
+    # User-specified --label values take precedence over auto-derived ones.
+    auto_labels = setup.auto_labels.model_dump(exclude_none=True)
+    agent_opts = agent_opts.model_copy_update(
+        to_update(
+            agent_opts.field_ref().label_options,
+            AgentLabelOptions(labels={**auto_labels, **agent_opts.label_options.labels}),
+        ),
+    )
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
         create_result = api_create(
-            source_location=setup.source_location,
+            source_location=setup.resolved_source.location,
             target_host=resolved_target_host,
             agent_options=agent_opts,
             mng_ctx=mng_ctx,
@@ -819,36 +829,40 @@ def _handle_editor_message(
         logger.debug("Message sent successfully")
 
 
+def _get_source_remote_url(source_location: HostLocation) -> str | None:
+    """Get the git remote origin URL from the source location via execute_command."""
+    result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
+    if result.success and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
 def _parse_project_name(
-    source_location: HostLocation, opts: CreateCliOptions, address: AgentAddress, mng_ctx: MngContext
+    resolved_source: ResolvedSource,
+    opts: CreateCliOptions,
+    remote_url: str | None,
 ) -> str:
+    """Determine the project name for a new agent.
+
+    Priority: explicit --project flag > source agent's project label > git remote > folder name.
+    """
     if opts.project:
         return opts.project
 
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement the below function so that it works via HostInterface calls instead!"
-        )
+    # If creating from an existing agent, inherit its project label
+    if resolved_source.agent is not None:
+        source_project = resolved_source.agent.labels.get("project")
+        if source_project is not None:
+            return source_project
 
-    source_project = derive_project_name_from_path(source_location.path, mng_ctx.concurrency_group)
+    # Derive from the already-fetched remote URL (works for both local and remote hosts)
+    if remote_url is not None:
+        project_name = parse_project_name_from_url(remote_url)
+        if project_name is not None:
+            return project_name
 
-    # When creating a new host from an external source (--source-agent or --source-host),
-    # validate that the project inferred from the source matches the project inferred from
-    # the local working directory. If they differ, the user must specify --project explicitly
-    # to avoid silently tagging the agent with the wrong project.
-    is_external_source = opts.source_agent is not None or opts.source_host is not None
-    is_creating_new_host = _is_creating_new_host(address, opts.new_host)
-    if is_external_source and is_creating_new_host:
-        local_git_root = find_git_worktree_root(None, mng_ctx.concurrency_group)
-        local_path = local_git_root if local_git_root is not None else Path(os.getcwd())
-        local_project = derive_project_name_from_path(local_path, mng_ctx.concurrency_group)
-        if source_project != local_project:
-            raise UserInputError(
-                f"Project mismatch: source infers project '{source_project}' but local directory infers "
-                f"'{local_project}'. Use --project to specify which project name to use."
-            )
-
-    return source_project
+    # Fall back to the source directory name (resolve to normalize symlinks / '..' components)
+    return resolved_source.location.path.resolve().name
 
 
 def _try_reuse_existing_agent(
@@ -925,12 +939,8 @@ def _resolve_source_location(
     mng_ctx: MngContext,
     *,
     is_start_desired: bool,
-) -> tuple[HostLocation, AgentId | None]:
-    """Resolve the source location and optionally the source agent ID.
-
-    Returns (source_location, source_agent_id) where source_agent_id is set
-    when the source was resolved from an agent (--from-agent / --source-agent).
-    """
+) -> ResolvedSource:
+    """Resolve the source location and optionally the source agent ID and labels."""
     # figure out the agent source data
     if opts.source is None and opts.source_agent is None and opts.source_host is None:
         # easy, source location is on current host
@@ -941,7 +951,7 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Parse the source first to check if it's just a local path.
     # When --source is a plain filesystem path (no agent or host component),
@@ -965,11 +975,11 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
     agents_by_host = agent_and_host_loader()
-    resolved = resolve_source_location(
+    return resolve_source_location(
         opts.source,
         opts.source_agent,
         opts.source_host,
@@ -978,7 +988,6 @@ def _resolve_source_location(
         mng_ctx,
         is_start_desired=is_start_desired,
     )
-    return resolved.location, resolved.agent_id
 
 
 def _resolve_target_host(
@@ -1249,7 +1258,6 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
 def _parse_target_host(
     opts: CreateCliOptions,
     address: AgentAddress,
-    project_name: str | None,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:

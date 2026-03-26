@@ -454,7 +454,7 @@ def _make_mng_ctx_with_plugins(
     """Create a SimpleNamespace that mimics MngContext.get_plugin_config behavior."""
     plugin_dict = plugins or {}
 
-    def get_plugin_config(name: str, config_type: type) -> object:  # ty: ignore[invalid-argument-type]
+    def get_plugin_config(name: str, config_type: type) -> object:
         config = plugin_dict.get(PluginName(name))
         if config is None:
             return config_type()
@@ -467,7 +467,7 @@ def _make_mng_ctx_with_plugins(
 
 
 def test_build_command_map_returns_builtins_with_no_user_config() -> None:
-    commands = _build_command_map(_make_mng_ctx_with_plugins())  # ty: ignore[invalid-argument-type]
+    commands = _build_command_map(_make_mng_ctx_with_plugins())
     assert {"r", "p", "d", "m"} <= set(commands.keys())
 
 
@@ -479,7 +479,7 @@ def test_build_command_map_user_command_overrides_builtin() -> None:
             )
         }
     )
-    commands = _build_command_map(mng_ctx)  # ty: ignore[invalid-argument-type]
+    commands = _build_command_map(mng_ctx)
     assert commands["r"].name == "custom-refresh"
 
 
@@ -487,11 +487,11 @@ def test_build_command_map_disabled_command_is_excluded() -> None:
     mng_ctx = _make_mng_ctx_with_plugins(
         {PluginName("kanpan"): KanpanPluginConfig(commands={"d": CustomCommand(name="delete", enabled=False)})}
     )
-    assert "d" not in _build_command_map(mng_ctx)  # ty: ignore[invalid-argument-type]
+    assert "d" not in _build_command_map(mng_ctx)
 
 
 def test_load_user_commands_no_kanpan_plugin_returns_empty() -> None:
-    assert _load_user_commands(_make_mng_ctx_with_plugins()) == {}  # ty: ignore[invalid-argument-type]
+    assert _load_user_commands(_make_mng_ctx_with_plugins()) == {}
 
 
 def test_load_user_commands_handles_dict_values() -> None:
@@ -499,7 +499,7 @@ def test_load_user_commands_handles_dict_values() -> None:
         enabled=True, commands={"x": {"name": "from-dict", "command": "echo hi"}}
     )
     mng_ctx = _make_mng_ctx_with_plugins({PluginName("kanpan"): config})
-    commands = _load_user_commands(mng_ctx)  # ty: ignore[invalid-argument-type]
+    commands = _load_user_commands(mng_ctx)
     assert commands["x"].name == "from-dict"
 
 
@@ -1545,7 +1545,7 @@ def test_build_column_palette_no_colors() -> None:
 
 
 def test_load_user_columns_no_config_returns_empty() -> None:
-    assert _load_user_columns(_make_mng_ctx_with_plugins()) == {}  # ty: ignore[invalid-argument-type]
+    assert _load_user_columns(_make_mng_ctx_with_plugins()) == {}
 
 
 def test_load_user_columns_handles_dict_values() -> None:
@@ -1555,7 +1555,7 @@ def test_load_user_columns_handles_dict_values() -> None:
         columns={"blocked": {"header": "BLOCKED", "colors": {"yes": "light red"}}},
     )
     mng_ctx = _make_mng_ctx_with_plugins({PluginName("kanpan"): config})
-    columns = _load_user_columns(mng_ctx)  # ty: ignore[invalid-argument-type]
+    columns = _load_user_columns(mng_ctx)
     assert "blocked" in columns
     assert columns["blocked"].header == "BLOCKED"
     assert columns["blocked"].colors == {"yes": "light red"}
@@ -1566,7 +1566,7 @@ def test_load_user_columns_handles_proper_objects() -> None:
         columns={"blocked": CustomColumnConfig(header="BLOCKED")},
     )
     mng_ctx = _make_mng_ctx_with_plugins({PluginName("kanpan"): config})
-    columns = _load_user_columns(mng_ctx)  # ty: ignore[invalid-argument-type]
+    columns = _load_user_columns(mng_ctx)
     assert columns["blocked"].header == "BLOCKED"
 
 
@@ -1604,6 +1604,7 @@ def test_build_board_widgets_muted_agent_flattens_custom_column_colors() -> None
     walker, index_to_entry = _build_board_widgets(_make_snapshot(entries=entries), column_defs)
     agent_idx = next(iter(index_to_entry.keys()))
     row_widget = walker[agent_idx]
+    assert isinstance(row_widget, AttrMap)
     inner_row = row_widget.original_widget
     for child, _options in inner_row.contents:
         if isinstance(child, Text):
@@ -1623,6 +1624,8 @@ def test_build_board_widgets_custom_column_focus_map_includes_col_attrs() -> Non
     )
     agent_idx = next(iter(index_to_entry.keys()))
     attr_map_widget = walker[agent_idx]
+    assert isinstance(attr_map_widget, AttrMap)
+    assert attr_map_widget.focus_map is not None
     assert "col_blocked_yes" in attr_map_widget.focus_map
     assert attr_map_widget.focus_map["col_blocked_yes"] == "col_blocked_yes_focus"
 
