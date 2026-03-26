@@ -212,6 +212,8 @@ else
 fi
 
 # PR/CI gate (can be disabled via .reviewer/settings.json)
+source "$SCRIPT_DIR/config_utils.sh"
+REVIEWER_SETTINGS=".reviewer/settings.json"
 CI_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "ci.is_enabled" "true")
 
 if [[ "$CI_ENABLED" != "true" ]]; then

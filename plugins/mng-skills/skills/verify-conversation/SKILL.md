@@ -66,10 +66,11 @@ Get the current HEAD hash: `git rev-parse HEAD`
 
 Spawn a `review-conversation` Agent and tell it to:
 
-1. Read the issue categories from `${CLAUDE_PLUGIN_ROOT}/agents/categories/conversation-issue-categories.md`
-2. Read the instruction files: `CLAUDE.md` at the repo root, plus any other instruction files (`AGENTS.md`, `.claude.md`, etc.) that exist at the repo root
+1. Read the instruction files: `CLAUDE.md` at the repo root, plus any other instruction files (`AGENTS.md`, `.claude.md`, etc.) that exist at the repo root
 
 Also provide the agent with:
+
+3. The filter script path: `${CLAUDE_PLUGIN_ROOT}/scripts/filter_transcript.py`
 
 4. The list of session file paths to read, grouped by provenance:
    - `mng_tracked` files: label as "The sequence of tracked session files for this task"
