@@ -2,7 +2,7 @@
 
 Automated code review enforcement for [mng](https://github.com/imbue-ai/mng) users.
 
-**This plugin enforces code quality by default.** When installed, a Stop hook blocks Claude from finishing until autofix and conversation review have been run. This is not opt-in -- it activates automatically. Individual gates can be disabled per-session with the configuration skills below.
+**This plugin enforces code quality by default.** When installed, a Stop hook blocks Claude from finishing until autofix and conversation review have been run. Enforcement is on by default but individual gates can be disabled per-session with the configuration skills below.
 
 ## Install
 
