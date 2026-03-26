@@ -9,7 +9,8 @@ The user may provide a shell expression as an argument. If provided, use that as
 
 Examples of expressions the user might provide:
 - `true` -- always enforce
-- `test -n "${MNG_AGENT_STATE_DIR:-}"` -- only mng-managed sessions
+- `test -n "${CI:-}"` -- only in CI environments
+- `test "$(git rev-parse --abbrev-ref HEAD)" != "main"` -- only on feature branches
 
 Run this command, substituting the expression:
 
