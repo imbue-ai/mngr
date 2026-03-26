@@ -23,9 +23,9 @@ class FetchPrsResult:
 def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
     """Fetch all PRs from a repo using gh CLI.
 
-    Repo is identified either by cwd (a directory inside the target git
-    repository) or by repo (an 'owner/repo' string passed via --repo).
-    When both are provided, --repo takes precedence.
+    Repo is identified by repo ('owner/repo' string passed via --repo) or
+    by cwd (a directory inside the target git repository). Prefer repo
+    since it doesn't require a local checkout.
 
     Returns a FetchPrsResult with the PRs and any error message.
     """

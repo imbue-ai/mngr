@@ -141,11 +141,11 @@ def test_fetch_github_data_fetches_per_repo(tmp_path: Path) -> None:
     def mock_fetch_prs(cg: object, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
         nonlocal call_count
         call_count += 1
-        if cwd == dir_a:
+        if repo == "org/repo-a":
             return FetchPrsResult(prs=(pr_a,), error=None)
-        if cwd == dir_b:
+        if repo == "org/repo-b":
             return FetchPrsResult(prs=(pr_b,), error=None)
-        return FetchPrsResult(prs=(), error="unexpected cwd")
+        return FetchPrsResult(prs=(), error=f"unexpected repo: {repo}")
 
     mng_ctx = MagicMock()
 
@@ -208,7 +208,7 @@ def test_fetch_github_data_partial_failure(tmp_path: Path) -> None:
     pr = make_pr_info(number=1, head_branch="mng/feature")
 
     def mock_fetch_prs(cg: object, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
-        if cwd == good_dir:
+        if repo == "org/good":
             return FetchPrsResult(prs=(pr,), error=None)
         return FetchPrsResult(prs=(), error="gh pr list failed: auth required")
 

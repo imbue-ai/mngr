@@ -91,35 +91,25 @@ def fetch_github_data(mng_ctx: MngContext, agents: list[AgentDetails]) -> GitHub
     """Fetch GitHub PR data from all unique repos and build the PR-to-branch index.
 
     Discovers repos from each agent's 'remote' label (set at creation time).
-    Fetches PRs once per unique repo: uses a local agent's work_dir as cwd
-    when available, otherwise falls back to gh --repo for remote-only repos.
+    Fetches PRs once per unique repo via gh --repo (no local cwd needed).
     Agents without the 'remote' label are skipped.
     """
     cg = mng_ctx.concurrency_group
     errors: list[str] = []
 
-    # Collect one local work_dir per unique repo for the gh CLI call.
-    # Repos without a local agent can still be fetched via gh --repo.
-    cwd_by_repo: dict[str, Path] = {}
+    # Collect unique repos from agent labels.
     all_repos: set[str] = set()
-
     for agent in agents:
         repo_path = _get_agent_repo_path(agent)
-        if repo_path is None:
-            continue
-        all_repos.add(repo_path)
-        is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists()
-        if is_local and repo_path not in cwd_by_repo:
-            cwd_by_repo[repo_path] = agent.work_dir
+        if repo_path is not None:
+            all_repos.add(repo_path)
 
-    # Fetch PRs once per unique repo. Use a local cwd when available,
-    # otherwise fall back to gh --repo for remote-only repos.
+    # Fetch PRs once per unique repo via gh --repo.
     pr_by_repo_branch: dict[str, dict[str, PrInfo]] = {}
     repo_pr_loaded: dict[str, bool] = {}
 
     for repo_path in all_repos:
-        local_cwd = cwd_by_repo.get(repo_path)
-        pr_result = fetch_all_prs(cg, cwd=local_cwd, repo=repo_path if local_cwd is None else None)
+        pr_result = fetch_all_prs(cg, repo=repo_path)
         if pr_result.error is None:
             repo_index = _build_pr_branch_index(pr_result.prs)
             if repo_index:
