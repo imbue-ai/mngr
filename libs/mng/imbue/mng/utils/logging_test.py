@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+import paramiko.channel
 import pytest
 from loguru import logger
 
@@ -669,8 +670,6 @@ def test_paramiko_transport_log_patch_joins_list_messages() -> None:
 
 
 def _get_paramiko_traceback() -> types.TracebackType:
-    import paramiko.channel
-
     try:
         cast(Any, paramiko.channel.Channel._send)(None, b"test", None)
     except (AttributeError, TypeError, OSError) as e:

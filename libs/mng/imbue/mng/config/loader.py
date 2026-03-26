@@ -318,11 +318,24 @@ def _parse_providers(
             config_class = get_provider_config_class(backend)
         except UnknownBackendError as e:
             msg = f"Provider '{name}' references unknown backend '{backend}'."
-            if disabled_plugins:
+            if backend in disabled_plugins:
+                msg += (
+                    f" The '{backend}' plugin is currently disabled. Either enable"
+                    f' the plugin or add `plugin = "{backend}"` to this provider'
+                    f" block so it is skipped when the plugin is disabled."
+                )
+            elif disabled_plugins:
                 msg += (
                     f" If this backend is provided by a disabled plugin, either enable"
                     f' the plugin or add `plugin = "<plugin-name>"` to this provider'
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
+                )
+            else:
+                msg += (
+                    f" The plugin package that provides the"
+                    f" '{backend}' backend may not be installed. If you installed mng"
+                    f" as a tool, try reinstalling with the plugin package"
+                    f" (e.g. --with 'mng-{backend}')."
                 )
             if strict:
                 raise ConfigParseError(msg) from e

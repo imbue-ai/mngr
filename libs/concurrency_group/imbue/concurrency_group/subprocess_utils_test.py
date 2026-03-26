@@ -254,8 +254,8 @@ def test_gather_output_reads_from_stdout_and_stderr() -> None:
     shutdown_event = Event()
 
     gatherer = OutputGatherer(
-        stdout=stdout_io,  # type: ignore[arg-type]
-        stderr=stderr_io,  # type: ignore[arg-type]
+        stdout=stdout_io,
+        stderr=stderr_io,
         stdout_container=stdout_container,
         stderr_container=stderr_container,
         shutdown_event=shutdown_event,
@@ -311,8 +311,8 @@ def test_get_incomplete_lines_returns_partial_content() -> None:
     shutdown_event = Event()
 
     gatherer = OutputGatherer(
-        stdout=stdout_io,  # type: ignore[arg-type]
-        stderr=stderr_io,  # type: ignore[arg-type]
+        stdout=stdout_io,
+        stderr=stderr_io,
         stdout_container=stdout_container,
         stderr_container=stderr_container,
         shutdown_event=shutdown_event,

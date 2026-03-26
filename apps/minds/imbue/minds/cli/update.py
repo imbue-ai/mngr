@@ -8,6 +8,7 @@ The ``mind update <agent-name>`` command:
 4. Starts the mind back up (via ``mng start``)
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
@@ -75,7 +76,7 @@ def find_mind_agent(agent_name: str) -> MindAgentRecord:
     return parse_mind_agent_record(agents[0], agent_name)
 
 
-def parse_mind_agent_record(raw: dict[str, object], agent_name: str) -> MindAgentRecord:
+def parse_mind_agent_record(raw: Mapping[str, object], agent_name: str) -> MindAgentRecord:
     """Parse a raw agent dict from ``mng list`` JSON into a MindAgentRecord.
 
     Validates that the required ``id`` and ``work_dir`` fields are present.
