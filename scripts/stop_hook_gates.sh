@@ -3,8 +3,9 @@ set -euo pipefail
 #
 # stop_hook_gates.sh
 #
-# Check whether autofix verification and conversation review have been
-# completed. Exits 0 if all enabled gates pass, 2 if any are missing.
+# Check whether autofix verification, architecture verification, and
+# conversation review have been completed. Exits 0 if all enabled gates
+# pass, 2 if any are missing.
 #
 # Usage:
 #   ./stop_hook_gates.sh [COMMIT_HASH]
@@ -13,7 +14,7 @@ set -euo pipefail
 #
 # This script is used by:
 #   - main_claude_stop_hook.sh (the full mng stop hook orchestrator)
-#   - The mng-skills Claude Code plugin (as a standalone Stop hook)
+#   - The mng-code-review Claude Code plugin (as a standalone Stop hook)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config_utils.sh
