@@ -132,14 +132,6 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
         is_build_cache=True,
     )
 
-    # Emit info messages for each resource type
-    emit_info("Cleaning work directories...", output_opts.output_format)
-    emit_info("Cleaning machines...", output_opts.output_format)
-    emit_info("Cleaning snapshots...", output_opts.output_format)
-    emit_info("Cleaning volumes...", output_opts.output_format)
-    emit_info("Cleaning logs...", output_opts.output_format)
-    emit_info("Cleaning build cache...", output_opts.output_format)
-
     # Call the API
     result = api_gc(
         mng_ctx=mng_ctx,
@@ -147,6 +139,7 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
         resource_types=resource_types,
         dry_run=opts.dry_run,
         error_behavior=error_behavior,
+        on_resource_type_start=lambda rt: _emit_resource_type_start(rt, output_opts.output_format),
     )
 
     # Emit destroyed events for CLI output
@@ -167,6 +160,22 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
+
+
+_RESOURCE_TYPE_MESSAGES: dict[str, str] = {
+    "work_dirs": "Cleaning work directories...",
+    "machines": "Cleaning machines...",
+    "snapshots": "Cleaning snapshots...",
+    "volumes": "Cleaning volumes...",
+    "logs": "Cleaning logs...",
+    "build_cache": "Cleaning build cache...",
+}
+
+
+def _emit_resource_type_start(resource_type: str, output_format: OutputFormat) -> None:
+    """Emit an info message when starting to GC a specific resource type."""
+    msg = _RESOURCE_TYPE_MESSAGES.get(resource_type, f"Cleaning {resource_type}...")
+    emit_info(msg, output_format)
 
 
 @pure
