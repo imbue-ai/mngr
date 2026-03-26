@@ -121,8 +121,8 @@ def timestamp_to_datetime(timestamp: int | None) -> datetime | None:
 
 
 @pure
-def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
-    """Get names of all descendant processes from ps output."""
+def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Parse ps output into children-by-ppid and comm-by-pid mappings."""
     children_by_ppid: dict[str, list[str]] = {}
     comm_by_pid: dict[str, str] = {}
 
@@ -135,6 +135,14 @@ def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
                 children_by_ppid[ppid] = []
             children_by_ppid[ppid].append(pid)
 
+    return children_by_ppid, comm_by_pid
+
+
+@pure
+def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
+    """Get names of all descendant processes from ps output."""
+    children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
+
     descendant_names: list[str] = []
     queue = list(children_by_ppid.get(root_pid, []))
     while queue:
@@ -144,6 +152,13 @@ def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
         queue.extend(children_by_ppid.get(pid, []))
 
     return descendant_names
+
+
+@pure
+def get_pid_comm(pid: str, ps_output: str) -> str | None:
+    """Look up a process's comm (name) from ps output by PID."""
+    _children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
+    return comm_by_pid.get(pid)
 
 
 @pure
@@ -187,6 +202,16 @@ def determine_lifecycle_state(
 
     # Current command is a shell -> agent probably finished
     if current_command in SHELL_COMMANDS:
+        return AgentLifecycleState.DONE
+
+    # Cross-reference with ps: tmux's pane_current_command can disagree with
+    # ps because some programs modify their process title (e.g., Claude Code
+    # sets it to its version string like "2.1.73"). When the agent exits and
+    # the shell prompt returns, tmux may briefly report the stale title while
+    # ps correctly shows the pane process as a shell. Use the pane PID's own
+    # comm from ps as the authoritative source.
+    pane_comm = get_pid_comm(pane_pid, ps_output)
+    if pane_comm is not None and pane_comm in SHELL_COMMANDS:
         return AgentLifecycleState.DONE
 
     return AgentLifecycleState.REPLACED
