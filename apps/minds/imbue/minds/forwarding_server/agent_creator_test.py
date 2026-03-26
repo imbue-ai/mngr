@@ -212,6 +212,8 @@ def test_agent_creator_get_log_queue_returns_queue_for_tracked() -> None:
     q = creator.get_log_queue(agent_id)
     assert q is not None
 
+    creator.close()
+
 
 def test_make_log_callback_puts_lines_into_queue() -> None:
     log_queue: queue_mod.Queue[str] = queue_mod.Queue()
