@@ -23,7 +23,11 @@ Override actions available:
 Before doing any work:
 
 1. **Ensure the working tree is clean (aside from the category file edits).** Run `git status` and confirm there are no other uncommitted changes. The override script must always be updated from a known-good committed state so that changes can be reviewed and reverted cleanly.
-2. **Ensure VET_REPO is set.** The generator requires a vet checkout. Run `echo $VET_REPO` to confirm. If not set, ask the user for the path.
+2. **Ensure VET_REPO is set.** The generator requires a vet checkout. Run `echo $VET_REPO` to confirm. If not set, clone it:
+   ```bash
+   git clone https://github.com/imbue-ai/vet /tmp/vet
+   export VET_REPO=/tmp/vet
+   ```
 
 ## Instructions
 
