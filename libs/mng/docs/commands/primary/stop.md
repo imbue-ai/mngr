@@ -24,8 +24,6 @@ command is a shorthand for 'mng stop --archive'.
 
 Supports custom format templates via --format. Available fields: name.
 
-Alias: s
-
 **Usage:**
 
 ```text

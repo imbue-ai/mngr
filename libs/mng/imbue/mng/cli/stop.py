@@ -268,7 +268,7 @@ be filtered out of listings while preserving its state. The 'mng archive'
 command is a shorthand for 'mng stop --archive'.
 
 Supports custom format templates via --format. Available fields: name.""",
-    aliases=("s",),
+    aliases=(),
     examples=(
         ("Stop an agent by name", "mng stop my-agent"),
         ("Stop multiple agents", "mng stop agent1 agent2"),
