@@ -88,8 +88,8 @@ mng create my-task --source-path /tmp/my_random_folder --command python -- scrip
 mng create my-task
 git branch | grep mng/my-task
 
-# --branch controls branch creation. The format is "base:new", where "base" is the branch to start from and "new" is the branch to create.
-# omitting "base" (i.e. starting with ":") uses the current branch. The * in "new" is replaced by the agent name.
+# --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
+# omitting BASE (i.e. starting with ":") uses the current branch. The * in NEW is replaced by the agent name.
 # the default is ":mng/*", which creates a new branch named mng/{agent_name} off the current branch.
 # you can change the pattern:
 mng create my-task --branch ":feature/*"
@@ -105,7 +105,7 @@ mng create my-task --branch ":feature/my-task"
 mng create my-task --copy
 # that is used by default if you're not in a git repo
 
-# you can disable new branch creation entirely by omitting the ":new" part:
+# you can disable new branch creation entirely by omitting the :NEW part:
 mng create my-task --branch main
 # this checks out the existing branch in the worktree (or copy) without creating a new one
 
