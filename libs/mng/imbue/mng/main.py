@@ -344,7 +344,6 @@ cli.add_command(limit, name="lim")
 cli.add_command(rename, name="mv")
 cli.add_command(snapshot, name="snap")
 
-
 # Add commands that use UNPROCESSED args and delegate to other commands.
 # Not in BUILTIN_COMMANDS since plugin options are applied to the delegate target.
 cli.add_command(archive)
