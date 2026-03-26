@@ -133,6 +133,8 @@ class ListCliOptions(CommonCliOptions):
     sort: str
     limit: int | None
     watch: int | None
+    ids: bool
+    addrs: bool
     on_error: str
     stream: bool
 
@@ -195,6 +197,16 @@ class ListCliOptions(CommonCliOptions):
     help="Read agent and host IDs or names from stdin (one per line)",
 )
 @optgroup.group("Output Format")
+@optgroup.option(
+    "--ids",
+    is_flag=True,
+    help="Print only agent IDs, one per line",
+)
+@optgroup.option(
+    "--addrs",
+    is_flag=True,
+    help="Print only agent addresses (name@host.provider), one per line",
+)
 @optgroup.option(
     "--fields",
     help="Which fields to include (comma-separated)",
@@ -273,6 +285,14 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # Format template is now resolved by the common option parsing infrastructure
     # (via --format with a template string, e.g. --format '{name}\t{state}')
     format_template = output_opts.format_template
+
+    # --ids / --addrs: shorthand for format templates that print one value per line
+    if opts.ids and opts.addrs:
+        raise click.UsageError("--ids and --addrs are mutually exclusive")
+    if opts.ids:
+        format_template = "{id}"
+    if opts.addrs:
+        format_template = "{name}@{host.name}.{host.provider_name}"
 
     # Parse fields if provided
     fields = None

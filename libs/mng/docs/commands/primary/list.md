@@ -43,6 +43,8 @@ mng list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--ids` | boolean | Print only agent IDs, one per line | `False` |
+| `--addrs` | boolean | Print only agent addresses (name@host.provider), one per line | `False` |
 | `--fields` | text | Which fields to include (comma-separated) | None |
 | `--header` | text | Override column header label (format: FIELD=LABEL, repeatable) | None |
 | `--sort` | text | Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time] | `create_time` |
