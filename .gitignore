@@ -248,13 +248,15 @@ tmr_*/
 
 # Offload caches and local files
 .offload/**
-test-results/**
+test-results
 current.tar.gz
 
 # Minds deploy-time build artifacts
 .minds/
 
 # Autofix session artifacts
+.autofix/
+.reviews/
 .reviewer/outputs/
 .reviewer/settings.local.json
 
