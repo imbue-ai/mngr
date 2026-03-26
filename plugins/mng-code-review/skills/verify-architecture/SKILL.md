@@ -43,3 +43,18 @@ Spawn a single `analyze-architecture` Agent. Provide:
 ## Phase 4: Report
 
 Relay the agent's findings to the user. Report every point from the fit, unexpected choices, and verdict sections. Don't reproduce the structural footprint section on its own -- the user already knows what they built -- but reference specific details from it where needed to make the other points clear.
+
+## Phase 5: Create Verification Marker
+
+After reporting, create the verification marker so the stop hook knows architecture has been verified for this branch. Get the current branch name and timestamp:
+
+```bash
+git rev-parse --abbrev-ref HEAD
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+
+Use the Write tool (without checking if the directory exists) to create `.reviewer/outputs/architecture/{branch_name}.md` with the content `Verified at {timestamp}`.
+
+## Important: when to re-run
+
+Architecture verification is per-branch, not per-commit. You do NOT need to re-run it after every commit. However, if you later make changes that fundamentally alter the approach (new abstractions, changed data flow, different module boundaries), you should run /verify-architecture again to confirm the new direction is sound.

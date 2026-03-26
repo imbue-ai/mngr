@@ -25,9 +25,11 @@ REVIEWER_SETTINGS=".reviewer/settings.json"
 
 AUTOFIX_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "autofix.is_enabled" "true")
 CONVO_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "verify_conversation.is_enabled" "true")
+ARCH_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "verify_architecture.is_enabled" "true")
 
 AUTOFIX_NEEDED=false
 CONVO_NEEDED=false
+ARCH_NEEDED=false
 
 if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/verified.md" ]]; then
     AUTOFIX_NEEDED=true
@@ -37,6 +39,11 @@ if [[ "$CONVO_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/conversation/$
     CONVO_NEEDED=true
 fi
 
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+if [[ "$ARCH_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/architecture/${BRANCH}.md" ]]; then
+    ARCH_NEEDED=true
+fi
+
 AUTOFIX_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "autofix.append_to_prompt" "")
 if [[ -n "$AUTOFIX_EXTRA_ARGS" ]]; then
     AUTOFIX_CMD="/autofix ${AUTOFIX_EXTRA_ARGS}"
@@ -44,16 +51,27 @@ else
     AUTOFIX_CMD="/autofix"
 fi
 
-if [[ "$AUTOFIX_NEEDED" == "true" && "$CONVO_NEEDED" == "true" ]]; then
-    echo "Neither autofix nor conversation review have been run." >&2
-    echo "Run /verify-conversation up to and including Step 4 (Spawn Agent). Spawn that agent in the background, then run \"${AUTOFIX_CMD}\" to verify your changes. Be sure to report the results from the background agent before returning control to the user (be sure to wait for it to finish if it hasn't yet and if you're done running autofix)." >&2
-    exit 2
-elif [[ "$AUTOFIX_NEEDED" == "true" ]]; then
-    echo "Autofix has not been run yet. Run \"${AUTOFIX_CMD}\" to verify your changes." >&2
-    exit 2
-elif [[ "$CONVO_NEEDED" == "true" ]]; then
-    echo "Conversation has not been reviewed. Run /verify-conversation before finishing." >&2
-    exit 2
+MISSING=()
+if [[ "$ARCH_NEEDED" == "true" ]]; then
+    MISSING+=("architecture verification (/verify-architecture)")
+fi
+if [[ "$AUTOFIX_NEEDED" == "true" ]]; then
+    MISSING+=("autofix (${AUTOFIX_CMD})")
+fi
+if [[ "$CONVO_NEEDED" == "true" ]]; then
+    MISSING+=("conversation review (/verify-conversation)")
 fi
 
-exit 0
+if [[ ${#MISSING[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+echo "The following review gates have not been satisfied:" >&2
+for item in "${MISSING[@]}"; do
+    echo "  - ${item}" >&2
+done
+echo "" >&2
+if [[ ${#MISSING[@]} -gt 1 ]]; then
+    echo "Run these before finishing. If possible, run /verify-conversation in the background while running the others." >&2
+fi
+exit 2
