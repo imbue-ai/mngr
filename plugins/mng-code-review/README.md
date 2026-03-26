@@ -2,13 +2,37 @@
 
 Automated code review enforcement for [mng](https://github.com/imbue-ai/mng) users.
 
-**This plugin enforces code quality by default.** When installed, a Stop hook blocks Claude from finishing until autofix, architecture verification, and conversation review have been run. Enforcement is on by default but can be disabled with `/mng-code-review:reviewer-disable`, or individual gates can be toggled with the configuration skills below.
+When installed, a Stop hook can block Claude from finishing until autofix, architecture verification, and conversation review have been run. **The hook is off by default** -- you need to enable it by configuring `stop_hook.enabled_when` in `.reviewer/settings.json` or `.reviewer/settings.local.json`.
 
 ## Install
 
 ```
 claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-review@imbue-mng
 ```
+
+## Enabling the stop hook
+
+After installing, configure when the hook should fire by setting `stop_hook.enabled_when` to a shell expression. Examples:
+
+```json
+{
+    "stop_hook": {
+        "enabled_when": "true"
+    }
+}
+```
+
+This enables enforcement for all sessions. To only enforce on mng-managed agent sessions:
+
+```json
+{
+    "stop_hook": {
+        "enabled_when": "test -n \"${MNG_AGENT_STATE_DIR:-}\""
+    }
+}
+```
+
+Put this in `.reviewer/settings.json` (checked in, shared with team) or `.reviewer/settings.local.json` (gitignored, personal). Individual gates can be disabled with `/mng-code-review:reviewer-disable`.
 
 ## Skills
 
@@ -27,7 +51,7 @@ claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-rev
 
 ## How enforcement works
 
-The plugin registers a **Stop** hook that runs every time Claude finishes a response. If any enabled gate hasn't been satisfied, the hook exits non-zero, which prevents Claude from stopping and prompts it to run the missing checks.
+The plugin registers a **Stop** hook that runs every time Claude finishes a response. If `stop_hook.enabled_when` is not configured (or its shell expression exits non-zero), the hook passes through silently. When enabled, if any gate hasn't been satisfied, the hook blocks the session and prompts the agent to run the missing checks.
 
 Gates checked:
 - **Autofix** -- per-commit (must re-run after each new commit)
@@ -35,7 +59,7 @@ Gates checked:
 - **Conversation review** -- per-commit
 - **CI** -- handled by the full mng stop hook, not this plugin
 
-Configuration is stored in `.reviewer/settings.json` with local overrides in `.reviewer/settings.local.json`. Use the reviewer-* skills to toggle gates without editing JSON directly.
+A safety hatch prevents infinite loops: after 3 consecutive blocks at the same commit, the hook lets the agent through and clears the tracker.
 
 ## Agents
 

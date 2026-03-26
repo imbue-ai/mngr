@@ -1,1 +1,0 @@
-../../../scripts/record_demo.sh

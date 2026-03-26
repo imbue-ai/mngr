@@ -43,8 +43,7 @@
     }
   },
   "enabledPlugins": {
-    "mng-code-review@imbue-mng": true,
-    "mng-dev-tools@imbue-mng": true
+    "mng-code-review@imbue-mng": true
   },
   "model": "opus[1m]",
   "effortLevel": "high",

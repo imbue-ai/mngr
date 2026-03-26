@@ -144,20 +144,20 @@ sleep 1
 Use the helper script `scripts/record_demo.sh` to record each demo:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/record_demo.sh <demo_script> <output_name> [options]
+./scripts/record_demo.sh <demo_script> <output_name> [options]
 ```
 
 **Examples:**
 
 ```bash
 # Basic recording
-${CLAUDE_PLUGIN_ROOT}/scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo; .demos/scripts/demo1_cleanup.sh
+./scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo; .demos/scripts/demo1_cleanup.sh
 
 # Custom terminal size and speed
-${CLAUDE_PLUGIN_ROOT}/scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo --cols 120 --rows 24 --speed 1.5; .demos/scripts/demo1_cleanup.sh
+./scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo --cols 120 --rows 24 --speed 1.5; .demos/scripts/demo1_cleanup.sh
 
 # Recording without GIF conversion (for faster iteration)
-${CLAUDE_PLUGIN_ROOT}/scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo --no-gif; .demos/scripts/demo1_cleanup.sh
+./scripts/record_demo.sh .demos/scripts/demo1.sh feature-demo --no-gif; .demos/scripts/demo1_cleanup.sh
 ```
 
 The script produces three files in `.demos/` (or the directory specified by `--out-dir`):

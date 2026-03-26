@@ -27,11 +27,19 @@ source "$SCRIPT_DIR/config_utils.sh"
 
 REVIEWER_SETTINGS=".reviewer/settings.json"
 
-# By default, only fire on mng-managed sessions (MNG_AGENT_STATE_DIR is set
-# by mng when it launches agents). Set enforce_on_all_sessions to true in
-# .reviewer/settings.json to enforce on standalone Claude Code sessions too.
-ENFORCE_ALL=$(read_json_config "$REVIEWER_SETTINGS" "enforce_on_all_sessions" "false")
-if [[ "$ENFORCE_ALL" != "true" ]] && [[ -z "${MNG_AGENT_STATE_DIR:-}" ]]; then
+# By default, the stop hook is disabled. To enable it, set
+# stop_hook.enabled_when to a shell expression in .reviewer/settings.json
+# (or .reviewer/settings.local.json). The expression is evaluated with
+# bash -c; if it exits 0, the hook runs. Examples:
+#
+#   "true"                                     -- always run
+#   "test -n \"${MNG_AGENT_STATE_DIR:-}\""     -- only mng-managed sessions
+#
+ENABLED_WHEN=$(read_json_config "$REVIEWER_SETTINGS" "stop_hook.enabled_when" "")
+if [[ -z "$ENABLED_WHEN" ]]; then
+    exit 0
+fi
+if ! bash -c "$ENABLED_WHEN" 2>/dev/null; then
     exit 0
 fi
 
