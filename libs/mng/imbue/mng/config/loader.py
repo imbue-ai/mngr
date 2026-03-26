@@ -201,6 +201,7 @@ def load_config(
     config_dict["is_error_reporting_enabled"] = config.is_error_reporting_enabled
     config_dict["is_allowed_in_pytest"] = config.is_allowed_in_pytest
     config_dict["pre_command_scripts"] = config.pre_command_scripts
+    config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
 
     # Allow plugins to modify config_dict before validation
@@ -570,6 +571,7 @@ def parse_config(
     kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)
     kwargs["is_allowed_in_pytest"] = raw.pop("is_allowed_in_pytest", None)
     kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
+    kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
 
     if len(raw) > 0:

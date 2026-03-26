@@ -25,24 +25,6 @@ mng gc [OPTIONS]
 ```
 **Options:**
 
-## What to Clean - Agent Resources
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--all-agent-resources` | boolean | Clean all agent resource types (machines, snapshots, volumes, work dirs) | `False` |
-| `--machines` | boolean | Remove unused containers, instances, and sandboxes | `False` |
-| `--snapshots` | boolean | Remove unused snapshots | `False` |
-| `--volumes` | boolean | Remove unused volumes | `False` |
-| `--work-dirs` | boolean | Remove work directories (git worktrees/clones) not in use by any agent | `False` |
-
-## What to Clean - Mng Resources
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--logs` | boolean | Remove log files from destroyed agents/hosts | `False` |
-| `--build-cache` | boolean | Remove build cache entries | `False` |
-| `--machine-cache` | boolean | Remove machine cache entries (per-provider) [future] | `False` |
-
 ## Scope
 
 | Name | Type | Description | Default |
@@ -86,23 +68,23 @@ mng gc [OPTIONS]
 **Preview what would be cleaned (dry run)**
 
 ```bash
-$ mng gc --work-dirs --dry-run
+$ mng gc --dry-run
 ```
 
-**Clean all agent resources**
+**Clean all resources**
 
 ```bash
-$ mng gc --all-agent-resources
+$ mng gc
 ```
 
-**Clean machines and snapshots for Docker**
+**Clean resources for Docker only**
 
 ```bash
-$ mng gc --machines --snapshots --provider docker
+$ mng gc --provider docker
 ```
 
-**Clean logs and build cache**
+**Clean resources, continue on errors**
 
 ```bash
-$ mng gc --logs --build-cache
+$ mng gc --on-error continue
 ```

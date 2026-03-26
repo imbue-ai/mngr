@@ -248,21 +248,27 @@ tmr_*/
 
 # Offload caches and local files
 .offload/**
-test-results/**
+test-results
 current.tar.gz
 
 # Minds deploy-time build artifacts
 .minds/
 
 # Autofix session artifacts
+.autofix/
 .reviewer/outputs/
 .reviewer/settings.local.json
+.reviewer/.stop_hook_consecutive_blocks
+.reviews/
 
 # Stuck agent tracking (stop hook escape valve)
 .claude/blocked_stop_commits
 
 # Demo recordings (asciinema .cast, .txt, and scripts)
 .demos/
+
+# Conversation review artifacts
+.reviews/
 
 # for git worktrees from other repos
 .external_worktrees/
@@ -271,3 +277,4 @@ current.tar.gz
 cov.xml
 .autofix/
 .reviews/
+test-results

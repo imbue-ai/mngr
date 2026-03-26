@@ -11,7 +11,7 @@ build_arg = ["--file=libs/mng/imbue/mng/resources/Dockerfile", ".mng/dev/build/"
 target_path = "/code/mng"
 # the agent added these, but I kinda doubt we need them...
 #pass_env = ["ANTHROPIC_API_KEY"]
-#user_command = ["bash -c 'cd /code/mng && uv sync --all-packages'"]
+#extra_provision_command = ["bash -c 'cd /code/mng && uv sync --all-packages'"]
 
 [create_templates.coder]
 type = "coder"

@@ -2,7 +2,7 @@
 
 Provides common test infrastructure:
 - Global test locking (prevents parallel pytest processes from conflicting)
-- Test suite timing limits (configurable via PYTEST_MAX_DURATION env var)
+- Test suite timing limits (configurable via PYTEST_MAX_DURATION_SECONDS env var)
 - xdist parallelism override (configurable via PYTEST_NUMPROCESSES env var)
 - Output file redirection (slow tests report, coverage report)
 - Shared pytest defaults (markers, filterwarnings, CLI args, coverage report config)
@@ -15,9 +15,9 @@ Environment variables:
   pyproject.toml addopts). Set to e.g. 16 on machines with many cores, or 0 to
   disable xdist. This overrides the -n value from pyproject.toml but NOT an
   explicit -n passed on the command line.
-- PYTEST_MAX_DURATION: Override the maximum allowed test suite duration in seconds.
+- PYTEST_MAX_DURATION_SECONDS: Override the maximum allowed test suite duration in seconds.
   Without this, defaults are chosen based on test type and environment (see
-  _pytest_sessionfinish for details).
+  _compute_max_duration for details).
 - MNG_TEST_PROFILE: Force a specific test profile (overrides branch detection).
   Set to "all" to disable profile filtering entirely.
 
@@ -35,6 +35,7 @@ import fcntl
 import importlib.metadata
 import json
 import os
+import signal
 import sys
 import time
 from io import StringIO
@@ -101,6 +102,11 @@ _GLOBAL_TEST_LOCK_PATH: Final[Path] = Path("/tmp/pytest_global_test_lock")
 # The handle must stay open for the duration of the test session so the flock is held.
 # When the process exits for any reason, the OS closes the handle and releases the lock.
 _SESSION_LOCK_HANDLE_ATTR: Final[str] = "_global_test_lock_file_handle"
+
+# Grace period added to the max duration when computing the lock deadline.
+# This accounts for test collection, teardown, and other overhead beyond
+# the raw test execution time that _compute_max_duration() measures.
+_LOCK_DEADLINE_GRACE_SECONDS: Final[float] = 60.0
 
 # Guard to prevent duplicate hook registration (see module docstring).
 _registered: bool = False
@@ -178,45 +184,253 @@ def _print_lock_message(message: str, fd: int = 2) -> None:
     os.write(fd, f"\n{message}\n".encode())
 
 
+def _is_process_alive(pid: int) -> bool:
+    """Check whether a process with the given PID is still running.
+
+    Also reaps the process if it is a zombie child of the current process,
+    since zombies respond to ``os.kill(pid, 0)`` even though they have exited.
+    """
+    # Reap if it is a zombie child of ours.  For non-children this raises
+    # ChildProcessError which we silently ignore.
+    try:
+        waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            return False
+    except ChildProcessError:
+        pass
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by a different user.
+        return True
+
+
+def _kill_stale_process(pid: int) -> bool:
+    """Send SIGTERM then SIGKILL to a process that has exceeded its deadline.
+
+    Returns True if the signals were delivered (the process should be dying or
+    already dead). Returns False if the process could not be signalled (e.g. due
+    to insufficient permissions).
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+    # Give the process a moment to shut down gracefully before escalating.
+    # Human-sanctioned use of time.sleep -- there is no event-based mechanism
+    # to wait for an arbitrary (non-child) process to exit.
+    time.sleep(5)
+
+    if not _is_process_alive(pid):
+        return True
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return True
+
+
+def _read_lock_info(lock_path: Path) -> dict[str, Any] | None:
+    """Read and parse the JSON lock info from the lock file.
+
+    Returns None if the file is missing, empty, contains invalid JSON, or
+    the top-level value is not a dict.
+    """
+    try:
+        content = lock_path.read_text()
+        if not content.strip():
+            return None
+        parsed = json.loads(content)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _write_lock_info(lock_handle: TextIO, pid: int, deadline: float | None) -> None:
+    """Write JSON lock info (pid and optional deadline) to the lock file handle."""
+    lock_info: dict[str, int | float] = {"pid": pid}
+    if deadline is not None:
+        lock_info["deadline"] = deadline
+    lock_handle.write(json.dumps(lock_info))
+    lock_handle.flush()
+
+
+def _compute_max_duration() -> float:
+    """Compute the maximum allowed test suite duration in seconds.
+
+    The same logic is used by _pytest_sessionfinish to enforce the time limit
+    and by _compute_lock_deadline to derive the lock file deadline.
+
+    There are 4 types of tests, each with different time limits in CI:
+
+    - unit tests: fast, local, no network (run together with integration tests)
+    - integration tests: local, no network, used for coverage calculation
+    - acceptance tests: run on all branches except release, have network/Modal/etc access
+    - release tests: only run on release, comprehensive tests for release readiness
+    """
+    if "PYTEST_MAX_DURATION_SECONDS" in os.environ:
+        return float(os.environ["PYTEST_MAX_DURATION_SECONDS"])
+    # Release tests have the highest limit since there can be many, and they can be slow
+    if os.environ.get("IS_RELEASE", "0") == "1":
+        return 10 * 60.0
+    # Acceptance tests have a somewhat higher limit than integration/unit
+    if os.environ.get("IS_ACCEPTANCE", "0") == "1":
+        return 6 * 60.0
+    if "CI" in os.environ:
+        # Integration + unit tests in CI should be fast
+        return 150.0
+    # Local development default
+    return 300.0
+
+
+def _compute_lock_deadline(start_time: float) -> float | None:
+    """Compute the lock deadline as an absolute timestamp.
+
+    Returns a deadline only when PYTEST_MAX_DURATION_SECONDS is explicitly set, indicating
+    that the caller is aware of a time budget (e.g. invoked from a hook or script).
+    When no explicit budget is set, returns None so that other processes will not
+    kill this one (though they can still clean up a dead PID).
+    """
+    if "PYTEST_MAX_DURATION_SECONDS" not in os.environ:
+        return None
+    max_duration = _compute_max_duration()
+    return start_time + max_duration + _LOCK_DEADLINE_GRACE_SECONDS
+
+
+def _try_break_stale_lock(lock_path: Path) -> bool:
+    """Attempt to break a stale or expired lock.
+
+    Reads the lock file to check the owning PID and optional deadline:
+    - If the PID is no longer alive, removes the lock file and returns True.
+    - If the PID is alive but its deadline has passed, kills it, removes the
+      lock file, and returns True.
+    - Otherwise returns False (lock is legitimately held).
+    """
+    lock_info = _read_lock_info(lock_path)
+    if lock_info is None:
+        return False
+
+    pid = lock_info.get("pid")
+    if not isinstance(pid, int):
+        return False
+
+    if not _is_process_alive(pid):
+        _print_lock_message(
+            f"PYTEST GLOBAL LOCK: Removing stale lock from dead process (pid={pid}).",
+        )
+        lock_path.unlink(missing_ok=True)
+        return True
+
+    deadline = lock_info.get("deadline")
+    if isinstance(deadline, (int, float)) and time.time() > deadline:
+        overdue = time.time() - deadline
+        _print_lock_message(
+            f"PYTEST GLOBAL LOCK: Process {pid} exceeded its deadline (by {overdue:.0f}s), sending SIGTERM+SIGKILL.",
+        )
+        if _kill_stale_process(pid):
+            lock_path.unlink(missing_ok=True)
+            return True
+        _print_lock_message(
+            f"PYTEST GLOBAL LOCK: Could not kill process {pid}, will wait for lock.",
+        )
+
+    return False
+
+
+def _verify_lock_inode(lock_handle: TextIO, lock_path: Path) -> bool:
+    """Check that the open file handle still refers to the same on-disk inode.
+
+    After acquiring an flock, the file may have been unlinked and recreated by
+    another process that broke a stale lock.  In that case our flock is on a
+    deleted inode and does not provide mutual exclusion with the new file.
+    """
+    fd_stat = os.fstat(lock_handle.fileno())
+    try:
+        path_stat = lock_path.stat()
+    except FileNotFoundError:
+        return False
+    return fd_stat.st_ino == path_stat.st_ino
+
+
 def _acquire_global_test_lock(
     lock_path: Path,
 ) -> TextIO:
     """Acquire an exclusive lock on the given path, returning the open file handle.
 
-    If the lock cannot be acquired immediately, prints a waiting message to stderr,
-    then blocks until the lock is available.
+    If the lock cannot be acquired immediately, the lock file is inspected for a
+    JSON payload containing the holder's PID and an optional deadline:
 
-    The caller must keep the returned file handle open for as long as they want to hold
-    the lock. The lock is automatically released when the file handle is closed or when
-    the process exits.
+    - If the holder's PID is no longer running, the stale lock file is removed
+      and acquisition is retried immediately.
+    - If the holder is still alive but its deadline has passed, the holder is
+      killed (SIGTERM then SIGKILL), the lock file is removed, and acquisition
+      is retried.
+    - Otherwise, blocks until the lock becomes available.
+
+    The caller must keep the returned file handle open for as long as they want
+    to hold the lock. The lock is automatically released when the file handle is
+    closed or when the process exits.
     """
-    # Create the lock file if it doesn't exist
-    lock_path.touch(exist_ok=True)
+    acquired_handle: TextIO | None = None
+    waited_for_lock = False
+    while acquired_handle is None:
+        # Ensure the lock file exists.
+        lock_path.touch(exist_ok=True)
 
-    # Open the lock file
-    lock_file_handle = lock_path.open("w")
+        try:
+            lock_file_handle = lock_path.open("r+")
+        except FileNotFoundError:
+            # Narrow race: file was deleted between touch() and open().
+            continue
 
-    # Try to acquire the lock without blocking first to see if we need to wait
-    try:
-        fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # We got the lock immediately, no need to print anything
-        return lock_file_handle
-    except BlockingIOError:
-        # Lock is held by another process, we'll need to wait
-        pass
+        # Try to acquire the lock without blocking.
+        try:
+            fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Lock is held by another process.
+            lock_file_handle.close()
 
-    # Print a message about waiting for the lock
-    _print_lock_message(
-        "PYTEST GLOBAL LOCK: Another pytest process is running.\n"
-        "Waiting for it to complete before starting this test run...",
-    )
+            if _try_break_stale_lock(lock_path):
+                continue
 
-    # Now acquire the lock with blocking (will wait until available)
-    fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX)
+            # Legitimate lock holder -- block until it finishes.
+            _print_lock_message(
+                "PYTEST GLOBAL LOCK: Another pytest process is running.\n"
+                "Waiting for it to complete before starting this test run...",
+            )
+            lock_path.touch(exist_ok=True)
+            try:
+                lock_file_handle = lock_path.open("r+")
+            except FileNotFoundError:
+                continue
+            fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX)
+            waited_for_lock = True
 
-    _print_lock_message("PYTEST GLOBAL LOCK: Lock acquired, proceeding with tests.")
+        # Verify the inode has not been replaced while we waited.
+        if _verify_lock_inode(lock_file_handle, lock_path):
+            # We hold the real lock.  Truncate so the caller can write fresh info.
+            lock_file_handle.seek(0)
+            lock_file_handle.truncate()
+            acquired_handle = lock_file_handle
+        else:
+            lock_file_handle.close()
 
-    return lock_file_handle
+    if waited_for_lock:
+        _print_lock_message("PYTEST GLOBAL LOCK: Lock acquired, proceeding with tests.")
+
+    return acquired_handle
 
 
 def _configure_shared_coverage_defaults(config: pytest.Config) -> None:
@@ -310,7 +524,12 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
         setattr(session, _SESSION_LOCK_HANDLE_ATTR, lock_handle)  # noqa: B010
 
         # Record start time AFTER acquiring the lock so wait time isn't counted
-        setattr(session, "start_time", time.time())  # noqa: B010
+        start_time = time.time()
+        setattr(session, "start_time", start_time)  # noqa: B010
+
+        # Write lock info so other processes can detect stale/expired locks
+        deadline = _compute_lock_deadline(start_time)
+        _write_lock_info(lock_handle, os.getpid(), deadline)
 
     start_resource_guards(session)
 
@@ -332,33 +551,7 @@ def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if hasattr(session, "start_time"):
         duration = time.time() - session.start_time
-
-        # There are 4 types of tests, each with different time limits in CI:
-        # - unit tests: fast, local, no network (run with integration tests)
-        # - integration tests: local, no network, used for coverage calculation
-        # - acceptance tests: run on all branches except release, have network/Modal/etc access
-        # - release tests: only run on release, comprehensive tests for release readiness
-
-        # Allow explicit override via environment variable (useful for generating test timings)
-        if "PYTEST_MAX_DURATION" in os.environ:
-            max_duration = float(os.environ["PYTEST_MAX_DURATION"])
-        # release tests have the highest limit, since there can be many more of them, and they can take a really long time
-        elif os.environ.get("IS_RELEASE", "0") == "1":
-            # this limit applies to the test suite that runs against "release" in GitHub CI
-            max_duration = 10 * 60.0
-        # acceptance tests have a somewhat higher limit (than integration and unit)
-        elif os.environ.get("IS_ACCEPTANCE", "0") == "1":
-            # this limit applies to the test suite that runs against all branches *except* "release" in GitHub CI (and has access to network, Modal, etc)
-            max_duration = 6 * 60.0
-        # integration tests have a lower limit
-        else:
-            if "CI" in os.environ:
-                # this limit applies to the test suite that runs against all branches *except* "release" in GitHub CI (and which is basically just used for calculating coverage)
-                # typically integration tests and unit tests are run locally, so we want them to be fast
-                max_duration = 150.0
-            else:
-                # this limit applies to the entire test suite when run locally
-                max_duration = 300.0
+        max_duration = _compute_max_duration()
 
         if duration > max_duration:
             pytest.exit(

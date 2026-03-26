@@ -72,14 +72,14 @@ def test_provision_stopped_modal_agent(
     result = run_mng_subprocess("stop", agent_name, env=env, timeout=120)
     assert result.returncode == 0, f"Stop failed: {result.stderr}\n{result.stdout}"
 
-    # Provision the stopped agent with a new env var and a user command
+    # Provision the stopped agent with a new env var and an extra provision command
     new_env_var = f"PROV_NEW_VAR={get_short_random_string()}"
     result = run_mng_subprocess(
         "provision",
         agent_name,
         "--env",
         new_env_var,
-        "--user-command",
+        "--extra-provision-command",
         "echo 'provision-ran' > /tmp/prov_marker.txt",
         env=env,
         timeout=300,

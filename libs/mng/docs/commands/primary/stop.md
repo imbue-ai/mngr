@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [stop|s] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
+mng [stop|s] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
 ```
 
 Stop running agent(s).
@@ -23,8 +23,6 @@ be filtered out of listings while preserving its state. The 'mng archive'
 command is a shorthand for 'mng stop --archive'.
 
 Supports custom format templates via --format. Available fields: name.
-
-Alias: s
 
 **Usage:**
 
@@ -46,7 +44,6 @@ mng stop [OPTIONS] [AGENTS]...
 | `--session` | text | Tmux session name to stop (can be specified multiple times). The agent name is extracted by stripping the configured prefix from the session name. | None |
 | `--include` | text | Filter agents to stop by CEL expression (repeatable) [future] | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) [future] | None |
-| `--stdin` | boolean | Read agent and host names/IDs from stdin, one per line [future] | `False` |
 
 ## Behavior
 

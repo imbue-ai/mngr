@@ -26,8 +26,7 @@ def test_provision_cli_options_can_be_instantiated() -> None:
         bootstrap=None,
         destroy_on_fail=False,
         restart=True,
-        user_command=(),
-        sudo_command=(),
+        extra_provision_command=(),
         upload_file=(),
         append_to_file=(),
         prepend_to_file=(),
@@ -48,7 +47,7 @@ def test_provision_cli_options_can_be_instantiated() -> None:
     )
     assert opts.agent == "my-agent"
     assert opts.restart is True
-    assert opts.user_command == ()
+    assert opts.extra_provision_command == ()
 
 
 # =============================================================================

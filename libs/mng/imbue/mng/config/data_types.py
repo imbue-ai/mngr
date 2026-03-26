@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -17,6 +18,7 @@ from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mng.errors import ConfigParseError
@@ -89,6 +91,16 @@ def merge_dict_fields(base: dict[K, V], override: dict[K, V] | None) -> dict[K, 
     if override is not None:
         return {**base, **override}
     return base
+
+
+# === Enums ===
+
+
+class WorkDirExtraPathMode(UpperCaseStrEnum):
+    """Transfer mode for extra paths in new work directories."""
+
+    SHARE = auto()
+    COPY = auto()
 
 
 # === Value Types ===
@@ -368,6 +380,12 @@ class MngConfig(FrozenModel):
         default_factory=lambda: list(("HISTFILE", "PROFILE", "VIRTUAL_ENV")),
         description="Environment variables to unset when creating agent tmux sessions",
     )
+    work_dir_extra_paths: dict[str, WorkDirExtraPathMode] = Field(
+        default_factory=dict,
+        description="Paths to transfer into new work directories, mapped to transfer mode. "
+        "'SHARE': symlink on same host, copy on different host. "
+        "'COPY': always copy via rsync.",
+    )
     pager: str | None = Field(
         default=None,
         description="Pager command for help output (e.g., 'less'). If None, uses PAGER env var or 'less' as fallback.",
@@ -466,6 +484,9 @@ class MngConfig(FrozenModel):
 
         # Merge unset_vars (list - concatenate if override is not None)
         merged_unset_vars = merge_list_fields(self.unset_vars, override.unset_vars)
+
+        # Merge work_dir_extra_paths (dict - override keys take precedence)
+        merged_work_dir_extra_paths = merge_dict_fields(self.work_dir_extra_paths, override.work_dir_extra_paths)
 
         # Merge enabled_backends (list - override wins if not None/empty, otherwise keep base)
         merged_enabled_backends = override.enabled_backends if override.enabled_backends else self.enabled_backends
@@ -589,6 +610,7 @@ class MngConfig(FrozenModel):
             default_host_dir=merged_default_host_dir,
             pager=merged_pager,
             unset_vars=merged_unset_vars,
+            work_dir_extra_paths=merged_work_dir_extra_paths,
             enabled_backends=merged_enabled_backends,
             agent_types=merged_agent_types,
             providers=merged_providers,
@@ -752,10 +774,7 @@ class CreateCliOptions(CommonCliOptions):
     source_path: str | None
     target: str | None
     target_path: str | None
-    in_place: bool
-    copy_source: bool
-    clone: bool
-    worktree: bool
+    transfer: str | None
     rsync: bool | None
     rsync_args: str | None
     include_git: bool
@@ -793,8 +812,7 @@ class CreateCliOptions(CommonCliOptions):
     start_on_boot: bool | None
     start_host: bool
     grant: tuple[str, ...]
-    user_command: tuple[str, ...]
-    sudo_command: tuple[str, ...]
+    extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]

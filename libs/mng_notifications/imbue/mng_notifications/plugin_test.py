@@ -7,15 +7,15 @@ from imbue.mng_notifications.config import NotificationsPluginConfig
 from imbue.mng_notifications.plugin import register_cli_commands
 
 
-def test_register_cli_commands_returns_watch_command() -> None:
-    """Verify that register_cli_commands returns the watch command."""
+def test_register_cli_commands_returns_notify_command() -> None:
+    """Verify that register_cli_commands returns the notify command."""
     result = register_cli_commands()
 
     assert result is not None
     assert isinstance(result, Sequence)
     assert len(result) == 1
     assert isinstance(result[0], click.Command)
-    assert result[0].name == "watch"
+    assert result[0].name == "notify"
 
 
 def test_plugin_config_is_registered() -> None:

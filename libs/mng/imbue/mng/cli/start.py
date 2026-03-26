@@ -24,6 +24,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.interfaces.agent import AgentInterface
@@ -46,9 +47,6 @@ class StartCliOptions(CommonCliOptions):
     host: tuple[str, ...]
     include: tuple[str, ...]
     exclude: tuple[str, ...]
-    stdin: bool
-    snapshot: str | None
-    latest: bool
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -136,11 +134,6 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     multiple=True,
     help="Exclude agents and hosts matching CEL expression (repeatable) [future]",
 )
-@optgroup.option(
-    "--stdin",
-    is_flag=True,
-    help="Read agent and host names/IDs from stdin, one per line [future]",
-)
 @optgroup.group("Behavior")
 @optgroup.option(
     "--dry-run",
@@ -155,18 +148,6 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
 @optgroup.option(
     "--connect-command",
     help="Command to run instead of the builtin connect. MNG_AGENT_NAME and MNG_SESSION_NAME env vars are set.",
-)
-@optgroup.group("Snapshot")
-@optgroup.option(
-    "--snapshot",
-    type=str,
-    default=None,
-    help="Start from a specific snapshot instead of the most recent [future]",
-)
-@optgroup.option(
-    "--latest/--no-latest",
-    default=True,
-    help="Start from the most recent snapshot or state [default] [future]",
 )
 @add_common_options
 @click.pass_context
@@ -185,15 +166,9 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--include is not implemented yet")
     if opts.exclude:
         raise NotImplementedError("--exclude is not implemented yet")
-    if opts.stdin:
-        raise NotImplementedError("--stdin is not implemented yet")
-    if opts.snapshot is not None:
-        raise NotImplementedError("--snapshot is not implemented yet")
-    if not opts.latest:
-        raise NotImplementedError("--no-latest is not implemented yet")
 
     # Validate input
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers and not opts.start_all:
         raise click.UsageError("Must specify at least one agent or use --all")
@@ -295,7 +270,7 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mng start [AGENTS...] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run] [--snapshot <SNAPSHOT>]",
+    synopsis="mng start [AGENTS...|-] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.

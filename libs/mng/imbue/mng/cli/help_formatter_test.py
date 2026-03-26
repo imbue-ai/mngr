@@ -21,6 +21,7 @@ from imbue.mng.cli.help_formatter import run_pager
 from imbue.mng.cli.help_formatter import show_help_with_pager
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.main import BUILTIN_COMMANDS
+from imbue.mng.main import PLUGIN_COMMANDS
 from imbue.mng.main import cli
 
 
@@ -652,3 +653,32 @@ def test_wrap_text_wraps_long_lines() -> None:
     assert len(lines) > 1
     assert lines[0].startswith("  ")
     assert lines[1].startswith("    ")
+
+
+# =============================================================================
+# CLI documentation completeness
+# =============================================================================
+
+
+def test_all_non_hidden_commands_have_generated_docs() -> None:
+    """Every non-hidden CLI command must have auto-generated documentation.
+
+    If a new command is added but not placed in PRIMARY_COMMANDS,
+    SECONDARY_COMMANDS, or ALIAS_COMMANDS in scripts/make_cli_docs.py,
+    no doc file will be generated and this test will fail.
+    """
+    docs_dir = Path(__file__).resolve().parents[3] / "docs" / "commands"
+    all_doc_files = {p.stem for p in docs_dir.rglob("*.md")}
+
+    missing = []
+    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
+        if cmd.name is None or cmd.hidden:
+            continue
+        if cmd.name not in all_doc_files:
+            missing.append(cmd.name)
+
+    assert missing == [], (
+        f"Commands missing generated docs: {missing}. "
+        f"Add each command to PRIMARY_COMMANDS, SECONDARY_COMMANDS, or ALIAS_COMMANDS "
+        f"in scripts/make_cli_docs.py, then run: uv run python scripts/make_cli_docs.py"
+    )

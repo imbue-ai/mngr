@@ -16,6 +16,7 @@ from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import PluginConfig
 from imbue.mng.config.data_types import ProviderInstanceConfig
+from imbue.mng.config.data_types import WorkDirExtraPathMode
 from imbue.mng.config.data_types import get_or_create_user_id
 from imbue.mng.config.data_types import merge_cli_args
 from imbue.mng.config.data_types import merge_dict_fields
@@ -664,6 +665,47 @@ def test_mng_config_pre_command_scripts_default_is_empty_dict(mng_test_prefix: s
     """MngConfig should have empty pre_command_scripts by default."""
     config = MngConfig(prefix=mng_test_prefix)
     assert config.pre_command_scripts == {}
+
+
+# =============================================================================
+# Tests for MngConfig.work_dir_extra_paths
+# =============================================================================
+
+
+def test_mng_config_work_dir_extra_paths_default_is_empty_dict(mng_test_prefix: str) -> None:
+    """MngConfig should have empty work_dir_extra_paths by default."""
+    config = MngConfig(prefix=mng_test_prefix)
+    assert config.work_dir_extra_paths == {}
+
+
+def test_mng_config_merge_with_merges_work_dir_extra_paths(mng_test_prefix: str) -> None:
+    """MngConfig.merge_with should merge work_dir_extra_paths dicts with override winning per key."""
+    base = MngConfig(
+        prefix=mng_test_prefix,
+        work_dir_extra_paths={".venv": WorkDirExtraPathMode.SHARE, ".test_output": WorkDirExtraPathMode.COPY},
+    )
+    override = MngConfig(
+        prefix=mng_test_prefix,
+        work_dir_extra_paths={".venv": WorkDirExtraPathMode.COPY},
+    )
+    merged = base.merge_with(override)
+    assert merged.work_dir_extra_paths[".venv"] == WorkDirExtraPathMode.COPY
+    assert merged.work_dir_extra_paths[".test_output"] == WorkDirExtraPathMode.COPY
+
+
+def test_mng_config_merge_with_adds_new_work_dir_extra_paths(mng_test_prefix: str) -> None:
+    """MngConfig.merge_with should add new work_dir_extra_paths from override."""
+    base = MngConfig(
+        prefix=mng_test_prefix,
+        work_dir_extra_paths={".venv": WorkDirExtraPathMode.SHARE},
+    )
+    override = MngConfig(
+        prefix=mng_test_prefix,
+        work_dir_extra_paths={"node_modules": WorkDirExtraPathMode.SHARE},
+    )
+    merged = base.merge_with(override)
+    assert ".venv" in merged.work_dir_extra_paths
+    assert "node_modules" in merged.work_dir_extra_paths
 
 
 # =============================================================================

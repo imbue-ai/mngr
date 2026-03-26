@@ -43,14 +43,6 @@ class GcCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the gc() function itself.
     """
 
-    all_agent_resources: bool
-    machines: bool
-    snapshots: bool
-    volumes: bool
-    work_dirs: bool
-    logs: bool
-    build_cache: bool
-    machine_cache: bool
     dry_run: bool
     on_error: str
     all_providers: bool
@@ -59,48 +51,6 @@ class GcCliOptions(CommonCliOptions):
 
 
 @click.command(name="gc")
-@optgroup.group("What to Clean - Agent Resources")
-@optgroup.option(
-    "--all-agent-resources",
-    is_flag=True,
-    help="Clean all agent resource types (machines, snapshots, volumes, work dirs)",
-)
-@optgroup.option(
-    "--machines",
-    is_flag=True,
-    help="Remove unused containers, instances, and sandboxes",
-)
-@optgroup.option(
-    "--snapshots",
-    is_flag=True,
-    help="Remove unused snapshots",
-)
-@optgroup.option(
-    "--volumes",
-    is_flag=True,
-    help="Remove unused volumes",
-)
-@optgroup.option(
-    "--work-dirs",
-    is_flag=True,
-    help="Remove work directories (git worktrees/clones) not in use by any agent",
-)
-@optgroup.group("What to Clean - Mng Resources")
-@optgroup.option(
-    "--logs",
-    is_flag=True,
-    help="Remove log files from destroyed agents/hosts",
-)
-@optgroup.option(
-    "--build-cache",
-    is_flag=True,
-    help="Remove build cache entries",
-)
-@optgroup.option(
-    "--machine-cache",
-    is_flag=True,
-    help="Remove machine cache entries (per-provider) [future]",
-)
 @optgroup.group("Scope")
 @optgroup.option(
     "--all-providers",
@@ -151,34 +101,6 @@ def _gc_impl(ctx: click.Context, **kwargs) -> None:
         command_class=GcCliOptions,
     )
 
-    # Remove machine cache entries (per-provider)
-    # Wire this through to the API when implemented
-    if opts.machine_cache:
-        raise NotImplementedError("--machine-cache is not implemented yet")
-
-    has_any_resource_type = (
-        opts.all_agent_resources
-        or opts.machines
-        or opts.snapshots
-        or opts.volumes
-        or opts.work_dirs
-        or opts.logs
-        or opts.build_cache
-    )
-
-    if not has_any_resource_type:
-        error_msg = "No resource types specified for cleanup. Use --all-agent-resources or specify individual types."
-        match output_opts.output_format:
-            case OutputFormat.JSON:
-                emit_final_json({"error": error_msg, "exit_code": 1})
-            case OutputFormat.JSONL:
-                emit_event("error", {"message": error_msg, "exit_code": 1}, OutputFormat.JSONL)
-            case OutputFormat.HUMAN:
-                logger.error(error_msg)
-            case _ as unreachable:
-                assert_never(unreachable)
-        ctx.exit(1)
-
     # Watch mode: run gc repeatedly at the specified interval
     if opts.watch:
         try:
@@ -200,35 +122,15 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
 
     providers = _get_selected_providers(mng_ctx=mng_ctx, opts=opts)
 
-    # Expand all_agent_resources flag
-    is_machines = opts.machines or opts.all_agent_resources
-    is_snapshots = opts.snapshots or opts.all_agent_resources
-    is_volumes = opts.volumes or opts.all_agent_resources
-    is_work_dirs = opts.work_dirs or opts.all_agent_resources
-
-    # Build API types from CLI options
+    # Always GC all resource types
     resource_types = GcResourceTypes(
-        is_machines=is_machines,
-        is_snapshots=is_snapshots,
-        is_volumes=is_volumes,
-        is_work_dirs=is_work_dirs,
-        is_logs=opts.logs,
-        is_build_cache=opts.build_cache,
+        is_machines=True,
+        is_snapshots=True,
+        is_volumes=True,
+        is_work_dirs=True,
+        is_logs=True,
+        is_build_cache=True,
     )
-
-    # Emit info messages for each resource type
-    if is_work_dirs:
-        emit_info("Cleaning work directories...", output_opts.output_format)
-    if is_machines:
-        emit_info("Cleaning machines...", output_opts.output_format)
-    if is_snapshots:
-        emit_info("Cleaning snapshots...", output_opts.output_format)
-    if is_volumes:
-        emit_info("Cleaning volumes...", output_opts.output_format)
-    if opts.logs:
-        emit_info("Cleaning logs...", output_opts.output_format)
-    if opts.build_cache:
-        emit_info("Cleaning build cache...", output_opts.output_format)
 
     # Call the API
     result = api_gc(
@@ -237,6 +139,7 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
         resource_types=resource_types,
         dry_run=opts.dry_run,
         error_behavior=error_behavior,
+        on_resource_type_start=lambda rt: _emit_resource_type_start(rt, output_opts.output_format),
     )
 
     # Emit destroyed events for CLI output
@@ -257,6 +160,22 @@ def _run_gc_iteration(mng_ctx: MngContext, opts: GcCliOptions, output_opts: Outp
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
+
+
+_RESOURCE_TYPE_MESSAGES: dict[str, str] = {
+    "work_dirs": "Cleaning work directories...",
+    "machines": "Cleaning machines...",
+    "snapshots": "Cleaning snapshots...",
+    "volumes": "Cleaning volumes...",
+    "logs": "Cleaning logs...",
+    "build_cache": "Cleaning build cache...",
+}
+
+
+def _emit_resource_type_start(resource_type: str, output_format: OutputFormat) -> None:
+    """Emit an info message when starting to GC a specific resource type."""
+    msg = _RESOURCE_TYPE_MESSAGES.get(resource_type, f"Cleaning {resource_type}...")
+    emit_info(msg, output_format)
 
 
 @pure
@@ -451,10 +370,10 @@ and any resources that are associated with destroyed hosts and agents.
 `mng gc` can be used to manually trigger garbage collection of unused
 resources at any time.""",
     examples=(
-        ("Preview what would be cleaned (dry run)", "mng gc --work-dirs --dry-run"),
-        ("Clean all agent resources", "mng gc --all-agent-resources"),
-        ("Clean machines and snapshots for Docker", "mng gc --machines --snapshots --provider docker"),
-        ("Clean logs and build cache", "mng gc --logs --build-cache"),
+        ("Preview what would be cleaned (dry run)", "mng gc --dry-run"),
+        ("Clean all resources", "mng gc"),
+        ("Clean resources for Docker only", "mng gc --provider docker"),
+        ("Clean resources, continue on errors", "mng gc --on-error continue"),
     ),
     see_also=(
         ("cleanup", "Interactive cleanup of agents and hosts"),

@@ -53,7 +53,7 @@ from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mng.plugins.hookspecs import OptionStackItem
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.polling import poll_until
 from imbue.mng_claude import hookimpl
@@ -1007,12 +1007,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
         """
-        if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
+        if options.transfer_mode == TransferMode.GIT_WORKTREE:
             if not host.is_local:
                 raise PluginMngError(
-                    "Worktree mode is not supported on remote hosts.\n"
+                    "Git worktree transfer mode is not supported on remote hosts.\n"
                     "Claude trust extension requires local filesystem access. "
-                    "Use --copy or --clone instead."
+                    "Use --transfer=git-mirror instead."
                 )
 
         config = self.agent_config
@@ -1026,8 +1026,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             and not mng_ctx.is_auto_approve
             and not config.trust_working_directory
         ):
-            copy_mode = options.git.copy_mode if options.git else None
-            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+            transfer_mode = options.transfer_mode
+            if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
                 source_path = self._find_git_source_path(mng_ctx.concurrency_group)
                 trust_path = source_path if source_path is not None else self.work_dir
             else:
@@ -1149,8 +1149,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         mode, prompts the user for each undismissed dialog. For non-interactive
         mode, raises the appropriate error.
 
-        source_path is the trusted source directory (for worktree/copy modes).
-        When None (clone mode), trust is prompted for work_dir instead.
+        source_path is the trusted source directory (for git-worktree/git-mirror modes).
+        When None (rsync/none mode), trust is prompted for work_dir instead.
         """
         global_config_path = get_claude_config_path()
         trust_path = source_path if source_path is not None else self.work_dir
@@ -1180,7 +1180,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # skipDangerousModePermissionPrompt in settings.json instead.
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
-        """Find the source repo path for the agent's work_dir, if it's a git worktree/copy.
+        """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
         or None if work_dir is not inside a git repo.
@@ -1307,9 +1307,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         dialog. Falls back to generated defaults if no global config exists.
 
         Trust for work_dir is added by extending from the source directory
-        (for worktree/copy modes), by trust_working_directory config, or
-        inherited from the global config (for clone mode where the user was
-        already prompted). Falls back to generated defaults if no global
+        (for git-worktree/git-mirror modes), by trust_working_directory config,
+        or inherited from the global config (for rsync/none modes where the
+        user was already prompted). Falls back to generated defaults if no global
         config exists.
         """
         global_config = read_claude_config(get_claude_config_path())
@@ -1319,10 +1319,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             data = _generate_claude_json(config.version)
 
         projects = data.setdefault("projects", {})
-        copy_mode = options.git.copy_mode if options.git else None
+        transfer_mode = options.transfer_mode
 
-        # For worktree/copy mode, extend trust from the source to the work_dir
-        if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+        # For worktree/mirror mode, extend trust from the source to the work_dir
+        if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
             source_path = self._find_git_source_path(self.mng_ctx.concurrency_group)
             if source_path is not None:
                 source_path = source_path.resolve()
@@ -1356,9 +1356,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         For local hosts, ensures all known Claude startup dialogs are dismissed
         in the global config so they don't intercept tmux input. Trust handling
-        depends on the copy mode:
-        - worktree/copy: trust is extended from the source directory
-        - clone: trust is prompted for the work_dir
+        depends on the transfer mode:
+        - git-worktree/git-mirror: trust is extended from the source directory
+        - rsync/none: trust is prompted for the work_dir
         - trust_working_directory=True: trust is auto-added for work_dir
         """
         with mng_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
@@ -1372,8 +1372,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             if host.is_local:
                 # Determine the source path for trust extension
                 source_path: Path | None = None
-                copy_mode = options.git.copy_mode if options.git else None
-                if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+                transfer_mode = options.transfer_mode
+                if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
                     source_path = self._find_git_source_path(mng_ctx.concurrency_group)
 
                 if config.trust_working_directory:

@@ -22,7 +22,7 @@ from imbue.mng_notifications.notifier import get_notifier
 from imbue.mng_notifications.watcher import watch_for_waiting_agents
 
 
-class WatchCliOptions(CommonCliOptions):
+class NotifyCliOptions(CommonCliOptions):
     pass
 
 
@@ -64,11 +64,11 @@ def _ensure_observe(mng_ctx: MngContext) -> Iterator[None]:
 @click.command()
 @add_common_options
 @click.pass_context
-def watch(ctx: click.Context, **kwargs: object) -> None:
+def notify(ctx: click.Context, **kwargs: object) -> None:
     mng_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
-        command_name="watch",
-        command_class=WatchCliOptions,
+        command_name="notify",
+        command_class=NotifyCliOptions,
     )
 
     plugin_config = _get_plugin_config(mng_ctx)
@@ -105,9 +105,9 @@ def watch(ctx: click.Context, **kwargs: object) -> None:
 
 
 CommandHelpMetadata(
-    key="watch",
-    one_line_description="Watch agents and notify when they transition to WAITING",
-    synopsis="mng watch",
+    key="notify",
+    one_line_description="Notify when agents transition to WAITING",
+    synopsis="mng notify",
     description="""Sends a desktop notification when any agent transitions from RUNNING to WAITING.
 
 Automatically starts `mng observe` in the background if it is not already running.
@@ -126,12 +126,12 @@ Or use a custom command (MNG_AGENT_NAME is set in the environment):
     [plugins.notifications]
     custom_terminal_command = "my-terminal -e mng connect $MNG_AGENT_NAME"
 
-Press Ctrl+C to stop watching.""",
-    examples=(("Watch all agents", "mng watch"),),
+Press Ctrl+C to stop.""",
+    examples=(("Notify on all agents", "mng notify"),),
     see_also=(
         ("observe", "Stream agent state changes to local event files"),
         ("list", "List agents to see their current state"),
     ),
 ).register()
 
-add_pager_help_option(watch)
+add_pager_help_option(notify)

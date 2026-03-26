@@ -50,6 +50,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import TransferMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
@@ -1378,31 +1379,31 @@ def test_provision_agent_prepend_to_new_file(host_with_temp_dir: tuple[Host, Pat
     assert target_file.read_text() == "new content"
 
 
-def test_provision_agent_user_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent runs user commands."""
+def test_provision_agent_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent runs extra provision commands."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
     marker_file = temp_dir / "provision_test" / "marker.txt"
 
     options = CreateAgentOptions(
-        name=AgentName("prov-user-cmd"),
+        name=AgentName("prov-extra-cmd"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
             create_directories=(marker_file.parent,),
-            user_commands=(f"echo 'user command executed' > {marker_file}",),
+            extra_provision_commands=(f"echo 'extra command executed' > {marker_file}",),
         ),
     )
 
     host.provision_agent(agent, options, host.mng_ctx)
 
     assert marker_file.exists()
-    assert "user command executed" in marker_file.read_text()
+    assert "extra command executed" in marker_file.read_text()
 
 
-def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that user commands run in the agent's work_dir."""
+def test_provision_agent_extra_provision_commands_in_work_dir(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that extra provision commands run in the agent's work_dir."""
     host, temp_dir = host_with_temp_dir
 
     # Create agent with a specific work_dir
@@ -1417,7 +1418,7 @@ def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Hos
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=(f"pwd > {marker_file}",),
+            extra_provision_commands=(f"pwd > {marker_file}",),
         ),
     )
 
@@ -1427,8 +1428,8 @@ def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Hos
     assert str(work_dir) in marker_file.read_text()
 
 
-def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent runs multiple user commands in order."""
+def test_provision_agent_multiple_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent runs multiple extra provision commands in order."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -1440,7 +1441,7 @@ def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, 
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(
+            extra_provision_commands=(
                 f"echo 'first' > {output_file}",
                 f"echo 'second' >> {output_file}",
                 f"echo 'third' >> {output_file}",
@@ -1458,8 +1459,8 @@ def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, 
     assert lines[2] == "third"
 
 
-def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent raises on user command failure."""
+def test_provision_agent_extra_provision_command_failure_raises(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent raises on extra provision command failure."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -1468,7 +1469,7 @@ def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[H
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=("exit 1",),
+            extra_provision_commands=("exit 1",),
         ),
     )
 
@@ -1477,7 +1478,7 @@ def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[H
 
     assert exc_info.value.main_exception is not None
     assert isinstance(exc_info.value.main_exception, MngError)
-    assert "User command failed" in str(exc_info.value.main_exception)
+    assert "Extra provision command failed" in str(exc_info.value.main_exception)
 
 
 def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path], tmp_path: Path) -> None:
@@ -1503,7 +1504,7 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
             create_directories=(provision_dir,),
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=remote_upload),),
             append_to_files=(FileModificationSpec(remote_path=append_file, text="appended content"),),
-            user_commands=(f"echo 'marker' > {marker_file}",),
+            extra_provision_commands=(f"echo 'marker' > {marker_file}",),
         ),
     )
 
@@ -1553,8 +1554,7 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
     2. Upload files
     3. Append to files
     4. Prepend to files
-    5. Sudo commands (skipped in this test)
-    6. User commands
+    5. Extra provision commands
     """
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
@@ -1580,8 +1580,8 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
             append_to_files=(FileModificationSpec(remote_path=target_file, text="appended\n"),),
             # 4. Prepend - adds to beginning
             prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended\n"),),
-            # 6. User commands - run last, can verify final state
-            user_commands=(f"cat {target_file} > {log_file}",),
+            # 5. Extra provision commands - run last, can verify final state
+            extra_provision_commands=(f"cat {target_file} > {log_file}",),
         ),
     )
 
@@ -1688,6 +1688,7 @@ def test_create_work_dir_copy_without_git(host_with_temp_dir: tuple[Host, Path])
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1718,6 +1719,8 @@ def test_create_work_dir_copy_with_git(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1761,6 +1764,8 @@ def test_create_work_dir_copy_with_git_copies_info_exclude(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     host.create_agent_work_dir(host, source_path, options)
@@ -1789,6 +1794,7 @@ def test_create_work_dir_copy_excludes_git_when_disabled(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         git=AgentGitOptions(is_git_synced=False),
     )
 
@@ -1831,6 +1837,7 @@ def test_create_work_dir_copy_with_untracked_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1866,6 +1873,7 @@ def test_create_work_dir_copy_with_gitignored_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_gitignored=True),
     )
 
@@ -1900,6 +1908,7 @@ def test_create_work_dir_copy_with_renamed_file(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1931,6 +1940,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/new-branch-test"),
     )
 
@@ -1979,6 +1989,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/origin-test"),
     )
 
@@ -2019,6 +2030,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/no-origin-test"),
     )
 
@@ -2099,8 +2111,10 @@ def test_provision_agent_writes_env_files_to_agent_env(host_with_temp_dir: tuple
     assert "SECOND_VAR=second_value" in content
 
 
-def test_provision_agent_user_commands_have_access_to_env_vars(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that user commands can access the environment variables."""
+def test_provision_agent_extra_provision_commands_have_access_to_env_vars(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """Test that extra provision commands can access the environment variables."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -2115,7 +2129,7 @@ def test_provision_agent_user_commands_have_access_to_env_vars(host_with_temp_di
         ),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(f"echo $PROVISION_TEST_VAR > {output_file}",),
+            extra_provision_commands=(f"echo $PROVISION_TEST_VAR > {output_file}",),
         ),
     )
 
@@ -2373,7 +2387,7 @@ def test_provision_agent_host_env_sourced_before_agent_env(host_with_temp_dir: t
         ),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(f"echo HOST_VAR=$HOST_VAR SHARED_VAR=$SHARED_VAR > {output_file}",),
+            extra_provision_commands=(f"echo HOST_VAR=$HOST_VAR SHARED_VAR=$SHARED_VAR > {output_file}",),
         ),
     )
 
@@ -2406,6 +2420,7 @@ def test_rsync_extra_args_parsing(host_with_temp_dir: tuple[Host, Path]) -> None
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--exclude exclude_me.txt",
@@ -2440,6 +2455,7 @@ def test_rsync_extra_args_with_spaces(host_with_temp_dir: tuple[Host, Path]) -> 
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args='--exclude "file with spaces.txt"',
@@ -2479,6 +2495,7 @@ def test_transfer_extra_files_with_many_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_git_synced=True, is_include_unclean=True),
     )
 
@@ -2642,6 +2659,7 @@ def test_rsync_does_not_delete_existing_files_by_default(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2676,6 +2694,7 @@ def test_rsync_with_delete_removes_extra_files(host_with_temp_dir: tuple[Host, P
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--delete",
@@ -2742,6 +2761,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-one"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2756,6 +2776,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-two"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 

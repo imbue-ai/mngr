@@ -475,7 +475,7 @@ def test_parse_create_templates_multiple_templates() -> None:
     raw = {
         "modal": {"new_host": "modal"},
         "docker": {"new_host": "docker"},
-        "local": {"in_place": True},
+        "local": {"transfer": "none"},
     }
     result = _parse_create_templates(raw)
     assert len(result) == 3
@@ -614,6 +614,8 @@ def test_parse_config_accepts_every_mng_config_field() -> None:
     assert result.headless is True
     assert result.unset_vars == ["TEST_VAR"]
     assert result.enabled_backends == [ProviderBackendName("local")]
+    assert ".venv" in result.work_dir_extra_paths
+    assert ".test_output" in result.work_dir_extra_paths
 
 
 def test_load_config_threads_every_field_from_toml(
@@ -654,6 +656,8 @@ def test_load_config_threads_every_field_from_toml(
     assert config.default_destroyed_host_persisted_seconds == 12345.0
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
+    assert ".venv" in config.work_dir_extra_paths
+    assert ".test_output" in config.work_dir_extra_paths
 
 
 # Sample values used by the regression tests above. When adding a new field to
@@ -670,6 +674,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "commands": {"create": {"name": "test"}},
     "create_templates": {"modal": {"new_host": "modal"}},
     "pre_command_scripts": {"create": ["echo hello"]},
+    "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
     "logging": {"file_level": "DEBUG"},
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
@@ -699,6 +704,10 @@ name = "test"
 
 [pre_command_scripts]
 create = ["echo hello"]
+
+[work_dir_extra_paths]
+".venv" = "SHARE"
+".test_output" = "COPY"
 
 [logging]
 file_level = "DEBUG"

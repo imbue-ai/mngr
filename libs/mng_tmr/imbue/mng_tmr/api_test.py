@@ -19,32 +19,30 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng_tmr.api import CollectTestsError
-from imbue.mng_tmr.api import PLUGIN_NAME
 from imbue.mng_tmr.api import _build_agent_options
-from imbue.mng_tmr.api import _build_agent_prompt
-from imbue.mng_tmr.api import _build_grouped_tables
-from imbue.mng_tmr.api import _build_stacked_bar
-from imbue.mng_tmr.api import _copy_mode_for_provider
-from imbue.mng_tmr.api import _render_markdown
 from imbue.mng_tmr.api import _sanitize_test_name_for_agent
 from imbue.mng_tmr.api import _short_random_id
+from imbue.mng_tmr.api import _transfer_mode_for_provider
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
-from imbue.mng_tmr.api import display_category_of
-from imbue.mng_tmr.api import generate_html_report
 from imbue.mng_tmr.api import read_agent_result
 from imbue.mng_tmr.api import read_integrator_result
 from imbue.mng_tmr.api import should_pull_changes
 from imbue.mng_tmr.data_types import Change
 from imbue.mng_tmr.data_types import ChangeKind
 from imbue.mng_tmr.data_types import ChangeStatus
-from imbue.mng_tmr.data_types import DisplayCategory
-from imbue.mng_tmr.data_types import IntegratorResult
+from imbue.mng_tmr.data_types import ReportSection
 from imbue.mng_tmr.data_types import TestAgentInfo
-from imbue.mng_tmr.data_types import TestMapReduceResult
 from imbue.mng_tmr.data_types import TmrLaunchConfig
+from imbue.mng_tmr.prompts import PLUGIN_NAME
+from imbue.mng_tmr.prompts import build_test_agent_prompt
+from imbue.mng_tmr.report import report_section_of
+from imbue.mng_tmr.testing import BLOCKED_FIX
+from imbue.mng_tmr.testing import FAILED_FIX
+from imbue.mng_tmr.testing import SUCCEEDED_FIX
+from imbue.mng_tmr.testing import make_test_result
 
 
 def test_short_random_id_length() -> None:
@@ -92,13 +90,13 @@ def test_sanitize_single_part() -> None:
     assert result == "simple-test"
 
 
-def test_copy_mode_local_provider_uses_worktree() -> None:
-    assert _copy_mode_for_provider(ProviderInstanceName("local")) == WorkDirCopyMode.WORKTREE
+def test_transfer_mode_local_provider_uses_git_worktree() -> None:
+    assert _transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
 
 
-def test_copy_mode_remote_provider_uses_clone() -> None:
-    assert _copy_mode_for_provider(ProviderInstanceName("docker")) == WorkDirCopyMode.CLONE
-    assert _copy_mode_for_provider(ProviderInstanceName("modal")) == WorkDirCopyMode.CLONE
+def test_transfer_mode_remote_provider_uses_git_mirror() -> None:
+    assert _transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
+    assert _transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
 
 
 def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:
@@ -126,13 +124,13 @@ def test_build_agent_options_rsync_disabled() -> None:
 def test_build_agent_options_local_uses_worktree() -> None:
     opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
     assert opts.git is not None
-    assert opts.git.copy_mode == WorkDirCopyMode.WORKTREE
+    assert opts.transfer_mode == TransferMode.GIT_WORKTREE
 
 
-def test_build_agent_options_remote_uses_clone() -> None:
+def test_build_agent_options_remote_uses_git_mirror() -> None:
     opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"))
     assert opts.git is not None
-    assert opts.git.copy_mode == WorkDirCopyMode.CLONE
+    assert opts.transfer_mode == TransferMode.GIT_MIRROR
 
 
 def test_build_agent_options_local_ready_timeout() -> None:
@@ -169,7 +167,7 @@ def test_build_agent_options_sets_agent_name() -> None:
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
-    prompt = _build_agent_prompt("tests/test_foo.py::test_bar", ())
+    prompt = build_test_agent_prompt("tests/test_foo.py::test_bar", ())
     assert "tests/test_foo.py::test_bar" in prompt
     assert "result.json" in prompt
     assert "IMPROVE_TEST" in prompt
@@ -181,44 +179,34 @@ def test_build_agent_prompt_contains_test_id() -> None:
 
 
 def test_build_agent_prompt_contains_plugin_name() -> None:
-    prompt = _build_agent_prompt("tests/test_x.py::test_y", ())
+    prompt = build_test_agent_prompt("tests/test_x.py::test_y", ())
     assert PLUGIN_NAME in prompt
 
 
 def test_build_agent_prompt_includes_pytest_flags() -> None:
-    prompt = _build_agent_prompt("tests/test_x.py::test_y", ("-m", "release"))
+    prompt = build_test_agent_prompt("tests/test_x.py::test_y", ("-m", "release"))
     assert "-m release" in prompt
 
 
 def test_build_agent_prompt_requests_markdown() -> None:
-    prompt = _build_agent_prompt("t::t", ())
+    prompt = build_test_agent_prompt("t::t", ())
     assert "markdown" in prompt.lower()
 
 
 def test_build_agent_prompt_instructs_one_entry_per_kind() -> None:
-    prompt = _build_agent_prompt("t::t", ())
+    prompt = build_test_agent_prompt("t::t", ())
     assert "do not duplicate kinds" in prompt.lower()
 
 
 def test_build_agent_prompt_with_suffix() -> None:
-    prompt = _build_agent_prompt("t::t", (), prompt_suffix="Always run with --verbose flag.")
+    prompt = build_test_agent_prompt("t::t", (), prompt_suffix="Always run with --verbose flag.")
     assert "Always run with --verbose flag." in prompt
 
 
 def test_build_agent_prompt_empty_suffix_ignored() -> None:
-    prompt_no_suffix = _build_agent_prompt("t::t", ())
-    prompt_empty_suffix = _build_agent_prompt("t::t", (), prompt_suffix="")
+    prompt_no_suffix = build_test_agent_prompt("t::t", ())
+    prompt_empty_suffix = build_test_agent_prompt("t::t", (), prompt_suffix="")
     assert prompt_no_suffix == prompt_empty_suffix
-
-
-def test_render_markdown_bold() -> None:
-    result = _render_markdown("**bold**")
-    assert "<strong>bold</strong>" in result
-
-
-def test_render_markdown_plain_text() -> None:
-    result = _render_markdown("plain text")
-    assert "plain text" in result
 
 
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -242,300 +230,45 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
         collect_tests(pytest_args=("non_existent_test_file.py",), source_dir=tmp_path, cg=cg)
 
 
-# --- Helpers for should_pull_changes / display_category_of tests ---
-
-_SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
-_FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
-_BLOCKED_FIX = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
-
-
-def _result(
-    changes: dict[ChangeKind, Change] | None = None,
-    errored: bool = False,
-    before: bool | None = None,
-    after: bool | None = None,
-) -> TestMapReduceResult:
-    """Build a minimal TestMapReduceResult for testing pull/display logic."""
-    return TestMapReduceResult(
-        test_node_id="t::t",
-        agent_name=AgentName("a"),
-        changes=changes if changes is not None else {},
-        errored=errored,
-        tests_passing_before=before,
-        tests_passing_after=after,
-    )
-
-
 # --- should_pull_changes tests ---
+# Uses shared helpers from testing: make_test_result, SUCCEEDED_FIX, FAILED_FIX, BLOCKED_FIX
 
 
 def test_should_pull_succeeded_fix_with_tests_passing() -> None:
-    assert should_pull_changes(_result(changes=_SUCCEEDED_FIX, before=False, after=True)) is True
+    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)) is True
 
 
 def test_should_pull_succeeded_fix_tests_were_failing_still_failing() -> None:
-    assert should_pull_changes(_result(changes=_SUCCEEDED_FIX, before=False, after=False)) is True
+    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=False, after=False)) is True
 
 
 def test_should_not_pull_when_errored() -> None:
-    assert should_pull_changes(_result(changes=_SUCCEEDED_FIX, errored=True, before=False, after=True)) is False
+    assert (
+        should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, errored=True, before=False, after=True)) is False
+    )
 
 
 def test_should_not_pull_when_no_succeeded_changes() -> None:
-    assert should_pull_changes(_result(changes=_FAILED_FIX, before=False, after=False)) is False
-    assert should_pull_changes(_result(changes=_BLOCKED_FIX, before=False, after=False)) is False
+    assert should_pull_changes(make_test_result(changes=FAILED_FIX, before=False, after=False)) is False
+    assert should_pull_changes(make_test_result(changes=BLOCKED_FIX, before=False, after=False)) is False
 
 
 def test_should_not_pull_when_no_changes() -> None:
-    assert should_pull_changes(_result(before=True, after=True)) is False
+    assert should_pull_changes(make_test_result(before=True, after=True)) is False
 
 
 def test_should_not_pull_when_regression() -> None:
-    assert should_pull_changes(_result(changes=_SUCCEEDED_FIX, before=True, after=False)) is False
+    assert should_pull_changes(make_test_result(changes=SUCCEEDED_FIX, before=True, after=False)) is False
 
 
 def test_should_pull_improvement_tests_still_passing() -> None:
     improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes(_result(changes=improved, before=True, after=True)) is True
+    assert should_pull_changes(make_test_result(changes=improved, before=True, after=True)) is True
 
 
 def test_should_not_pull_improvement_that_breaks_tests() -> None:
     improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes(_result(changes=improved, before=True, after=False)) is False
-
-
-# --- display_category_of tests ---
-
-
-def test_display_category_errored() -> None:
-    assert display_category_of(_result(errored=True)) == DisplayCategory.ERRORED
-
-
-def test_display_category_pending() -> None:
-    assert display_category_of(_result()) == DisplayCategory.PENDING
-
-
-def test_display_category_clean_pass() -> None:
-    assert display_category_of(_result(before=True, after=True)) == DisplayCategory.CLEAN_PASS
-
-
-def test_display_category_fixed() -> None:
-    assert display_category_of(_result(changes=_SUCCEEDED_FIX, before=False, after=True)) == DisplayCategory.FIXED
-
-
-def test_display_category_regressed() -> None:
-    assert display_category_of(_result(changes=_SUCCEEDED_FIX, before=True, after=False)) == DisplayCategory.REGRESSED
-
-
-def test_display_category_stuck_failed_changes() -> None:
-    assert display_category_of(_result(changes=_FAILED_FIX, before=False, after=False)) == DisplayCategory.STUCK
-
-
-def test_display_category_stuck_no_changes_tests_failing() -> None:
-    assert display_category_of(_result(before=False, after=False)) == DisplayCategory.STUCK
-
-
-# --- HTML report tests ---
-
-
-def test_build_stacked_bar_empty() -> None:
-    assert _build_stacked_bar({}, 0) == ""
-
-
-def test_build_stacked_bar_single_category() -> None:
-    bar_html = _build_stacked_bar({DisplayCategory.CLEAN_PASS: 5}, 5)
-    assert "width: 100.0%" in bar_html
-    assert "CLEAN_PASS: 5" in bar_html
-
-
-def test_build_stacked_bar_multiple_categories() -> None:
-    bar_html = _build_stacked_bar({DisplayCategory.CLEAN_PASS: 3, DisplayCategory.STUCK: 2}, 5)
-    assert "CLEAN_PASS: 3" in bar_html
-    assert "STUCK: 2" in bar_html
-
-
-def test_build_grouped_tables_groups_by_category() -> None:
-    results = [
-        _result(before=True, after=True),
-        _result(changes=_SUCCEEDED_FIX, before=False, after=True),
-    ]
-    tables_html = _build_grouped_tables(results)
-    assert tables_html.index("FIXED") < tables_html.index("CLEAN_PASS")
-
-
-def test_build_grouped_tables_shows_branch() -> None:
-    r = TestMapReduceResult(
-        test_node_id="t::c",
-        agent_name=AgentName("c"),
-        changes=_SUCCEEDED_FIX,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        summary_markdown="fixed",
-        branch_name="mng-tmr/c-abc123",
-    )
-    assert "mng-tmr/c-abc123" in _build_grouped_tables([r])
-
-
-def test_build_grouped_tables_shows_changes_column() -> None:
-    changes = {
-        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed"),
-        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked"),
-    }
-    r = TestMapReduceResult(
-        test_node_id="t::d",
-        agent_name=AgentName("d"),
-        changes=changes,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        summary_markdown="Fixed test",
-    )
-    tables_html = _build_grouped_tables([r])
-    assert "FIX_TEST/SUCCEEDED" in tables_html
-    assert "IMPROVE_TEST/BLOCKED" in tables_html
-
-
-def test_build_grouped_tables_renders_markdown_summary() -> None:
-    r = TestMapReduceResult(
-        test_node_id="t::d",
-        agent_name=AgentName("d"),
-        tests_passing_before=True,
-        tests_passing_after=True,
-        summary_markdown="Test **passed** with `no issues`.",
-    )
-    tables_html = _build_grouped_tables([r])
-    assert "<strong>passed</strong>" in tables_html
-    assert "<code>no issues</code>" in tables_html
-
-
-def test_generate_html_report(tmp_path: Path) -> None:
-    results = [
-        TestMapReduceResult(
-            test_node_id="tests/test_a.py::test_pass",
-            agent_name=AgentName("tmr-test-pass"),
-            tests_passing_before=True,
-            tests_passing_after=True,
-            summary_markdown="Passed immediately",
-        ),
-        TestMapReduceResult(
-            test_node_id="tests/test_b.py::test_fixed",
-            agent_name=AgentName("tmr-test-fixed"),
-            changes=_SUCCEEDED_FIX,
-            tests_passing_before=False,
-            tests_passing_after=True,
-            summary_markdown="Fixed missing import",
-            branch_name="mng-tmr/test-fixed",
-        ),
-    ]
-    output_path = tmp_path / "report.html"
-    result_path = generate_html_report(results, output_path)
-    assert result_path == output_path
-    assert output_path.exists()
-    content = output_path.read_text()
-    assert "Test Map-Reduce Report" in content
-    assert "CLEAN_PASS" in content
-    assert "FIXED" in content
-    assert 'class="bar"' in content
-
-
-def test_generate_html_report_groups_clean_pass_last(tmp_path: Path) -> None:
-    results = [
-        _result(before=True, after=True),
-        _result(changes=_FAILED_FIX, before=False, after=False),
-    ]
-    tables_html = _build_grouped_tables(results)
-    assert tables_html.index("STUCK") < tables_html.index("CLEAN_PASS")
-
-
-def test_generate_html_report_creates_parent_dirs(tmp_path: Path) -> None:
-    output_path = tmp_path / "subdir" / "nested" / "report.html"
-    results = [_result(before=True, after=True)]
-    generate_html_report(results, output_path)
-    assert output_path.exists()
-
-
-def test_generate_html_report_all_display_categories(tmp_path: Path) -> None:
-    results = [
-        _result(),
-        _result(changes=_SUCCEEDED_FIX, before=False, after=True),
-        _result(changes=_SUCCEEDED_FIX, before=True, after=False),
-        _result(changes=_FAILED_FIX, before=False, after=False),
-        _result(errored=True),
-        _result(before=True, after=True),
-    ]
-    output_path = tmp_path / "all_categories.html"
-    generate_html_report(results, output_path)
-    content = output_path.read_text()
-    for cat in DisplayCategory:
-        assert cat.value in content
-
-
-def test_generate_html_report_empty_results(tmp_path: Path) -> None:
-    output_path = tmp_path / "empty.html"
-    generate_html_report([], output_path)
-    assert "0 test(s)" in output_path.read_text()
-
-
-def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
-    results = [_result(changes=_SUCCEEDED_FIX, before=False, after=True)]
-    integrator = IntegratorResult(
-        merged=("mng-tmr/a",),
-        branch_name="mng-tmr/integrated-abc123",
-        summary_markdown="Merged 1 branch",
-    )
-    output_path = tmp_path / "integrator.html"
-    generate_html_report(results, output_path, integrator=integrator)
-    content = output_path.read_text()
-    assert "Integrator" in content
-    assert "mng-tmr/integrated-abc123" in content
-    assert "mng-tmr/a" in content
-
-
-def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
-    results = [_result(before=True, after=True)]
-    integrator = IntegratorResult(
-        merged=("mng-tmr/a",),
-        failed=("mng-tmr/b",),
-        branch_name="mng-tmr/integrated-abc123",
-        summary_markdown="Partial merge",
-    )
-    output_path = tmp_path / "integrator_partial.html"
-    generate_html_report(results, output_path, integrator=integrator)
-    content = output_path.read_text()
-    assert "Failed to merge" in content
-    assert "mng-tmr/b" in content
-
-
-def test_generate_html_report_without_integrator(tmp_path: Path) -> None:
-    results = [_result(before=True, after=True)]
-    output_path = tmp_path / "no_integrator.html"
-    generate_html_report(results, output_path)
-    content = output_path.read_text()
-    assert "Integrated branch:" not in content
-
-
-def test_generate_html_report_integrator_html_escaped(tmp_path: Path) -> None:
-    results = [_result(before=True, after=True)]
-    integrator = IntegratorResult(
-        branch_name="<script>alert('xss')</script>",
-        summary_markdown="test",
-    )
-    output_path = tmp_path / "escape.html"
-    generate_html_report(results, output_path, integrator=integrator)
-    content = output_path.read_text()
-    assert "<script>" not in content
-    assert "&lt;script&gt;" in content
-
-
-def test_build_stacked_bar_pending_category() -> None:
-    bar_html = _build_stacked_bar({DisplayCategory.PENDING: 3}, 3)
-    assert "PENDING: 3" in bar_html
-    assert "rgb(3, 169, 244)" in bar_html
-
-
-def test_build_grouped_tables_pending_first() -> None:
-    results = [_result(), _result(before=True, after=True)]
-    tables_html = _build_grouped_tables(results)
-    assert tables_html.index("PENDING") < tables_html.index("CLEAN_PASS")
+    assert should_pull_changes(make_test_result(changes=improved, before=True, after=False)) is False
 
 
 def test_build_current_results_pending_agents() -> None:
@@ -545,17 +278,19 @@ def test_build_current_results_pending_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-one-abc123"),
+            created_at=0.0,
         ),
         TestAgentInfo(
             test_node_id="tests/test_b.py::test_two",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-two-def456"),
+            created_at=0.0,
         ),
     ]
     results = build_current_results(agents=agents, final_details={}, timed_out_ids=set(), hosts={})
     assert len(results) == 2
-    assert display_category_of(results[0]) == DisplayCategory.PENDING
-    assert display_category_of(results[1]) == DisplayCategory.PENDING
+    assert report_section_of(results[0]) == ReportSection.RUNNING
+    assert report_section_of(results[1]) == ReportSection.RUNNING
     assert "still running" in results[0].summary_markdown
 
 
@@ -567,12 +302,13 @@ def test_build_current_results_timed_out_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=agent_id,
             agent_name=AgentName("tmr-test-one-abc123"),
+            created_at=0.0,
         ),
     ]
     results = build_current_results(agents=agents, final_details={}, timed_out_ids={str(agent_id)}, hosts={})
     assert len(results) == 1
     assert results[0].errored is True
-    assert display_category_of(results[0]) == DisplayCategory.ERRORED
+    assert report_section_of(results[0]) == ReportSection.BLOCKED
 
 
 # --- read_agent_result / read_integrator_result tests ---
@@ -658,14 +394,17 @@ def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterf
     _write_result_json(
         localhost.host_dir,
         agent_id,
-        '{"merged": ["branch-a", "branch-b"], "failed": ["branch-c"], "summary_markdown": "Merged 2 of 3"}',
+        '{"squashed_branches": ["branch-a", "branch-b"], "squashed_commit_hash": "abc1234",'
+        ' "impl_priority": ["branch-d"], "impl_commit_hashes": {"branch-d": "def5678"}, "failed": ["branch-c"]}',
     )
     detail = _make_agent_detail(agent_id, localhost.host_dir)
     result = read_integrator_result(detail, localhost, "mng-tmr/integrated")
-    assert result.merged == ("branch-a", "branch-b")
+    assert result.squashed_branches == ("branch-a", "branch-b")
+    assert result.squashed_commit_hash == "abc1234"
+    assert result.impl_priority == ("branch-d",)
+    assert result.impl_commit_hashes == {"branch-d": "def5678"}
     assert result.failed == ("branch-c",)
     assert result.branch_name == "mng-tmr/integrated"
-    assert result.summary_markdown == "Merged 2 of 3"
 
 
 def test_read_integrator_result_missing_file(localhost: OnlineHostInterface) -> None:
@@ -673,4 +412,6 @@ def test_read_integrator_result_missing_file(localhost: OnlineHostInterface) -> 
     detail = _make_agent_detail(agent_id, localhost.host_dir)
     result = read_integrator_result(detail, localhost, "mng-tmr/integrated")
     assert result.branch_name == "mng-tmr/integrated"
-    assert "Failed to read" in result.summary_markdown
+    assert result.squashed_branches == ()
+    assert result.impl_priority == ()
+    assert result.failed == ()

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [snapshot|snap] [create|list|destroy] [AGENTS...] [OPTIONS]
+mng [snapshot|snap] [create|list|destroy] [AGENTS...|-] [OPTIONS]
 ```
 
 Create, list, and destroy host snapshots.
@@ -85,7 +85,6 @@ mng snapshot create [OPTIONS] [IDENTIFIERS]...
 | `--dry-run` | boolean | Show what would be snapshotted without actually creating snapshots | `False` |
 | `--include` | text | Filter agents by CEL expression (repeatable) [future] | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) [future] | None |
-| `--stdin` | boolean | Read agent/host names from stdin [future] | `False` |
 | `--tag` | text | Metadata tag for the snapshot (KEY=VALUE) [future] | None |
 | `--description` | text | Description for the snapshot [future] | None |
 | `--restart-if-larger-than` | text | Restart host if snapshot exceeds size (e.g., 5G) [future] | None |
@@ -270,7 +269,6 @@ mng snapshot destroy [OPTIONS] [AGENTS]...
 | `--dry-run` | boolean | Show what would be destroyed without actually deleting | `False` |
 | `--include` | text | Filter snapshots by CEL expression (repeatable) [future] | None |
 | `--exclude` | text | Exclude snapshots matching CEL expression (repeatable) [future] | None |
-| `--stdin` | boolean | Read agent/host names from stdin [future] | `False` |
 
 ## Common
 
