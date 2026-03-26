@@ -15,7 +15,6 @@ from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
-from imbue.mng.cli.stdin_utils import resolve_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import MngError
@@ -210,11 +209,8 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         raise UserInputError("Cannot specify both --head and --tail")
 
     # Resolve the target agent
-    target_identifier = resolve_stdin_placeholder(opts.target)
-    # target is a required click argument, so it's never None here
-    assert target_identifier is not None
     target = resolve_events_target(
-        identifier=target_identifier,
+        identifier=opts.target,
         mng_ctx=mng_ctx,
     )
 
@@ -247,7 +243,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="transcript",
     one_line_description="View the message transcript for an agent",
-    synopsis="mng transcript <TARGET|-> [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]",
+    synopsis="mng transcript TARGET [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]",
     arguments_description="- `TARGET`: Agent name or ID whose transcript to view",
     description="""View the common transcript for an agent. The transcript contains
 user messages, assistant messages, and tool call/result summaries in a

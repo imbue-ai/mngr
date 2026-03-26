@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng transcript <TARGET|-> [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]
+mng transcript TARGET [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]
 ```
 
 View the message transcript for an agent.

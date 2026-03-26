@@ -15,7 +15,6 @@ from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
-from imbue.mng.cli.stdin_utils import resolve_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import UserInputError
@@ -164,7 +163,7 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     if opts.agent is not None and opts.agent_option is not None:
         raise UserInputError("Cannot specify both positional agent and --agent option")
     elif opts.agent is not None:
-        agent_identifier = resolve_stdin_placeholder(opts.agent)
+        agent_identifier = opts.agent
     elif opts.agent_option is not None:
         agent_identifier = opts.agent_option
     else:
@@ -221,7 +220,7 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="provision",
     one_line_description="Re-run provisioning on an existing agent [experimental]",
-    synopsis="mng [provision|prov] [AGENT|-] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]",
+    synopsis="mng [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]",
     description="""This re-runs the provisioning steps (plugin lifecycle hooks, file transfers,
 custom commands, env vars) on an agent that has already been created. Useful for
 syncing configuration, authentication, and installing additional packages. Most

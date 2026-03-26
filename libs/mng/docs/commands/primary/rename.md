@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [rename|mv] <CURRENT|-> <NEW-NAME> [--dry-run] [--host]
+mng [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host]
 ```
 
 Rename an agent or host [experimental].

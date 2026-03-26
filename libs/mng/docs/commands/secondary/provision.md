@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [provision|prov] [AGENT|-] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]
+mng [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]
 ```
 
 Re-run provisioning on an existing agent [experimental].
