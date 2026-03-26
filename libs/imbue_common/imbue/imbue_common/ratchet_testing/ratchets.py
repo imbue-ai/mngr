@@ -544,8 +544,6 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
 
     violations: list[str] = []
     for sh_file in sh_files:
-        if not sh_file.exists():
-            continue
         content = sh_file.read_text()
         if not strict_mode_pattern.search(content):
             violations.append(str(sh_file))

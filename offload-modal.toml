@@ -4,7 +4,7 @@ max_parallel = 50
 test_timeout_secs = 60
 stream_output = true
 sandbox_project_root = "/code/mng"
-sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages"
+sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && git add -A && uv sync --all-packages && chown -R mng-test-runner:mng-test-runner /code/mng"
 
 [provider]
 type = "modal"
@@ -13,7 +13,7 @@ dockerfile = "libs/mng/imbue/mng/resources/Dockerfile"
 [framework]
 type = "pytest"
 paths = ["."]
-command = "uv run pytest"
+command = "runuser -u mng-test-runner -- uv run pytest"
 run_args = "--no-cov -p no:xdist -o addopts="
 
 [groups.all]
