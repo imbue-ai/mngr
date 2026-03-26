@@ -2,12 +2,12 @@
 # during Modal's image upload. The Docker image only needs current.tar.gz;
 # all other repo files are delivered via the tarball.
 .git/
-__pycache__/
-*.pyc
-.pytest_cache/
-.test_output/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.test_output/
 .venv/
-.ruff_cache/
+**/.ruff_cache/
 .mng/dev/
 test-results/
 tmr_*/
