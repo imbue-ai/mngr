@@ -912,7 +912,7 @@ def _classify_entry(entry: AgentBoardEntry, repo_pr_loaded: dict[str, bool]) -> 
             return BoardSection.PR_CLOSED
         return BoardSection.PR_BEING_REVIEWED
     agent_repo = repo_path_from_labels(entry.column_data.labels)
-    if agent_repo is not None and repo_pr_loaded.get(agent_repo) is not True:
+    if agent_repo is not None and repo_pr_loaded.get(agent_repo) is False:
         return BoardSection.PRS_FAILED
     return BoardSection.STILL_COOKING
 
