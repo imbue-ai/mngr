@@ -255,7 +255,12 @@ def _is_behind_origin(vet_repo: Path, base_commit: str) -> bool:
 def load_vet(vet_repo: Path) -> dict:
     """Import vet modules at the pinned base commit, restoring vet HEAD after."""
     base_commit = VET_BASE_COMMIT_PATH.read_text().strip()
-    original_head = _git(vet_repo, "rev-parse", "HEAD", check=True).stdout.strip()
+    original_commit = _git(vet_repo, "rev-parse", "HEAD", check=True).stdout.strip()
+
+    # Preserve the branch ref (if on a branch) so we restore to the branch, not
+    # a detached HEAD at the same commit.
+    symref_result = _git(vet_repo, "symbolic-ref", "-q", "HEAD", check=False)
+    original_ref = symref_result.stdout.strip() if symref_result.returncode == 0 else original_commit
 
     if _is_behind_origin(vet_repo, base_commit):
         print(
@@ -265,10 +270,11 @@ def load_vet(vet_repo: Path) -> dict:
             file=sys.stderr,
         )
 
-    if original_head != base_commit:
+    needs_checkout = original_commit != base_commit
+    if needs_checkout:
         print(
             f"note: checking out pinned vet base ({base_commit[:12]}), "
-            f"will restore HEAD ({original_head[:12]}) after.",
+            f"will restore HEAD ({original_commit[:12]}) after.",
             file=sys.stderr,
         )
         _git(vet_repo, "checkout", "--quiet", base_commit, check=True)
@@ -290,8 +296,8 @@ def load_vet(vet_repo: Path) -> dict:
             "ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE": ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE,
         }
     finally:
-        if original_head != base_commit:
-            _git(vet_repo, "checkout", "--quiet", original_head, check=True)
+        if needs_checkout:
+            _git(vet_repo, "checkout", "--quiet", original_ref, check=True)
 
 
 # ---------------------------------------------------------------------------
