@@ -133,7 +133,7 @@ def _vet_guide_to_section(guide) -> CategorySection:
 def _apply_overrides(sections: list[CategorySection]) -> list[CategorySection]:
     """Apply mng-specific overrides to the category sections.
 
-    Inserts new categories and extends existing ones with additional guidance.
+    Inserts new categories and extends or replaces existing ones with mng-specific guidance.
     """
     sections_by_code: dict[str, CategorySection] = {s.issue_code: s for s in sections}
 
