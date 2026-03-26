@@ -1623,10 +1623,12 @@ class Host(BaseHost, OnlineHostInterface):
             if not result.success:
                 stderr_lines = result.stderr.strip().split("\n")
                 conflicts = [line.removeprefix("CONFLICT: ") for line in stderr_lines if line.startswith("CONFLICT: ")]
+                failures = [line.removeprefix("FAILED: ") for line in stderr_lines if line.startswith("FAILED: ")]
                 if conflicts:
-                    raise UserInputError(
-                        "work_dir_extra_paths: target already exists and is not a symlink: " + ", ".join(conflicts)
-                    )
+                    msg = "work_dir_extra_paths: target already exists and is not a symlink: " + ", ".join(conflicts)
+                    if failures:
+                        msg += "; also failed to create symlinks for: " + ", ".join(failures)
+                    raise UserInputError(msg)
                 raise MngError(f"work_dir_extra_paths: failed to create symlinks: {result.stderr}")
 
         # Rsync all copy paths in a single batch
