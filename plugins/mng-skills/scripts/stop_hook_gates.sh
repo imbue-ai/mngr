@@ -1,0 +1,1 @@
+../../../scripts/stop_hook_gates.sh

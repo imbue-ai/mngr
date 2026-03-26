@@ -201,48 +201,15 @@ export RED GREEN YELLOW NC
 # Gate checks: autofix and conversation review must both pass before we
 # bother launching the (slow) CI check.
 # ---------------------------------------------------------------------------
-source "$SCRIPT_DIR/config_utils.sh"
-
-AUTOFIX_NEEDED=false
-CONVO_NEEDED=false
-
-# Autofix gate (inlined from check_autofix_ran.sh)
-REVIEWER_SETTINGS=".reviewer/settings.json"
-AUTOFIX_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "autofix.is_enabled" "true")
-if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/verified.md" ]]; then
-    AUTOFIX_NEEDED=true
-fi
-
-# Conversation review gate (inlined from check_conversation_reviewed.sh)
-CONVO_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "verify_conversation.is_enabled" "true")
-if [[ "$CONVO_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/conversation/${HASH}.json" ]]; then
-    CONVO_NEEDED=true
-fi
-
-# Build the autofix command string (may include extra args from config)
-AUTOFIX_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "autofix.append_to_prompt" "")
-if [[ -n "$AUTOFIX_EXTRA_ARGS" ]]; then
-    AUTOFIX_CMD="/autofix ${AUTOFIX_EXTRA_ARGS}"
+if GATE_OUTPUT=$("$SCRIPT_DIR/stop_hook_gates.sh" "$HASH" 2>&1); then
+    _log_to_file "INFO" "Autofix and conversation review gates passed"
 else
-    AUTOFIX_CMD="/autofix"
-fi
-
-if [[ "$AUTOFIX_NEEDED" == "true" && "$CONVO_NEEDED" == "true" ]]; then
-    log_error "Neither autofix nor conversation review have been run."
-    log_error "Run /verify-conversation up to and including Step 4 (Spawn Agent). Spawn that agent in the background, then run \"${AUTOFIX_CMD}\" to verify your changes. Be sure to report the results from the background agent before returning control to the user (be sure to wait for it to finish if it hasn't yet and if you're done running autofix)."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (both autofix and conversation review missing)"
-    exit 2
-elif [[ "$AUTOFIX_NEEDED" == "true" ]]; then
-    log_error "Autofix has not been run yet. Run \"${AUTOFIX_CMD}\" to verify your changes."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (autofix missing)"
-    exit 2
-elif [[ "$CONVO_NEEDED" == "true" ]]; then
-    log_error "Conversation has not been reviewed. Run /verify-conversation before finishing."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (conversation review missing)"
+    while IFS= read -r line; do
+        log_error "$line"
+    done <<< "$GATE_OUTPUT"
+    _log_to_file "INFO" "main_stop_hook exiting with code 2 (gate check failed)"
     exit 2
 fi
-
-_log_to_file "INFO" "Autofix and conversation review gates passed"
 
 # PR/CI gate (can be disabled via .reviewer/settings.json)
 CI_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "ci.is_enabled" "true")
