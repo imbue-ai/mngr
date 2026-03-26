@@ -7,7 +7,7 @@ Automated code review enforcement for [mng](https://github.com/imbue-ai/mng) use
 ## Install
 
 ```
-claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-review@mng-marketplace
+claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-review@imbue-mng
 ```
 
 ## Skills

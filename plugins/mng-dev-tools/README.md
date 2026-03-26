@@ -5,7 +5,7 @@ Development workflow tools for [mng](https://github.com/imbue-ai/mng) users: iss
 ## Install
 
 ```
-claude plugin marketplace add imbue-ai/mng && claude plugin install mng-dev-tools@mng-marketplace
+claude plugin marketplace add imbue-ai/mng && claude plugin install mng-dev-tools@imbue-mng
 ```
 
 ## Skills

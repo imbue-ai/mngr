@@ -299,7 +299,7 @@ if command -v claude &>/dev/null; then
     printf "mng provides Claude Code plugins for code review enforcement and development\n"
     printf "workflow tools. To install them, run:\n"
     printf "\n"
-    printf "  ${BOLD}claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-review@mng-marketplace && claude plugin install mng-dev-tools@mng-marketplace${RESET}\n"
+    printf "  ${BOLD}claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-review@imbue-mng && claude plugin install mng-dev-tools@imbue-mng${RESET}\n"
     printf "\n"
 fi
 
