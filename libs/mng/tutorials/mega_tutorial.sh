@@ -172,8 +172,8 @@ mng create my-task --provider docker -s "--gpus all"
 mng create my-task --provider modal --target-path /workspace
 
 # you can upload files and run custom commands during host provisioning:
-mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
-# (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
+mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
+# (--append-to-file and --prepend-to-file are also available)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mng create my-task --provider modal --no-start-on-boot

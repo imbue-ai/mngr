@@ -363,7 +363,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         This method is called after on_before_provisioning validation and
         after get_provision_file_transfers files have been copied, but before any
         of the CLI-defined provisioning options (create_directories, upload_files,
-        append_to_files, prepend_to_files, sudo_commands, user_commands) are
+        append_to_files, prepend_to_files, extra_provision_commands) are
         processed.
 
         Use this method to perform agent-type-specific provisioning that should happen

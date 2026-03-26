@@ -260,15 +260,15 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-def test_create_modal_upload_and_user_command(e2e: E2eSession) -> None:
+def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can upload files and run custom commands during host provisioning:
-    mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo"
-    # (--sudo-command runs as root; --append-to-file and --prepend-to-file are also available)
+    mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
+    # (--append-to-file and --prepend-to-file are also available)
     """)
     _assert_provider_disabled(
         e2e.run(
-            'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --user-command "pip install foo" --no-ensure-clean',
+            'mng create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo" --no-ensure-clean',
             comment="you can upload files and run custom commands during host provisioning",
         )
     )

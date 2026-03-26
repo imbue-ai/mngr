@@ -1876,8 +1876,7 @@ class Host(BaseHost, OnlineHostInterface):
         Upload files (files exist before modifications)
         Append text to files
         Prepend text to files
-        Run sudo commands (system-level setup, with env vars sourced)
-        Run user commands (user-level setup, with env vars sourced)
+        Run extra provision commands (user-level setup, with env vars sourced)
         Call agent.on_after_provisioning() (finalization)
         """
         with self.mng_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
@@ -1920,8 +1919,7 @@ class Host(BaseHost, OnlineHostInterface):
                 uploads=len(provisioning.upload_files),
                 appends=len(provisioning.append_to_files),
                 prepends=len(provisioning.prepend_to_files),
-                sudo_cmds=len(provisioning.sudo_commands),
-                user_cmds=len(provisioning.user_commands),
+                extra_cmds=len(provisioning.extra_provision_commands),
             ):
                 # Create directories
                 for directory in provisioning.create_directories:
@@ -1948,19 +1946,12 @@ class Host(BaseHost, OnlineHostInterface):
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
 
-                # Run sudo commands (with env vars sourced)
-                for cmd in provisioning.sudo_commands:
-                    result = self._run_sudo_command(source_prefix + cmd)
-                    logger.trace("Ran sudo command: {}", cmd)
-                    if not result.success:
-                        raise MngError(f"Sudo command failed: {cmd}\nstderr: {result.stderr}")
-
-                # Run user commands (with env vars sourced)
-                for cmd in provisioning.user_commands:
+                # Run extra provision commands (with env vars sourced)
+                for cmd in provisioning.extra_provision_commands:
                     result = self.execute_command(source_prefix + cmd, cwd=agent.work_dir)
-                    logger.trace("Ran user command: {}", cmd)
+                    logger.trace("Ran extra provision command: {}", cmd)
                     if not result.success:
-                        raise MngError(f"User command failed: {cmd}\nstderr: {result.stderr}")
+                        raise MngError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
             ensure_log_thread.join(60.0)
@@ -2039,18 +2030,6 @@ class Host(BaseHost, OnlineHostInterface):
         except FileNotFoundError:
             existing_content = ""
         self.write_text_file(path, text + existing_content)
-
-    def _run_sudo_command(self, command: str) -> CommandResult:
-        """Run a command with sudo privileges."""
-        success, output = self._run_shell_command(
-            StringCommand(command),
-            _sudo=True,
-        )
-        return CommandResult(
-            stdout=output.stdout,
-            stderr=output.stderr,
-            success=success,
-        )
 
     def rename_agent(self, agent: AgentInterface, new_name: AgentName) -> AgentInterface:
         """Rename an agent and return the updated agent object.

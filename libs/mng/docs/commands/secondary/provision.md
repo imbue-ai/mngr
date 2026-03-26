@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [provision|prov] [AGENT] [--agent <AGENT>] [--user-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]
+mng [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]
 ```
 
 Re-run provisioning on an existing agent [experimental].
@@ -61,8 +61,7 @@ mng provision [OPTIONS] [AGENT]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--user-command` | text | Run custom shell command during provisioning [repeatable] | None |
-| `--sudo-command` | text | Run custom shell command as root during provisioning [repeatable] | None |
+| `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 | `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
 | `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |
@@ -110,7 +109,7 @@ $ mng provision my-agent
 **Install a package without restarting**
 
 ```bash
-$ mng provision my-agent --user-command 'pip install pandas' --no-restart
+$ mng provision my-agent --extra-provision-command 'pip install pandas' --no-restart
 ```
 
 **Upload a config file**
@@ -123,10 +122,4 @@ $ mng provision my-agent --upload-file ./config.json:/app/config.json
 
 ```bash
 $ mng provision my-agent --env 'API_KEY=secret'
-```
-
-**Run a root command**
-
-```bash
-$ mng provision my-agent --sudo-command 'apt-get install -y ffmpeg'
 ```
