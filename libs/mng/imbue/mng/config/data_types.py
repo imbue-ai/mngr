@@ -641,7 +641,7 @@ class MngContext(FrozenModel):
     )
     project_root: Path | None = Field(
         default=None,
-        description="Project root directory (git worktree root), used as cwd for pre-command scripts",
+        description="Project root directory (MNG_PROJECT_DIR, --context, or git worktree root)",
     )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
