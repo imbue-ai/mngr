@@ -1,5 +1,4 @@
 from io import StringIO
-from unittest.mock import patch
 
 import pytest
 
@@ -237,30 +236,22 @@ def test_expand_stdin_placeholder_empty_tuple_returns_empty_list() -> None:
 
 
 def test_expand_stdin_placeholder_dash_reads_from_stdin() -> None:
-    stdin = StringIO("agent-a\nagent-b\nagent-c\n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = expand_stdin_placeholder(("-",))
+    result = expand_stdin_placeholder(("-",), stdin=StringIO("agent-a\nagent-b\nagent-c\n"))
     assert result == ["agent-a", "agent-b", "agent-c"]
 
 
 def test_expand_stdin_placeholder_dash_strips_whitespace() -> None:
-    stdin = StringIO("  agent-a  \n  agent-b  \n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = expand_stdin_placeholder(("-",))
+    result = expand_stdin_placeholder(("-",), stdin=StringIO("  agent-a  \n  agent-b  \n"))
     assert result == ["agent-a", "agent-b"]
 
 
 def test_expand_stdin_placeholder_dash_skips_empty_lines() -> None:
-    stdin = StringIO("agent-a\n\n\nagent-b\n\n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = expand_stdin_placeholder(("-",))
+    result = expand_stdin_placeholder(("-",), stdin=StringIO("agent-a\n\n\nagent-b\n\n"))
     assert result == ["agent-a", "agent-b"]
 
 
 def test_expand_stdin_placeholder_preserves_non_dash_args_around_dash() -> None:
-    stdin = StringIO("stdin-agent\n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = expand_stdin_placeholder(("before", "-", "after"))
+    result = expand_stdin_placeholder(("before", "-", "after"), stdin=StringIO("stdin-agent\n"))
     assert result == ["before", "stdin-agent", "after"]
 
 
@@ -270,10 +261,8 @@ def test_expand_stdin_placeholder_multiple_dashes_raises_error() -> None:
 
 
 def test_expand_stdin_placeholder_dash_with_tty_raises_error() -> None:
-    stdin = _TtyStringIO("")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        with pytest.raises(UserInputError, match="requires piped input"):
-            expand_stdin_placeholder(("-",))
+    with pytest.raises(UserInputError, match="requires piped input"):
+        expand_stdin_placeholder(("-",), stdin=_TtyStringIO(""))
 
 
 # =============================================================================
@@ -290,28 +279,20 @@ def test_resolve_stdin_placeholder_non_dash_returns_unchanged() -> None:
 
 
 def test_resolve_stdin_placeholder_dash_reads_single_line() -> None:
-    stdin = StringIO("agent-from-stdin\nextra-line\n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = resolve_stdin_placeholder("-")
+    result = resolve_stdin_placeholder("-", stdin=StringIO("agent-from-stdin\nextra-line\n"))
     assert result == "agent-from-stdin"
 
 
 def test_resolve_stdin_placeholder_dash_skips_leading_empty_lines() -> None:
-    stdin = StringIO("\n\nagent-from-stdin\n")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        result = resolve_stdin_placeholder("-")
+    result = resolve_stdin_placeholder("-", stdin=StringIO("\n\nagent-from-stdin\n"))
     assert result == "agent-from-stdin"
 
 
 def test_resolve_stdin_placeholder_dash_with_tty_raises_error() -> None:
-    tty_stdin = _TtyStringIO("")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", tty_stdin):
-        with pytest.raises(UserInputError, match="requires piped input"):
-            resolve_stdin_placeholder("-")
+    with pytest.raises(UserInputError, match="requires piped input"):
+        resolve_stdin_placeholder("-", stdin=_TtyStringIO(""))
 
 
 def test_resolve_stdin_placeholder_dash_with_empty_stdin_raises_error() -> None:
-    stdin = StringIO("")
-    with patch("imbue.mng.cli.stdin_utils.sys.stdin", stdin):
-        with pytest.raises(UserInputError, match="stdin is empty"):
-            resolve_stdin_placeholder("-")
+    with pytest.raises(UserInputError, match="stdin is empty"):
+        resolve_stdin_placeholder("-", stdin=StringIO(""))

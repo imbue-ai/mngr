@@ -1,24 +1,25 @@
 import sys
+from typing import TextIO
 
 from imbue.mng.errors import UserInputError
 
 STDIN_PLACEHOLDER = "-"
 
 
-def _read_identifiers_from_stdin() -> list[str]:
-    """Read identifiers from stdin, one per line.
+def _read_identifiers_from_stream(stream: TextIO) -> list[str]:
+    """Read identifiers from a text stream, one per line.
 
     Strips whitespace from each line and skips empty lines.
     """
     identifiers: list[str] = []
-    for line in sys.stdin:
+    for line in stream:
         stripped = line.strip()
         if stripped:
             identifiers.append(stripped)
     return identifiers
 
 
-def expand_stdin_placeholder(identifiers: tuple[str, ...]) -> list[str]:
+def expand_stdin_placeholder(identifiers: tuple[str, ...], stdin: TextIO | None = None) -> list[str]:
     """Expand the '-' stdin placeholder in a sequence of identifiers.
 
     If '-' appears in identifiers, it is replaced with newline-separated
@@ -32,10 +33,11 @@ def expand_stdin_placeholder(identifiers: tuple[str, ...]) -> list[str]:
         return list(identifiers)
     if dash_count > 1:
         raise UserInputError("'-' can only be specified once (stdin can only be consumed once)")
-    if sys.stdin.isatty():
+    stream = stdin if stdin is not None else sys.stdin
+    if stream.isatty():
         raise UserInputError("'-' requires piped input (stdin is a TTY)")
 
-    stdin_values = _read_identifiers_from_stdin()
+    stdin_values = _read_identifiers_from_stream(stream)
     result: list[str] = []
     for identifier in identifiers:
         if identifier == STDIN_PLACEHOLDER:
@@ -45,7 +47,7 @@ def expand_stdin_placeholder(identifiers: tuple[str, ...]) -> list[str]:
     return result
 
 
-def resolve_stdin_placeholder(identifier: str | None) -> str | None:
+def resolve_stdin_placeholder(identifier: str | None, stdin: TextIO | None = None) -> str | None:
     """Resolve the '-' stdin placeholder for single-target commands.
 
     If identifier is '-', reads a single non-empty line from stdin.
@@ -56,9 +58,10 @@ def resolve_stdin_placeholder(identifier: str | None) -> str | None:
     """
     if identifier is None or identifier != STDIN_PLACEHOLDER:
         return identifier
-    if sys.stdin.isatty():
+    stream = stdin if stdin is not None else sys.stdin
+    if stream.isatty():
         raise UserInputError("'-' requires piped input (stdin is a TTY)")
-    for line in sys.stdin:
+    for line in stream:
         stripped = line.strip()
         if stripped:
             return stripped
