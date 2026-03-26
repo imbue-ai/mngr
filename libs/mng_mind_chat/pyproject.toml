@@ -40,7 +40,7 @@ addopts = [
   "--timeout=120",
   "--cov=imbue.mng_mind_chat",
   "--cov-report=term-missing",
-  "--cov-fail-under=80",
+  "--cov-fail-under=95",
   "-m not acceptance and not release",
 ]
 markers = [
@@ -52,7 +52,7 @@ markers = [
 source = ["imbue/mng_mind_chat"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 95
 omit = [
     "*_test.py",
     "test_*.py",
