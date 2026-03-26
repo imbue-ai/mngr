@@ -102,8 +102,9 @@ mng create my-task --branch ":feature/my-task"
 mng create my-task --copy
 # that is used by default if you're not in a git repo
 
-# you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
-mng create my-task --copy --branch main
+# you can disable new branch creation entirely by omitting the :NEW part:
+mng create my-task --branch main
+# this checks out the existing branch in the worktree (or copy) without creating a new one
 
 # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
 mng create my-task --clone

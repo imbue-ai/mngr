@@ -1,5 +1,7 @@
+import gc
 import subprocess
 import time
+import warnings
 from io import BytesIO
 from threading import Event
 
@@ -12,6 +14,7 @@ from imbue.concurrency_group.subprocess_utils import OutputGatherer
 from imbue.concurrency_group.subprocess_utils import PartialOutputContainer
 from imbue.concurrency_group.subprocess_utils import _is_timeout
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
+from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 
 
 def test_check_raises_process_timeout_error_when_timed_out() -> None:
@@ -352,3 +355,18 @@ def test_gather_output_handles_none_reads() -> None:
     stdout_output, stderr_output = gatherer.get_output()
     assert stdout_output == b""
     assert stderr_output == b""
+
+
+def test_run_local_command_closes_subprocess_pipes() -> None:
+    """Verify stdout/stderr pipes are closed after command completes, not left for GC."""
+    gc.collect()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        run_local_command_modern_version(["echo", "hello"])
+        gc.collect()
+
+    resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert resource_warnings == [], (
+        f"Subprocess pipes not closed explicitly; got {len(resource_warnings)} ResourceWarning(s): "
+        + ", ".join(str(w.message) for w in resource_warnings)
+    )
