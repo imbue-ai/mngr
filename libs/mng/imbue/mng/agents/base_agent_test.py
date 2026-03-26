@@ -1010,8 +1010,8 @@ class _StubHost:
 def _create_agent_with_stub_host(
     temp_mng_ctx: MngContext,
     stub: _StubHost,
-    name: AgentName,
     cls: type[BaseAgent] = BaseAgent,
+    name: AgentName | None = None,
     **kwargs: Any,
 ) -> BaseAgent:
     """Create an agent with a stub host for command recording.
@@ -1023,7 +1023,7 @@ def _create_agent_with_stub_host(
     """
     return cls.model_construct(
         id=AgentId.generate(),
-        name=name,
+        name=name if name is not None else AgentName("stub-agent"),
         agent_type=AgentTypeName("test"),
         work_dir=Path("/tmp/stub-work"),
         create_time=datetime.now(timezone.utc),
@@ -1040,7 +1040,7 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
 ) -> None:
     """Short messages should use tmux send-keys -l."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     agent._send_tmux_literal_keys("mng-test:0", "hello")
 
@@ -1055,7 +1055,7 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
 ) -> None:
     """Messages >= 1024 chars should use write_text_file + load-buffer + paste-buffer."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     long_message = "x" * 1024
     agent._send_tmux_literal_keys("mng-test:0", long_message)
@@ -1083,7 +1083,7 @@ def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
             CommandResult(success=False, stdout="", stderr="load failed"),
         ]
     )
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     with pytest.raises(SendMessageError, match="load-buffer failed"):
         agent._send_tmux_literal_keys("mng-test:0", "x" * 1024)
@@ -1099,7 +1099,7 @@ def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
             CommandResult(success=False, stdout="", stderr="paste failed"),
         ]
     )
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     with pytest.raises(SendMessageError, match="paste-buffer failed"):
         agent._send_tmux_literal_keys("mng-test:0", "x" * 1024)
@@ -1114,7 +1114,7 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
             CommandResult(success=False, stdout="", stderr="command too long"),
         ]
     )
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     with pytest.raises(SendMessageError, match="send-keys failed"):
         agent._send_tmux_literal_keys("mng-test:0", "hello")
@@ -1125,7 +1125,7 @@ def test_send_tmux_literal_keys_long_message_sanitizes_slash_in_session_name(
 ) -> None:
     """Session names with '/' should produce flat temp file paths (no nested dirs)."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("foo/bar"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, name=AgentName("foo/bar"))
 
     long_message = "x" * 1024
     agent._send_tmux_literal_keys("mng-test:0", long_message)
@@ -1146,7 +1146,7 @@ def test_send_message_simple_sends_keys_and_enter(
 ) -> None:
     """_send_message_simple should send keys then send Enter."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     agent._send_message_simple("mng-test:0", "hello")
 
@@ -1166,7 +1166,7 @@ def test_send_message_simple_raises_on_enter_failure(
             CommandResult(success=False, stdout="", stderr="enter failed"),
         ]
     )
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     with pytest.raises(SendMessageError, match="send-keys Enter failed"):
         agent._send_message_simple("mng-test:0", "hello")
@@ -1182,7 +1182,7 @@ def test_raise_send_timeout_raises_send_message_error(
 ) -> None:
     """_raise_send_timeout should raise SendMessageError with the given reason."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     with pytest.raises(SendMessageError, match="timeout reason"):
         agent._raise_send_timeout("mng-test:0", "timeout reason")
@@ -1198,7 +1198,7 @@ def test_get_command_basename_full_path(
 ) -> None:
     """_get_command_basename should extract basename from a full path."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     assert agent._get_command_basename(CommandString("/usr/bin/python3 script.py")) == "python3"
 
@@ -1208,7 +1208,7 @@ def test_get_command_basename_simple_command(
 ) -> None:
     """_get_command_basename should handle a simple command name."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     assert agent._get_command_basename(CommandString("sleep 1000")) == "sleep"
 
@@ -1218,7 +1218,7 @@ def test_get_command_basename_single_word(
 ) -> None:
     """_get_command_basename should return the command itself for a single word."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     assert agent._get_command_basename(CommandString("python3")) == "python3"
 
@@ -1228,7 +1228,7 @@ def test_get_command_basename_strips_leading_subshell_syntax(
 ) -> None:
     """_get_command_basename should strip leading '(' from subshell-wrapped commands."""
     stub = _StubHost()
-    agent = _create_agent_with_stub_host(temp_mng_ctx, stub, AgentName("stub-agent"))
+    agent = _create_agent_with_stub_host(temp_mng_ctx, stub)
 
     assert agent._get_command_basename(CommandString("( /usr/bin/script.sh session ) &")) == "script.sh"
 
