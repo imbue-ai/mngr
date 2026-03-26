@@ -257,6 +257,7 @@ current.tar.gz
 # Autofix session artifacts
 .reviewer/outputs/
 .reviewer/settings.local.json
+.reviews/
 
 # Stuck agent tracking (stop hook escape valve)
 .claude/blocked_stop_commits
