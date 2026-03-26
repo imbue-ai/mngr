@@ -194,6 +194,8 @@ def test_agent_creator_start_creation_with_custom_name(tmp_path: Path) -> None:
 
     creator.wait_for_completion(agent_id, timeout=10.0)
 
+    creator.wait_for_completion(agent_id, timeout=10.0)
+
 
 def test_agent_creator_get_log_queue_returns_none_for_unknown() -> None:
     creator = AgentCreator(
