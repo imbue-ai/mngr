@@ -90,7 +90,7 @@ def generate_html_report(
                 agent_artifact_runs[str(r.agent_name)] = runs
 
     toc_html = _build_toc_sidebar(counts)
-    tables_html = _build_grouped_tables(results, agent_artifact_runs, integrator)
+    tables_html = _build_grouped_tables(results, agent_artifact_runs, integrator, run_commands)
     panels_html = _build_artifact_panels(agent_artifact_runs)
 
     has_artifacts = bool(agent_artifact_runs)
@@ -182,6 +182,7 @@ def _build_grouped_tables(
     results: list[TestMapReduceResult],
     agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] | None = None,
     integrator: IntegratorResult | None = None,
+    run_commands: list[tuple[str, str]] | None = None,
 ) -> str:
     """Build HTML tables grouped by report section."""
     agent_artifact_runs = agent_artifact_runs or {}
@@ -208,6 +209,25 @@ def _build_grouped_tables(
 
         is_running = sec == ReportSection.RUNNING
         sections += f'    <h2 id="{anchor}" style="color: {color};">{label} ({len(group)})</h2>\n'
+
+        # Show resolution hint for the blocked section
+        if sec == ReportSection.BLOCKED:
+            reintegrate_cmd = ""
+            if run_commands:
+                for cmd_label, cmd_text in run_commands:
+                    if "reintegrate" in cmd_label.lower():
+                        reintegrate_cmd = html.escape(cmd_text)
+                        break
+            sections += (
+                '    <div class="blocked-hint">\n'
+                "      <p>To resolve issues with a blocked agent:</p>\n"
+                "      <ol>\n"
+                "        <li><code>mng connect $agent_name</code></li>\n"
+                '        <li>When done, tell it to "regenerate the outcome file"</li>\n'
+            )
+            if reintegrate_cmd:
+                sections += f"        <li>Run: <code>{reintegrate_cmd}</code></li>\n"
+            sections += "      </ol>\n    </div>\n"
 
         # Show squashed commit hash for the non-impl fixes section
         if sec == ReportSection.NON_IMPL_FIXES and integrator is not None and integrator.squashed_commit_hash:
@@ -293,6 +313,10 @@ def _html_report_css() -> str:
         " margin-bottom: 1.5rem; font-size: 0.85rem; }\n"
         "    .run-cmd { margin: 0.3rem 0; }\n"
         "    .run-cmd-label { color: rgb(80, 80, 80); }\n"
+        "    .blocked-hint { background: rgb(255, 243, 224); border-left: 3px solid rgb(244, 67, 54);"
+        " padding: 0.5rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; border-radius: 0 4px 4px 0; }\n"
+        "    .blocked-hint p { margin: 0 0 0.3rem 0; font-weight: 600; }\n"
+        "    .blocked-hint ol { margin: 0; padding-left: 1.5rem; }\n"
         "    .toc-sidebar { position: sticky; top: 2rem; width: 200px; float: left;"
         " padding-right: 1rem; }\n"
         "    .toc-link { display: block; font-weight: 600; font-size: 0.9rem;"
