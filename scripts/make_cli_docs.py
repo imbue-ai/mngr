@@ -636,60 +636,6 @@ def generate_pypi_readme(repo_root: Path) -> None:
         print(f"Updated: {dest}")
 
 
-# ---------------------------------------------------------------------------
-# Plugin agent/skill generation
-# ---------------------------------------------------------------------------
-
-# Files that need path rewriting for the plugin. Each entry maps a project-level
-# source to a plugin destination, with a list of (old, new) substitution pairs.
-_PLUGIN_REWRITES: dict[tuple[str, str], list[tuple[str, str]]] = {
-    (".claude/agents/verify-and-fix.md", "plugins/mng-skills/agents/verify-and-fix.md"): [
-        (".claude/agents/categories/", "${CLAUDE_PLUGIN_ROOT}/agents/categories/"),
-    ],
-    (".claude/agents/review-conversation.md", "plugins/mng-skills/agents/review-conversation.md"): [
-        ("scripts/filter_transcript.py", "${CLAUDE_PLUGIN_ROOT}/scripts/filter_transcript.py"),
-    ],
-    (".claude/skills/fix-something/SKILL.md", "plugins/mng-skills/skills/fix-something/SKILL.md"): [
-        ("./scripts/random_fixme.sh", "${CLAUDE_PLUGIN_ROOT}/scripts/random_fixme.sh"),
-    ],
-    (".claude/skills/verify-conversation/SKILL.md", "plugins/mng-skills/skills/verify-conversation/SKILL.md"): [
-        ("./scripts/export_transcript_paths.sh", "${CLAUDE_PLUGIN_ROOT}/scripts/export_transcript_paths.sh"),
-        ("scripts/filter_transcript.py", "${CLAUDE_PLUGIN_ROOT}/scripts/filter_transcript.py"),
-        (".claude/agents/categories/", "${CLAUDE_PLUGIN_ROOT}/agents/categories/"),
-    ],
-}
-
-_PLUGIN_GENERATION_COMMENT = (
-    "<!-- This file is auto-generated from the project-level source. Do not edit directly. -->\n"
-    "<!-- To modify, edit the source file and run: uv run python scripts/make_cli_docs.py -->\n\n"
-)
-
-
-def generate_plugin_rewrites(repo_root: Path) -> None:
-    """Generate plugin agent/skill files by rewriting paths in project-level sources.
-
-    Some plugin files need ${CLAUDE_PLUGIN_ROOT} substitutions because the plugin
-    is installed in a cache directory where relative paths won't resolve. This
-    function generates those files from the project-level sources so they stay
-    in sync automatically.
-    """
-    for (src_rel, dest_rel), substitutions in _PLUGIN_REWRITES.items():
-        src = repo_root / src_rel
-        dest = repo_root / dest_rel
-
-        content = src.read_text()
-        for old, new in substitutions:
-            content = content.replace(old, new)
-
-        content = _PLUGIN_GENERATION_COMMENT + content
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        existing_content = dest.read_text() if dest.exists() else None
-        if content != existing_content:
-            dest.write_text(content)
-            print(f"Updated: {dest}")
-
-
 def main() -> None:
     repo_root = Path(__file__).parent.parent
 
@@ -706,9 +652,6 @@ def main() -> None:
     # Generate docs for alias commands
     for command_name in sorted(ALIAS_COMMANDS):
         generate_alias_doc(command_name, base_dir)
-
-    # Generate plugin agent/skill files with path rewrites
-    generate_plugin_rewrites(repo_root)
 
 
 if __name__ == "__main__":

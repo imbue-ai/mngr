@@ -34,6 +34,17 @@
       }
     ]
   },
+  "extraKnownMarketplaces": {
+    "mng-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "imbue-ai/mng"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "mng-skills@mng-marketplace": true
+  },
   "model": "opus[1m]",
   "effortLevel": "high",
   "statusLine": {

@@ -1,4 +1,5 @@
 ---
+name: convert-github-issues-to-fixmes
 description: Convert triaged autoclaude GitHub issues into FIXMEs in the codebase. Use when you want to process issues that have been triaged by authorized users.
 ---
 

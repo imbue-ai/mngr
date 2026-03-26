@@ -1,4 +1,5 @@
 ---
+name: update-issues-in-repo
 description: Convert a file containing identified issues into a tracked file in current_tasks/. Use after running identify-* commands to create a local record of current issues.
 ---
 

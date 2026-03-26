@@ -1,4 +1,5 @@
 ---
+name: create-task-from-json
 argument-hint: [json_file] [context_file] [output_dir]
 description: Create a prompt from a short task description in a JSON file
 ---

@@ -1,4 +1,5 @@
 ---
+name: sync-tutorial-to-e2e-tests
 argument-hint: <script_file> <test_directory>
 description: Match tutorial script blocks to e2e pytest functions and add missing tests
 ---
