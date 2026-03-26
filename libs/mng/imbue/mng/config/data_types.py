@@ -639,6 +639,10 @@ class MngContext(FrozenModel):
         default_factory=lambda: ConcurrencyGroup(name="default"),
         description="Top-level concurrency group for managing spawned processes",
     )
+    project_root: Path | None = Field(
+        default=None,
+        description="Project root directory (git worktree root), used as cwd for pre-command scripts",
+    )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
         """Get a plugin's typed config, falling back to defaults if absent."""

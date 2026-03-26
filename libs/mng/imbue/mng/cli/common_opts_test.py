@@ -1,5 +1,6 @@
 """Tests for common_opts module."""
 
+from pathlib import Path
 from typing import Any
 
 import click
@@ -63,6 +64,24 @@ def test_run_single_script_captures_stderr(cg: ConcurrencyGroup) -> None:
     script, exit_code, stdout, stderr = _run_single_script("echo error >&2 && exit 1", cg)
     assert exit_code == 1
     assert "error" in stderr
+
+
+def test_run_single_script_uses_cwd(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """_run_single_script should run the script in the specified cwd."""
+    script, exit_code, stdout, stderr = _run_single_script("pwd", cg, cwd=tmp_path)
+    assert exit_code == 0
+    assert stdout.strip() == str(tmp_path)
+
+
+def test_run_pre_command_scripts_uses_cwd(tmp_path: Path, mng_test_prefix: str, cg: ConcurrencyGroup) -> None:
+    """_run_pre_command_scripts should pass cwd to scripts."""
+    marker = tmp_path / "marker.txt"
+    config = MngConfig(
+        prefix=mng_test_prefix,
+        pre_command_scripts={"create": ["touch marker.txt"]},
+    )
+    _run_pre_command_scripts(config, "create", cg, cwd=tmp_path)
+    assert marker.exists()
 
 
 def test_run_pre_command_scripts_no_scripts(mng_test_prefix: str, cg: ConcurrencyGroup) -> None:
