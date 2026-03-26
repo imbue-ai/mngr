@@ -355,9 +355,12 @@ def launch_all_test_agents(
                 )
             )
         for future in futures:
-            info, host = future.result()
-            agents.append(info)
-            agent_hosts[str(info.agent_id)] = host
+            try:
+                info, host = future.result()
+                agents.append(info)
+                agent_hosts[str(info.agent_id)] = host
+            except (MngError, HostError, OSError, BaseExceptionGroup) as exc:
+                logger.warning("Failed to launch agent: {}", exc)
 
     logger.info("Launched {} agent(s)", len(agents))
     return agents, agent_hosts, launch_config.snapshot
@@ -382,7 +385,11 @@ def _launch_agents_up_to_limit(
     """
     while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
         test_node_id = remaining_tests.pop(0)
-        info, host = launch_test_agent(test_node_id, config, mng_ctx, pytest_flags, prompt_suffix)
+        try:
+            info, host = launch_test_agent(test_node_id, config, mng_ctx, pytest_flags, prompt_suffix)
+        except (MngError, HostError, OSError, BaseExceptionGroup) as exc:
+            logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
+            continue
         all_agents.append(info)
         all_hosts[str(info.agent_id)] = host
         agent_id_to_info[str(info.agent_id)] = info
