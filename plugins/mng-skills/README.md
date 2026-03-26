@@ -8,8 +8,6 @@ Code review, architecture verification, conversation analysis, and development w
 claude plugin marketplace add imbue-ai/mng && claude plugin install mng-skills@mng-marketplace
 ```
 
-If you're working in the mng repo itself, the plugin is offered automatically when you trust the project folder.
-
 ## What's included
 
 ### Code review
