@@ -17,6 +17,10 @@ If you're working in the mng repo itself, the plugin is offered automatically wh
 - **autofix** -- Iteratively find and fix code issues on a branch. Spawns fresh-context agents for each pass, presents fixes for review, and reverts any you reject.
 - **verify-architecture** -- Assess whether the approach on a branch fits existing codebase patterns. Generates independent solution proposals before examining the diff to avoid confirmation bias.
 - **verify-conversation** -- Review the conversation transcript for behavioral issues (misleading behavior, disobeyed instructions, feedback worth saving).
+- **reviewer-autofix-enable / disable** -- Toggle the autofix gate.
+- **reviewer-autofix-all-issues / ignore-minor-issues** -- Control issue severity threshold for unattended autofix.
+- **reviewer-ci-enable / disable** -- Toggle the CI gate.
+- **reviewer-verify-conversation-enable / disable** -- Toggle the conversation review gate.
 
 ### Development workflow
 
@@ -28,15 +32,6 @@ If you're working in the mng repo itself, the plugin is offered automatically wh
 - **identify-outdated-docstrings** -- Find docstrings that no longer match what the code does.
 - **create-fixmes** -- Create FIXME comments in code from an identified-issues file.
 - **create-github-issues-from-file** -- Convert identified issues into GitHub issues.
-
-### Reviewer configuration
-
-These configure which gates are checked before a session can finish:
-
-- **reviewer-autofix-enable / disable** -- Toggle the autofix gate.
-- **reviewer-autofix-all-issues / ignore-minor-issues** -- Control issue severity threshold for unattended autofix.
-- **reviewer-ci-enable / disable** -- Toggle the CI gate.
-- **reviewer-verify-conversation-enable / disable** -- Toggle the conversation review gate.
 
 ### Writing
 
