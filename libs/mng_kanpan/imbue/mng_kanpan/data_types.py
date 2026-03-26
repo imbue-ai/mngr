@@ -33,6 +33,7 @@ class BoardSection(UpperCaseStrEnum):
     """Sections for grouping agents on the board, based on PR state."""
 
     STILL_COOKING = auto()
+    PRS_FAILED = auto()
     PR_BEING_REVIEWED = auto()
     PR_MERGED = auto()
     PR_CLOSED = auto()
@@ -80,16 +81,27 @@ class BoardSnapshot(FrozenModel):
 
     entries: tuple[AgentBoardEntry, ...] = Field(description="All agent board entries")
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during fetch")
-    prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched from GitHub")
+    repo_pr_loaded: dict[str, bool] = Field(
+        description="Per-repo PR load status: repo_path -> True if PRs loaded successfully, False if failed"
+    )
     fetch_time_seconds: float = Field(description="Time taken to fetch data")
 
 
 class GitHubData(FrozenModel):
-    """GitHub PR data fetched via the gh CLI, used to enrich agent snapshots."""
+    """GitHub PR data fetched via the gh CLI, used to enrich agent snapshots.
 
-    pr_by_branch: dict[str, PrInfo] = Field(description="Mapping from branch name to the most relevant PR")
-    repo_path: str | None = Field(default=None, description="GitHub owner/repo path (e.g. 'owner/repo')")
-    prs_loaded: bool = Field(default=True, description="Whether PR data was successfully fetched")
+    Supports agents across multiple GitHub repos. PRs are fetched per-repo and
+    merged into a single branch index. Per-agent repo paths allow correct
+    create_pr_url generation and per-repo prs_loaded tracking.
+    """
+
+    pr_by_repo_branch: dict[str, dict[str, PrInfo]] = Field(
+        default_factory=dict,
+        description="Nested mapping: repo_path -> branch -> most relevant PR",
+    )
+    repo_pr_loaded: dict[str, bool] = Field(
+        description="Per-repo PR load status: repo_path -> True if PRs loaded successfully, False if failed"
+    )
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during remote fetch")
 
 

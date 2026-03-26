@@ -42,6 +42,7 @@ from imbue.mng_kanpan.data_types import PrState
 from imbue.mng_kanpan.data_types import RefreshHook
 from imbue.mng_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mng_kanpan.fetcher import fetch_board_snapshot
+from imbue.mng_kanpan.fetcher import repo_path_from_labels
 from imbue.mng_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
@@ -64,6 +65,7 @@ PALETTE = [
     ("section_cancelled", "dark gray", ""),
     ("section_in_review", "light cyan", ""),
     ("section_in_progress", "yellow", ""),
+    ("section_prs_failed", "light red", ""),
     # CI checks (only failing and pending get color; passing is default)
     ("check_failing", "light red", ""),
     ("check_failing_focus", "light red,standout", ""),
@@ -82,6 +84,7 @@ BOARD_SECTION_ORDER: tuple[BoardSection, ...] = (
     BoardSection.PR_CLOSED,
     BoardSection.PR_BEING_REVIEWED,
     BoardSection.STILL_COOKING,
+    BoardSection.PRS_FAILED,
     BoardSection.MUTED,
 )
 
@@ -91,6 +94,7 @@ _SECTION_PREFIX: dict[BoardSection, str] = {
     BoardSection.PR_CLOSED: "Cancelled",
     BoardSection.PR_BEING_REVIEWED: "In review",
     BoardSection.STILL_COOKING: "In progress",
+    BoardSection.PRS_FAILED: "In progress",
     BoardSection.MUTED: "Muted",
 }
 
@@ -99,6 +103,7 @@ _SECTION_SUFFIX: dict[BoardSection, str] = {
     BoardSection.PR_CLOSED: "PR closed",
     BoardSection.PR_BEING_REVIEWED: "PR pending",
     BoardSection.STILL_COOKING: "no PR yet",
+    BoardSection.PRS_FAILED: "PRs not loaded",
     BoardSection.MUTED: "",
 }
 
@@ -107,6 +112,7 @@ _SECTION_ATTR: dict[BoardSection, str] = {
     BoardSection.PR_CLOSED: "section_cancelled",
     BoardSection.PR_BEING_REVIEWED: "section_in_review",
     BoardSection.STILL_COOKING: "section_in_progress",
+    BoardSection.PRS_FAILED: "section_prs_failed",
     BoardSection.MUTED: "section_muted",
 }
 
@@ -304,7 +310,8 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
     entry = state.index_to_entry.get(walker_idx)
     if entry is None:
         return
-    section = _classify_entry(entry)
+    repo_pr_loaded = state.snapshot.repo_pr_loaded if state.snapshot is not None else {}
+    section = _classify_entry(entry, repo_pr_loaded)
     name_markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]] = _get_name_cell_markup(entry, mark_key)
     if section == BoardSection.MUTED:
         name_markup = _flatten_markup_to_muted(name_markup)
@@ -544,11 +551,8 @@ def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: 
         entry.model_copy(update={"is_muted": is_muted}) if entry.name == agent_name else entry
         for entry in state.snapshot.entries
     )
-    state.snapshot = BoardSnapshot(
-        entries=new_entries,
-        errors=state.snapshot.errors,
-        prs_loaded=state.snapshot.prs_loaded,
-        fetch_time_seconds=state.snapshot.fetch_time_seconds,
+    state.snapshot = state.snapshot.model_copy_update(
+        to_update(state.snapshot.field_ref().entries, new_entries),
     )
 
 
@@ -800,7 +804,8 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     try:
         new_snapshot = state.refresh_future.result()
         should_carry_forward = was_local_only or (
-            not new_snapshot.prs_loaded and state.snapshot is not None and state.snapshot.prs_loaded
+            state.snapshot is not None
+            and _has_regressed_repos(state.snapshot.repo_pr_loaded, new_snapshot.repo_pr_loaded)
         )
         if should_carry_forward and state.snapshot is not None:
             new_snapshot = _carry_forward_pr_data(state.snapshot, new_snapshot)
@@ -809,11 +814,11 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
         failed = True
         logger.debug("Refresh failed: {}", e)
         if state.snapshot is not None:
-            state.snapshot = BoardSnapshot(
-                entries=state.snapshot.entries,
-                errors=(*state.snapshot.errors, f"Refresh failed: {e}"),
-                prs_loaded=state.snapshot.prs_loaded,
-                fetch_time_seconds=state.snapshot.fetch_time_seconds,
+            state.snapshot = state.snapshot.model_copy_update(
+                to_update(
+                    state.snapshot.field_ref().errors,
+                    (*state.snapshot.errors, f"Refresh failed: {e}"),
+                ),
             )
     finally:
         state.refresh_future = None
@@ -842,17 +847,34 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 @pure
-def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
-    """Carry forward PR data from a previous snapshot when the new one failed to load PRs.
+def _has_regressed_repos(old_status: dict[str, bool], new_status: dict[str, bool]) -> bool:
+    """Check if any repo that previously loaded successfully has now failed or is missing."""
+    return any(old_status.get(repo) is True and new_status.get(repo) is not True for repo in old_status)
 
-    Matches entries by agent name and copies pr and create_pr_url from the old snapshot.
-    The new snapshot's prs_loaded is set to True since we're using valid (stale) data.
+
+@pure
+def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
+    """Carry forward PR data from a previous snapshot for agents whose repo failed to load.
+
+    For each agent, if its repo was loaded in the old snapshot but not in the new one,
+    copies pr and create_pr_url from the old entry. Agents whose repo loaded successfully
+    in the new snapshot keep their fresh data.
     """
     old_by_name = {entry.name: entry for entry in old.entries}
     updated_entries = []
     for entry in new.entries:
+        agent_repo = repo_path_from_labels(entry.column_data.labels)
+        repo_regressed = (
+            agent_repo is not None
+            and old.repo_pr_loaded.get(agent_repo) is True
+            and new.repo_pr_loaded.get(agent_repo) is not True
+        )
         old_entry = old_by_name.get(entry.name)
-        if old_entry is not None and (old_entry.pr is not None or old_entry.create_pr_url is not None):
+        if (
+            repo_regressed
+            and old_entry is not None
+            and (old_entry.pr is not None or old_entry.create_pr_url is not None)
+        ):
             ref = entry.field_ref()
             updated = entry.model_copy_update(
                 to_update(ref.pr, old_entry.pr),
@@ -861,28 +883,38 @@ def _carry_forward_pr_data(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnaps
             updated_entries.append(updated)
         else:
             updated_entries.append(entry)
+    # Merge: for regressed repos, restore True from old; keep new status for everything else.
+    merged_status = {**new.repo_pr_loaded}
+    for repo, loaded in old.repo_pr_loaded.items():
+        if loaded and not merged_status.get(repo):
+            merged_status[repo] = True
     return BoardSnapshot(
         entries=tuple(updated_entries),
         errors=new.errors,
-        prs_loaded=True,
+        repo_pr_loaded=merged_status,
         fetch_time_seconds=new.fetch_time_seconds,
     )
 
 
-def _classify_entry(entry: AgentBoardEntry) -> BoardSection:
+def _classify_entry(entry: AgentBoardEntry, repo_pr_loaded: dict[str, bool]) -> BoardSection:
     """Determine which board section an agent belongs to based on its PR state.
 
     Muted agents are always placed in the MUTED section regardless of PR state.
+    Agents whose repo failed to load PRs go into PRS_FAILED (agents with no
+    remote label are not considered failed -- they just have no upstream).
     """
     if entry.is_muted:
         return BoardSection.MUTED
-    if entry.pr is None:
-        return BoardSection.STILL_COOKING
-    if entry.pr.state == PrState.MERGED:
-        return BoardSection.PR_MERGED
-    if entry.pr.state == PrState.CLOSED:
-        return BoardSection.PR_CLOSED
-    return BoardSection.PR_BEING_REVIEWED
+    if entry.pr is not None:
+        if entry.pr.state == PrState.MERGED:
+            return BoardSection.PR_MERGED
+        if entry.pr.state == PrState.CLOSED:
+            return BoardSection.PR_CLOSED
+        return BoardSection.PR_BEING_REVIEWED
+    agent_repo = repo_path_from_labels(entry.column_data.labels)
+    if agent_repo is not None and repo_pr_loaded.get(agent_repo) is False:
+        return BoardSection.PRS_FAILED
+    return BoardSection.STILL_COOKING
 
 
 def _get_state_attr(entry: AgentBoardEntry) -> str:
@@ -1240,7 +1272,7 @@ def _build_board_widgets(
     # Classify entries into sections
     by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
     for entry in snapshot.entries:
-        section = _classify_entry(entry)
+        section = _classify_entry(entry, snapshot.repo_pr_loaded)
         by_section.setdefault(section, []).append(entry)
 
     has_content = False
@@ -1256,14 +1288,7 @@ def _build_board_widgets(
         else:
             walker.append(Divider())
 
-        if section == BoardSection.STILL_COOKING and not snapshot.prs_loaded:
-            section_attr = _SECTION_ATTR[section]
-            heading: list[str | tuple[Hashable, str]] = [
-                (section_attr, "In progress"),
-                f" - PRs not loaded ({len(entries)})",
-            ]
-        else:
-            heading = _format_section_heading(section, len(entries))
+        heading = _format_section_heading(section, len(entries))
         walker.append(Text(heading))
         has_content = True
 

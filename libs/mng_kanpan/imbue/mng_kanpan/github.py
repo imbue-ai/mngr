@@ -20,30 +20,33 @@ class FetchPrsResult:
         self.error = error
 
 
-def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None) -> FetchPrsResult:
-    """Fetch all PRs from the current repo using gh CLI.
+def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
+    """Fetch all PRs from a repo using gh CLI.
 
-    Runs gh pr list to get recent PRs in all states. The cwd parameter should
-    point to a directory inside the target git repository so that gh can detect
-    which GitHub repo to query.
+    Repo is identified by repo ('owner/repo' string passed via --repo) or
+    by cwd (a directory inside the target git repository). Prefer repo
+    since it doesn't require a local checkout.
 
     Returns a FetchPrsResult with the PRs and any error message.
     """
     try:
+        cmd = [
+            "gh",
+            "pr",
+            "list",
+            "--author",
+            "@me",
+            "--state",
+            "all",
+            "--json",
+            "number,title,state,headRefName,url,statusCheckRollup,isDraft",
+            "--limit",
+            "500",
+        ]
+        if repo is not None:
+            cmd.extend(["--repo", repo])
         result = cg.run_process_to_completion(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--author",
-                "@me",
-                "--state",
-                "all",
-                "--json",
-                "number,title,state,headRefName,url,statusCheckRollup,isDraft",
-                "--limit",
-                "500",
-            ],
+            cmd,
             timeout=30,
             cwd=cwd,
         )

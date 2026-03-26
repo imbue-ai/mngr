@@ -460,7 +460,10 @@ class _AutoLabels(FrozenModel):
     """Auto-derived agent labels. Field names are the label keys."""
 
     project: str = Field(description="Project name (from git remote or folder name)")
-    remote: str | None = Field(default=None, description="Git remote origin URL")
+    remote: str | None = Field(
+        default=None,
+        description="Git remote origin URL (stored verbatim, may include credentials if the remote uses HTTPS with an embedded PAT)",
+    )
 
 
 class _CreateSetup(FrozenModel):
@@ -821,7 +824,12 @@ def _handle_editor_message(
 
 
 def _get_source_remote_url(source_location: HostLocation) -> str | None:
-    """Get the git remote origin URL from the source location via execute_command."""
+    """Get the git remote origin URL from the source location via execute_command.
+
+    Returns the URL verbatim, which may include embedded credentials (e.g. a
+    GitHub PAT in an HTTPS URL). This is intentional -- stripping credentials
+    would break gh CLI auth for repos that rely on PAT-based HTTPS remotes.
+    """
     result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
     if result.success and result.stdout.strip():
         return result.stdout.strip()

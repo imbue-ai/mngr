@@ -82,33 +82,46 @@ def fetch_agent_snapshot(
     return BoardSnapshot(
         entries=tuple(entries),
         errors=tuple(errors),
-        prs_loaded=False,
+        repo_pr_loaded={},
         fetch_time_seconds=elapsed,
     )
 
 
 def fetch_github_data(mng_ctx: MngContext, agents: list[AgentDetails]) -> GitHubData:
-    """Fetch GitHub PR data and build the PR-to-branch index.
+    """Fetch GitHub PR data from all unique repos and build the PR-to-branch index.
 
-    Returns a GitHubData containing pr_by_branch, repo_path, and any errors.
+    Discovers repos from each agent's 'remote' label (set at creation time).
+    Fetches PRs once per unique repo via gh --repo (no local cwd needed).
+    Agents without the 'remote' label are skipped.
     """
     cg = mng_ctx.concurrency_group
     errors: list[str] = []
 
-    gh_cwd = _find_git_cwd(agents)
+    # Collect unique repos from agent labels.
+    all_repos: set[str] = set()
+    for agent in agents:
+        repo_path = _get_agent_repo_path(agent)
+        if repo_path is not None:
+            all_repos.add(repo_path)
 
-    pr_result = fetch_all_prs(cg, cwd=gh_cwd)
-    prs_loaded = pr_result.error is None
-    if pr_result.error is not None:
-        errors.append(pr_result.error)
-    pr_by_branch = _build_pr_branch_index(pr_result.prs)
+    # Fetch PRs once per unique repo via gh --repo.
+    pr_by_repo_branch: dict[str, dict[str, PrInfo]] = {}
+    repo_pr_loaded: dict[str, bool] = {}
 
-    repo_path = _get_github_repo_path(gh_cwd, cg) if gh_cwd is not None else None
+    for repo_path in all_repos:
+        pr_result = fetch_all_prs(cg, repo=repo_path)
+        if pr_result.error is None:
+            repo_index = _build_pr_branch_index(pr_result.prs)
+            if repo_index:
+                pr_by_repo_branch[repo_path] = repo_index
+            repo_pr_loaded[repo_path] = True
+        else:
+            repo_pr_loaded[repo_path] = False
+            errors.append(pr_result.error)
 
     return GitHubData(
-        pr_by_branch=pr_by_branch,
-        repo_path=repo_path,
-        prs_loaded=prs_loaded,
+        pr_by_repo_branch=pr_by_repo_branch,
+        repo_pr_loaded=repo_pr_loaded,
         errors=tuple(errors),
     )
 
@@ -118,13 +131,16 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
     """Enrich a local-only snapshot with GitHub PR data.
 
     For each entry, looks up PR by branch name and attaches pr and create_pr_url.
+    create_pr_url is only generated for agents whose repo had a successful PR fetch.
     """
     enriched_entries: list[AgentBoardEntry] = []
     for entry in snapshot.entries:
-        pr = remote.pr_by_branch.get(entry.branch) if entry.branch else None
+        agent_repo = repo_path_from_labels(entry.column_data.labels)
+        pr = _lookup_pr(remote, agent_repo, entry.branch)
+        agent_prs_loaded = agent_repo is not None and remote.repo_pr_loaded.get(agent_repo) is True
         create_pr_url = (
-            _build_create_pr_url(remote.repo_path, entry.branch)
-            if remote.prs_loaded and remote.repo_path and entry.branch and pr is None
+            _build_create_pr_url(agent_repo, entry.branch)
+            if agent_prs_loaded and entry.branch and pr is None
             else None
         )
         enriched_entry = entry.model_copy_update(
@@ -136,7 +152,7 @@ def enrich_snapshot_with_github_data(snapshot: BoardSnapshot, remote: GitHubData
     return BoardSnapshot(
         entries=tuple(enriched_entries),
         errors=(*snapshot.errors, *remote.errors),
-        prs_loaded=remote.prs_loaded,
+        repo_pr_loaded=remote.repo_pr_loaded,
         fetch_time_seconds=snapshot.fetch_time_seconds,
     )
 
@@ -185,11 +201,11 @@ def fetch_board_snapshot(
         is_local = agent.host.provider_name == LOCAL_PROVIDER_NAME
         local_work_dir = agent.work_dir if is_local and agent.work_dir.exists() else None
         commits_ahead = _get_commits_ahead(local_work_dir, cg) if local_work_dir is not None else None
-        pr = remote.pr_by_branch.get(branch) if branch else None
+        agent_repo = _get_agent_repo_path(agent)
+        pr = _lookup_pr(remote, agent_repo, branch)
+        agent_prs_loaded = agent_repo is not None and remote.repo_pr_loaded.get(agent_repo) is True
         create_pr_url = (
-            _build_create_pr_url(remote.repo_path, branch)
-            if remote.prs_loaded and remote.repo_path and branch and pr is None
-            else None
+            _build_create_pr_url(agent_repo, branch) if agent_prs_loaded and branch and pr is None else None
         )
         entries.append(
             AgentBoardEntry(
@@ -216,18 +232,15 @@ def fetch_board_snapshot(
     snapshot = BoardSnapshot(
         entries=tuple(entries),
         errors=(*errors, *remote.errors),
-        prs_loaded=remote.prs_loaded,
+        repo_pr_loaded=remote.repo_pr_loaded,
         fetch_time_seconds=time.monotonic() - start_time,
     )
 
     if on_after_refresh:
         after_errors = run_refresh_hooks(cg, on_after_refresh, snapshot.entries)
         if after_errors:
-            snapshot = BoardSnapshot(
-                entries=snapshot.entries,
-                errors=(*snapshot.errors, *after_errors),
-                prs_loaded=snapshot.prs_loaded,
-                fetch_time_seconds=snapshot.fetch_time_seconds,
+            snapshot = snapshot.model_copy_update(
+                to_update(snapshot.field_ref().errors, (*snapshot.errors, *after_errors)),
             )
 
     return snapshot
@@ -313,18 +326,6 @@ def _is_agent_muted(certified_data: Any) -> bool:
     return certified_data.get("plugin", {}).get(PLUGIN_NAME, {}).get("muted", False)
 
 
-def _find_git_cwd(agents: list[AgentDetails]) -> Path | None:
-    """Find a local agent work_dir to use as cwd for gh commands.
-
-    Returns the first accessible local agent work_dir, or None if no local
-    agent has an accessible work_dir.
-    """
-    for agent in agents:
-        if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists():
-            return agent.work_dir
-    return None
-
-
 def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | None:
     """Get the number of commits the local branch is ahead of its remote tracking branch.
 
@@ -340,22 +341,6 @@ def _get_commits_ahead(work_dir: Path | None, cg: ConcurrencyGroup) -> int | Non
         )
         return int(result.stdout.strip())
     except (ProcessError, ValueError):
-        return None
-
-
-def _get_github_repo_path(work_dir: Path, cg: ConcurrencyGroup) -> str | None:
-    """Get the GitHub owner/repo path from a git repository's remote URL.
-
-    Returns a string like "owner/repo", or None if the remote is not GitHub
-    or cannot be determined.
-    """
-    try:
-        result = cg.run_process_to_completion(
-            ["git", "remote", "get-url", "origin"],
-            cwd=work_dir,
-        )
-        return _parse_github_repo_path(result.stdout.strip())
-    except ProcessError:
         return None
 
 
@@ -393,6 +378,30 @@ def _build_create_pr_url(repo_path: str | None, branch: str | None) -> str | Non
     if repo_path is None or branch is None:
         return None
     return f"https://github.com/{repo_path}/compare/{branch}?expand=1"
+
+
+@pure
+def _get_agent_repo_path(agent: AgentDetails) -> str | None:
+    """Get the GitHub repo path for an agent from its 'remote' label."""
+    return repo_path_from_labels(agent.labels)
+
+
+@pure
+def repo_path_from_labels(labels: dict[str, str]) -> str | None:
+    """Extract GitHub 'owner/repo' from a labels dict's 'remote' entry."""
+    remote_url = labels.get("remote")
+    if remote_url is None:
+        return None
+    return _parse_github_repo_path(remote_url)
+
+
+@pure
+def _lookup_pr(remote: GitHubData, agent_repo: str | None, branch: str | None) -> PrInfo | None:
+    """Look up the PR for an agent by its repo and branch."""
+    if not branch or agent_repo is None:
+        return None
+    repo_prs = remote.pr_by_repo_branch.get(agent_repo)
+    return repo_prs.get(branch) if repo_prs is not None else None
 
 
 @pure
