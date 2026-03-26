@@ -45,24 +45,3 @@ def expand_stdin_placeholder(identifiers: tuple[str, ...], stdin: TextIO | None 
         else:
             result.append(identifier)
     return result
-
-
-def resolve_stdin_placeholder(identifier: str | None, stdin: TextIO | None = None) -> str | None:
-    """Resolve the '-' stdin placeholder for single-target commands.
-
-    If identifier is '-', reads a single non-empty line from stdin.
-    Returns the identifier unchanged otherwise, or None if identifier is None.
-
-    Raises UserInputError if '-' is specified but stdin is a TTY, or if
-    stdin contains no non-empty lines.
-    """
-    if identifier is None or identifier != STDIN_PLACEHOLDER:
-        return identifier
-    stream = stdin if stdin is not None else sys.stdin
-    if stream.isatty():
-        raise UserInputError("'-' requires piped input (stdin is a TTY)")
-    for line in stream:
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    raise UserInputError("'-' was specified but stdin is empty")
