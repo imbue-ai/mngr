@@ -58,9 +58,6 @@ mng snapshot create my-agent
 
 # List snapshots
 mng snapshot list my-agent
-
-# Start from a snapshot (creates a new container from the committed image) [future]
-mng start my-agent --snapshot <snapshot-id>
 ```
 
 Snapshots capture the container's filesystem layers. Volume mounts are not included in snapshots.

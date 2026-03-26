@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng start [AGENTS...] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run] [--snapshot <SNAPSHOT>]
+mng start [AGENTS...] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]
 ```
 
 Start stopped agent(s).
@@ -49,13 +49,6 @@ mng start [OPTIONS] [AGENTS]...
 | `--dry-run` | boolean | Show what would be started without actually starting | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNG_AGENT_NAME and MNG_SESSION_NAME env vars are set. | None |
-
-## Snapshot
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--snapshot` | text | Start from a specific snapshot instead of the most recent [future] | None |
-| `--latest`, `--no-latest` | boolean | Start from the most recent snapshot or state [default] [future] | `True` |
 
 ## Common
 
