@@ -1203,9 +1203,9 @@ class Host(BaseHost, OnlineHostInterface):
                     exclude_git=has_git_options,
                 )
 
-            extra_paths = self.mng_ctx.config.work_dir_extra_paths
-            if extra_paths:
-                self._apply_work_dir_extra_paths(source_host, source_path, target_path, extra_paths)
+            self._apply_work_dir_extra_paths(
+                source_host, source_path, target_path, self.mng_ctx.config.work_dir_extra_paths
+            )
 
             # make sure we finished updating the generated work dir state
             mark_generated_work_dir_thread.join(60.0)
@@ -1803,9 +1803,9 @@ class Host(BaseHost, OnlineHostInterface):
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
 
-            extra_paths = self.mng_ctx.config.work_dir_extra_paths
-            if extra_paths:
-                self._apply_work_dir_extra_paths(host, source_path, work_dir_path, extra_paths)
+            self._apply_work_dir_extra_paths(
+                host, source_path, work_dir_path, self.mng_ctx.config.work_dir_extra_paths
+            )
 
             return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
 
