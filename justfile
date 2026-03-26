@@ -76,18 +76,18 @@ test-quick:
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION=600 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "no release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   # parallelism is controlled by PYTEST_NUMPROCESSES env var (default: 4 from pyproject.toml)
-  PYTEST_MAX_DURATION=1200 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "acceptance or not acceptance"
+  PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest --override-ini='cov-fail-under=0' --no-cov -m "acceptance or not acceptance"
 
 # Generate test timings for pytest-split (run periodically to keep timings up to date. Runs all acceptance and release)
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION=6000 uv run pytest --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
+  PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
 
 # useful for running against a single test, regardless of how it is marked
 test target:
-  PYTEST_MAX_DURATION=600 uv run pytest -sv --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
