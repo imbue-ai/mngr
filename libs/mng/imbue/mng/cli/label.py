@@ -1,4 +1,3 @@
-import sys
 from typing import Any
 from typing import assert_never
 
@@ -18,6 +17,7 @@ from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
@@ -52,19 +52,6 @@ def parse_label_string(label_str: str) -> tuple[str, str]:
     if not key:
         raise UserInputError(f"Invalid label format: '{label_str}'. Label key cannot be empty.")
     return key, value
-
-
-def _read_agent_identifiers_from_stdin() -> list[str]:
-    """Read agent identifiers from stdin, one per line.
-
-    Skips empty lines and strips whitespace.
-    """
-    identifiers: list[str] = []
-    for line in sys.stdin:
-        stripped = line.strip()
-        if stripped:
-            identifiers.append(stripped)
-    return identifiers
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -171,25 +158,6 @@ def apply_labels_to_agents_offline(
         raise AgentNotFoundOnHostError(match.agent_id, match.host_id)
 
 
-def _collect_agent_identifiers(opts: LabelCliOptions) -> list[str]:
-    """Collect agent identifiers from positional args, --agent flag, and stdin.
-
-    Reads from stdin automatically when no identifiers are provided and
-    stdin is not a TTY.
-    """
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
-
-    if not agent_identifiers and not opts.label_all:
-        try:
-            if not sys.stdin.isatty():
-                stdin_identifiers = _read_agent_identifiers_from_stdin()
-                agent_identifiers.extend(stdin_identifiers)
-        except (ValueError, AttributeError) as e:
-            logger.debug("Failed to read agent identifiers from stdin: {}", e)
-
-    return agent_identifiers
-
-
 def apply_labels(
     target_agents: list[AgentMatch],
     labels_to_set: dict[str, str],
@@ -284,11 +252,11 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
         key, value = parse_label_string(label_str)
         labels_to_set[key] = value
 
-    # Collect agent identifiers from args, --agent, and stdin
-    agent_identifiers = _collect_agent_identifiers(opts)
+    # Collect agent identifiers from args and --agent flag
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers and not opts.label_all:
-        raise click.UsageError("Must specify at least one agent, use --all, or pipe agent names via stdin")
+        raise click.UsageError("Must specify at least one agent or use --all (use '-' to read from stdin)")
 
     if agent_identifiers and opts.label_all:
         raise click.UsageError("Cannot specify both agent names and --all")
@@ -325,8 +293,8 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="label",
     one_line_description="Set labels on agents",
-    synopsis="mng label [AGENTS...] [--agent <AGENT>] [--all] -l KEY=VALUE [-l KEY=VALUE ...]",
-    arguments_description="- `AGENTS`: Agent name(s) or ID(s) to label. Can also be read from stdin (one per line) when not provided as arguments.",
+    synopsis="mng label [AGENTS...|-] [--agent <AGENT>] [--all] -l KEY=VALUE [-l KEY=VALUE ...]",
+    arguments_description="- `AGENTS`: Agent name(s) or ID(s) to label. Use '-' to read from stdin (one per line).",
     description="""Labels are key-value pairs attached to agents. They are stored in the
 agent's certified data and persist across restarts.
 
@@ -340,7 +308,7 @@ the host to be started.""",
         ("Set a label on an agent", "mng label my-agent --label archived_at=2026-03-15"),
         ("Set multiple labels on multiple agents", "mng label agent1 agent2 -l env=prod -l team=backend"),
         ("Label all agents", "mng label --all --label project=myproject"),
-        ("Read agent names from stdin", "mng list --format '{name}' | mng label -l reviewed=true"),
+        ("Read agent names from stdin", "mng list --format '{name}' | mng label - -l reviewed=true"),
         ("Preview changes", "mng label my-agent --label status=done --dry-run"),
     ),
     see_also=(

@@ -20,6 +20,7 @@ from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
@@ -49,7 +50,6 @@ class LimitCliOptions(CommonCliOptions):
     # Planned features (not yet implemented)
     include: tuple[str, ...]
     exclude: tuple[str, ...]
-    stdin: bool
     # Lifecycle
     start_on_boot: bool | None
     idle_timeout: str | None
@@ -263,11 +263,6 @@ def _resolve_host_identifiers(
     multiple=True,
     help="Exclude agents matching CEL expression (repeatable) [future]",
 )
-@optgroup.option(
-    "--stdin",
-    is_flag=True,
-    help="Read agent and host names/IDs from stdin, one per line [future]",
-)
 @optgroup.group("Behavior")
 @optgroup.option(
     "--dry-run",
@@ -352,8 +347,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--include is not implemented yet")
     if opts.exclude:
         raise NotImplementedError("--exclude is not implemented yet")
-    if opts.stdin:
-        raise NotImplementedError("--stdin is not implemented yet")
     if opts.refresh_ssh_keys:
         raise NotImplementedError("--refresh-ssh-keys is not implemented yet")
     if opts.add_ssh_key:
@@ -375,7 +368,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
         )
 
     # Validate targets: must specify agents, --host, or --all
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
     has_agents = bool(agent_identifiers)
     has_hosts = bool(opts.hosts)
 
@@ -583,7 +576,7 @@ def _apply_agent_changes(
 CommandHelpMetadata(
     key="limit",
     one_line_description="Configure limits for agents and hosts [experimental]",
-    synopsis="mng [limit|lim] [AGENTS...] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]",
+    synopsis="mng [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to configure (can also be specified via `--agent`)",
     description="""Agents effectively have permissions that are equivalent to the *union* of all
 permissions on the same host. Changing permissions for agents requires them

@@ -16,6 +16,8 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import STDIN_PLACEHOLDER
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import UserInputError
@@ -40,7 +42,6 @@ class MessageCliOptions(CommonCliOptions):
     all_agents: bool
     include: tuple[str, ...]
     exclude: tuple[str, ...]
-    stdin: bool
     message_content: str | None
     provider: tuple[str, ...]
     on_error: str
@@ -73,11 +74,6 @@ class MessageCliOptions(CommonCliOptions):
     "--exclude",
     multiple=True,
     help="Exclude agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--stdin",
-    is_flag=True,
-    help="Read agent and host IDs or names from stdin (one per line)",
 )
 @optgroup.option(
     "--start/--no-start",
@@ -123,13 +119,8 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     )
 
     # Build list of agent identifiers
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
-
-    # Handle stdin input for agent identifiers
-    stdin_refs: list[str] = []
-    if opts.stdin:
-        stdin_refs = [line.strip() for line in sys.stdin if line.strip()]
-        agent_identifiers.extend(stdin_refs)
+    stdin_consumed = STDIN_PLACEHOLDER in opts.agents
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     # Validate input: must have agents specified or use --all or use filters
     if not agent_identifiers and not opts.all_agents and not opts.include:
@@ -139,7 +130,9 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         raise UserInputError("Cannot specify both agent names and --all")
 
     # Get message content
-    message_content = _get_message_content(opts.message_content, ctx, is_interactive=mng_ctx.is_interactive)
+    message_content = _get_message_content(
+        opts.message_content, ctx, is_interactive=mng_ctx.is_interactive, stdin_consumed=stdin_consumed
+    )
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -199,10 +192,19 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         ctx.exit(1)
 
 
-def _get_message_content(message_option: str | None, ctx: click.Context, is_interactive: bool) -> str:
+def _get_message_content(
+    message_option: str | None,
+    ctx: click.Context,
+    is_interactive: bool,
+    stdin_consumed: bool = False,
+) -> str:
     """Get the message content from option, stdin, or editor."""
     if message_option is not None:
         return message_option
+
+    # If stdin was consumed by '-' for agent names, we can't also read it for message content
+    if stdin_consumed:
+        raise UserInputError("When using '-' for agent names, message content must be provided via --message")
 
     # Check if stdin has piped data (not a tty)
     if not sys.stdin.isatty():
@@ -286,7 +288,7 @@ def _emit_json_output(result: MessageResult) -> None:
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mng [message|msg] [AGENTS...] [--agent <AGENT>] [--all] [-m <MESSAGE>]",
+    synopsis="mng [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 

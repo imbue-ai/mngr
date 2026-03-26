@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng start [AGENTS...] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]
+mng start [AGENTS...|-] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]
 ```
 
 Start stopped agent(s).
@@ -40,7 +40,6 @@ mng start [OPTIONS] [AGENTS]...
 | `--host` | text | Host(s) to start all stopped agents on [repeatable] [future] | None |
 | `--include` | text | Filter agents and hosts to start by CEL expression (repeatable) [future] | None |
 | `--exclude` | text | Exclude agents and hosts matching CEL expression (repeatable) [future] | None |
-| `--stdin` | boolean | Read agent and host names/IDs from stdin, one per line [future] | `False` |
 
 ## Behavior
 
