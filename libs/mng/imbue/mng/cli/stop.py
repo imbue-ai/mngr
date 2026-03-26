@@ -22,6 +22,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import OutputOptions
 from imbue.mng.errors import HostOfflineError
@@ -45,7 +46,6 @@ class StopCliOptions(CommonCliOptions):
     # Planned features (not yet implemented)
     include: tuple[str, ...]
     exclude: tuple[str, ...]
-    stdin: bool
     snapshot_mode: str | None
     graceful: bool
     graceful_timeout: str | None
@@ -110,11 +110,6 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     multiple=True,
     help="Exclude agents matching CEL expression (repeatable) [future]",
 )
-@optgroup.option(
-    "--stdin",
-    is_flag=True,
-    help="Read agent and host names/IDs from stdin, one per line [future]",
-)
 @optgroup.group("Behavior")
 @optgroup.option(
     "--archive",
@@ -158,8 +153,6 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--include is not implemented yet")
     if opts.exclude:
         raise NotImplementedError("--exclude is not implemented yet")
-    if opts.stdin:
-        raise NotImplementedError("--stdin is not implemented yet")
     if opts.snapshot_mode is not None:
         raise NotImplementedError("--snapshot-mode is not implemented yet")
     if not opts.graceful:
@@ -168,7 +161,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--graceful-timeout is not implemented yet")
 
     # Validate input
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
@@ -255,7 +248,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mng stop [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mng [stop|s] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 

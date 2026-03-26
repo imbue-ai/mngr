@@ -41,15 +41,21 @@ class Change(FrozenModel):
     summary_markdown: str = Field(description="Markdown description of what was done or attempted")
 
 
-class DisplayCategory(UpperCaseStrEnum):
-    """Derived display category for HTML report grouping and coloring."""
+class ReportSection(UpperCaseStrEnum):
+    """Derived section for HTML report grouping and coloring."""
 
-    PENDING = auto()
-    FIXED = auto()
-    REGRESSED = auto()
-    STUCK = auto()
-    ERRORED = auto()
+    NON_IMPL_FIXES = auto()
+    IMPL_FIXES = auto()
+    BLOCKED = auto()
     CLEAN_PASS = auto()
+    RUNNING = auto()
+
+
+class TestRunInfo(FrozenModel):
+    """Metadata for a single test run within an agent's work."""
+
+    run_name: str = Field(description="The --mng-e2e-run-name value used for this run")
+    description_markdown: str = Field(description="Brief description of what this run was for")
 
 
 class TestResult(FrozenModel):
@@ -68,6 +74,7 @@ class TestResult(FrozenModel):
         default=None, description="Are tests passing after all changes? None if unknown."
     )
     summary_markdown: str = Field(default="", description="Overall markdown summary of what happened")
+    test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="List of test runs performed, in order")
 
 
 class TestAgentInfo(FrozenModel):
@@ -76,6 +83,8 @@ class TestAgentInfo(FrozenModel):
     test_node_id: str = Field(description="The pytest node ID for the test (e.g. tests/test_foo.py::test_bar)")
     agent_id: AgentId = Field(description="The ID of the launched agent")
     agent_name: AgentName = Field(description="The name of the launched agent")
+    branch_name: str | None = Field(default=None, description="Git branch created for this agent")
+    created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
 
 
 class TmrLaunchConfig(FrozenModel):
@@ -100,12 +109,17 @@ class TmrLaunchConfig(FrozenModel):
 
 
 class IntegratorResult(FrozenModel):
-    """Result from the integrator agent that merges fix branches."""
+    """Result from the integrator agent that cherry-picks fix branches."""
 
-    merged: tuple[str, ...] = Field(default=(), description="Branch names successfully merged")
-    failed: tuple[str, ...] = Field(default=(), description="Branch names that could not be merged")
+    agent_name: AgentName | None = Field(default=None, description="Name of the integrator agent")
+    squashed_branches: tuple[str, ...] = Field(default=(), description="Branches in the squashed non-impl commit")
+    squashed_commit_hash: str | None = Field(default=None, description="Commit hash of the squashed non-impl commit")
+    impl_priority: tuple[str, ...] = Field(default=(), description="Impl branches in priority order, highest first")
+    impl_commit_hashes: dict[str, str] = Field(
+        default_factory=dict, description="Mapping of impl branch name to its commit hash on the integrated branch"
+    )
+    failed: tuple[str, ...] = Field(default=(), description="Branch names that could not be integrated")
     branch_name: str | None = Field(default=None, description="Integrated branch name, if any merges succeeded")
-    summary_markdown: str = Field(default="", description="Markdown summary from the integrator agent")
 
 
 class TestMapReduceResult(FrozenModel):
@@ -124,3 +138,4 @@ class TestMapReduceResult(FrozenModel):
         default=None,
         description="Git branch name if code changes were pulled, or None",
     )
+    test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="Test runs performed by the agent, in order")

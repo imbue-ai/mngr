@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [exec|x] [AGENTS...] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
+mng [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.

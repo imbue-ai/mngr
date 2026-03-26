@@ -15,30 +15,14 @@ from http.server import HTTPServer
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
-_TEST_OUTPUT_DIR = Path(__file__).resolve().parent / ".test_output"
+from imbue.mng.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
+from imbue.mng.utils.detail_renderer import ASCIINEMA_PLAYER_JS
+from imbue.mng.utils.detail_renderer import render_transcript
+from imbue.mng.utils.detail_renderer import render_tutorial_block
 
-_ASCIINEMA_PLAYER_CSS = "https://cdn.jsdelivr.net/npm/asciinema-player@3.15.1/dist/bundle/asciinema-player.css"
-_ASCIINEMA_PLAYER_JS = "https://cdn.jsdelivr.net/npm/asciinema-player@3.15.1/dist/bundle/asciinema-player.min.js"
-
-# Standard 8-color and bright 8-color ANSI palette (indices 0-15).
-_ANSI_COLORS_16 = [
-    "#000",
-    "#c00",
-    "#0a0",
-    "#a50",
-    "#00a",
-    "#a0a",
-    "#0aa",
-    "#aaa",
-    "#555",
-    "#f55",
-    "#5f5",
-    "#ff5",
-    "#55f",
-    "#f5f",
-    "#5ff",
-    "#fff",
-]
+_E2E_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = next(p for p in [_E2E_DIR, *_E2E_DIR.parents] if (p / ".git").exists())
+_TEST_OUTPUT_DIR = _REPO_ROOT / ".test_output" / "e2e"
 
 _SIDEBAR_CSS = "\n".join(
     [
@@ -77,85 +61,6 @@ _SIDEBAR_JS = """
 </script>"""
 
 
-def _ansi_to_html(text: str) -> str:
-    """Convert ANSI escape sequences in text to HTML spans.
-
-    Handles SGR sequences (ESC[...m) for:
-    - Reset (0)
-    - Bold (1)
-    - Foreground 30-37, 90-97 (standard + bright)
-    - 256-color foreground 38;5;N
-    """
-    result: list[str] = []
-    pos = 0
-    open_spans = 0
-    # Match ESC[ followed by semicolon-separated numbers followed by 'm'
-    ansi_re = re.compile(r"\x1b\[([\d;]*)m")
-
-    for m in ansi_re.finditer(text):
-        # Emit text before this escape
-        result.append(html.escape(text[pos : m.start()]))
-        pos = m.end()
-
-        codes = m.group(1)
-        if not codes or codes == "0":
-            # Reset -- close all open spans
-            result.append("</span>" * open_spans)
-            open_spans = 0
-            continue
-
-        parts = codes.split(";")
-        styles: list[str] = []
-        i = 0
-        while i < len(parts):
-            c = int(parts[i]) if parts[i].isdigit() else 0
-            if c == 0:
-                result.append("</span>" * open_spans)
-                open_spans = 0
-            elif c == 1:
-                styles.append("font-weight:bold")
-            elif 30 <= c <= 37:
-                styles.append(f"color:{_ANSI_COLORS_16[c - 30]}")
-            elif 90 <= c <= 97:
-                styles.append(f"color:{_ANSI_COLORS_16[c - 90 + 8]}")
-            elif c == 38 and i + 2 < len(parts) and parts[i + 1] == "5":
-                n = int(parts[i + 2]) if parts[i + 2].isdigit() else 0
-                if n < 16:
-                    styles.append(f"color:{_ANSI_COLORS_16[n]}")
-                elif n < 232:
-                    n -= 16
-                    r = (n // 36) * 51
-                    g = ((n % 36) // 6) * 51
-                    b = (n % 6) * 51
-                    styles.append(f"color:rgb({r},{g},{b})")
-                else:
-                    v = 8 + (n - 232) * 10
-                    styles.append(f"color:rgb({v},{v},{v})")
-                i += 2
-            else:
-                pass
-            i += 1
-
-        if styles:
-            result.append(f'<span style="{";".join(styles)}">')
-            open_spans += 1
-
-    # Emit remaining text
-    result.append(html.escape(text[pos:]))
-    result.append("</span>" * open_spans)
-    return "".join(result)
-
-
-def _linkify_agent_names(rendered_html: str, cast_stems: list[str]) -> str:
-    """Replace occurrences of cast stem names in already-rendered HTML with anchor links."""
-    for stem in cast_stems:
-        escaped_stem = html.escape(stem)
-        anchor = f"#cast-{escaped_stem}"
-        link = f'<a href="{anchor}" style="color:rgb(108,182,255);text-decoration:underline">{escaped_stem}</a>'
-        rendered_html = rendered_html.replace(escaped_stem, link, 1)
-    return rendered_html
-
-
 def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> str:
     """Render a full HTML page.
 
@@ -181,7 +86,7 @@ def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> s
 <head>
 <meta charset="utf-8">
 <title>{html.escape(title)}</title>
-<link rel="stylesheet" type="text/css" href="{_ASCIINEMA_PLAYER_CSS}">
+<link rel="stylesheet" type="text/css" href="{ASCIINEMA_PLAYER_CSS}">
 <style>
   body {{ font-family: system-ui, -apple-system, sans-serif; margin: 2em; background: rgb(250,250,250); color: rgb(34,34,34); }}
   h2 {{ font-size: 1.1em; margin-top: 2em; }}
@@ -205,74 +110,10 @@ def _html_page(title: str, nav: str, body: str, sidebar: str | None = None) -> s
 <body>
 {nav}
 {body}
-<script src="{_ASCIINEMA_PLAYER_JS}"></script>
+<script src="{ASCIINEMA_PLAYER_JS}"></script>
 {extra_js}
 </body>
 </html>"""
-
-
-def _render_tutorial_block(text: str) -> str:
-    """Render a tutorial block with the same color scheme as transcripts.
-
-    Comment lines (starting with the hash character) are yellow, command lines are blue.
-    """
-    rendered_lines: list[str] = []
-    for line in text.splitlines():
-        escaped = html.escape(line)
-        if line.lstrip().startswith("#"):
-            rendered_lines.append(f'<span class="comment">{escaped}</span>')
-        elif line.strip():
-            rendered_lines.append(f'<span class="prompt">{escaped}</span>')
-        else:
-            rendered_lines.append(escaped)
-    return '<pre class="transcript">' + "\n".join(rendered_lines) + "</pre>"
-
-
-def _render_transcript(text: str, cast_stems: list[str] | None = None) -> str:
-    """Render a transcript into styled HTML blocks."""
-    lines = text.splitlines()
-
-    # Split into blocks: a new block starts when a comment or command line
-    # follows an exit-code line.
-    blocks: list[list[str]] = []
-    current_block: list[str] = []
-    for line in lines:
-        is_new_block_start = (
-            (line.startswith("# ") or line.startswith("$ "))
-            and current_block
-            and any(bl.startswith("? ") for bl in current_block)
-        )
-        if is_new_block_start:
-            blocks.append(current_block)
-            current_block = []
-        current_block.append(line)
-    if current_block:
-        blocks.append(current_block)
-
-    html_parts: list[str] = []
-    for block in blocks:
-        rendered_lines: list[str] = []
-        for line in block:
-            if line.startswith("# "):
-                rendered_lines.append(f'<span class="comment">{html.escape(line)}</span>')
-            elif line.startswith("$ "):
-                rendered_lines.append(f'<span class="prompt">{html.escape(line)}</span>')
-            elif line.startswith("! "):
-                rest = line[2:]
-                rendered_lines.append(f'<span class="stderr-prefix">! </span>{_ansi_to_html(rest)}')
-            elif re.match(r"^\? \d+$", line):
-                code = line[2:]
-                rendered_lines.append(f'<span class="exit-code">exit code: {html.escape(code)}</span>')
-            else:
-                rendered_lines.append(_ansi_to_html(line))
-        html_parts.append('<div class="cmd-block">' + "\n".join(rendered_lines) + "</div>")
-
-    rendered = '<pre class="transcript">' + "\n".join(html_parts) + "</pre>"
-
-    if cast_stems:
-        rendered = _linkify_agent_names(rendered, cast_stems)
-
-    return rendered
 
 
 def _index_page() -> str:
@@ -327,7 +168,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     tutorial_block_path = test_dir / "tutorial_block.txt"
     if tutorial_block_path.exists():
         parts.append("<h2>Tutorial block</h2>")
-        parts.append(_render_tutorial_block(tutorial_block_path.read_text()))
+        parts.append(render_tutorial_block(tutorial_block_path.read_text()))
 
     # Collect cast files first so we can link agent names in the transcript
     cast_files = sorted(test_dir.glob("*.cast"))
@@ -337,7 +178,7 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     transcript_path = test_dir / "transcript.txt"
     if transcript_path.exists():
         parts.append("<h2>CLI transcript</h2>")
-        parts.append(_render_transcript(transcript_path.read_text(), cast_stems=cast_stems))
+        parts.append(render_transcript(transcript_path.read_text(), cast_stems=cast_stems))
 
     # Cast players
     player_inits: list[str] = []

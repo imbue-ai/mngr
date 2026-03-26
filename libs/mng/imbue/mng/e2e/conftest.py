@@ -44,7 +44,8 @@ class E2eSession(Session):
 
 _E2E_DIR = Path(__file__).resolve().parent
 _BIN_DIR = _E2E_DIR / "bin"
-_TEST_OUTPUT_DIR = _E2E_DIR / ".test_output"
+_REPO_ROOT = next(p for p in [_E2E_DIR, *_E2E_DIR.parents] if (p / ".git").exists())
+_TEST_OUTPUT_DIR = _REPO_ROOT / ".test_output" / "e2e"
 _DEBUGGING_DOC = "libs/mng/imbue/mng/e2e/DEBUGGING.md"
 
 _ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS = 5.0
@@ -69,6 +70,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="yes",
         help="Save test artifacts (transcript, asciinema recordings, tutorial block). "
         "'yes' = always (default), 'on-failure' = only when test fails, 'no' = never",
+    )
+    group.addoption(
+        "--mng-e2e-run-name",
+        default=None,
+        help="Override the auto-generated timestamp directory name for test output. "
+        "When provided, output goes to .test_output/e2e/<run_name>/ instead of a timestamp.",
     )
 
 
@@ -116,10 +123,12 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 
 
 @pytest.fixture(scope="session")
-def e2e_run_dir() -> Path:
-    """Create a timestamped directory for this test run's output."""
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
-    run_dir = _TEST_OUTPUT_DIR / timestamp
+def e2e_run_dir(request: pytest.FixtureRequest) -> Path:
+    """Create a named or timestamped directory for this test run's output."""
+    run_name = request.config.getoption("--mng-e2e-run-name", default=None)
+    if run_name is None:
+        run_name = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = _TEST_OUTPUT_DIR / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -223,10 +232,10 @@ def e2e(
     - Isolated TMUX_TMPDIR (own tmux server, separate from the one the parent
       autouse fixture creates for the in-process test environment)
     - A temporary git repo as the working directory
-    - Disabled remote providers (Modal, Docker) via settings.local.toml
+    - Remote providers (Modal, Docker) left enabled for e2e testing
     - A custom connect_command that records tmux sessions via asciinema
 
-    Output is saved to .test_output/<timestamp>/<test_name>/.
+    Output is saved to .test_output/e2e/<timestamp>/<test_name>/ (relative to repo root).
     """
     # Create a separate tmux tmpdir for subprocess-spawned tmux sessions.
     # The parent autouse fixture isolates the in-process tmux server, but
@@ -249,10 +258,18 @@ def e2e(
     env["MNG_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
 
+    # Transform the inherited prefix from mng_{uuid}- to mng_test-{uuid}-
+    # so that Modal environment names (which are {prefix}{user_id}) pass the
+    # mng_test- guard in the Modal backend. This only affects subprocess
+    # commands; the in-process prefix remains unchanged for tmux cleanup.
+    inherited_prefix = env.get("MNG_PREFIX", "mng_")
+    env["MNG_PREFIX"] = inherited_prefix.replace("mng_", "mng_test-", 1)
+
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
-    # Configure connect_command for create/start and disable remote providers
+    # Configure connect_command for create/start
+    # Remote providers (Modal, Docker) are left enabled so that e2e tests exercise them
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
@@ -260,13 +277,15 @@ def e2e(
         "\n"
         "[commands.start]\n"
         'connect_command = "mng-e2e-connect"\n'
-        "\n"
-        "[providers.modal]\n"
-        "is_enabled = false\n"
-        "\n"
-        "[providers.docker]\n"
-        "is_enabled = false\n"
     )
+
+    # Ensure .claude/settings.local.json is gitignored. Remote providers
+    # (Modal, Docker) need to write Claude hooks to this file, and the
+    # gitignore check fails if it would appear as an unstaged change.
+    gitignore_path = temp_git_repo / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(".claude/settings.local.json\n")
+        run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
     session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)
 

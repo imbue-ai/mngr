@@ -1161,11 +1161,9 @@ def _parse_agent_opts(
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
     base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
 
-    # --transfer=git-worktree requires a new branch
-    if transfer_mode == TransferMode.GIT_WORKTREE and new_branch_name is None:
-        raise UserInputError(
-            "--transfer=git-worktree requires a new branch. Use --branch BASE:NEW instead of --branch BASE."
-        )
+    # Worktree mode supports both:
+    #   --branch foo       -> check out existing branch 'foo' in the worktree
+    #   --branch foo:bar   -> create new branch 'bar' from 'foo' in the worktree
 
     # if the user didn't specify whether to include unclean, then infer from ensure_clean
     if opts.include_unclean is None:

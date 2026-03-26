@@ -23,7 +23,6 @@ _DEFAULT_OPTS = MessageCliOptions(
     all_agents=False,
     include=(),
     exclude=(),
-    stdin=False,
     message_content=None,
     on_error="continue",
     start=False,
@@ -49,7 +48,6 @@ def test_message_cli_options_has_expected_fields() -> None:
         all_agents=False,
         include=("name == 'test'",),
         exclude=(),
-        stdin=False,
         message_content="Hello",
         on_error="continue",
         start=False,
@@ -299,18 +297,18 @@ def test_emit_human_output_only_failed_agents(capsys: pytest.CaptureFixture[str]
 
 
 # =============================================================================
-# Tests for message --stdin path
+# Tests for stdin '-' placeholder
 # =============================================================================
 
 
-def test_message_stdin_flag_reads_agent_names_from_input(
+def test_message_dash_reads_agent_names_from_input(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test message --stdin reads agent names from stdin and reports them not found."""
+    """Test message '-' reads agent names from stdin and reports them not found."""
     result = cli_runner.invoke(
         message,
-        ["--stdin", "-m", "hello"],
+        ["-", "-m", "hello"],
         input="nonexistent-stdin-agent-1\nnonexistent-stdin-agent-2\n",
         obj=plugin_manager,
         catch_exceptions=False,

@@ -1688,25 +1688,42 @@ class Host(BaseHost, OnlineHostInterface):
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
-        # Worktree mode always requires a new branch (enforced at CLI)
-        if not options.git or not options.git.new_branch_name:
-            raise UserInputError("Worktree mode requires a new branch name in git options")
-        branch_name = options.git.new_branch_name
+        new_branch_name = options.git.new_branch_name if options.git else None
+        base_branch = options.git.base_branch if options.git else None
 
-        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
-            cmd = f"mkdir -p {work_dir_path.parent} && git -C {shlex.quote(str(source_path))} worktree add {shlex.quote(str(work_dir_path))} -b {shlex.quote(branch_name)}"
+        if not new_branch_name and not base_branch:
+            raise UserInputError("Worktree mode requires a branch. Use --branch BRANCH or --branch BASE:NEW.")
 
-            if options.git and options.git.base_branch:
-                cmd += f" {shlex.quote(options.git.base_branch)}"
+        branch_label = new_branch_name or base_branch
+
+        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_label):
+            git_c = f"git -C {shlex.quote(str(source_path))}"
+            mkdir_cmd = f"mkdir -p {work_dir_path.parent}"
+
+            # git worktree add <path> [-b <new>] [<base>]
+            worktree_args = [mkdir_cmd, "&&", git_c, "worktree", "add", shlex.quote(str(work_dir_path))]
+            if new_branch_name:
+                worktree_args += ["-b", shlex.quote(new_branch_name)]
+            if base_branch:
+                worktree_args.append(shlex.quote(base_branch))
+            cmd = " ".join(worktree_args)
+            created_branch = new_branch_name
 
             result = self.execute_command(cmd)
             if not result.success:
-                raise MngError(f"Failed to create git worktree: {result.stderr}")
+                stderr = result.stderr or ""
+                if "already checked out" in stderr or "already used by worktree" in stderr:
+                    raise UserInputError(
+                        f"{stderr.strip()}\n"
+                        f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
+                        f"To work directly in the existing worktree, use --in-place from that directory"
+                    )
+                raise MngError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
 
-            return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
+            return CreateWorkDirResult(path=work_dir_path, created_branch_name=created_branch)
 
     def create_agent_state(
         self,
