@@ -26,6 +26,7 @@ from imbue.mng.cli.output_helpers import AbortError
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_info
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.config.agent_class_registry import get_agent_class
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.errors import BaseMngError
@@ -274,6 +275,23 @@ def _remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None
         logger.debug("Failed to remove ask work dir {}", work_path)
 
 
+def _check_headless_claude_available() -> None:
+    """Verify the headless_claude plugin is available.
+
+    When mng is installed as a standalone tool (not via ``uv run``), the
+    mng_claude plugin may not be present, causing a silent fallback to
+    BaseAgent which doesn't support streaming output.
+    """
+    agent_class = get_agent_class("headless_claude")
+    if not issubclass(agent_class, StreamingHeadlessAgentMixin):
+        raise MngError(
+            "The 'headless_claude' agent type is not available. "
+            "The mng_claude plugin may not be installed.\n"
+            "Install it with:\n"
+            "  mng plugin add mng-claude"
+        )
+
+
 @contextmanager
 def _headless_claude_output(
     host: OnlineHostInterface, mng_ctx: MngContext, prompt: str, system_prompt: str
@@ -287,6 +305,8 @@ def _headless_claude_output(
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
+    _check_headless_claude_available()
+
     work_path = _create_work_dir_on_host(host)
     try:
         # Write prompt and system prompt to files via the host interface so

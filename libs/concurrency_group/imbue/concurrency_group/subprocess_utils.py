@@ -219,8 +219,9 @@ def run_local_command_modern_version(
             raise ProcessSetupError(
                 command=tuple(command),
                 stdout="",
-                stderr="",
-                is_output_already_logged=trace_output,
+                stderr=str(e),
+                # Popen failed, so no output was ever streamed regardless of trace_output.
+                is_output_already_logged=False,
             ) from e
 
         on_initialization_complete(None)

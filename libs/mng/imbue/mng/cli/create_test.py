@@ -1,5 +1,6 @@
 """Tests for create module helper functions."""
 
+import subprocess
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -10,11 +11,14 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mng.api.find import ResolvedSource
 from imbue.mng.cli.agent_addr import AgentAddress
 from imbue.mng.cli.agent_addr import parse_agent_address
+from imbue.mng.cli.create import _AutoLabels
 from imbue.mng.cli.create import _CreateCommand
 from imbue.mng.cli.create import _RECOVERED_MESSAGE_FILENAME
 from imbue.mng.cli.create import _editor_cleanup_scope
+from imbue.mng.cli.create import _get_source_remote_url
 from imbue.mng.cli.create import _is_creating_new_host
 from imbue.mng.cli.create import _parse_agent_opts
 from imbue.mng.cli.create import _parse_branch_flag
@@ -449,16 +453,16 @@ def test_resolve_source_location_with_auto_start_enabled(
         to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
     )
 
-    result, source_agent_id = _resolve_source_location(
+    result = _resolve_source_location(
         opts,
         agent_and_host_loader=lambda: {},
         mng_ctx=temp_mng_ctx,
         is_start_desired=True,
     )
 
-    assert isinstance(result.host, OnlineHostInterface)
-    assert result.path == temp_work_dir
-    assert source_agent_id is None
+    assert isinstance(result.location.host, OnlineHostInterface)
+    assert result.location.path == temp_work_dir
+    assert result.agent is None
 
 
 def test_resolve_target_host_with_auto_start_enabled(
@@ -495,122 +499,165 @@ def test_resolve_target_host_with_host_reference(
 
 
 # =============================================================================
-# Tests for _parse_project_name project mismatch validation
+# Tests for _parse_project_name
 # =============================================================================
 
 
 def test_parse_project_name_returns_explicit_project(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     temp_work_dir: Path,
 ) -> None:
-    """When --project is specified, return it directly without validation."""
+    """When --project is specified, return it directly."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=temp_work_dir)
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=temp_work_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
     )
 
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(resolved, opts, remote_url=None)
 
     assert result == "explicit-project"
 
 
-def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_agent(
+def test_parse_project_name_inherits_from_source_agent(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """Raises UserInputError when source agent project differs from local and creating a new host."""
-    # Create a source directory with a different name than the CWD project
-    different_project_dir = tmp_path / "totally-different-project"
-    different_project_dir.mkdir()
-
+    """When source agent has a project label, inherit it."""
+    some_dir = tmp_path / "local-folder"
+    some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address with provider but no host name implies new host
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
+    resolved = ResolvedSource(
+        location=HostLocation(host=local_host, path=some_dir),
+        agent=DiscoveredAgent(
+            host_id=local_host.id,
+            agent_id=AgentId("agent-00000000000000000000000000000001"),
+            agent_name=AgentName("source-agent"),
+            provider_name=ProviderInstanceName("local"),
+            certified_data={"labels": {"project": "inherited-project"}},
+        ),
     )
 
-    with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
+
+    assert result == "inherited-project"
 
 
-def test_parse_project_name_raises_on_mismatch_with_new_host_and_source_host(
+def test_parse_project_name_derives_from_remote_url(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """Raises UserInputError when source host project differs from local and creating a new host."""
-    different_project_dir = tmp_path / "another-different-project"
-    different_project_dir.mkdir()
-
+    """When remote URL is available, derive project name from it."""
+    some_dir = tmp_path / "local-folder"
+    some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address with --new-host flag and a provider
-    address = AgentAddress(
-        host_name=HostName("myhost"),
-        provider_name=ProviderInstanceName("modal"),
-    )
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_host, "some-host"),
-        to_update(default_create_cli_opts.field_ref().new_host, True),
-    )
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
-    with pytest.raises(UserInputError, match="Project mismatch"):
-        _parse_project_name(source_location, opts, address, temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url="https://github.com/owner/my-repo.git")
+
+    assert result == "my-repo"
 
 
-def test_parse_project_name_no_error_without_new_host(
+def test_parse_project_name_falls_back_to_folder_name(
     default_create_cli_opts: CreateCliOptions,
     local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
     tmp_path: Path,
 ) -> None:
-    """No error when source project differs but no new host is being created."""
-    different_project_dir = tmp_path / "yet-another-project"
-    different_project_dir.mkdir()
-
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=different_project_dir)
-    # Address targets existing host (not new)
-    address = AgentAddress(host_name=HostName("myhost"))
-    opts = default_create_cli_opts.model_copy_update(
-        to_update(default_create_cli_opts.field_ref().source_agent, "some-agent"),
-    )
-
-    # Should not raise - no new host means project tag doesn't matter
-    result = _parse_project_name(source_location, opts, address, temp_mng_ctx)
-
-    assert result == "yet-another-project"
-
-
-def test_parse_project_name_no_error_without_external_source(
-    default_create_cli_opts: CreateCliOptions,
-    local_provider: LocalProviderInstance,
-    temp_mng_ctx: MngContext,
-    tmp_path: Path,
-) -> None:
-    """No error when creating a new host without an external source reference."""
+    """When no remote URL, fall back to the source directory name."""
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
-
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
-    source_location = HostLocation(host=local_host, path=some_dir)
-    # Address implies new host (provider only, no host name)
-    address = AgentAddress(provider_name=ProviderInstanceName("docker"))
+    resolved = ResolvedSource(location=HostLocation(host=local_host, path=some_dir))
 
-    # Should not raise - no source_agent/source_host means no external source
-    result = _parse_project_name(source_location, opts=default_create_cli_opts, address=address, mng_ctx=temp_mng_ctx)
+    result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
 
     assert result == "some-project"
+
+
+# =============================================================================
+# Tests for _get_source_remote_url
+# =============================================================================
+
+
+def test_get_source_remote_url_returns_url_when_remote_exists(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When source location has a git repo with a remote, return the remote URL."""
+    repo_dir = tmp_path / "my-repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/my-repo.git"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=repo_dir)
+
+    result = _get_source_remote_url(source_location)
+
+    assert result == "https://github.com/owner/my-repo.git"
+
+
+def test_get_source_remote_url_returns_none_when_no_remote(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When git repo has no remote, return None."""
+    repo_dir = tmp_path / "no-remote"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=repo_dir)
+
+    result = _get_source_remote_url(source_location)
+
+    assert result is None
+
+
+def test_get_source_remote_url_returns_none_when_no_git(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """When source path is not a git repo, return None."""
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    source_location = HostLocation(host=local_host, path=plain_dir)
+
+    result = _get_source_remote_url(source_location)
+
+    assert result is None
+
+
+# =============================================================================
+# Tests for _AutoLabels
+# =============================================================================
+
+
+def test_auto_labels_dump_includes_remote_when_set() -> None:
+    """model_dump includes both project and remote when remote is set."""
+    meta = _AutoLabels(project="my-project", remote="https://github.com/owner/my-project.git")
+
+    assert meta.model_dump(exclude_none=True) == {
+        "project": "my-project",
+        "remote": "https://github.com/owner/my-project.git",
+    }
+
+
+def test_auto_labels_dump_excludes_remote_when_none() -> None:
+    """model_dump omits remote when it is None."""
+    meta = _AutoLabels(project="my-project")
+
+    assert meta.model_dump(exclude_none=True) == {"project": "my-project"}
 
 
 # =============================================================================

@@ -7,7 +7,6 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.errors import MngError
-from imbue.mng.utils.git_utils import _parse_project_name_from_url
 from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.git_utils import find_git_worktree_root
@@ -17,61 +16,62 @@ from imbue.mng.utils.git_utils import get_git_author_info
 from imbue.mng.utils.git_utils import get_git_remote_url
 from imbue.mng.utils.git_utils import get_head_commit
 from imbue.mng.utils.git_utils import is_git_repository
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.git_utils import parse_worktree_git_file
 
 
 def test_github_https_url() -> None:
     """Test parsing a GitHub HTTPS URL."""
     url = "https://github.com/owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_https_url_without_git_suffix() -> None:
     """Test parsing a GitHub HTTPS URL without .git suffix."""
     url = "https://github.com/owner/my-project"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_ssh_url() -> None:
     """Test parsing a GitHub SSH URL."""
     url = "git@github.com:owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_github_ssh_url_without_git_suffix() -> None:
     """Test parsing a GitHub SSH URL without .git suffix."""
     url = "git@github.com:owner/my-project"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_gitlab_https_url() -> None:
     """Test parsing a GitLab HTTPS URL."""
     url = "https://gitlab.com/owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_gitlab_ssh_url() -> None:
     """Test parsing a GitLab SSH URL."""
     url = "git@gitlab.com:owner/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_nested_project_path() -> None:
     """Test parsing a URL with nested project path."""
     url = "https://github.com/org/group/subgroup/my-project.git"
-    assert _parse_project_name_from_url(url) == "my-project"
+    assert parse_project_name_from_url(url) == "my-project"
 
 
 def test_invalid_url() -> None:
     """Test parsing an invalid URL returns None."""
     url = "not-a-valid-url"
-    assert _parse_project_name_from_url(url) is None
+    assert parse_project_name_from_url(url) is None
 
 
 def test_empty_url() -> None:
     """Test parsing an empty URL returns None."""
     url = ""
-    assert _parse_project_name_from_url(url) is None
+    assert parse_project_name_from_url(url) is None
 
 
 def test_derive_from_folder_name_when_no_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -127,6 +127,45 @@ def test_derive_from_git_remote_ssh(tmp_path: Path, cg: ConcurrencyGroup) -> Non
 
     # Should use the remote project name, not the folder name
     assert derive_project_name_from_path(project_dir, cg) == "remote-project"
+
+
+def test_derive_from_source_repo_name_for_worktree_without_origin(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """Test that worktrees without an origin remote use the source repo's directory name."""
+    worktree_path = tmp_path / "ugly-worktree-name-abc123"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "test-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # temp_git_repo has no origin remote, so should fall back to source repo dir name
+    assert derive_project_name_from_path(worktree_path, cg) == temp_git_repo.name
+
+
+def test_derive_from_origin_for_worktree_with_origin(
+    cg: ConcurrencyGroup, tmp_path: Path, temp_git_repo: Path
+) -> None:
+    """Test that worktrees with an origin remote use the remote project name."""
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/owner/remote-project.git"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    worktree_path = tmp_path / "ugly-worktree-name-abc123"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), "-b", "test-branch"],
+        cwd=temp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Should use origin's project name, not the worktree or source repo dir name
+    assert derive_project_name_from_path(worktree_path, cg) == "remote-project"
 
 
 def test_is_git_repository_returns_false_for_nonexistent_path(tmp_path: Path, cg: ConcurrencyGroup) -> None:
