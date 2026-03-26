@@ -173,9 +173,6 @@ def _apply_overrides(sections: list[CategorySection]) -> list[CategorySection]:
             case OverrideAction.ADD_CATEGORY:
                 msg = "ADD_CATEGORY should use NEW_CATEGORIES, not CATEGORY_EXTENSIONS"
                 raise ValueError(msg)
-            case _:
-                msg = f"Unhandled override action: {override.action}"
-                raise ValueError(msg)
 
     return sections
 
