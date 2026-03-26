@@ -4,6 +4,7 @@ import json
 import os
 import threading
 from pathlib import Path
+
 import pytest
 from loguru import logger
 from watchdog.events import FileClosedEvent
