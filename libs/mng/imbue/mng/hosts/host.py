@@ -2371,7 +2371,7 @@ class Host(BaseHost, OnlineHostInterface):
             tmux_config_path = self._create_host_tmux_config()
 
             onboarding_marker = self.mng_ctx.profile_dir / "tmux_onboarding_shown"
-            is_onboarding_needed = not onboarding_marker.exists()
+            is_onboarding_needed = not onboarding_marker.exists() and os.environ.get("IS_AUTONOMOUS", "0") != "1"
 
             for agent_id in agent_ids:
                 agent = self._get_agent_by_id(agent_id)
