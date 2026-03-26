@@ -17,7 +17,7 @@
 # Environment:
 #   MNG_AGENT_STATE_DIR  - agent state directory (contains events/, commands/)
 #   MNG_AGENT_WORK_DIR   - agent work directory (contains talking/PROMPT.md)
-#   MNG_LLM_MODEL        - model to use for llm commands (default: claude-opus-4.6)
+#   MNG_LLM_MODEL        - model to use for llm commands (default: claude-haiku-4.5)
 #   LLM_USER_PATH        - llm data directory (contains logs.db)
 
 set -euo pipefail
@@ -52,7 +52,7 @@ log() {
 
 # Get the model from MNG_LLM_MODEL env var, falling back to hardcoded default.
 get_model() {
-    echo "${MNG_LLM_MODEL:-claude-opus-4.6}"
+    echo "${MNG_LLM_MODEL:-claude-haiku-4.5}"
 }
 
 generate_conversation_id() {
@@ -224,13 +224,22 @@ new_conversation() {
     tags=$(build_tags_json "$name")
 
     if [ "$as_agent" = true ]; then
-        local conversation_id
-        conversation_id=$(generate_conversation_id)
-        insert_conversation_record "$conversation_id" "$tags"
         if [ -n "$message" ]; then
-            log "Injecting agent message into new conversation $conversation_id"
-            llm inject --cid "$conversation_id" -m "$model" "$message"
-            log "Agent message injected successfully"
+            log "Creating new conversation via llm inject (no --cid)"
+            local inject_output
+            inject_output=$(llm inject -m "$model" "$message")
+            log "llm inject output: $inject_output"
+
+            # Parse conversation ID from "Injected message into conversation <id>"
+            local conversation_id
+            conversation_id=$(echo "$inject_output" | awk '{print $NF}')
+            if [ -z "$conversation_id" ]; then
+                echo "ERROR: Could not parse conversation ID from llm inject output: $inject_output" >&2
+                exit 1
+            fi
+
+            insert_conversation_record "$conversation_id" "$tags"
+            log "Agent message injected into new conversation $conversation_id"
             local message_id
             message_id=$(get_last_response_id "$conversation_id")
             echo "conversation_id=$conversation_id"
@@ -238,6 +247,21 @@ new_conversation() {
                 echo "message_id=$message_id"
             fi
         else
+            # No message -- create conversation via llm inject with empty
+            # content so the llm conversations table has the entry.
+            log "Creating empty new conversation via llm inject"
+            local inject_output
+            inject_output=$(LLM_MATCHED_RESPONSE="" llm inject -m matched-responses --prompt "" "")
+            log "llm inject output: $inject_output"
+
+            local conversation_id
+            conversation_id=$(echo "$inject_output" | awk '{print $NF}')
+            if [ -z "$conversation_id" ]; then
+                echo "ERROR: Could not parse conversation ID from llm inject output: $inject_output" >&2
+                exit 1
+            fi
+
+            insert_conversation_record "$conversation_id" "$tags"
             echo "conversation_id=$conversation_id"
         fi
     else
@@ -430,7 +454,7 @@ show_help() {
     echo "  message_id=<id>        Response ID of the injected message"
     echo ""
     echo "Environment:"
-    echo "  MNG_LLM_MODEL   Model for llm commands (default: claude-opus-4.6)"
+    echo "  MNG_LLM_MODEL   Model for llm commands (default: claude-haiku-4.5)"
 }
 
 log "Invoked with args: $*"

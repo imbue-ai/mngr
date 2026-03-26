@@ -36,6 +36,7 @@ def test_clone_creates_agent_from_source(
                 clone_name,
                 "--command",
                 "sleep 482917",
+                "--transfer=none",
                 "--no-connect",
             ],
             obj=plugin_manager,

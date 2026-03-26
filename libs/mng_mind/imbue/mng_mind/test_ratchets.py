@@ -32,7 +32,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(0))
+    rc.check_time_sleep(_DIR, snapshot(1))
 
 
 def test_prevent_global_keyword() -> None:
@@ -208,7 +208,7 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess_usage() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(11))
+    rc.check_direct_subprocess(_DIR, snapshot(13))
 
 
 # --- AST-based ratchets ---

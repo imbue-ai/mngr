@@ -26,8 +26,10 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -51,7 +53,7 @@ from imbue.mng.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mng.plugins.hookspecs import OptionStackItem
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import CommandString
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.git_utils import find_git_common_dir
 from imbue.mng.utils.polling import poll_until
 from imbue.mng_claude import hookimpl
@@ -610,7 +612,9 @@ def _load_claude_resource_script(filename: str) -> str:
     return script_path.read_text()
 
 
-def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Path) -> None:
+def _provision_background_scripts(
+    host: OnlineHostInterface, agent_state_dir: Path, concurrency_group: ConcurrencyGroup
+) -> None:
     """Write the background task scripts to $MNG_AGENT_STATE_DIR/commands/.
 
     Provisions stream_transcript.sh, claude_background_tasks.sh, and
@@ -625,11 +629,25 @@ def _provision_background_scripts(host: OnlineHostInterface, agent_state_dir: Pa
     host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
     # Claude-specific scripts from this plugin's resources
+    threads: list[ObservableThread] = []
     for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
-            host.write_file(script_path, script_content.encode(), mode="0755")
+            try:
+                thread = concurrency_group.start_new_thread(
+                    host.write_file, (script_path, script_content.encode(), "0755")
+                )
+            except InvalidConcurrencyGroupStateError:
+                # The parent group is shutting down (e.g., another provisioning step
+                # failed). Stop spawning threads and let the real error propagate.
+                logger.debug("Concurrency group shutting down; aborting background script provisioning")
+                return
+            threads.append(thread)
+
+    # make sure everything actually uploaded
+    for thread in threads:
+        thread.join(60.0)
 
 
 def _has_api_credentials_available(
@@ -989,12 +1007,12 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
         """
-        if options.git and options.git.copy_mode == WorkDirCopyMode.WORKTREE:
+        if options.transfer_mode == TransferMode.GIT_WORKTREE:
             if not host.is_local:
                 raise PluginMngError(
-                    "Worktree mode is not supported on remote hosts.\n"
+                    "Git worktree transfer mode is not supported on remote hosts.\n"
                     "Claude trust extension requires local filesystem access. "
-                    "Use --copy or --clone instead."
+                    "Use --transfer=git-mirror instead."
                 )
 
         config = self.agent_config
@@ -1008,8 +1026,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             and not mng_ctx.is_auto_approve
             and not config.trust_working_directory
         ):
-            copy_mode = options.git.copy_mode if options.git else None
-            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+            transfer_mode = options.transfer_mode
+            if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
                 source_path = self._find_git_source_path(mng_ctx.concurrency_group)
                 trust_path = source_path if source_path is not None else self.work_dir
             else:
@@ -1131,8 +1149,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         mode, prompts the user for each undismissed dialog. For non-interactive
         mode, raises the appropriate error.
 
-        source_path is the trusted source directory (for worktree/copy modes).
-        When None (clone mode), trust is prompted for work_dir instead.
+        source_path is the trusted source directory (for git-worktree/git-mirror modes).
+        When None (rsync/none mode), trust is prompted for work_dir instead.
         """
         global_config_path = get_claude_config_path()
         trust_path = source_path if source_path is not None else self.work_dir
@@ -1162,7 +1180,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # skipDangerousModePermissionPrompt in settings.json instead.
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
-        """Find the source repo path for the agent's work_dir, if it's a git worktree/copy.
+        """Find the source repo path for the agent's work_dir, if it's a git worktree or mirror.
 
         Returns the parent of the git common dir (the source repo root),
         or None if work_dir is not inside a git repo.
@@ -1212,6 +1230,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     ) -> None:
         """Set up the per-agent config dir on a local host."""
         claude_json_data = self._build_per_agent_claude_json(options, config)
+        approve_api_key_for_claude(claude_json_data)
         host.write_text_file(config_dir / ".claude.json", json.dumps(claude_json_data, indent=2) + "\n")
 
         if config.convert_macos_credentials and is_macos():
@@ -1259,6 +1278,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         if realpath_result.success and realpath_result.stdout.strip():
             resolved_work_dir = Path(realpath_result.stdout.strip())
         claude_json_data = build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
+        approve_api_key_for_claude(claude_json_data)
         file_transfers.append(
             (config_dir / ".claude.json", (json.dumps(claude_json_data, indent=2) + "\n").encode("utf-8"))
         )
@@ -1287,9 +1307,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         dialog. Falls back to generated defaults if no global config exists.
 
         Trust for work_dir is added by extending from the source directory
-        (for worktree/copy modes), by trust_working_directory config, or
-        inherited from the global config (for clone mode where the user was
-        already prompted). Falls back to generated defaults if no global
+        (for git-worktree/git-mirror modes), by trust_working_directory config,
+        or inherited from the global config (for rsync/none modes where the
+        user was already prompted). Falls back to generated defaults if no global
         config exists.
         """
         global_config = read_claude_config(get_claude_config_path())
@@ -1299,10 +1319,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             data = _generate_claude_json(config.version)
 
         projects = data.setdefault("projects", {})
-        copy_mode = options.git.copy_mode if options.git else None
+        transfer_mode = options.transfer_mode
 
-        # For worktree/copy mode, extend trust from the source to the work_dir
-        if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
+        # For worktree/mirror mode, extend trust from the source to the work_dir
+        if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
             source_path = self._find_git_source_path(self.mng_ctx.concurrency_group)
             if source_path is not None:
                 source_path = source_path.resolve()
@@ -1336,95 +1356,101 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         For local hosts, ensures all known Claude startup dialogs are dismissed
         in the global config so they don't intercept tmux input. Trust handling
-        depends on the copy mode:
-        - worktree/copy: trust is extended from the source directory
-        - clone: trust is prompted for the work_dir
+        depends on the transfer mode:
+        - git-worktree/git-mirror: trust is extended from the source directory
+        - rsync/none: trust is prompted for the work_dir
         - trust_working_directory=True: trust is auto-added for work_dir
         """
-        config = self.agent_config
+        with mng_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
+            config = self.agent_config
 
-        if host.is_local:
-            # Determine the source path for trust extension
-            source_path: Path | None = None
-            copy_mode = options.git.copy_mode if options.git else None
-            if copy_mode in (WorkDirCopyMode.WORKTREE, WorkDirCopyMode.COPY):
-                source_path = self._find_git_source_path(mng_ctx.concurrency_group)
+            # Provision background task scripts to the agent state directory
+            provision_backgroun_script_thread = concurrency_group.start_new_thread(
+                _provision_background_scripts, (host, self._get_agent_dir(), concurrency_group)
+            )
 
-            if config.trust_working_directory:
-                # Auto-approve all dialogs for agents that opt into trust
-                ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
-            else:
-                # Check/prompt for all blocking dialogs
-                # source_path=None (clone/no-git) means trust is prompted for work_dir
-                self._ensure_no_blocking_dialogs(source_path, mng_ctx)
+            if host.is_local:
+                # Determine the source path for trust extension
+                source_path: Path | None = None
+                transfer_mode = options.transfer_mode
+                if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
+                    source_path = self._find_git_source_path(mng_ctx.concurrency_group)
 
-        # no matter what, *always* dismiss the cost popup, it's pointless
-        acknowledge_cost_threshold(get_claude_config_path())
+                if config.trust_working_directory:
+                    # Auto-approve all dialogs for agents that opt into trust
+                    ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
+                else:
+                    # Check/prompt for all blocking dialogs
+                    # source_path=None (clone/no-git) means trust is prompted for work_dir
+                    self._ensure_no_blocking_dialogs(source_path, mng_ctx)
 
-        # Ensure claude is installed (and at the right version if pinned)
-        if config.check_installation:
-            is_installed = _check_claude_installed(host)
-            if is_installed:
-                logger.debug("Claude is already installed on the host")
-                # If version is pinned, verify the installed version matches
-                if config.version is not None:
-                    installed_version = _get_claude_version(host)
-                    if installed_version != config.version:
-                        raise PluginMngError(
-                            f"Claude version mismatch: installed version is {installed_version!r}, "
-                            f"but agent config pins version {config.version!r}. "
-                            "Re-install claude with the correct version or update the pinned version in your agent config."
-                        )
-                    logger.debug("Claude version {} matches pinned version", installed_version)
-            else:
-                logger.warning("Claude is not installed on the host")
-                install_hint = _build_install_command_hint(config.version)
+            # Ensure claude is installed (and at the right version if pinned)
+            if config.check_installation:
+                is_installed = _check_claude_installed(host)
+                if is_installed:
+                    logger.debug("Claude is already installed on the host")
+                    # If version is pinned, verify the installed version matches
+                    if config.version is not None:
+                        installed_version = _get_claude_version(host)
+                        if installed_version != config.version:
+                            raise PluginMngError(
+                                f"Claude version mismatch: installed version is {installed_version!r}, "
+                                f"but agent config pins version {config.version!r}. "
+                                "Re-install claude with the correct version or update the pinned version in your agent config."
+                            )
+                        logger.debug("Claude version {} matches pinned version", installed_version)
+                else:
+                    logger.warning("Claude is not installed on the host")
+                    install_hint = _build_install_command_hint(config.version)
 
-                if host.is_local:
-                    # For local hosts, auto-approve or prompt the user for consent
-                    if mng_ctx.is_auto_approve:
-                        logger.debug("Auto-approving claude installation (--yes)")
-                    elif mng_ctx.is_interactive:
-                        if _prompt_user_for_installation(config.version):
-                            logger.debug("User consented to install claude locally")
+                    if host.is_local:
+                        # For local hosts, auto-approve or prompt the user for consent
+                        if mng_ctx.is_auto_approve:
+                            logger.debug("Auto-approving claude installation (--yes)")
+                        elif mng_ctx.is_interactive:
+                            if _prompt_user_for_installation(config.version):
+                                logger.debug("User consented to install claude locally")
+                            else:
+                                raise PluginMngError(
+                                    f"Claude is not installed. Please install it manually with:\n  {install_hint}"
+                                )
                         else:
+                            # Non-interactive mode: fail with a clear message
                             raise PluginMngError(
                                 f"Claude is not installed. Please install it manually with:\n  {install_hint}"
                             )
                     else:
-                        # Non-interactive mode: fail with a clear message
-                        raise PluginMngError(
-                            f"Claude is not installed. Please install it manually with:\n  {install_hint}"
-                        )
-                else:
-                    if not mng_ctx.config.is_remote_agent_installation_allowed:
-                        raise PluginMngError(
-                            "Claude is not installed on the remote host and automatic remote installation is disabled. "
-                            "Set is_remote_agent_installation_allowed = true in your mng config to enable automatic installation, "
-                            "or install Claude manually on the remote host."
-                        )
-                    else:
-                        logger.debug("Automatic remote agent installation is enabled, proceeding")
+                        if not mng_ctx.config.is_remote_agent_installation_allowed:
+                            raise PluginMngError(
+                                "Claude is not installed on the remote host and automatic remote installation is disabled. "
+                                "Set is_remote_agent_installation_allowed = true in your mng config to enable automatic installation, "
+                                "or install Claude manually on the remote host."
+                            )
+                        else:
+                            logger.debug("Automatic remote agent installation is enabled, proceeding")
 
-                # Install claude
-                logger.info("Installing claude...")
-                _install_claude(host, config.version)
-                logger.info("Claude installed successfully")
+                    # Install claude
+                    logger.info("Installing claude...")
+                    _install_claude(host, config.version)
+                    logger.info("Claude installed successfully")
 
-        # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
-        # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
-        # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
-        if options.source_agent_state_dir is not None:
-            self._transfer_source_plugin_data(host, options.source_agent_state_dir)
+            # no matter what, *always* dismiss the cost popup, it's pointless
+            acknowledge_cost_threshold(get_claude_config_path())
 
-        # Set up per-agent config directory (for both local and remote hosts)
-        self._setup_per_agent_config_dir(host, options, mng_ctx)
+            # Transfer plugin data from source agent before config setup (if cloning via --from-agent).
+            # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
+            # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
+            if options.source_agent_state_dir is not None:
+                self._transfer_source_plugin_data(host, options.source_agent_state_dir)
 
-        # Configure readiness hooks (for both local and remote hosts)
-        self._configure_readiness_hooks(host)
+            # Set up per-agent config directory (for both local and remote hosts)
+            self._setup_per_agent_config_dir(host, options, mng_ctx)
 
-        # Provision background task scripts to the agent state directory
-        _provision_background_scripts(host, self._get_agent_dir())
+            # Configure readiness hooks (for both local and remote hosts)
+            self._configure_readiness_hooks(host)
+
+            # should be done by now, just wanted to do in parallel for latency reasons
+            provision_backgroun_script_thread.join(60.0)
 
     def on_after_provisioning(
         self,
@@ -1690,12 +1716,7 @@ def get_files_for_deploy(
     # it's a little silly to pass in repo_root here, but whatever, it will also get reset when we're provisioning
     claude_json_data = build_claude_json_for_agent(False, repo_root, None, current_time=FIXED_TIME)
     # also inject our API key here, since deployed versions need it
-    user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
-    api_key = user_claude_json_data.get("primaryApiKey", os.environ.get("ANTHROPIC_API_KEY", ""))
-    if api_key:
-        approved_keys = claude_json_data.setdefault("customApiKeyResponses", {})
-        approved_keys["approved"] = approved_keys.get("approved", []) + [api_key[-20:]]
-        approved_keys["rejected"] = []
+    approve_api_key_for_claude(claude_json_data)
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
     if include_user_settings:
@@ -1739,3 +1760,19 @@ def modify_env_vars_for_deploy(
             )
         env_vars["ANTHROPIC_API_KEY"] = token
     env_vars["IS_SANDBOX"] = "1"
+
+
+def approve_api_key_for_claude(data: dict[str, Any]):
+    # approve the API key so that the agent doesnt get blocked
+    user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
+    conf_key = user_claude_json_data.get("primaryApiKey", "")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key or conf_key:
+        approved_section = data.setdefault("customApiKeyResponses", {})
+        approved_list = approved_section.get("approved", [])
+        if api_key[-20:] not in approved_list:
+            approved_list.append(api_key[-20:])
+        if conf_key[-20:] not in approved_list:
+            approved_list.append(conf_key[-20:])
+        approved_section["approved"] = approved_list
+        approved_section["rejected"] = []

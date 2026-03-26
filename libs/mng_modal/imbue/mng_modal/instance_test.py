@@ -1457,6 +1457,35 @@ def test_shutdown_script_includes_volume_sync_when_host_volume_enabled(
     assert "sync /host_volume" in script
 
 
+def test_shutdown_script_forces_kill_on_curl_failure(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """Shutdown script should log response, sync volume, and kill -9 1 when curl fails."""
+    written_content: dict[str, str] = {}
+
+    class MockHost:
+        host_dir = Path("/mng")
+
+        def write_text_file(self, path: Path, content: str, mode: str | None = None) -> None:
+            written_content[str(path)] = content
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.get_object_id.return_value = "sb-test-curl-fail"
+
+    host_id = HostId.generate()
+    modal_provider._create_shutdown_script(
+        cast(Any, MockHost()),
+        mock_sandbox,
+        host_id,
+        "https://test--snapshot.modal.run",
+    )
+
+    script = written_content["/mng/commands/shutdown.sh"]
+    assert "CURL_EXIT" in script
+    assert "kill -9 1" in script
+    assert 'log "Response (if any): $RESPONSE"' in script
+
+
 def test_is_host_volume_created_defaults_to_true() -> None:
     """ModalProviderConfig.is_host_volume_created should default to True."""
     config = ModalProviderConfig()

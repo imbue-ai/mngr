@@ -73,13 +73,13 @@ def test_mng_create_echo_command_on_modal(
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
-def test_mng_create_with_worktree_flag_on_modal_raises_error(
+def test_mng_create_with_transfer_git_worktree_on_modal_raises_error(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Test that explicitly requesting --worktree on modal raises an error.
+    """Test that explicitly requesting --transfer=git-worktree on modal raises an error.
 
-    The --worktree flag only works when source and target are on the same host.
+    The git-worktree transfer mode only works when source and target are on the same host.
     Modal is always a remote host, so this should fail.
     """
     agent_name = f"test-modal-worktree-{get_short_random_string()}"
@@ -93,7 +93,7 @@ def test_mng_create_with_worktree_flag_on_modal_raises_error(
             f"{agent_name}@{agent_name}.modal",
             "echo",
             "--new-host",
-            "--worktree",
+            "--transfer=git-worktree",
             "--no-connect",
             "--no-ensure-clean",
             "--source",
@@ -107,10 +107,10 @@ def test_mng_create_with_worktree_flag_on_modal_raises_error(
         env=modal_subprocess_env.env,
     )
 
-    # Should fail with an error about worktree mode
-    assert result.returncode != 0, "Expected worktree on modal to fail"
-    assert "worktree" in result.stderr.lower() or "worktree" in result.stdout.lower(), (
-        f"Expected error message about worktree mode. stderr: {result.stderr}\nstdout: {result.stdout}"
+    # Should fail with an error about git-worktree transfer mode
+    assert result.returncode != 0, "Expected git-worktree on modal to fail"
+    assert "git-worktree" in result.stderr.lower() or "git-worktree" in result.stdout.lower(), (
+        f"Expected error message about git-worktree transfer mode. stderr: {result.stderr}\nstdout: {result.stdout}"
     )
 
 

@@ -33,6 +33,12 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(
         dir_name="mng", pypi_name="mng", internal_deps=("imbue-common", "concurrency-group", "resource-guards")
     ),
+    PackageInfo(
+        dir_name="modal_proxy",
+        pypi_name="modal-proxy",
+        internal_deps=("imbue-common", "concurrency-group", "mng", "resource-guards"),
+    ),
+    PackageInfo(dir_name="mng_modal", pypi_name="mng-modal", internal_deps=("mng", "modal-proxy")),
     PackageInfo(dir_name="mng_claude", pypi_name="mng-claude", internal_deps=("mng",)),
     PackageInfo(dir_name="mng_pair", pypi_name="mng-pair", internal_deps=("mng",)),
     PackageInfo(dir_name="mng_opencode", pypi_name="mng-opencode", internal_deps=("mng",)),

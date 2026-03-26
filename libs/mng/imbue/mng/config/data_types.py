@@ -752,10 +752,7 @@ class CreateCliOptions(CommonCliOptions):
     source_path: str | None
     target: str | None
     target_path: str | None
-    in_place: bool
-    copy_source: bool
-    clone: bool
-    worktree: bool
+    transfer: str | None
     rsync: bool | None
     rsync_args: str | None
     include_git: bool
@@ -793,8 +790,7 @@ class CreateCliOptions(CommonCliOptions):
     start_on_boot: bool | None
     start_host: bool
     grant: tuple[str, ...]
-    user_command: tuple[str, ...]
-    sudo_command: tuple[str, ...]
+    extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]

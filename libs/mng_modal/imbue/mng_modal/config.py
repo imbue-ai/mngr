@@ -110,6 +110,10 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "be restarted if it was stopped gracefully (which creates a snapshot)."
         ),
     )
+    ssh_connect_timeout: float = Field(
+        default=60.0,
+        description="Timeout in seconds for waiting for sshd to be ready on the sandbox",
+    )
     is_host_volume_created: bool = Field(
         default=True,
         description=(

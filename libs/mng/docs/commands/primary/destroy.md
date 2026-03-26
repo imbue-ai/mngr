@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [destroy|rm] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [-f|--force] [--dry-run] [-b|--remove-created-branch]
+mng [destroy|rm] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [--stdin] [-f|--force] [--dry-run] [-b|--remove-created-branch]
 ```
 
 Destroy agent(s) and clean up resources.
@@ -42,9 +42,9 @@ mng destroy [OPTIONS] [AGENTS]...
 | `--agent` | text | Agent name or ID to destroy (can be specified multiple times) | None |
 | `-a`, `--all`, `--all-agents` | boolean | Destroy all agents | `False` |
 | `--session` | text | Tmux session name to destroy (can be specified multiple times). The agent name is extracted by stripping the configured prefix from the session name. | None |
-| `--include` | text | Filter agents to destroy by CEL expression (repeatable). [future] | None |
-| `--exclude` | text | Exclude agents matching CEL expression from destruction (repeatable). [future] | None |
-| `--stdin` | boolean | Read agent names/IDs from stdin, one per line. [future] | `False` |
+| `--include` | text | Filter agents to destroy by CEL expression (repeatable) | None |
+| `--exclude` | text | Exclude agents matching CEL expression from destruction (repeatable) | None |
+| `--stdin` | boolean | Read agent names/IDs from stdin, one per line | `False` |
 
 ## Behavior
 
@@ -120,6 +120,24 @@ $ mng destroy --agent my-agent --agent another-agent
 
 ```bash
 $ mng destroy --session mng-my-agent
+```
+
+**Destroy agents matching a CEL filter**
+
+```bash
+$ mng destroy --include 'name.startsWith("test-")' --force
+```
+
+**Destroy all except docker agents**
+
+```bash
+$ mng destroy --all --exclude 'host.provider == "docker"' --force
+```
+
+**Pipe agent names from list**
+
+```bash
+$ mng list --format '{name}' | mng destroy --stdin --force
 ```
 
 **Custom format template output**

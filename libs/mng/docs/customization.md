@@ -7,8 +7,8 @@
 `mng` loads configuration from multiple sources with the following precedence (lowest to highest):
 
 1. User config: `~/.mng/profiles/<profile_id>/settings.toml`
-2. Project config: `.mng/settings.toml` (at git root or context dir)
-3. Local config: `.mng/settings.local.toml` (at git root or context dir)
+2. Project config: `.mng/settings.toml` (at git root, context dir, or `MNG_PROJECT_DIR`)
+3. Local config: `.mng/settings.local.toml` (at git root, context dir, or `MNG_PROJECT_DIR`)
 4. Environment variables: `MNG_PREFIX`, `MNG_HOST_DIR`, `MNG_ROOT_NAME`
 5. CLI arguments (highest precedence)
 

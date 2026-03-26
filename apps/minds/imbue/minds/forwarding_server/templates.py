@@ -7,6 +7,7 @@ from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.forwarding_server.agent_creator import AgentCreationInfo
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
@@ -79,11 +80,11 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
     + """
     .form-group { margin-bottom: 16px; }
     label { display: block; margin-bottom: 6px; font-size: 14px; color: rgb(60, 60, 80); }
-    input[type="text"] {
+    input[type="text"], select {
       width: 100%; max-width: 500px; padding: 10px 14px;
       border: 1px solid rgb(200, 200, 210); border-radius: 6px; font-size: 16px;
     }
-    input[type="text"]:focus { outline: none; border-color: rgb(26, 26, 46); }
+    input[type="text"]:focus, select:focus { outline: none; border-color: rgb(26, 26, 46); }
     .help-text { margin-top: 4px; font-size: 13px; color: gray; }
     .back-link { margin-top: 24px; }
     .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
@@ -108,6 +109,15 @@ _CREATE_FORM_TEMPLATE: Final[str] = (
       <input type="text" id="branch" name="branch" value="{{ branch }}"
              placeholder="main">
       <p class="help-text">The branch to check out after cloning. Leave empty to use the repository's default branch.</p>
+    </div>
+    <div class="form-group">
+      <label for="launch_mode">Launch mode</label>
+      <select id="launch_mode" name="launch_mode">
+        {% for mode in launch_modes %}
+        <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+        {% endfor %}
+      </select>
+      <p class="help-text">Local: run in a Docker container. Cloud: run on a cloud provider. Dev: run directly on this host.</p>
     </div>
     <button type="submit" class="btn">Create</button>
   </form>
@@ -242,14 +252,19 @@ def render_landing_page(
 _DEFAULT_GIT_URL: Final[str] = "https://github.com/imbue-ai/simple_mind.git"
 
 
-_DEFAULT_AGENT_NAME: Final[str] = "selene"
+_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MIND_NAME", "selene")
 
 
 _DEFAULT_BRANCH: Final[str] = os.getenv("MIND_BRANCH", "main")
 
 
 @pure
-def render_create_form(git_url: str = "", agent_name: str = "", branch: str = "") -> str:
+def render_create_form(
+    git_url: str = "",
+    agent_name: str = "",
+    branch: str = "",
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
     """Render the agent creation form page.
 
     When git_url is provided, the form field is pre-filled with that value.
@@ -259,7 +274,13 @@ def render_create_form(git_url: str = "", agent_name: str = "", branch: str = ""
     effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
     effective_branch = branch if branch else _DEFAULT_BRANCH
     template = _JINJA_ENV.from_string(_CREATE_FORM_TEMPLATE)
-    return template.render(git_url=effective_url, agent_name=effective_name, branch=effective_branch)
+    return template.render(
+        git_url=effective_url,
+        agent_name=effective_name,
+        branch=effective_branch,
+        launch_modes=list(LaunchMode),
+        selected_launch_mode=launch_mode.value,
+    )
 
 
 @pure

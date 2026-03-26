@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -264,7 +265,7 @@ def test_mng_cli_resolver_update_servers_replaces_state() -> None:
 # -- parse_agents_from_json tests --
 
 
-def _make_agents_json_with_ssh(*agents: tuple[str, dict[str, object] | None]) -> str:
+def _make_agents_json_with_ssh(*agents: tuple[str, Mapping[str, object] | None]) -> str:
     """Build mng list --format json output with optional SSH info per agent."""
     agent_list = []
     for agent_id, ssh in agents:
@@ -546,7 +547,7 @@ def _make_discovery_full_line(
     )
 
 
-def _make_host_ssh_info_line(host_id: str, ssh_data: dict[str, object]) -> str:
+def _make_host_ssh_info_line(host_id: str, ssh_data: Mapping[str, object]) -> str:
     """Build a HOST_SSH_INFO event JSON line."""
     return json.dumps(
         {

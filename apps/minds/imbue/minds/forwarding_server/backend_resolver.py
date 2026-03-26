@@ -23,7 +23,7 @@ from imbue.mng.api.discovery_events import parse_discovery_event_line
 from imbue.mng.primitives import AgentId
 from imbue.mng.primitives import DiscoveredAgent
 
-SERVERS_LOG_FILENAME: Final[str] = "servers/events.jsonl"
+SERVERS_EVENT_SOURCE_NAME: Final[str] = "servers"
 
 
 class ServerLogParseError(ValueError):
@@ -423,7 +423,7 @@ class MngStreamManager(MutableModel):
         self._events_servers[aid_str] = {}
 
         process = self._cg.run_process_in_background(
-            command=[self.mng_binary, "events", aid_str, SERVERS_LOG_FILENAME, "--follow", "--quiet"],
+            command=[self.mng_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
             on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
         )
         self._events_processes[aid_str] = process

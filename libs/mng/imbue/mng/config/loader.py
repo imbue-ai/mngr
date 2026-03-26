@@ -72,8 +72,8 @@ def load_config(
 
     Precedence (lowest to highest):
     1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir or git root)
-    3. Local config (.{root_name}/settings.local.toml at context_dir or git root)
+    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNG_PROJECT_DIR)
+    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNG_PROJECT_DIR)
     4. Environment variables (MNG_ROOT_NAME, MNG_PREFIX, MNG_HOST_DIR)
     5. CLI arguments (handled by caller)
 
@@ -82,6 +82,10 @@ def load_config(
     2. Defaults for prefix and default_host_dir (if not set in config files)
 
     Explicit MNG_PREFIX/MNG_HOST_DIR values override MNG_ROOT_NAME-derived defaults.
+
+    MNG_PROJECT_DIR overrides where project settings are found. When set, project
+    and local config files are loaded from that directory instead of .{root_name}/
+    at the git root.
 
     Returns MngContext containing both the final MngConfig and a reference to the plugin manager.
     """
@@ -176,7 +180,7 @@ def load_config(
 
     # Block disabled plugins so their hooks don't fire. This covers
     # CLI-level --disable-plugin flags that weren't known at startup.
-    block_disabled_plugins(pm, config_dict["disabled_plugins"])
+    block_disabled_plugins(pm, config_dict["disabled_plugins"], is_strict=True)
 
     # Include logging if not None
     if config.logging is not None:
@@ -314,11 +318,24 @@ def _parse_providers(
             config_class = get_provider_config_class(backend)
         except UnknownBackendError as e:
             msg = f"Provider '{name}' references unknown backend '{backend}'."
-            if disabled_plugins:
+            if backend in disabled_plugins:
+                msg += (
+                    f" The '{backend}' plugin is currently disabled. Either enable"
+                    f' the plugin or add `plugin = "{backend}"` to this provider'
+                    f" block so it is skipped when the plugin is disabled."
+                )
+            elif disabled_plugins:
                 msg += (
                     f" If this backend is provided by a disabled plugin, either enable"
                     f' the plugin or add `plugin = "<plugin-name>"` to this provider'
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
+                )
+            else:
+                msg += (
+                    f" The plugin package that provides the"
+                    f" '{backend}' backend may not be installed. If you installed mng"
+                    f" as a tool, try reinstalling with the plugin package"
+                    f" (e.g. --with 'mng-{backend}')."
                 )
             if strict:
                 raise ConfigParseError(msg) from e
@@ -432,7 +449,7 @@ def _apply_plugin_overrides(
     return enabled_result, disabled_names
 
 
-def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[str]) -> None:
+def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[str], is_strict: bool = False) -> None:
     """Block disabled plugins in the plugin manager so their hooks don't fire.
 
     Uses pm.set_blocked() which both prevents future registration and
@@ -440,6 +457,11 @@ def block_disabled_plugins(pm: pluggy.PluginManager, disabled_names: frozenset[s
     are already blocked (no-op in that case).
     """
     for name in disabled_names:
+        if is_strict:
+            if not pm.has_plugin(name) and not pm.is_blocked(name):
+                raise Exception(
+                    f"Cannot disable plugin '{name}' because it is not registered. Possibly was not installed, or was disabled via a config file? Registered plugins: {pm.list_name_plugin()}"
+                )
         if not pm.is_blocked(name):
             pm.set_blocked(name)
 

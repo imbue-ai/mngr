@@ -101,6 +101,7 @@ def _is_backend_enabled(backend_name: str, mng_ctx: MngContext) -> bool:
 def get_all_provider_instances(
     mng_ctx: MngContext,
     provider_names: tuple[str, ...] | None = None,
+    reset_caches: bool = False,
 ) -> list[BaseProviderInstance]:
     """Get all available provider instances.
 
@@ -153,6 +154,10 @@ def get_all_provider_instances(
             provider_name = ProviderInstanceName(backend_name)
             providers.append(get_provider_instance(provider_name, mng_ctx))
             seen_names.add(backend_name)
+
+    if reset_caches:
+        for provider in providers:
+            provider.reset_caches()
 
     logger.trace("Loaded {} total provider instances", len(providers))
     return providers

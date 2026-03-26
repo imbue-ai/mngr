@@ -64,6 +64,12 @@ jobs:
       - name: Build mng
         run: pyproject-build libs/mng -o dist/
 
+      - name: Build modal-proxy
+        run: pyproject-build libs/modal_proxy -o dist/
+
+      - name: Build mng-modal
+        run: pyproject-build libs/mng_modal -o dist/
+
       - name: Build mng-claude
         run: pyproject-build libs/mng_claude -o dist/
 

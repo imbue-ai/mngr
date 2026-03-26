@@ -36,13 +36,15 @@ from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.polling import poll_until
 
 # Constants for send_message paste-detection synchronization
-_SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 10.0
-_TUI_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
+_SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
+# this can take a while, especialy on modal--the process needs to actually start and render the TUI before the indicator appears
+_TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
+_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Default timeout for signal-based synchronization
 # Note that this does need to be fairly long, since it can take a little while for the machine to respond if you're unlucky
-_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 10.0
+# this is *especially* the case when running on modal, when really overloading the machine while it is starting, etc
+_DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS: Final[float] = 90.0
 
 # Compiled once for _normalize_for_match performance
 _NON_ALNUM_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
@@ -283,19 +285,19 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.
 
+        Runs preflight checks (e.g., dialog detection) first -- errors from
+        preflight indicate a condition that won't resolve by resending (e.g.,
+        a blocking dialog).
+
         For agents that echo input to the terminal (like Claude Code), uses a
         paste-detection approach to ensure the message is fully received before
         sending Enter. This avoids race conditions where Enter could be
         interpreted as a literal newline instead of a submit action.
 
         Subclasses can enable this by overriding uses_paste_detection_send().
-
-        Before sending, runs preflight checks (e.g., dialog detection) that
-        subclasses can customize by overriding _preflight_send_message().
         """
         with log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
-
             if self.uses_paste_detection_send():
                 self._send_message_with_paste_detection(self.tmux_target, message)
             else:
@@ -565,7 +567,13 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             f'timeout {timeout_secs} tmux wait-for "$0"'
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
-        result = self.host.execute_command(cmd, timeout_seconds=remaining_time)
+        try:
+            result = self.host.execute_command(cmd, timeout_seconds=remaining_time)
+        except TimeoutError:
+            # The execute_command timeout can race with the bash `timeout` inside
+            # the command. Treat the pyinfra-level timeout as a normal timeout.
+            logger.debug("Execute command timed out before bash timeout; treating as signal timeout")
+            return False
         elapsed_ms = (time.time() - start) * 1000
         if result.success:
             logger.trace("Received submission signal in {:.0f}ms", elapsed_ms)

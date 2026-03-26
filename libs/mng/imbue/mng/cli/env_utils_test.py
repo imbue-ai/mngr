@@ -1,9 +1,12 @@
-"""Tests for CLI environment variable utilities."""
+"""Tests for CLI environment variable and label utilities."""
 
 import pytest
 
 from imbue.mng.cli.env_utils import resolve_env_vars
+from imbue.mng.cli.env_utils import resolve_labels
 from imbue.mng.config.data_types import EnvVar
+from imbue.mng.errors import UserInputError
+from imbue.mng.interfaces.host import AgentLabelOptions
 
 
 def test_resolve_env_vars_pass_through_from_environ(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,3 +81,21 @@ def test_resolve_env_vars_returns_env_var_instances() -> None:
     assert isinstance(result[0], EnvVar)
     assert result[0].key == "KEY"
     assert result[0].value == "value"
+
+
+def test_resolve_labels_valid() -> None:
+    """resolve_labels should parse KEY=VALUE strings into AgentLabelOptions."""
+    result = resolve_labels(("key=value", "batch=run1"))
+    assert result == AgentLabelOptions(labels={"key": "value", "batch": "run1"})
+
+
+def test_resolve_labels_empty() -> None:
+    """resolve_labels should return empty labels for empty input."""
+    result = resolve_labels(())
+    assert result == AgentLabelOptions(labels={})
+
+
+def test_resolve_labels_invalid_raises() -> None:
+    """resolve_labels should raise UserInputError for missing '=' separator."""
+    with pytest.raises(UserInputError):
+        resolve_labels(("no-equals-sign",))

@@ -39,7 +39,7 @@ from imbue.mng.primitives import HostState
 from imbue.mng.primitives import Permission
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 
 # Default timeout for waiting for agent readiness before sending messages.
 # With hook-based polling, we return early when the agent signals readiness,
@@ -195,12 +195,7 @@ class OnlineHostInterface(HostInterface, ABC):
         ...
 
     @abstractmethod
-    def write_file(
-        self,
-        path: Path,
-        content: bytes,
-        mode: str | None = None,
-    ) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
         """Write bytes content to a file."""
         ...
 
@@ -509,10 +504,6 @@ class AgentGitOptions(FrozenModel):
         default=True,
         description="Whether to sync git data from the source repository",
     )
-    copy_mode: WorkDirCopyMode = Field(
-        default=WorkDirCopyMode.COPY,
-        description="How to set up the work_dir: copy, clone, or worktree",
-    )
     base_branch: str | None = Field(
         default=None,
         description="Starting branch for the agent (default: current branch)",
@@ -618,13 +609,9 @@ class FileModificationSpec(FrozenModel):
 class AgentProvisioningOptions(FrozenModel):
     """Simple provisioning options for the agent."""
 
-    user_commands: tuple[str, ...] = Field(
+    extra_provision_commands: tuple[str, ...] = Field(
         default=(),
         description="Custom shell commands to run during provisioning",
-    )
-    sudo_commands: tuple[str, ...] = Field(
-        default=(),
-        description="Custom shell commands to run as root during provisioning",
     )
     upload_files: tuple[UploadFileSpec, ...] = Field(
         default=(),
@@ -749,6 +736,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Target path for the agent work_dir",
     )
+    transfer_mode: TransferMode = Field(
+        default=TransferMode.NONE,
+        description="How to transfer the project into the agent work_dir",
+    )
     initial_message: str | None = Field(
         default=None,
         description="Initial message to pipe to the agent on startup",
@@ -855,7 +846,7 @@ class NewHostOptions(FrozenModel):
         description="Name for the new host (None means use provider default or auto-generate)",
     )
     name_style: HostNameStyle = Field(
-        default=HostNameStyle.ASTRONOMY,
+        default=HostNameStyle.COOLNAME,
         description="Style for auto-generated host name (used when name is None and provider has no default)",
     )
     tags: dict[str, str] = Field(

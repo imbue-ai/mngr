@@ -76,14 +76,20 @@ def _read_host_record(host_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
+    """Atomically write JSON data to a file."""
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(temp_path, path)
+
+
 def _write_host_record(host_record: dict[str, Any]) -> None:
     """Write a host record to the volume."""
     host_id = host_record["certified_host_data"]["host_id"]
     path = f"/vol/hosts/{host_id}.json"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(host_record, f, indent=2)
-    volume.commit()
+    _atomic_write_json(path, host_record)
 
 
 def _write_agent_records(host_id: str, agents: list[dict[str, Any]]) -> None:
@@ -104,10 +110,7 @@ def _write_agent_records(host_id: str, agents: list[dict[str, Any]]) -> None:
         agent_id = agent.get("id")
         if agent_id:
             agent_path = f"{host_dir}/{agent_id}.json"
-            with open(agent_path, "w") as f:
-                json.dump(agent, f, indent=2)
-
-    volume.commit()
+            _atomic_write_json(agent_path, agent)
 
 
 @app.function(volumes={"/vol": volume})
@@ -189,6 +192,9 @@ def snapshot_and_shutdown(request_body: dict[str, Any]) -> dict[str, Any]:
 
             # Write agent records so they appear in mng list for stopped hosts
             _write_agent_records(host_id, agents)
+
+            # and *make sure* we commit all of it:
+            volume.commit()
 
             # Terminate the sandbox
             sandbox.terminate()

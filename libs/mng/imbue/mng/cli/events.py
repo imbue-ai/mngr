@@ -1,28 +1,19 @@
 import sys
 from typing import Any
-from typing import assert_never
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
 from imbue.mng.api.events import EventRecord
 from imbue.mng.api.events import EventsTarget
-from imbue.mng.api.events import apply_head_or_tail
-from imbue.mng.api.events import follow_event_file
-from imbue.mng.api.events import read_event_content
 from imbue.mng.api.events import resolve_events_target
 from imbue.mng.api.events import stream_all_events
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
-from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.config.data_types import CommonCliOptions
-from imbue.mng.config.data_types import OutputOptions
-from imbue.mng.errors import MngError
 from imbue.mng.errors import UserInputError
-from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.cel_utils import compile_cel_filters
 
 
@@ -33,7 +24,8 @@ class EventsCliOptions(CommonCliOptions):
     """
 
     target: str
-    event_filename: str | None
+    sources: tuple[str, ...]
+    source: tuple[str, ...]
     filter: str | None
     follow: bool
     tail: int | None
@@ -48,7 +40,7 @@ def _write_and_flush_stdout(content: str) -> None:
 
 @click.command(name="events")
 @click.argument("target")
-@click.argument("event_filename", required=False, default=None)
+@click.argument("sources", nargs=-1)
 @optgroup.group("Display")
 @optgroup.option(
     "--follow/--no-follow",
@@ -60,15 +52,20 @@ def _write_and_flush_stdout(content: str) -> None:
     "--tail",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the last N events (or lines when viewing a specific file)",
+    help="Print the last N events",
 )
 @optgroup.option(
     "--head",
     type=click.IntRange(min=1),
     default=None,
-    help="Print the first N events (or lines when viewing a specific file)",
+    help="Print the first N events",
 )
 @optgroup.group("Filtering")
+@optgroup.option(
+    "--source",
+    multiple=True,
+    help="Event source to include, relative to events/ (e.g. 'messages', 'logs/mng'). Can be repeated.",
+)
 # FIXME: this should be consistent with the rest of the API (two repeatable args, --include and --exclude, that can be used together to build up complex filters)
 @optgroup.option(
     "--filter",
@@ -79,7 +76,7 @@ def _write_and_flush_stdout(content: str) -> None:
 @add_common_options
 @click.pass_context
 def events(ctx: click.Context, **kwargs: Any) -> None:
-    mng_ctx, output_opts, opts = setup_command_context(
+    mng_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="events",
         command_class=EventsCliOptions,
@@ -93,21 +90,16 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
     if opts.follow and opts.head is not None:
         raise UserInputError("Cannot use --head with --follow")
 
-    if opts.filter is not None and opts.event_filename is not None:
-        raise UserInputError("Cannot use --filter with a specific event file name")
-
     # Resolve the target (agent or host)
     target = resolve_events_target(
         identifier=opts.target,
         mng_ctx=mng_ctx,
     )
 
-    # If a specific event file is given, view that file directly
-    if opts.event_filename is not None:
-        _handle_specific_file(target, opts, output_opts)
-        return
+    # Merge positional source arguments and --source option values
+    all_sources = tuple(sorted(set(opts.sources) | set(opts.source)))
 
-    # Stream all events from all sources
+    # Compile CEL filters
     cel_include_filters: list[Any] = []
     cel_exclude_filters: list[Any] = []
     if opts.filter is not None:
@@ -116,41 +108,7 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
             exclude_filters=[],
         )
 
-    _stream_all_events_cli(target, opts, cel_include_filters, cel_exclude_filters)
-
-
-def _handle_specific_file(
-    target: EventsTarget,
-    opts: EventsCliOptions,
-    output_opts: OutputOptions,
-) -> None:
-    """View a specific event file by name."""
-    assert opts.event_filename is not None
-
-    if opts.follow:
-        # Follow mode: poll and print new content
-        logger.info("Following event file '{}' for {} (Ctrl+C to stop)", opts.event_filename, target.display_name)
-        try:
-            follow_event_file(
-                target=target,
-                event_file_name=opts.event_filename,
-                on_new_content=_write_and_flush_stdout,
-                tail_count=opts.tail,
-            )
-        except KeyboardInterrupt:
-            # Clean exit on Ctrl+C
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        return
-
-    # Read and display the event file
-    try:
-        content = read_event_content(target, opts.event_filename)
-    except (MngError, OSError) as e:
-        raise MngError(f"Failed to read event file '{opts.event_filename}': {e}") from e
-
-    filtered_content = apply_head_or_tail(content, head_count=opts.head, tail_count=opts.tail)
-    _emit_event_content(filtered_content, opts.event_filename, output_opts)
+    _stream_all_events_cli(target, opts, cel_include_filters, cel_exclude_filters, all_sources)
 
 
 def _emit_event_record(event: EventRecord) -> None:
@@ -165,6 +123,7 @@ def _stream_all_events_cli(
     opts: EventsCliOptions,
     cel_include_filters: list[Any],
     cel_exclude_filters: list[Any],
+    source_filters: tuple[str, ...],
 ) -> None:
     """Stream all events from all sources as JSONL lines."""
     try:
@@ -176,52 +135,30 @@ def _stream_all_events_cli(
             tail_count=opts.tail,
             head_count=opts.head,
             is_follow=opts.follow,
+            source_filters=source_filters,
         )
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         sys.stdout.flush()
 
 
-def _emit_event_content(
-    content: str,
-    event_file_name: str,
-    output_opts: OutputOptions,
-) -> None:
-    """Emit event content in the appropriate format."""
-    match output_opts.output_format:
-        case OutputFormat.HUMAN:
-            sys.stdout.write(content)
-            if content and not content.endswith("\n"):
-                sys.stdout.write("\n")
-            sys.stdout.flush()
-        case OutputFormat.JSON | OutputFormat.JSONL:
-            emit_final_json(
-                {
-                    "event_file": event_file_name,
-                    "content": content,
-                }
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="events",
     one_line_description="View events from an agent or host",
-    synopsis="mng events TARGET [EVENT_FILE] [--filter CEL] [--follow] [--tail N] [--head N]",
+    synopsis="mng events TARGET [SOURCES...] [--source SOURCE] [--filter CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host name/ID whose events to view\n"
-        "- `EVENT_FILE`: Name of a specific event file to view (optional; streams all events if omitted)"
+        "- `SOURCES`: Event sources to include (optional; includes all sources if omitted). "
+        "These are paths relative to the target's events/ directory (e.g. 'messages', 'logs/mng')."
     ),
     description="""TARGET identifies an agent (by name or ID) or a host (by name or ID).
 The command first tries to match TARGET as an agent, then as a host.
 
-If EVENT_FILE is not specified, streams all events from all sources in
-date-sorted order. Use --filter to restrict which events are included
-via a CEL expression. Use --follow to continuously stream new events.
-
-If EVENT_FILE is specified, prints its contents directly.
+Streams all events from all sources in date-sorted order. Use --source
+or positional SOURCES arguments to restrict which event sources to include.
+Use --filter to further restrict events via a CEL expression. Use --follow
+to continuously stream new events.
 
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
@@ -229,11 +166,12 @@ the volume. The command handles online/offline transitions automatically.
 Press Ctrl+C to stop.""",
     examples=(
         ("Stream all events for an agent", "mng events my-agent"),
-        ("Stream only message events", "mng events my-agent --filter 'source == \"messages\"'"),
+        ("Stream only message events", "mng events my-agent messages"),
+        ("Stream events from multiple sources", "mng events my-agent messages logs/mng"),
+        ("Same thing using --source", "mng events my-agent --source messages --source logs/mng"),
+        ("Filter within a source", "mng events my-agent messages --filter 'data.role == \"user\"'"),
         ("View last 100 events", "mng events my-agent --tail 100"),
         ("Follow all events in real-time", "mng events my-agent --follow"),
-        ("View a specific event file", "mng events my-agent messages/events.jsonl"),
-        ("Follow a specific event file", "mng events my-agent messages/events.jsonl --follow"),
     ),
     see_also=(
         ("list", "List available agents"),

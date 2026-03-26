@@ -13,16 +13,6 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "rm -rf .claude/reviewed_commits"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [

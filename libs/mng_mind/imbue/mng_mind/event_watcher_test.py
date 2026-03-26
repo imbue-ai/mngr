@@ -18,9 +18,14 @@ from imbue.mng_llm.conftest import write_conversation_to_db
 from imbue.mng_llm.conftest import write_minds_settings_toml
 from imbue.mng_mind import event_watcher as event_watcher_module
 from imbue.mng_mind.conftest import EventWatcherSubprocessCapture
+from imbue.mng_mind.conftest import FakeWaitProcess
 from imbue.mng_mind.conftest import SyntheticLoopEnv
+from imbue.mng_mind.conftest import TrackingIdleWait
+from imbue.mng_mind.conftest import _create_fake_wait_process
 from imbue.mng_mind.conftest import _create_synthetic_loop_env
-from imbue.mng_mind.conftest import create_executable_script
+from imbue.mng_mind.conftest import create_executable_command
+from imbue.mng_mind.conftest import create_tracking_idle_wait
+from imbue.mng_mind.conftest import make_pending_idle_wait
 from imbue.mng_mind.data_types import WatcherSettings
 from imbue.mng_mind.event_watcher import DEFAULT_CEL_FILTER
 from imbue.mng_mind.event_watcher import InvalidTimeFormatError
@@ -40,7 +45,6 @@ from imbue.mng_mind.event_watcher import _TokenBucket
 from imbue.mng_mind.event_watcher import _apply_event_batch_filter
 from imbue.mng_mind.event_watcher import _apply_special_event_handling
 from imbue.mng_mind.event_watcher import _compute_backoff_seconds
-from imbue.mng_mind.event_watcher import _cumulative_idle_delay_minutes
 from imbue.mng_mind.event_watcher import _deliver_batch
 from imbue.mng_mind.event_watcher import _filter_catchup_events
 from imbue.mng_mind.event_watcher import _filter_ignored_sources
@@ -51,9 +55,10 @@ from imbue.mng_mind.event_watcher import _load_scheduled_events_state
 from imbue.mng_mind.event_watcher import _load_watcher_settings
 from imbue.mng_mind.event_watcher import _make_synthetic_event_line
 from imbue.mng_mind.event_watcher import _parse_time_of_day
+from imbue.mng_mind.event_watcher import _per_event_idle_delay_minutes
 from imbue.mng_mind.event_watcher import _resolve_user_timezone
 from imbue.mng_mind.event_watcher import _run_delivery_loop
-from imbue.mng_mind.event_watcher import _run_event_batch_filter_script
+from imbue.mng_mind.event_watcher import _run_event_batch_filter_command
 from imbue.mng_mind.event_watcher import _run_synthetic_events_loop
 from imbue.mng_mind.event_watcher import _save_delivery_state
 from imbue.mng_mind.event_watcher import _save_scheduled_events_state
@@ -98,7 +103,7 @@ def test_defaults_match_between_data_types_and_event_watcher() -> None:
     assert model_defaults.idle_event_delay_minutes_schedule == watcher_defaults.idle_event_delay_minutes_schedule
     assert model_defaults.scheduled_events == dict(watcher_defaults.scheduled_events)
     assert model_defaults.user_timezone == watcher_defaults.user_timezone
-    assert model_defaults.event_batch_filter_script == watcher_defaults.event_batch_filter_script
+    assert model_defaults.event_batch_filter_command == watcher_defaults.event_batch_filter_command
 
 
 # -- _load_watcher_settings tests --
@@ -1172,7 +1177,7 @@ def test_delivery_loop_retries_on_failure(tmp_path: Path) -> None:
             event_lists_dir,
             ignored_sources_state,
         ),
-        kwargs={"send_message": failing_then_succeeding},
+        kwargs={"send_message": failing_then_succeeding, "backoff_base_seconds": 0.01},
         daemon=True,
     )
     thread.start()
@@ -1225,7 +1230,7 @@ def test_delivery_loop_writes_notification_on_repeated_failure(tmp_path: Path) -
             event_lists_dir,
             ignored_sources_state,
         ),
-        kwargs={"send_message": failing_and_tracking},
+        kwargs={"send_message": failing_and_tracking, "backoff_base_seconds": 0.01},
         daemon=True,
     )
     thread.start()
@@ -1550,6 +1555,71 @@ def test_delivery_loop_filters_event_exclude_sources(tmp_path: Path) -> None:
     assert json.loads(lines[0])["event_id"] == "evt-keep"
 
 
+@pytest.mark.timeout(15)
+def test_delivery_loop_delivers_user_message_immediately_when_batching_disabled(tmp_path: Path) -> None:
+    """When is_message_batching_enabled=False, user messages are delivered without waiting for assistant."""
+    state_file, events_dir, event_batches_dir, event_lists_dir, ignored_sources_state = _setup_delivery_loop_dirs(
+        tmp_path
+    )
+    settings = _EventWatcherSettings(
+        burst_size=5,
+        max_messages_per_minute=60,
+        is_message_batching_enabled=False,
+    )
+
+    event_buffer: list[str] = []
+    buffer_lock = threading.Lock()
+    stop_event = threading.Event()
+    capture = _MessageCapture()
+
+    # A user message from the "messages" source -- with batching enabled this would be
+    # held until an assistant response arrives, but with batching disabled it should
+    # be delivered immediately.
+    user_msg = json.dumps(
+        {
+            "source": "messages",
+            "role": "user",
+            "conversation_id": "conv-1",
+            "event_id": "evt-user-1",
+            "timestamp": "2026-03-01T12:00:00Z",
+        }
+    )
+    event_buffer.append(user_msg)
+
+    thread = threading.Thread(
+        target=_run_delivery_loop,
+        args=(
+            settings,
+            "agent-test-00000000000000000001",
+            state_file,
+            events_dir,
+            event_buffer,
+            buffer_lock,
+            stop_event,
+            event_batches_dir,
+            event_lists_dir,
+            ignored_sources_state,
+        ),
+        kwargs={"send_message": capture},
+        daemon=True,
+    )
+    thread.start()
+
+    assert capture.wait_for_call(timeout=5.0), "Expected send_message to be called"
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    # The user message should have been delivered (not held)
+    batch_files = list(event_batches_dir.glob("*.jsonl"))
+    assert len(batch_files) == 1
+    lines = batch_files[0].read_text().strip().split("\n")
+    assert len(lines) == 1
+    parsed = json.loads(lines[0])
+    assert parsed["event_id"] == "evt-user-1"
+    assert parsed["role"] == "user"
+    assert parsed["source"] == "messages"
+
+
 # -- main() tests --
 
 
@@ -1662,7 +1732,7 @@ def test_main_restarts_subprocess_on_exit(tmp_path: Path, monkeypatch: pytest.Mo
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
-            # Stop after the restart to avoid waiting through multiple 5s delays
+            # Stop after the restart to avoid waiting through multiple delays
             stop_event.set()
         return _FakeEventsProcess([])
 
@@ -1672,6 +1742,7 @@ def test_main_restarts_subprocess_on_exit(tmp_path: Path, monkeypatch: pytest.Mo
             "start_subprocess": counting_factory,
             "stop_event": stop_event,
             "send_message": capture,
+            "subprocess_restart_delay_seconds": 0.01,
         },
         daemon=True,
     )
@@ -1868,30 +1939,30 @@ def test_make_synthetic_event_line_includes_extra_fields() -> None:
     assert parsed["minutes_since_last_event"] == 5.0
 
 
-# -- _cumulative_idle_delay_minutes tests --
+# -- _per_event_idle_delay_minutes tests --
 
 
-def test_cumulative_idle_delay_first_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 0) == 1
+def test_per_event_delay_first_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 0) == 1
 
 
-def test_cumulative_idle_delay_second_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 1) == 11
+def test_per_event_delay_second_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 1) == 10
 
 
-def test_cumulative_idle_delay_third_event() -> None:
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 2) == 71
+def test_per_event_delay_third_event() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 2) == 60
 
 
-def test_cumulative_idle_delay_repeats_last_value() -> None:
-    # Index 3 is beyond the schedule, so last value (60) repeats
-    assert _cumulative_idle_delay_minutes((1, 10, 60), 3) == 131
+def test_per_event_delay_repeats_last_value() -> None:
+    assert _per_event_idle_delay_minutes((1, 10, 60), 3) == 60
+    assert _per_event_idle_delay_minutes((1, 10, 60), 10) == 60
 
 
-def test_cumulative_idle_delay_single_value_schedule() -> None:
-    assert _cumulative_idle_delay_minutes((5,), 0) == 5
-    assert _cumulative_idle_delay_minutes((5,), 1) == 10
-    assert _cumulative_idle_delay_minutes((5,), 2) == 15
+def test_per_event_delay_single_value_schedule() -> None:
+    assert _per_event_idle_delay_minutes((5,), 0) == 5
+    assert _per_event_idle_delay_minutes((5,), 1) == 5
+    assert _per_event_idle_delay_minutes((5,), 2) == 5
 
 
 # -- _parse_time_of_day tests --
@@ -1983,6 +2054,9 @@ def test_synthetic_loop_sends_onboarding_on_first_run(tmp_path: Path) -> None:
         env.stop_event,
         env.last_real_event_monotonic,
         env.mind_state_dir,
+        # Positive value: simulates that initial delivery has already happened,
+        # so the onboarding wait loop exits immediately.
+        last_delivery_monotonic=[1.0],
     )
 
     assert len(env.event_buffer) == 1
@@ -1990,6 +2064,94 @@ def test_synthetic_loop_sends_onboarding_on_first_run(tmp_path: Path) -> None:
     assert parsed["type"] == "onboarding"
     assert parsed["source"] == "mind/onboarding"
     assert (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
+
+
+def test_synthetic_loop_onboarding_waits_for_delivery(tmp_path: Path) -> None:
+    """Onboarding event is deferred until last_delivery_monotonic becomes positive."""
+    mind_state_dir = tmp_path / "mind"
+    mind_state_dir.mkdir(parents=True)
+    env = _create_synthetic_loop_env(mind_state_dir)
+
+    delivery_mono: list[float] = [0.0]
+    onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
+
+    settings = _EventWatcherSettings()
+
+    # Run the synthetic loop in a background thread so we can control timing
+    loop_thread = threading.Thread(
+        target=_run_synthetic_events_loop,
+        kwargs={
+            "settings": settings,
+            "event_buffer": env.event_buffer,
+            "buffer_lock": env.buffer_lock,
+            "stop_event": env.stop_event,
+            "last_real_event_monotonic": env.last_real_event_monotonic,
+            "mind_state_dir": env.mind_state_dir,
+            "last_delivery_monotonic": delivery_mono,
+        },
+        daemon=True,
+    )
+    loop_thread.start()
+
+    # Give the loop time to enter the waiting state, then verify no
+    # onboarding has been sent while delivery_mono is still 0.0.
+    # Uses a never-set event for the delay to avoid time.sleep.
+    delay = threading.Event()
+    delay.wait(timeout=0.3)
+    assert len(env.event_buffer) == 0, "Onboarding should be blocked while delivery has not occurred"
+    assert not onboarding_marker.exists()
+
+    # Simulate delivery completing
+    delivery_mono[0] = 1.0
+
+    # Poll for the onboarding marker to appear (proving the loop unblocked)
+    deadline = time.monotonic() + 5.0
+    while not onboarding_marker.exists():
+        assert time.monotonic() < deadline, "Timed out waiting for onboarding after delivery"
+        delay.wait(timeout=0.05)
+
+    env.stop_event.set()
+    loop_thread.join(timeout=5.0)
+
+    assert len(env.event_buffer) == 1
+    parsed = json.loads(env.event_buffer[0])
+    assert parsed["type"] == "onboarding"
+    assert parsed["source"] == "mind/onboarding"
+
+
+def test_synthetic_loop_onboarding_exits_on_stop_without_delivery(tmp_path: Path) -> None:
+    """If stop_event fires before delivery, onboarding is not sent."""
+    mind_state_dir = tmp_path / "mind"
+    mind_state_dir.mkdir(parents=True)
+    env = _create_synthetic_loop_env(mind_state_dir)
+
+    settings = _EventWatcherSettings()
+
+    # Run the loop in a thread so we can stop it
+    loop_done = threading.Event()
+
+    def run_loop() -> None:
+        _run_synthetic_events_loop(
+            settings,
+            env.event_buffer,
+            env.buffer_lock,
+            env.stop_event,
+            env.last_real_event_monotonic,
+            env.mind_state_dir,
+            last_delivery_monotonic=[0.0],
+        )
+        loop_done.set()
+
+    loop_thread = threading.Thread(target=run_loop, daemon=True)
+    loop_thread.start()
+
+    # Stop the loop without delivery ever happening
+    env.stop_event.set()
+    loop_done.wait(timeout=5.0)
+    loop_thread.join(timeout=5.0)
+
+    assert len(env.event_buffer) == 0
+    assert not (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
 
 
 def test_synthetic_loop_skips_onboarding_when_marker_exists(synthetic_loop_env: SyntheticLoopEnv) -> None:
@@ -2014,14 +2176,19 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
     env.last_real_event_monotonic[0] = 1000.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
 
+    # The wait process completes immediately (agent is already idle)
+    fake_process = _create_fake_wait_process(is_complete=True, returncode=0)
+
     call_count = 0
 
     def clock_past_threshold() -> float:
         nonlocal call_count
         call_count += 1
-        if call_count > 1:
+        if call_count > 2:
             env.stop_event.set()
-        return 1061.0
+        # First call: agent becomes idle at 1050
+        # Second call: 70s after idle -> fires
+        return 1050.0 + (call_count - 1) * 70.0
 
     _run_synthetic_events_loop(
         settings,
@@ -2032,6 +2199,8 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
         env.mind_state_dir,
         clock_past_threshold,
         poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=lambda _agent_id: fake_process,
     )
 
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
@@ -2043,10 +2212,11 @@ def test_synthetic_loop_sends_idle_event_after_delay(synthetic_loop_env: Synthet
     assert parsed["minutes_since_last_event"] >= 1.0
 
 
-def test_synthetic_loop_resets_idle_on_real_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
-    """The idle counter resets when a real event arrives."""
+def test_synthetic_loop_no_idle_events_when_agent_not_waiting(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """No idle events fire when the agent never enters WAITING state."""
     env = synthetic_loop_env
-    env.last_real_event_monotonic[0] = 1030.0
+    env.last_real_event_monotonic[0] = 1000.0
+    env.last_non_messages_event_monotonic[0] = 1030.0
     settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
 
     call_count = 0
@@ -2067,10 +2237,461 @@ def test_synthetic_loop_resets_idle_on_real_event(synthetic_loop_env: SyntheticL
         env.mind_state_dir,
         clock_30s_after_real,
         poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=make_pending_idle_wait,
+        last_non_messages_event_monotonic=env.last_non_messages_event_monotonic,
+    )
+
+    # No idle events because the agent never entered WAITING (still pending)
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) == 0
+
+
+# -- Idle wait integration tests --
+
+
+def test_idle_wait_no_event_until_agent_becomes_idle(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When idle wait is enabled, no idle events fire until the agent enters WAITING."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    call_count = 0
+
+    def clock_past_threshold() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 2:
+            env.stop_event.set()
+        # Well past the 1-minute threshold from the last real event, but agent is not idle
+        return 1200.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_past_threshold,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=make_pending_idle_wait,
+    )
+
+    # No idle events because the agent never entered WAITING
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) == 0
+
+
+def test_idle_wait_fires_after_agent_becomes_idle(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Idle events fire based on time since the agent entered WAITING, not since the last real event."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    # The wait process completes immediately (agent is already idle)
+    fake_process = _create_fake_wait_process(is_complete=True, returncode=0)
+
+    call_count = 0
+
+    def clock_with_idle_at_1050() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: wait process poll check -- agent becomes idle at 1050
+            return 1050.0
+        if call_count > 2:
+            env.stop_event.set()
+        # 70 seconds after agent became idle at 1050 (> 1 minute threshold)
+        return 1120.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_with_idle_at_1050,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=lambda _agent_id: fake_process,
     )
 
     idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) >= 1
+    parsed = json.loads(idle_events[0])
+    assert parsed["type"] == "idle"
+    assert parsed["idle_event_number"] == 1
+    # minutes_since_last_event is measured from when the agent became idle (1050),
+    # not from the last real event (1000)
+    assert parsed["minutes_since_last_event"] >= 1.0
+
+
+def test_idle_wait_resets_on_real_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When a real event arrives, idle state resets. No new wait starts until delivery."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    wait_calls: list[str] = []
+
+    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
+        wait_calls.append(agent_id)
+        # Return a pending process (agent not yet idle)
+        return _create_fake_wait_process(is_complete=False, returncode=None)
+
+    call_count = 0
+
+    def clock_with_new_event() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Simulate a new real event arriving
+            env.last_real_event_monotonic[0] = 1100.0
+            return 1100.0
+        if call_count > 2:
+            env.stop_event.set()
+        return 1200.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_with_new_event,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=tracking_idle_wait,
+        # No last_delivery_monotonic -- wait won't restart without delivery
+    )
+
+    # Only initial wait at startup; on_real_event does NOT start a new wait
+    assert len(wait_calls) == 1
+    # No idle events because agent never entered WAITING
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
     assert len(idle_events) == 0
+
+
+def test_idle_wait_restarts_after_delivery_plus_slack(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """After a real event is delivered, the wait restarts only after slack time elapses."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    wait_calls: list[str] = []
+
+    def tracking_idle_wait(agent_id: str) -> FakeWaitProcess:
+        wait_calls.append(agent_id)
+        return _create_fake_wait_process(is_complete=False, returncode=None)
+
+    # Simulate delivery happening at T=1005 (after the real event at T=1000)
+    delivery_mono: list[float] = [1005.0]
+
+    call_count = 0
+
+    def clock_with_delivery() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Real event arrives
+            env.last_real_event_monotonic[0] = 1002.0
+            return 1002.0
+        if call_count == 2:
+            # Not enough slack yet (only 3s after delivery, need 5s)
+            return 1008.0
+        if call_count == 3:
+            # Enough slack (6s after delivery at 1005)
+            return 1011.0
+        if call_count > 4:
+            env.stop_event.set()
+        return 1100.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_with_delivery,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=tracking_idle_wait,
+        last_delivery_monotonic=delivery_mono,
+    )
+
+    # Initial wait + restart after delivery+slack = 2 calls
+    assert len(wait_calls) == 2
+
+
+def test_idle_events_require_agent_id(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Without agent_id, no idle events are sent even if the schedule is configured."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    call_count = 0
+
+    def clock_past_threshold() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            env.stop_event.set()
+        return 1061.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock_past_threshold,
+        poll_interval_seconds=0.01,
+    )
+
+    # No idle events: agent_id is required for idle event generation
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) == 0
+
+
+def test_idle_wait_restarts_on_nonzero_exit(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When mng wait exits with a non-zero code, it is restarted."""
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1,))
+
+    wait_calls: list[str] = []
+    call_idx = 0
+
+    def wait_that_fails_then_succeeds(agent_id: str) -> FakeWaitProcess:
+        nonlocal call_idx
+        wait_calls.append(agent_id)
+        call_idx += 1
+        if call_idx == 1:
+            # First call: fail with non-zero exit code
+            return _create_fake_wait_process(is_complete=True, returncode=1)
+        # Second call: succeed
+        return _create_fake_wait_process(is_complete=True, returncode=0)
+
+    call_count = 0
+
+    def clock() -> float:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 4:
+            env.stop_event.set()
+        # Iteration 1: wait fails at T=1050, restart issued
+        # Iteration 2: wait succeeds, agent_idle_since=1100
+        # Iteration 3: T=1170 → elapsed=70s > 60s → idle event fires
+        return 1050.0 + (call_count - 1) * 50.0
+
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=wait_that_fails_then_succeeds,
+    )
+
+    # First call at startup (fails), second call is restart (succeeds)
+    assert len(wait_calls) >= 2
+    # Should have sent idle events after the restart succeeded
+    idle_events = [line for line in env.event_buffer if '"mind/idle"' in line]
+    assert len(idle_events) >= 1
+
+
+def _make_first_idle_cycle_clock(
+    env: SyntheticLoopEnv,
+    tracker: TrackingIdleWait,
+    delivery_mono: list[float],
+    post_reentry_steps: Callable[[int], float | None],
+) -> Callable[[], float]:
+    """Build a clock that fires the first idle event, simulates delivery, then delegates.
+
+    Implements the common 5-step idle cycle used by multiple tests:
+      1. Agent becomes idle (first wait process completes) at T=1050
+      2. 70s later (T=1120): first idle event fires (> 1 min threshold)
+      3. Delivery + conversation events arrive (messages source)
+      4. Delivery completes with slack
+      5. Agent re-enters WAITING at T=1140
+
+    For call_count >= 6, delegates to ``post_reentry_steps(call_count)``.
+    Return None from the callback to stop the loop.
+    """
+    call_count_box: list[int] = [0]
+
+    def clock() -> float:
+        call_count_box[0] += 1
+        n = call_count_box[0]
+
+        if n == 1:
+            tracker.processes[0].complete(0)
+            return 1050.0
+        if n == 2:
+            return 1120.0
+        if n == 3:
+            delivery_mono[0] = 1121.0
+            env.last_real_event_monotonic[0] = 1130.0
+            return 1130.0
+        if n == 4:
+            delivery_mono[0] = 1131.0
+            return 1137.0
+        if n == 5:
+            if len(tracker.processes) >= 2:
+                tracker.processes[-1].complete(0)
+            return 1140.0
+
+        result = post_reentry_steps(n)
+        if result is None:
+            env.stop_event.set()
+            return 1900.0
+        return result
+
+    return clock
+
+
+def _run_idle_cycle_loop(
+    env: SyntheticLoopEnv,
+    settings: _EventWatcherSettings,
+    tracker: TrackingIdleWait,
+    delivery_mono: list[float],
+    clock: Callable[[], float],
+) -> list[dict[str, Any]]:
+    """Run the synthetic events loop with standard idle-cycle parameters.
+
+    Returns parsed idle events from the buffer.
+    """
+    _run_synthetic_events_loop(
+        settings,
+        env.event_buffer,
+        env.buffer_lock,
+        env.stop_event,
+        env.last_real_event_monotonic,
+        env.mind_state_dir,
+        clock,
+        poll_interval_seconds=0.01,
+        agent_id="agent-test",
+        start_idle_wait=tracker,
+        last_delivery_monotonic=delivery_mono,
+        last_non_messages_event_monotonic=env.last_non_messages_event_monotonic,
+    )
+    return [json.loads(line) for line in env.event_buffer if '"mind/idle"' in line]
+
+
+def test_idle_wait_preserves_counter_across_messages_events(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """After sending an idle event, conversation events (messages source) do NOT
+    reset idle_events_sent because last_non_messages_event_monotonic is unchanged.
+
+    This tests the full backoff cycle: send idle event -> agent processes it
+    and generates messages events -> agent re-enters WAITING -> next idle event
+    uses the incremented counter (longer delay).
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # 5 min after re-entry, not enough for 10 min delay
+            return 1440.0
+        if n == 7:
+            # 11 min after re-entry, second idle event fires
+            return 1800.0
+        if n > 8:
+            return None
+        return 1900.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    assert idle_events[1]["idle_event_number"] == 2
+
+
+def test_idle_wait_resets_counter_on_non_messages_event(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """When a non-messages event arrives, the idle counter resets to 0.
+
+    Events from sources other than "messages" (e.g. mng/agents, monitor)
+    are genuinely new external events and should reset the backoff.
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10, 60))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # A genuinely new non-messages event arrives -- resets counter
+            env.last_real_event_monotonic[0] = 1200.0
+            env.last_non_messages_event_monotonic[0] = 1200.0
+            return 1200.0
+        if n == 7:
+            delivery_mono[0] = 1202.0
+            return 1210.0
+        if n == 8:
+            # New wait process starts and completes (agent idle again)
+            if len(tracker.processes) >= 3:
+                tracker.processes[-1].complete(0)
+            return 1220.0
+        if n == 9:
+            # 70s from new idle: first event fires again
+            return 1290.0
+        if n > 10:
+            return None
+        return 1400.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    # Counter was reset by the genuinely new event, so this is event 1 again
+    assert idle_events[1]["idle_event_number"] == 1
+
+
+def test_idle_wait_uses_per_event_delay(synthetic_loop_env: SyntheticLoopEnv) -> None:
+    """Delays are per-event (not cumulative).
+
+    Schedule [1, 10]: first event after 1 min, second after 10 min
+    from the new WAITING time, not 11 min cumulative.
+    """
+    env = synthetic_loop_env
+    env.last_real_event_monotonic[0] = 1000.0
+    settings = _EventWatcherSettings(idle_event_delay_minutes_schedule=(1, 10))
+    tracker = create_tracking_idle_wait()
+    delivery_mono: list[float] = [1000.0]
+
+    def post_reentry(n: int) -> float | None:
+        if n == 6:
+            # T=1140 + 5 min, not enough for 10 min delay
+            return 1440.0
+        if n == 7:
+            # T=1140 + 11 min, second idle event fires
+            return 1800.0
+        if n > 8:
+            return None
+        return 1900.0
+
+    clock = _make_first_idle_cycle_clock(env, tracker, delivery_mono, post_reentry)
+    idle_events = _run_idle_cycle_loop(env, settings, tracker, delivery_mono, clock)
+
+    assert len(idle_events) >= 2
+    assert idle_events[0]["idle_event_number"] == 1
+    assert idle_events[1]["idle_event_number"] == 2
 
 
 def _make_counting_clock(env: SyntheticLoopEnv, max_iterations: int) -> Callable[[], float]:
@@ -2211,41 +2832,76 @@ def test_load_settings_defaults_new_fields(tmp_path: Path) -> None:
     assert settings.idle_event_delay_minutes_schedule == ()
     assert settings.scheduled_events == ()
     assert settings.user_timezone == "UTC"
-    assert settings.event_batch_filter_script is None
+    assert settings.is_message_batching_enabled is True
+    assert settings.event_batch_filter_command is None
 
 
-def test_load_settings_reads_event_batch_filter_script(tmp_path: Path) -> None:
+def test_load_settings_reads_event_batch_filter_command(tmp_path: Path) -> None:
     write_minds_settings_toml(
         tmp_path,
-        '[watchers]\nevent_batch_filter_script = "/usr/local/bin/my_filter.sh"\n',
+        '[watchers]\nevent_batch_filter_command = "/usr/local/bin/my_filter.sh"\n',
     )
     settings = _load_watcher_settings(tmp_path)
-    assert settings.event_batch_filter_script == "/usr/local/bin/my_filter.sh"
+    assert settings.event_batch_filter_command == "/usr/local/bin/my_filter.sh"
+
+
+def test_load_settings_reads_is_message_batching_enabled(tmp_path: Path) -> None:
+    write_minds_settings_toml(
+        tmp_path,
+        "[watchers]\nis_message_batching_enabled = false\n",
+    )
+    settings = _load_watcher_settings(tmp_path)
+    assert settings.is_message_batching_enabled is False
 
 
 @pytest.mark.timeout(15)
 def test_main_starts_synthetic_events_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """main() starts the synthetic events thread and delivers onboarding on first run."""
+    """main() starts the synthetic events thread and delivers onboarding on first run.
+
+    Onboarding waits for last_delivery_monotonic to become positive, so we must
+    emit a real event that gets delivered first. We poll for the onboarding marker
+    rather than relying on capture timing, because last_delivery_monotonic is
+    updated after send_message returns (race window).
+    """
     agent_state_dir = _setup_main_env(tmp_path, monkeypatch, suppress_onboarding=False)
     capture = _MessageCapture()
     stop_event = threading.Event()
+    mind_state_dir = agent_state_dir / "mind"
 
-    def immediate_stop_factory(agent_id: str, cel_filter: str) -> Any:
+    events = [_make_event_line("evt-trigger", timestamp="2026-03-01T12:00:00Z")]
+    call_count = 0
+
+    def fake_start_subprocess(agent_id: str, cel_filter: str) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _FakeEventsProcess(events)
         stop_event.set()
         return _FakeEventsProcess([])
 
-    main(
-        start_subprocess=immediate_stop_factory,
-        stop_event=stop_event,
-        send_message=capture,
+    thread = threading.Thread(
+        target=main,
+        kwargs={
+            "start_subprocess": fake_start_subprocess,
+            "stop_event": stop_event,
+            "send_message": capture,
+        },
+        daemon=True,
     )
+    thread.start()
 
-    # Verify the mind state directory was created
-    mind_state_dir = agent_state_dir / "mind"
+    # Poll for the onboarding marker (created after delivery unblocks onboarding)
+    onboarding_marker = mind_state_dir / _ONBOARDING_MARKER_FILENAME
+    deadline = time.monotonic() + 5.0
+    while not onboarding_marker.exists():
+        assert time.monotonic() < deadline, "Timed out waiting for onboarding marker"
+        stop_event.wait(timeout=0.05)
+
+    stop_event.set()
+    thread.join(timeout=5.0)
+
     assert mind_state_dir.is_dir()
-
-    # Verify the onboarding marker was created (onboarding event was sent)
-    assert (mind_state_dir / _ONBOARDING_MARKER_FILENAME).exists()
+    assert onboarding_marker.exists()
 
 
 @pytest.mark.timeout(15)
@@ -2290,68 +2946,68 @@ def test_main_delivers_subprocess_events_through_reader_thread(
     assert "Please process all events in " in message
 
 
-# -- _run_event_batch_filter_script tests --
+# -- _run_event_batch_filter_command tests --
 
 
-def test_run_event_batch_filter_script_passes_lines_through_identity_script(tmp_path: Path) -> None:
-    """A filter script that cats stdin should return the same lines."""
-    script_path = create_executable_script(tmp_path, "identity_filter.sh", "#!/bin/bash\ncat\n")
+def test_run_event_batch_filter_command_passes_lines_through_identity_command(tmp_path: Path) -> None:
+    """A filter command that cats stdin should return the same lines."""
+    filter_command = create_executable_command(tmp_path, "identity_filter.sh", "#!/bin/bash\ncat\n")
 
     lines = ['{"source":"a","event_id":"1"}', '{"source":"b","event_id":"2"}']
-    result = _run_event_batch_filter_script(lines, script_path)
+    result = _run_event_batch_filter_command(lines, filter_command)
     assert result is not None
     assert len(result) == 2
     assert result[0] == '{"source":"a","event_id":"1"}'
     assert result[1] == '{"source":"b","event_id":"2"}'
 
 
-def test_run_event_batch_filter_script_allows_filtering_to_empty(tmp_path: Path) -> None:
-    """A filter script that outputs empty lines for all events."""
-    script_path = create_executable_script(
+def test_run_event_batch_filter_command_allows_filtering_to_empty(tmp_path: Path) -> None:
+    """A filter command that outputs empty lines for all events."""
+    filter_command = create_executable_command(
         tmp_path, "drop_all_filter.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n'
     )
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _run_event_batch_filter_script(lines, script_path)
+    result = _run_event_batch_filter_command(lines, filter_command)
     assert result is not None
     assert len(result) == 2
     assert result[0] == ""
     assert result[1] == ""
 
 
-def test_run_event_batch_filter_script_replaces_filtered_events_with_empty_dict(tmp_path: Path) -> None:
-    """A filter script can output '{}' to indicate a filtered event."""
-    script_path = create_executable_script(
+def test_run_event_batch_filter_command_replaces_filtered_events_with_empty_dict(tmp_path: Path) -> None:
+    """A filter command can output '{}' to indicate a filtered event."""
+    filter_command = create_executable_command(
         tmp_path, "replace_with_empty_dict.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo "{}"; done\n'
     )
 
     lines = ['{"source":"a"}']
-    result = _run_event_batch_filter_script(lines, script_path)
+    result = _run_event_batch_filter_command(lines, filter_command)
     assert result is not None
     assert len(result) == 1
     assert result[0] == "{}"
 
 
-def test_run_event_batch_filter_script_returns_none_for_missing_script() -> None:
-    """A non-existent script should return None."""
-    result = _run_event_batch_filter_script(['{"a":1}'], "/nonexistent/filter_42983.sh")
+def test_run_event_batch_filter_command_returns_none_for_missing_command() -> None:
+    """A non-existent command should return None."""
+    result = _run_event_batch_filter_command(['{"a":1}'], "/nonexistent/filter_42983.sh")
     assert result is None
 
 
-def test_run_event_batch_filter_script_returns_none_for_nonzero_exit(tmp_path: Path) -> None:
-    """A script that exits non-zero should return None."""
-    script_path = create_executable_script(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
+def test_run_event_batch_filter_command_returns_none_for_nonzero_exit(tmp_path: Path) -> None:
+    """A command that exits non-zero should return None."""
+    filter_command = create_executable_command(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
 
-    result = _run_event_batch_filter_script(['{"a":1}'], script_path)
+    result = _run_event_batch_filter_command(['{"a":1}'], filter_command)
     assert result is None
 
 
-def test_run_event_batch_filter_script_returns_none_for_wrong_line_count(tmp_path: Path) -> None:
-    """A script that outputs a different number of lines should return None."""
-    script_path = create_executable_script(tmp_path, "bad_count_filter.sh", '#!/bin/bash\necho "only one"\n')
+def test_run_event_batch_filter_command_returns_none_for_wrong_line_count(tmp_path: Path) -> None:
+    """A command that outputs a different number of lines should return None."""
+    filter_command = create_executable_command(tmp_path, "bad_count_filter.sh", '#!/bin/bash\necho "only one"\n')
 
     lines = ['{"a":1}', '{"b":2}', '{"c":3}']
-    result = _run_event_batch_filter_script(lines, script_path)
+    result = _run_event_batch_filter_command(lines, filter_command)
     assert result is None
 
 
@@ -2360,46 +3016,46 @@ def test_run_event_batch_filter_script_returns_none_for_wrong_line_count(tmp_pat
 
 def test_apply_event_batch_filter_drops_empty_and_empty_dict_lines(tmp_path: Path) -> None:
     """Lines that are empty or '{}' should be removed from the result."""
-    script_path = create_executable_script(
+    filter_command = create_executable_command(
         tmp_path,
         "selective_filter.sh",
         '#!/bin/bash\nread line1; echo "$line1"\nread line2; echo ""\nread line3; echo "{}"\n',
     )
 
     lines = ['{"source":"keep"}', '{"source":"drop1"}', '{"source":"drop2"}']
-    result = _apply_event_batch_filter(lines, script_path)
+    result = _apply_event_batch_filter(lines, filter_command)
     assert len(result) == 1
     assert result[0] == '{"source":"keep"}'
 
 
-def test_apply_event_batch_filter_prepends_error_event_on_script_failure(tmp_path: Path) -> None:
-    """If the script fails, a filter_error event is prepended to the original lines."""
-    script_path = create_executable_script(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
+def test_apply_event_batch_filter_prepends_error_event_on_command_failure(tmp_path: Path) -> None:
+    """If the command fails, a filter_error event is prepended to the original lines."""
+    filter_command = create_executable_command(tmp_path, "failing_filter.sh", "#!/bin/bash\nexit 1\n")
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _apply_event_batch_filter(lines, script_path)
+    result = _apply_event_batch_filter(lines, filter_command)
     assert len(result) == 3
     error_event = json.loads(result[0])
     assert error_event["type"] == "filter_error"
     assert error_event["source"] == "mind/filter_error"
-    assert error_event["script_path"] == script_path
+    assert error_event["filter_command"] == filter_command
     assert result[1:] == lines
 
 
 def test_apply_event_batch_filter_returns_empty_when_all_filtered(tmp_path: Path) -> None:
     """When all events are filtered out, the result should be empty."""
-    script_path = create_executable_script(
+    filter_command = create_executable_command(
         tmp_path, "drop_all.sh", '#!/bin/bash\nwhile IFS= read -r line; do echo ""; done\n'
     )
 
     lines = ['{"source":"a"}', '{"source":"b"}']
-    result = _apply_event_batch_filter(lines, script_path)
+    result = _apply_event_batch_filter(lines, filter_command)
     assert result == []
 
 
 def test_apply_event_batch_filter_can_modify_event_content(tmp_path: Path) -> None:
-    """The script can modify event content (e.g. strip fields)."""
-    script_path = create_executable_script(
+    """The command can modify event content (e.g. strip fields)."""
+    filter_command = create_executable_command(
         tmp_path,
         "strip_fields.sh",
         "#!/usr/bin/env python3\n"
@@ -2418,7 +3074,7 @@ def test_apply_event_batch_filter_can_modify_event_content(tmp_path: Path) -> No
         '{"source":"a","data":"big_payload","event_id":"1"}',
         '{"source":"b","event_id":"2"}',
     ]
-    result = _apply_event_batch_filter(lines, script_path)
+    result = _apply_event_batch_filter(lines, filter_command)
     assert len(result) == 2
     parsed_first = json.loads(result[0])
     assert "data" not in parsed_first

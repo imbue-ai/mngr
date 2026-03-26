@@ -28,6 +28,7 @@ from imbue.mng.cli.list import _parse_slice_spec
 from imbue.mng.cli.list import _render_format_template
 from imbue.mng.cli.list import _should_use_streaming_mode
 from imbue.mng.cli.list import _sort_agents_by_cel
+from imbue.mng.cli.list import _truncate_to_width
 from imbue.mng.cli.list import list_command
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.interfaces.data_types import SnapshotInfo
@@ -557,6 +558,36 @@ def test_sort_agents_by_cel_nested_field() -> None:
 
 
 # =============================================================================
+# Tests for _truncate_to_width
+# =============================================================================
+
+
+def test_truncate_to_width_pads_short_values() -> None:
+    """Values shorter than the width should be left-justified with padding."""
+    assert _truncate_to_width("abc", 10) == "abc       "
+
+
+def test_truncate_to_width_exact_fit() -> None:
+    """Values exactly matching the width should not be truncated."""
+    assert _truncate_to_width("abcdefghij", 10) == "abcdefghij"
+
+
+def test_truncate_to_width_truncates_long_values() -> None:
+    """Values longer than the width should be truncated with a suffix."""
+    result = _truncate_to_width("this-is-a-very-long-name", 15)
+    assert len(result) == 15
+    assert result.endswith("... ")
+    assert result == "this-is-a-v... "
+
+
+def test_truncate_to_width_very_narrow_column() -> None:
+    """When column is too narrow for the suffix, just hard-truncate."""
+    result = _truncate_to_width("abcdefgh", 3)
+    assert result == "abc"
+    assert len(result) == 3
+
+
+# =============================================================================
 # Tests for _format_streaming_header_row and _format_streaming_agent_row
 # =============================================================================
 
@@ -581,6 +612,20 @@ def test_format_streaming_agent_row_extracts_field_values() -> None:
     assert "local" in result
 
 
+def test_format_streaming_agent_row_truncates_long_values() -> None:
+    """_format_streaming_agent_row should truncate values that exceed column width when is_truncate is True."""
+    long_name = "this-is-a-very-long-agent-name-that-exceeds-column-width"
+    agent = make_test_agent_details(name=long_name)
+    fields = ["name"]
+    widths = {"name": 20}
+    result_truncated = _format_streaming_agent_row(agent, fields, widths, is_truncate=True)
+    assert result_truncated.endswith("... ")
+    assert len(result_truncated) == 20
+
+    result_full = _format_streaming_agent_row(agent, fields, widths, is_truncate=False)
+    assert long_name in result_full
+
+
 def test_compute_column_widths_respects_minimums() -> None:
     """_compute_column_widths should never go below minimum widths."""
     fields = ["name", "state"]
@@ -589,13 +634,13 @@ def test_compute_column_widths_respects_minimums() -> None:
     assert widths["state"] >= 10
 
 
-def test_compute_column_widths_expands_expandable_columns() -> None:
-    """_compute_column_widths should give extra space to expandable columns."""
+def test_compute_column_widths_distributes_extra_space_evenly() -> None:
+    """_compute_column_widths should distribute extra space evenly across all columns."""
     fields = ["name", "state"]
     widths = _compute_column_widths(fields, 120)
-    # name is expandable, state is not -- name should get all the extra space
-    assert widths["name"] > 20
-    assert widths["state"] == 10
+    # Both columns should receive extra space beyond their minimums
+    assert widths["name"] > 15
+    assert widths["state"] > 10
 
 
 # =============================================================================

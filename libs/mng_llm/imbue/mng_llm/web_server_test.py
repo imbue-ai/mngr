@@ -480,7 +480,7 @@ def test_iso_timestamp_format(web_server_module: Any) -> None:
 def test_get_default_chat_model_returns_fallback_when_no_work_dir(web_server_module: Any) -> None:
     web_server_module.AGENT_WORK_DIR = ""
     result = web_server_module._get_default_chat_model()
-    assert result == "claude-opus-4.6"
+    assert result == "claude-haiku-4.5"
 
 
 def test_get_default_chat_model_returns_fallback_when_no_settings_file(web_server_module: Any, tmp_path: Path) -> None:
@@ -489,7 +489,7 @@ def test_get_default_chat_model_returns_fallback_when_no_settings_file(web_serve
     web_server_module.AGENT_WORK_DIR = str(work_dir)
 
     result = web_server_module._get_default_chat_model()
-    assert result == "claude-opus-4.6"
+    assert result == "claude-haiku-4.5"
 
 
 # -- _read_message_history tests --

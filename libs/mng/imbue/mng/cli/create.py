@@ -1,5 +1,6 @@
 import os
 import shlex
+import sys
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ from imbue.mng.api.data_types import ConnectionOptions
 from imbue.mng.api.data_types import CreateAgentResult
 from imbue.mng.api.data_types import SourceLocation
 from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.find import ResolvedSource
 from imbue.mng.api.find import ensure_agent_started
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import get_host_from_list_by_id
@@ -38,6 +40,7 @@ from imbue.mng.cli.agent_addr import parse_agent_address
 from imbue.mng.cli.common_opts import add_common_options
 from imbue.mng.cli.common_opts import setup_command_context
 from imbue.mng.cli.env_utils import resolve_env_vars
+from imbue.mng.cli.env_utils import resolve_labels
 from imbue.mng.cli.help_formatter import CommandHelpMetadata
 from imbue.mng.cli.help_formatter import add_pager_help_option
 from imbue.mng.cli.output_helpers import emit_event
@@ -85,17 +88,18 @@ from imbue.mng.primitives import OutputFormat
 from imbue.mng.primitives import Permission
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.duration import parse_duration_to_seconds
 from imbue.mng.utils.editor import EditorSession
-from imbue.mng.utils.git_utils import derive_project_name_from_path
 from imbue.mng.utils.git_utils import find_git_worktree_root
 from imbue.mng.utils.git_utils import get_current_git_branch
+from imbue.mng.utils.git_utils import parse_project_name_from_url
 from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.name_generator import generate_agent_name
 
 _DEFAULT_NEW_BRANCH_PATTERN: Final[str] = "mng/*"
+_RECOVERED_MESSAGE_FILENAME: Final[str] = "recovered-message.txt"
 
 
 class _CachedAgentHostLoader(MutableModel):
@@ -199,7 +203,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--name-style",
     type=click.Choice(_make_name_style_choices(), case_sensitive=False),
-    default="english",
+    default="coolname",
     show_default=True,
     help="Auto-generated name style",
 )
@@ -236,7 +240,7 @@ class _CreateCommand(click.Command):
 @optgroup.option(
     "--host-name-style",
     type=click.Choice(_make_host_name_style_choices(), case_sensitive=False),
-    default="astronomy",
+    default="coolname",
     show_default=True,
     help="Auto-generated host name style",
 )
@@ -274,25 +278,19 @@ class _CreateCommand(click.Command):
 @optgroup.option("--include-git/--no-include-git", default=True, show_default=True, help="Include .git directory")
 @optgroup.group("Agent Target (where to put the new agent)")
 @optgroup.option("--target", help="Target [HOST][:PATH]. Defaults to current dir if no other target args are given")
-@optgroup.option("--target-path", help="Directory to mount source inside agent host. Incompatible with --in-place")
 @optgroup.option(
-    "--in-place", "in_place", is_flag=True, help="Run directly in source directory. Incompatible with --target-path"
+    "--target-path", help="Directory to mount source inside agent host. Incompatible with --transfer=none"
 )
 @optgroup.option(
-    "--copy",
-    "copy_source",
-    is_flag=True,
-    help="Copy source to isolated directory before running [default for remote agents, and for local agents if not in a git repo]",
-)
-@optgroup.option(
-    "--clone",
-    is_flag=True,
-    help="Create a git clone that shares objects with original repo (only works for local agents)",
-)
-@optgroup.option(
-    "--worktree",
-    is_flag=True,
-    help="Create a git worktree that shares objects and index with original repo [default for local agents in a git repo]",
+    "--transfer",
+    type=click.Choice(["none", "rsync", "git-mirror", "git-worktree"], case_sensitive=False),
+    default=None,
+    help="How to transfer the project into the agent. "
+    "none: run in-place (no transfer). "
+    "rsync: copy via rsync (non-git projects). "
+    "git-mirror: transfer via git push --mirror (git projects). "
+    "git-worktree: create a git worktree (git projects, local only). "
+    "[default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git]",
 )
 @optgroup.group("Agent Git Configuration")
 @optgroup.option(
@@ -334,13 +332,10 @@ class _CreateCommand(click.Command):
 @optgroup.group("Agent Provisioning")
 @optgroup.option("--grant", "grant", multiple=True, help="Grant a permission to the agent [repeatable]")
 @optgroup.option(
-    "--user-command", "user_command", multiple=True, help="Run custom shell command during provisioning [repeatable]"
-)
-@optgroup.option(
-    "--sudo-command",
-    "sudo_command",
+    "--extra-provision-command",
+    "extra_provision_command",
     multiple=True,
-    help="Run custom shell command as root during provisioning [repeatable]",
+    help="Run custom shell command during provisioning [repeatable]",
 )
 @optgroup.option("--upload-file", "upload_file", multiple=True, help="Upload LOCAL:REMOTE file pair [repeatable]")
 @optgroup.option("--append-to-file", "append_to_file", multiple=True, help="Append REMOTE:TEXT to file [repeatable]")
@@ -461,6 +456,13 @@ def create(ctx: click.Context, **kwargs) -> None:
     _finish_create(create_result, setup, output_opts)
 
 
+class _AutoLabels(FrozenModel):
+    """Auto-derived agent labels. Field names are the label keys."""
+
+    project: str = Field(description="Project name (from git remote or folder name)")
+    remote: str | None = Field(default=None, description="Git remote origin URL")
+
+
 class _CreateSetup(FrozenModel):
     """Per-invocation state shared between _setup_create and _create_agent."""
 
@@ -472,9 +474,8 @@ class _CreateSetup(FrozenModel):
     )
     editor_session: EditorSession | None = Field(default=None, description="Editor session for --edit-message")
     agent_and_host_loader: _CachedAgentHostLoader = Field(description="Lazy loader for agents grouped by host")
-    source_location: HostLocation = Field(description="Resolved source location")
-    source_agent_id: AgentId | None = Field(default=None, description="Resolved source agent ID (when --from-agent)")
-    project_name: str = Field(description="Project name for agent labels")
+    resolved_source: ResolvedSource = Field(description="Resolved source location and optional source agent")
+    auto_labels: _AutoLabels = Field(description="Auto-derived labels for the new agent")
     host_lifecycle: HostLifecycleOptions = Field(description="Host lifecycle options")
     plugin_cli_params: dict[str, Any] = Field(
         default_factory=dict, description="Plugin-registered CLI params to merge into plugin_data"
@@ -524,12 +525,14 @@ def _setup_create(
     agent_and_host_loader = _CachedAgentHostLoader(mng_ctx=mng_ctx)
 
     # figure out where the source data is coming from
-    source_location, source_agent_id = _resolve_source_location(
-        opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host
-    )
+    resolved_source = _resolve_source_location(opts, agent_and_host_loader, mng_ctx, is_start_desired=opts.start_host)
 
-    # figure out the project label, in case we need that
-    project_name = _parse_project_name(source_location, opts, address, mng_ctx)
+    # derive auto-labels from the source location
+    remote_url = _get_source_remote_url(resolved_source.location)
+    auto_labels = _AutoLabels(
+        project=_parse_project_name(resolved_source, opts, remote_url),
+        remote=remote_url,
+    )
 
     # Parse host lifecycle options (these go on the host, not the agent)
     host_lifecycle = _parse_host_lifecycle_options(opts)
@@ -539,9 +542,8 @@ def _setup_create(
         initial_message=initial_message,
         editor_session=editor_session,
         agent_and_host_loader=agent_and_host_loader,
-        source_location=source_location,
-        source_agent_id=source_agent_id,
-        project_name=project_name,
+        resolved_source=resolved_source,
+        auto_labels=auto_labels,
         host_lifecycle=host_lifecycle,
         plugin_cli_params=plugin_cli_params or {},
     )
@@ -560,22 +562,23 @@ def _create_agent(
     target_host = _parse_target_host(
         opts=opts,
         address=address,
-        project_name=setup.project_name,
         agent_and_host_loader=setup.agent_and_host_loader,
         lifecycle=setup.host_lifecycle,
     )
 
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None
-    if setup.source_agent_id is not None:
-        source_agent_state_dir = get_agent_state_dir_path(setup.source_location.host.host_dir, setup.source_agent_id)
+    if setup.resolved_source.agent is not None:
+        source_agent_state_dir = get_agent_state_dir_path(
+            setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+        )
 
     # Parse agent options
     agent_opts, has_explicit_base = _parse_agent_opts(
         opts=opts,
         address=address,
         initial_message=setup.initial_message,
-        source_location=setup.source_location,
+        source_location=setup.resolved_source.location,
         source_agent_state_dir=source_agent_state_dir,
         mng_ctx=mng_ctx,
     )
@@ -614,10 +617,13 @@ def _create_agent(
             # or send initial message directly if --message/--message-file was provided
             with _editor_cleanup_scope(setup.editor_session):
                 if setup.editor_session is not None:
-                    _handle_editor_message(
-                        editor_session=setup.editor_session,
-                        agent=agent,
-                    )
+                    # Hold the host lock while waiting for the editor to prevent
+                    # idle shutdown during long editing sessions
+                    with host.lock_cooperatively():
+                        _handle_editor_message(
+                            editor_session=setup.editor_session,
+                            agent=agent,
+                        )
                 elif setup.initial_message is not None:
                     # Send initial message directly (from --message or --message-file)
                     logger.info("Sending message to agent")
@@ -630,10 +636,10 @@ def _create_agent(
     # If ensure-clean is set, verify the source work_dir is clean.
     # Skip the check when using an explicit base branch, since the agent will be
     # created from that branch and uncommitted changes in the current working tree
-    # are irrelevant (regardless of copy mode: worktree, clone, or copy).
+    # are irrelevant (regardless of transfer mode).
     is_from_explicit_base = agent_opts.git is not None and has_explicit_base
     if opts.ensure_clean and not is_from_explicit_base:
-        _ensure_clean_work_dir(setup.source_location)
+        _ensure_clean_work_dir(setup.resolved_source.location)
 
     # figure out the target host (if we just have a reference)
     resolved_target_host = _resolve_target_host(target_host, mng_ctx, is_start_desired=opts.start_host)
@@ -643,30 +649,34 @@ def _create_agent(
     if isinstance(resolved_target_host, OnlineHostInterface):
         _apply_host_labels(resolved_target_host, opts.host_label)
 
-    # Set the project as a label on the agent (labels are agent-level, not host-level)
-    if setup.project_name:
-        agent_opts = agent_opts.model_copy_update(
-            to_update(
-                agent_opts.field_ref().label_options,
-                AgentLabelOptions(labels={**agent_opts.label_options.labels, "project": setup.project_name}),
-            ),
-        )
+    # Set auto-derived labels (project, remote) on the agent (labels are agent-level, not host-level).
+    # User-specified --label values take precedence over auto-derived ones.
+    auto_labels = setup.auto_labels.model_dump(exclude_none=True)
+    agent_opts = agent_opts.model_copy_update(
+        to_update(
+            agent_opts.field_ref().label_options,
+            AgentLabelOptions(labels={**auto_labels, **agent_opts.label_options.labels}),
+        ),
+    )
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
         create_result = api_create(
-            source_location=setup.source_location,
+            source_location=setup.resolved_source.location,
             target_host=resolved_target_host,
             agent_options=agent_opts,
             mng_ctx=mng_ctx,
         )
 
-        # If --edit-message was used, wait for editor and send the message
+        # If --edit-message was used, wait for editor and send the message.
+        # Re-acquire the host lock to prevent idle shutdown while the user edits
+        # (api_create releases its lock before returning).
         if setup.editor_session is not None:
-            _handle_editor_message(
-                editor_session=setup.editor_session,
-                agent=create_result.agent,
-            )
+            with create_result.host.lock_cooperatively():
+                _handle_editor_message(
+                    editor_session=setup.editor_session,
+                    agent=create_result.agent,
+                )
 
     return create_result, connection_opts
 
@@ -717,8 +727,14 @@ def _on_editor_exit() -> None:
 
 
 @contextmanager
-def _editor_cleanup_scope(editor_session: EditorSession | None) -> Iterator[None]:
+def _editor_cleanup_scope(
+    editor_session: EditorSession | None,
+    recovery_dir: Path | None = None,
+) -> Iterator[None]:
     """Ensure editor session cleanup and logging suppressor restoration on exit.
+
+    On failure, saves any editor content to a recovery file before cleanup so
+    the user does not lose their work.
 
     Safe to nest: EditorSession.cleanup() is idempotent, and
     LoggingSuppressor.disable_and_replay() is a no-op when not suppressed.
@@ -727,9 +743,49 @@ def _editor_cleanup_scope(editor_session: EditorSession | None) -> Iterator[None
         yield
     finally:
         if editor_session is not None:
+            # If exiting due to an exception, rescue the editor content before
+            # cleanup deletes the temp file
+            if sys.exc_info()[0] is not None:
+                _rescue_editor_content(editor_session, recovery_dir=recovery_dir)
             editor_session.cleanup()
         if LoggingSuppressor.is_suppressed():
             LoggingSuppressor.disable_and_replay(clear_screen=True)
+
+
+def _rescue_editor_content(
+    editor_session: EditorSession,
+    recovery_dir: Path | None = None,
+) -> None:
+    """Save editor content to a recovery file so the user does not lose their work.
+
+    Reads the content from the editor's temp file (which still exists before cleanup)
+    and writes it to ~/.mng/recovered-message.txt. Uses logger.warning which will be
+    buffered if logging is suppressed and replayed when suppression is disabled.
+    """
+    if not editor_session.temp_file_path.exists():
+        return
+
+    try:
+        content = editor_session.temp_file_path.read_text().rstrip()
+    except OSError as e:
+        logger.trace("Failed to read editor temp file for recovery: {}", e)
+        return
+
+    if not content:
+        return
+
+    # Save to ~/.mng/recovered-message.txt
+    resolved_recovery_dir = recovery_dir if recovery_dir is not None else Path.home() / ".mng"
+    resolved_recovery_dir.mkdir(parents=True, exist_ok=True)
+    recovery_path = resolved_recovery_dir / _RECOVERED_MESSAGE_FILENAME
+
+    try:
+        recovery_path.write_text(content)
+    except OSError as e:
+        logger.trace("Failed to write recovery file {}: {}", recovery_path, e)
+        return
+
+    logger.warning("Your editor message has been saved to: {}", recovery_path)
 
 
 def _handle_editor_message(
@@ -764,36 +820,40 @@ def _handle_editor_message(
         logger.debug("Message sent successfully")
 
 
+def _get_source_remote_url(source_location: HostLocation) -> str | None:
+    """Get the git remote origin URL from the source location via execute_command."""
+    result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
+    if result.success and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
 def _parse_project_name(
-    source_location: HostLocation, opts: CreateCliOptions, address: AgentAddress, mng_ctx: MngContext
+    resolved_source: ResolvedSource,
+    opts: CreateCliOptions,
+    remote_url: str | None,
 ) -> str:
+    """Determine the project name for a new agent.
+
+    Priority: explicit --project flag > source agent's project label > git remote > folder name.
+    """
     if opts.project:
         return opts.project
 
-    if not source_location.host.is_local:
-        raise NotImplementedError(
-            "Have to re-implement the below function so that it works via HostInterface calls instead!"
-        )
+    # If creating from an existing agent, inherit its project label
+    if resolved_source.agent is not None:
+        source_project = resolved_source.agent.labels.get("project")
+        if source_project is not None:
+            return source_project
 
-    source_project = derive_project_name_from_path(source_location.path, mng_ctx.concurrency_group)
+    # Derive from the already-fetched remote URL (works for both local and remote hosts)
+    if remote_url is not None:
+        project_name = parse_project_name_from_url(remote_url)
+        if project_name is not None:
+            return project_name
 
-    # When creating a new host from an external source (--source-agent or --source-host),
-    # validate that the project inferred from the source matches the project inferred from
-    # the local working directory. If they differ, the user must specify --project explicitly
-    # to avoid silently tagging the agent with the wrong project.
-    is_external_source = opts.source_agent is not None or opts.source_host is not None
-    is_creating_new_host = _is_creating_new_host(address, opts.new_host)
-    if is_external_source and is_creating_new_host:
-        local_git_root = find_git_worktree_root(None, mng_ctx.concurrency_group)
-        local_path = local_git_root if local_git_root is not None else Path(os.getcwd())
-        local_project = derive_project_name_from_path(local_path, mng_ctx.concurrency_group)
-        if source_project != local_project:
-            raise UserInputError(
-                f"Project mismatch: source infers project '{source_project}' but local directory infers "
-                f"'{local_project}'. Use --project to specify which project name to use."
-            )
-
-    return source_project
+    # Fall back to the source directory name (resolve to normalize symlinks / '..' components)
+    return resolved_source.location.path.resolve().name
 
 
 def _try_reuse_existing_agent(
@@ -870,12 +930,8 @@ def _resolve_source_location(
     mng_ctx: MngContext,
     *,
     is_start_desired: bool,
-) -> tuple[HostLocation, AgentId | None]:
-    """Resolve the source location and optionally the source agent ID.
-
-    Returns (source_location, source_agent_id) where source_agent_id is set
-    when the source was resolved from an agent (--from-agent / --source-agent).
-    """
+) -> ResolvedSource:
+    """Resolve the source location and optionally the source agent ID and labels."""
     # figure out the agent source data
     if opts.source is None and opts.source_agent is None and opts.source_host is None:
         # easy, source location is on current host
@@ -886,7 +942,7 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Parse the source first to check if it's just a local path.
     # When --source is a plain filesystem path (no agent or host component),
@@ -910,11 +966,11 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mng_ctx)
         host = provider.get_host(HostName("localhost"))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return HostLocation(host=online_host, path=Path(source_path)), None
+        return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
     agents_by_host = agent_and_host_loader()
-    resolved = resolve_source_location(
+    return resolve_source_location(
         opts.source,
         opts.source_agent,
         opts.source_host,
@@ -923,7 +979,6 @@ def _resolve_source_location(
         mng_ctx,
         is_start_desired=is_start_desired,
     )
-    return resolved.location, resolved.agent_id
 
 
 def _resolve_target_host(
@@ -999,6 +1054,90 @@ def _split_cli_args(args: tuple[str, ...]) -> list[str]:
     return [token for arg in args for token in shlex.split(arg)]
 
 
+_TRANSFER_MODE_FROM_CLI: dict[str, TransferMode] = {
+    "none": TransferMode.NONE,
+    "rsync": TransferMode.RSYNC,
+    "git-mirror": TransferMode.GIT_MIRROR,
+    "git-worktree": TransferMode.GIT_WORKTREE,
+}
+
+
+def _resolve_transfer_mode(
+    opts: CreateCliOptions,
+    address: AgentAddress,
+    source_location: HostLocation,
+    mng_ctx: MngContext,
+) -> TransferMode:
+    """Resolve the transfer mode from CLI flags and context.
+
+    Validates the combination of transfer mode, project type (git vs non-git),
+    and target locality (local vs remote).
+    """
+    is_git_repo = (
+        _is_git_repo(source_location.path, mng_ctx.concurrency_group) if source_location.host.is_local else True
+    )
+    is_creating_new_host = _is_creating_new_host(address, opts.new_host)
+    is_remote = (
+        is_creating_new_host
+        and address.provider_name is not None
+        and address.provider_name.lower() != LOCAL_PROVIDER_NAME
+    ) or not source_location.host.is_local
+
+    # Check if target path points to the same location as source
+    is_same_path = False
+    if opts.target_path is not None:
+        target_resolved = Path(opts.target_path).resolve()
+        source_resolved = source_location.path.resolve()
+        if target_resolved == source_resolved and not is_remote:
+            is_same_path = True
+
+    if opts.transfer is not None:
+        # Explicit --transfer flag
+        transfer_mode = _TRANSFER_MODE_FROM_CLI[opts.transfer.lower()]
+    elif is_same_path:
+        # Target path is the same as source path: must be none
+        transfer_mode = TransferMode.NONE
+    elif is_git_repo and not is_remote:
+        transfer_mode = TransferMode.GIT_WORKTREE
+    elif is_git_repo and is_remote:
+        transfer_mode = TransferMode.GIT_MIRROR
+    else:
+        # Non-git project: use rsync (generates a target directory if needed)
+        transfer_mode = TransferMode.RSYNC
+
+    # Validate the transfer mode against the context
+    if is_same_path and transfer_mode != TransferMode.NONE:
+        raise UserInputError(
+            f"--transfer={opts.transfer} is not compatible with --target-path pointing to the source directory. "
+            f"Use --transfer=none or omit --target-path."
+        )
+
+    if is_git_repo and transfer_mode == TransferMode.RSYNC:
+        raise UserInputError(
+            "--transfer=rsync is not supported for git repositories. "
+            "Use --transfer=git-mirror, --transfer=git-worktree, or --transfer=none."
+        )
+
+    if not is_git_repo and transfer_mode in (TransferMode.GIT_MIRROR, TransferMode.GIT_WORKTREE):
+        raise UserInputError(
+            f"--transfer={opts.transfer} requires a git repository, but the source is not a git repo. "
+            f"Use --transfer=rsync or --transfer=none."
+        )
+
+    if is_remote and transfer_mode == TransferMode.GIT_WORKTREE:
+        raise UserInputError(
+            "--transfer=git-worktree only works for local agents. Use --transfer=git-mirror for remote agents."
+        )
+
+    if transfer_mode == TransferMode.NONE and opts.target_path is not None and not is_same_path:
+        raise UserInputError(
+            "--transfer=none is incompatible with --target-path pointing to a different directory. "
+            "Use a different --transfer mode, or omit --target-path."
+        )
+
+    return transfer_mode
+
+
 def _parse_agent_opts(
     opts: CreateCliOptions,
     address: AgentAddress,
@@ -1016,39 +1155,8 @@ def _parse_agent_opts(
         parsed_name_style = AgentNameStyle(opts.name_style.upper())
         parsed_agent_name = generate_agent_name(parsed_name_style)
 
-    # Determine copy_mode from CLI flags
-    # Priority: explicit flags > default behavior
-    # Default: worktree for local git repos, copy for non-git repos or remote hosts
-    copy_mode: WorkDirCopyMode | None
-    # None means "in-place" (no copy/clone/worktree)
-    if opts.in_place:
-        copy_mode = None
-    elif opts.worktree:
-        copy_mode = WorkDirCopyMode.WORKTREE
-    elif opts.clone:
-        copy_mode = WorkDirCopyMode.CLONE
-    elif opts.copy_source:
-        copy_mode = WorkDirCopyMode.COPY
-    else:
-        # No explicit flag, apply defaults based on context
-        # When creating a new remote host, always use COPY
-        # since WORKTREE only works when source and target are on the same host
-        is_creating_new_host = _is_creating_new_host(address, opts.new_host)
-        is_creating_remote_host = (
-            is_creating_new_host
-            and address.provider_name is not None
-            and address.provider_name.lower() != LOCAL_PROVIDER_NAME
-        )
-        if is_creating_remote_host:
-            copy_mode = WorkDirCopyMode.COPY
-        elif source_location.host.is_local:
-            is_git_repo = _is_git_repo(source_location.path, mng_ctx.concurrency_group)
-            if is_git_repo:
-                copy_mode = WorkDirCopyMode.WORKTREE
-            else:
-                copy_mode = WorkDirCopyMode.COPY
-        else:
-            copy_mode = WorkDirCopyMode.COPY
+    # Determine transfer mode
+    transfer_mode = _resolve_transfer_mode(opts, address, source_location, mng_ctx)
 
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
     base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
@@ -1063,13 +1171,12 @@ def _parse_agent_opts(
     else:
         is_include_unclean = opts.include_unclean
 
-    # Build git options (None if copy_mode is None, meaning --in-place)
+    # Build git options (None if transfer_mode is NONE or RSYNC -- no git involved)
     git: AgentGitOptions | None
-    if copy_mode is None:
+    if transfer_mode in (TransferMode.NONE, TransferMode.RSYNC):
         git = None
     else:
         git = AgentGitOptions(
-            copy_mode=copy_mode,
             base_branch=base_branch or _get_current_git_branch(source_location, mng_ctx),
             new_branch_name=new_branch_name,
             depth=opts.depth,
@@ -1081,7 +1188,9 @@ def _parse_agent_opts(
 
     # parse source data options
     data_options = AgentDataOptions(
-        is_rsync_enabled=bool(opts.rsync or opts.rsync_args or git is None),
+        is_rsync_enabled=bool(
+            opts.rsync or opts.rsync_args or transfer_mode in (TransferMode.NONE, TransferMode.RSYNC)
+        ),
         rsync_args=opts.rsync_args or "",
     )
 
@@ -1105,18 +1214,11 @@ def _parse_agent_opts(
     )
 
     # Parse label options
-    labels_dict: dict[str, str] = {}
-    for label_string in opts.label:
-        if "=" not in label_string:
-            raise UserInputError(f"Label must be in KEY=VALUE format, got: {label_string}")
-        key, value = label_string.split("=", 1)
-        labels_dict[key.strip()] = value.strip()
-    label_options = AgentLabelOptions(labels=labels_dict)
+    label_options = resolve_labels(opts.label)
 
     # Parse provisioning options
     provisioning = AgentProvisioningOptions(
-        user_commands=opts.user_command,
-        sudo_commands=opts.sudo_command,
+        extra_provision_commands=opts.extra_provision_command,
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
         append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
         prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
@@ -1164,6 +1266,7 @@ def _parse_agent_opts(
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
         target_path=parsed_target_path,
+        transfer_mode=transfer_mode,
         initial_message=initial_message,
         data_options=data_options,
         git=git,
@@ -1200,7 +1303,6 @@ def _parse_host_lifecycle_options(opts: CreateCliOptions) -> HostLifecycleOption
 def _parse_target_host(
     opts: CreateCliOptions,
     address: AgentAddress,
-    project_name: str | None,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
     lifecycle: HostLifecycleOptions,
 ) -> DiscoveredHost | NewHostOptions | None:
@@ -1423,10 +1525,10 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
     synopsis="""mng [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--in-place|--copy|--clone|--worktree]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--user-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]""",
     aliases=("c",),
@@ -1443,7 +1545,7 @@ new host (or uses an existing one), runs the specified agent process, and
 connects to it by default.
 
 By default, agents run locally in a new git worktree (for git repositories)
-or a copy of the current directory. Specify a host in the agent address
+or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
@@ -1451,9 +1553,9 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
-For local agents, mng creates a git worktree that shares objects with your
-original repository, allowing efficient branch management. For remote agents,
-the working directory is copied to the remote host.""",
+For local agents in git repos, mng creates a git worktree that shares objects
+with your original repository. For remote agents, the repo is transferred
+via git push --mirror. Use --transfer to override the default.""",
     examples=(
         ("Create an agent locally in a new git worktree (default)", "mng create my-agent"),
         ("Create an agent in a new Docker container", "mng create my-agent@.docker"),
@@ -1466,7 +1568,7 @@ the working directory is copied to the remote host.""",
         ("Create on existing host with provider", "mng create my-agent@my-dev-box.modal"),
         ("Create a new named host", "mng create my-agent@my-host.modal --new-host"),
         ("Clone from an existing agent", "mng create new-agent --source other-agent"),
-        ("Run directly in-place (no worktree)", "mng create my-agent --in-place"),
+        ("Run directly in-place (no transfer)", "mng create my-agent --transfer=none"),
         ("Create without connecting", "mng create my-agent --no-connect"),
         ("Add extra tmux windows", 'mng create my-agent -w server="npm run dev"'),
         ("Reuse existing agent or create if not found", "mng create my-agent --reuse"),

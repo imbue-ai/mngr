@@ -47,6 +47,7 @@ def test_cli_create_with_echo_command(
                 "echo 'hello from cli test' && sleep 958374",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -102,6 +103,7 @@ def test_cli_create_via_subprocess(
                 "sleep 651472",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
                 # Note: --command automatically implies --type generic
@@ -154,6 +156,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().command, "sleep 397265"),
         to_update(default_create_cli_opts.field_ref().source_path, str(temp_work_dir)),
+        to_update(default_create_cli_opts.field_ref().transfer, "none"),
         to_update(default_create_cli_opts.field_ref().connect, True),
         to_update(default_create_cli_opts.field_ref().ensure_clean, False),
     )
@@ -204,6 +207,7 @@ def test_no_connect_flag_skips_tmux_attach(
                 "sleep 529847",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -249,6 +253,7 @@ def test_message_file_flag_reads_message_from_file(
                 str(message_file),
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -296,6 +301,7 @@ def test_message_and_message_file_both_provided_raises_error(
             str(message_file),
             "--source",
             str(temp_work_dir),
+            "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
         ],
@@ -334,6 +340,7 @@ def test_multiline_message_creates_file_and_pipes(
                 str(message_file),
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -381,6 +388,7 @@ def test_single_line_message_uses_echo(
                 single_line_message,
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -426,6 +434,7 @@ def test_extra_window_with_named_window(
                 'myserver="sleep 847192"',
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -480,6 +489,7 @@ def test_extra_window_without_name_uses_default_window_name(
                 "sleep 719283",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -531,6 +541,7 @@ def test_command_and_type_are_mutually_exclusive(
             "claude",
             "--source",
             str(temp_work_dir),
+            "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
         ],
@@ -566,6 +577,7 @@ def test_command_with_generic_type_is_allowed(
                 "generic",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
             ],
@@ -616,6 +628,7 @@ def test_edit_message_sends_edited_content(
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
             ],
@@ -676,6 +689,7 @@ def test_edit_message_with_initial_content(
                 initial_content,
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
             ],
@@ -737,6 +751,7 @@ def test_edit_message_empty_content_does_not_send(
                 "--edit-message",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--connect",
                 "--no-ensure-clean",
             ],
@@ -796,6 +811,7 @@ ensure_clean = false
                 "sleep 847192",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--context",
                 str(config_dir),
@@ -851,6 +867,7 @@ ensure_clean = false
                 "cat",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--context",
                 str(config_dir),
@@ -909,6 +926,7 @@ ensure_clean = false
             "sleep 123456",
             "--source",
             str(temp_work_dir),
+            "--transfer=none",
             "--no-connect",
             "--context",
             str(config_dir),
@@ -1004,14 +1022,14 @@ def test_ensure_clean_skipped_with_explicit_base_branch(
 
 
 @pytest.mark.tmux
-def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
+def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
     cli_runner: CliRunner,
     temp_git_repo: Path,
     temp_host_dir: Path,
     mng_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Ensure-clean check is skipped with an explicit base branch even in copy mode (not just worktree)."""
+    """Ensure-clean check is skipped with an explicit base branch even in git-mirror mode (not just worktree)."""
     # Create a second branch to use as base
     subprocess.run(
         ["git", "branch", "other-branch"],
@@ -1038,7 +1056,8 @@ def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
                 str(temp_git_repo),
                 "--branch",
                 "other-branch:mng/*",
-                "--copy",
+                "--transfer",
+                "git-mirror",
                 "--no-connect",
             ],
             obj=plugin_manager,
@@ -1050,3 +1069,122 @@ def test_ensure_clean_skipped_with_explicit_base_branch_copy_mode(
 
         # Wait for background session so cleanup can properly kill it
         wait_for_agent_session(session_name)
+
+
+# =============================================================================
+# Tests for --transfer flag validation
+# =============================================================================
+
+
+def test_transfer_rsync_rejected_for_git_repo(
+    cli_runner: CliRunner,
+    temp_git_repo: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=rsync should be rejected when the source is a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-rsync-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_git_repo),
+            "--transfer",
+            "rsync",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "rsync" in result.output.lower()
+
+
+def test_transfer_git_mirror_rejected_for_non_git(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=git-mirror should be rejected when the source is not a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-mirror-no-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--transfer",
+            "git-mirror",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "git repository" in result.output.lower()
+
+
+def test_transfer_git_worktree_rejected_for_non_git(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=git-worktree should be rejected when the source is not a git repo."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-worktree-no-git",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--transfer",
+            "git-worktree",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "git repository" in result.output.lower()
+
+
+def test_transfer_none_with_different_target_path_rejected(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--transfer=none with --target-path pointing to a different directory should be rejected."""
+    different_dir = tmp_path / "different_target"
+    different_dir.mkdir()
+
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-none-diff-target",
+            "--command",
+            "sleep 1",
+            "--source",
+            str(temp_work_dir),
+            "--transfer",
+            "none",
+            "--target-path",
+            str(different_dir),
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "incompatible" in result.output.lower()

@@ -10,6 +10,7 @@ from imbue.mng.uv_tool import _requirement_to_with_arg
 from imbue.mng.uv_tool import build_base_specifier
 from imbue.mng.uv_tool import build_uv_tool_install_add
 from imbue.mng.uv_tool import build_uv_tool_install_add_git
+from imbue.mng.uv_tool import build_uv_tool_install_add_many
 from imbue.mng.uv_tool import build_uv_tool_install_add_path
 from imbue.mng.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mng.uv_tool import build_uv_tool_install_remove
@@ -333,6 +334,64 @@ def test_build_uv_tool_install_remove_last_dep() -> None:
     receipt = _make_receipt(extras=[ToolRequirement(name="mng-opencode")])
     cmd = build_uv_tool_install_remove(receipt, "mng-opencode")
     assert cmd == ("uv", "tool", "install", "mng", "--reinstall")
+
+
+# =============================================================================
+# Tests for build_uv_tool_install_add_many
+# =============================================================================
+
+
+def test_build_uv_tool_install_add_many_appends_all() -> None:
+    """build_uv_tool_install_add_many should add all specifiers in one command."""
+    receipt = _make_receipt(extras=[ToolRequirement(name="existing")])
+    cmd = build_uv_tool_install_add_many(receipt, ["mng-pair", "mng-tutor"])
+    assert cmd == (
+        "uv",
+        "tool",
+        "install",
+        "mng",
+        "--reinstall",
+        "--with",
+        "existing",
+        "--with",
+        "mng-pair",
+        "--with",
+        "mng-tutor",
+    )
+
+
+def test_build_uv_tool_install_add_many_empty_list() -> None:
+    """build_uv_tool_install_add_many with no new specifiers should preserve extras only."""
+    receipt = _make_receipt(extras=[ToolRequirement(name="existing")])
+    cmd = build_uv_tool_install_add_many(receipt, [])
+    assert cmd == (
+        "uv",
+        "tool",
+        "install",
+        "mng",
+        "--reinstall",
+        "--with",
+        "existing",
+    )
+
+
+def test_build_uv_tool_install_add_many_no_existing_extras() -> None:
+    """build_uv_tool_install_add_many should work with no prior extras."""
+    receipt = _make_receipt()
+    cmd = build_uv_tool_install_add_many(receipt, ["mng-opencode", "mng-pair", "mng-tutor"])
+    assert cmd == (
+        "uv",
+        "tool",
+        "install",
+        "mng",
+        "--reinstall",
+        "--with",
+        "mng-opencode",
+        "--with",
+        "mng-pair",
+        "--with",
+        "mng-tutor",
+    )
 
 
 # =============================================================================

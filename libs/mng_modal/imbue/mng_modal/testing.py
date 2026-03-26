@@ -67,6 +67,7 @@ def make_testing_provider(
         is_persistent=is_persistent,
         is_snapshotted_after_create=is_snapshotted_after_create,
         is_host_volume_created=is_host_volume_created,
+        ssh_connect_timeout=5.0,
     )
 
     modal_app = ModalProviderApp(

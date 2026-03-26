@@ -36,8 +36,7 @@ class ProvisionCliOptions(CommonCliOptions):
     destroy_on_fail: bool
     restart: bool
     # Provisioning options
-    user_command: tuple[str, ...]
-    sudo_command: tuple[str, ...]
+    extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]
@@ -95,16 +94,10 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
 )
 @optgroup.group("Agent Provisioning")
 @optgroup.option(
-    "--user-command",
-    "user_command",
+    "--extra-provision-command",
+    "extra_provision_command",
     multiple=True,
     help="Run custom shell command during provisioning [repeatable]",
-)
-@optgroup.option(
-    "--sudo-command",
-    "sudo_command",
-    multiple=True,
-    help="Run custom shell command as root during provisioning [repeatable]",
 )
 @optgroup.option(
     "--upload-file",
@@ -193,8 +186,7 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
 
     # Parse provisioning options
     provisioning = AgentProvisioningOptions(
-        user_commands=opts.user_command,
-        sudo_commands=opts.sudo_command,
+        extra_provision_commands=opts.extra_provision_command,
         upload_files=tuple(UploadFileSpec.from_string(f) for f in opts.upload_file),
         append_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.append_to_file),
         prepend_to_files=tuple(FileModificationSpec.from_string(f) for f in opts.prepend_to_file),
@@ -228,9 +220,9 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="provision",
     one_line_description="Re-run provisioning on an existing agent [experimental]",
-    synopsis="mng [provision|prov] [AGENT] [--agent <AGENT>] [--user-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]",
+    synopsis="mng [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>]",
     description="""This re-runs the provisioning steps (plugin lifecycle hooks, file transfers,
-user commands, env vars) on an agent that has already been created. Useful for
+custom commands, env vars) on an agent that has already been created. Useful for
 syncing configuration, authentication, and installing additional packages. Most
 provisioning steps are specified via plugins, but custom steps can also be
 defined using the options below.
@@ -252,11 +244,10 @@ the same host.""",
         ("Re-provision an agent", "mng provision my-agent"),
         (
             "Install a package without restarting",
-            "mng provision my-agent --user-command 'pip install pandas' --no-restart",
+            "mng provision my-agent --extra-provision-command 'pip install pandas' --no-restart",
         ),
         ("Upload a config file", "mng provision my-agent --upload-file ./config.json:/app/config.json"),
         ("Set an environment variable", "mng provision my-agent --env 'API_KEY=secret'"),
-        ("Run a root command", "mng provision my-agent --sudo-command 'apt-get install -y ffmpeg'"),
     ),
     see_also=(
         ("create", "Create and run an agent"),

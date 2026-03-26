@@ -7,10 +7,10 @@
 
 ```text
 mng [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--in-place|--copy|--clone|--worktree]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--user-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]
 ```
@@ -22,7 +22,7 @@ new host (or uses an existing one), runs the specified agent process, and
 connects to it by default.
 
 By default, agents run locally in a new git worktree (for git repositories)
-or a copy of the current directory. Specify a host in the agent address
+or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
@@ -30,9 +30,9 @@ The agent type defaults to 'claude' if not specified. Any command in your
 PATH can also be used as an agent type. Arguments after -- are passed
 directly to the agent command.
 
-For local agents, mng creates a git worktree that shares objects with your
-original repository, allowing efficient branch management. For remote agents,
-the working directory is copied to the remote host.
+For local agents in git repos, mng creates a git worktree that shares objects
+with your original repository. For remote agents, the repo is transferred
+via git push --mirror. Use --transfer to override the default.
 
 Alias: c
 
@@ -61,7 +61,7 @@ mng create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-t`, `--template` | text | Use a named template from create_templates config [repeatable, stacks in order] | None |
 | `-n`, `--name` | text | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
-| `--name-style` | choice (`english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `english` |
+| `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run [default: claude] | None |
 | `--command` | text | Run a literal command using the generic agent type (mutually exclusive with --type) | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
@@ -77,7 +77,7 @@ By default, `mng create` uses the local host. Use the agent address to specify a
 | `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider) | `False` |
 | `--project` | text | Project name for the agent (sets the 'project' label) [default: derived from git remote origin or folder name] | None |
 | `--host-label` | text | Host metadata label KEY=VALUE [repeatable] | None |
-| `--host-name-style` | choice (`astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `astronomy` |
+| `--host-name-style` | choice (`coolname` &#x7C; `astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `coolname` |
 
 ## Behavior
 
@@ -105,11 +105,8 @@ By default, `mng create` uses the local host. Use the agent address to specify a
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target` | text | Target [HOST][:PATH]. Defaults to current dir if no other target args are given | None |
-| `--target-path` | text | Directory to mount source inside agent host. Incompatible with --in-place | None |
-| `--in-place` | boolean | Run directly in source directory. Incompatible with --target-path | `False` |
-| `--copy` | boolean | Copy source to isolated directory before running [default for remote agents, and for local agents if not in a git repo] | `False` |
-| `--clone` | boolean | Create a git clone that shares objects with original repo (only works for local agents) | `False` |
-| `--worktree` | boolean | Create a git worktree that shares objects and index with original repo [default for local agents in a git repo] | `False` |
+| `--target-path` | text | Directory to mount source inside agent host. Incompatible with --transfer=none | None |
+| `--transfer` | choice (`none` &#x7C; `rsync` &#x7C; `git-mirror` &#x7C; `git-worktree`) | How to transfer the project into the agent. none: run in-place (no transfer). rsync: copy via rsync (non-git projects). git-mirror: transfer via git push --mirror (git projects). git-worktree: create a git worktree (git projects, local only). [default: git-worktree for local git repos, git-mirror for remote git repos, rsync for non-git] | None |
 
 ## Agent Git Configuration
 
@@ -137,8 +134,7 @@ See [Provision Options](../secondary/provision.md) for full details.
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--grant` | text | Grant a permission to the agent [repeatable] | None |
-| `--user-command` | text | Run custom shell command during provisioning [repeatable] | None |
-| `--sudo-command` | text | Run custom shell command as root during provisioning [repeatable] | None |
+| `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 | `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
 | `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |
@@ -337,10 +333,10 @@ $ mng create my-agent@my-host.modal --new-host
 $ mng create new-agent --source other-agent
 ```
 
-**Run directly in-place (no worktree)**
+**Run directly in-place (no transfer)**
 
 ```bash
-$ mng create my-agent --in-place
+$ mng create my-agent --transfer=none
 ```
 
 **Create without connecting**

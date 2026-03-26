@@ -11,6 +11,7 @@ from typing import IO
 from typing import cast
 
 import pytest
+from paramiko import ChannelException
 from paramiko import SSHException
 from pyinfra.api.host import Host as PyinfraHost
 
@@ -911,9 +912,10 @@ def _create_host_with_fake_connector(
         (OSError("No such file or directory"), False),
         (ValueError("Socket is closed"), False),
         (SSHException("SSH session not active"), True),
+        (ChannelException(2, "open failed"), True),
         (EOFError(), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "eof-error"],
+    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected
@@ -971,6 +973,19 @@ def _create_host_with_custom_sftp(
     The sftp_factory callable is invoked each time _create_sftp_client is called,
     allowing tests to inject fake SFTP behavior without monkeypatching.
     """
+    host, _ = _create_host_with_custom_sftp_and_fake(local_provider, sftp_factory)
+    return host
+
+
+def _create_host_with_custom_sftp_and_fake(
+    local_provider: LocalProviderInstance,
+    sftp_factory: Callable[[], object],
+) -> tuple[Host, _FakeHostWithSSH]:
+    """Like _create_host_with_custom_sftp but also returns the underlying fake pyinfra host.
+
+    This is useful for tests that need to inspect the fake host's state
+    (e.g. disconnect_call_count) after exercising the Host.
+    """
 
     class _HostWithCustomSFTP(Host):
         def _create_sftp_client(self, transport: object) -> Any:
@@ -978,12 +993,13 @@ def _create_host_with_custom_sftp(
 
     fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
     connector = PyinfraConnector(cast(PyinfraHost, fake))
-    return _HostWithCustomSFTP(
+    host = _HostWithCustomSFTP(
         id=HostId.generate(),
         connector=connector,
         provider_instance=local_provider,
         mng_ctx=local_provider.mng_ctx,
     )
+    return host, fake
 
 
 @pytest.mark.parametrize(
@@ -1101,6 +1117,106 @@ def test_put_file_resets_input_io_position_between_retry_attempts(
     # First call: partial read advanced position to 5, then socket closed
     # Second call: seek(0) reset position to 0 before creating new SFTP
     assert io_positions_at_call_time == [5, 0]
+
+
+def test_get_file_channel_exception_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """ChannelException should retry without calling disconnect on the connector.
+
+    When the server refuses to open a new channel (e.g. MaxSessions limit),
+    the transport is still alive.  Disconnecting would kill other threads'
+    in-flight SFTP operations on the shared transport.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ChannelException(2, "open failed")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+def test_put_file_channel_exception_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """ChannelException should retry without calling disconnect on the connector.
+
+    When the server refuses to open a new channel (e.g. MaxSessions limit),
+    the transport is still alive.  Disconnecting would kill other threads'
+    in-flight SFTP operations on the shared transport.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ChannelException(2, "open failed")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+def test_get_file_ssh_exception_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Non-ChannelException SSHException should disconnect before retrying.
+
+    This contrasts with ChannelException which should NOT disconnect.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SSHException("SSH session not active")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_put_file_ssh_exception_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Non-ChannelException SSHException should disconnect before retrying.
+
+    This contrasts with ChannelException which should NOT disconnect.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SSHException("SSH session not active")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
 
 
 def test_put_file_propagates_non_socket_closed_os_error(
@@ -1771,15 +1887,15 @@ def test_host_provision_agent_with_env_vars(
     assert "DEBUG=true" in env_content
 
 
-def test_host_provision_agent_with_user_commands(
+def test_host_provision_agent_with_extra_provision_commands(
     local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
 ) -> None:
-    """provision_agent should run user commands."""
+    """provision_agent should run extra provision commands."""
     host = local_host
-    # Create a marker file via user command to verify execution
+    # Create a marker file via extra provision command to verify execution
     marker_file = temp_work_dir / "provision_marker.txt"
 
     options = CreateAgentOptions(
@@ -1787,7 +1903,7 @@ def test_host_provision_agent_with_user_commands(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=(f"echo 'provisioned' > {marker_file}",),
+            extra_provision_commands=(f"echo 'provisioned' > {marker_file}",),
         ),
     )
 

@@ -69,7 +69,7 @@ class ChatSettings(FrozenModel):
     model: ChatModel | None = Field(
         default=None,
         description="Default model for new conversation threads. "
-        "When None, chat.sh falls back to the hardcoded default (claude-opus-4.6).",
+        "When None, chat.sh falls back to the hardcoded default (claude-haiku-4.5).",
     )
     welcome_message: NonEmptyStr = Field(
         default=DEFAULT_WELCOME_MESSAGE,

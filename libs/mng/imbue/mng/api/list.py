@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
-from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -24,31 +23,19 @@ from imbue.mng.api.discovery_events import extract_agents_and_hosts_from_full_li
 from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.api.providers import get_all_provider_instances
 from imbue.mng.config.data_types import MngContext
-from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import BaseMngError
-from imbue.mng.errors import HostAuthenticationError
-from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import MngError
 from imbue.mng.errors import ProviderInstanceNotFoundError
-from imbue.mng.hosts.common import compute_idle_seconds
-from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.data_types import AgentDetails
-from imbue.mng.interfaces.data_types import HostDetails
-from imbue.mng.interfaces.host import HostInterface
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mng.primitives import ActivitySource
 from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import AgentLifecycleState
-from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostId
-from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import SSHInfo
 from imbue.mng.providers.base_provider import BaseProviderInstance
 from imbue.mng.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mng.utils.cel_utils import compile_cel_filters
@@ -153,6 +140,9 @@ def list_agents(
     on_agent: Callable[[AgentDetails], None] | None = None,
     # Optional callback invoked immediately when each error is encountered (for streaming)
     on_error: Callable[[ErrorInfo], None] | None = None,
+    # whether to force the providers to refresh their caches and get new data. Only needed if calling this multiple
+    # times within the same process
+    reset_caches: bool = False,
 ) -> ListResult:
     """List all agents with optional filtering."""
     result = ListResult()
@@ -193,6 +183,7 @@ def list_agents(
                 params=params,
                 result=result,
                 results_lock=results_lock,
+                reset_caches=reset_caches,
             )
         else:
             # Batch mode: load all agents first, then process
@@ -202,6 +193,7 @@ def list_agents(
                 params=params,
                 result=result,
                 results_lock=results_lock,
+                reset_caches=reset_caches,
             )
 
     except MngError as e:
@@ -251,10 +243,13 @@ def _list_agents_batch(
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
+    reset_caches: bool = False,
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
     with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_all_hosts_and_agents(mng_ctx, provider_names, include_destroyed=True)
+        agents_by_host, providers = discover_all_hosts_and_agents(
+            mng_ctx, provider_names, include_destroyed=True, reset_caches=reset_caches
+        )
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))
 
@@ -302,13 +297,14 @@ def _list_agents_streaming(
     params: _ListAgentsParams,
     result: ListResult,
     results_lock: Lock,
+    reset_caches: bool = False,
 ) -> None:
     """Streaming mode: each provider loads and processes hosts independently.
 
     Fast providers fire on_agent callbacks while slow providers are still loading.
     """
     with log_span("Loading agents from all providers (streaming)"):
-        providers = get_all_provider_instances(mng_ctx, provider_names)
+        providers = get_all_provider_instances(mng_ctx, provider_names, reset_caches=reset_caches)
         logger.trace("Found {} provider instances", len(providers))
 
         with ConcurrencyGroupExecutor(
@@ -385,162 +381,24 @@ def _discover_and_emit_details_for_provider(
             params.on_error(error_info)
 
 
-def _build_host_details_from_host(
-    host: HostInterface,
-    host_ref: DiscoveredHost,
-    is_authentication_failure: bool,
-) -> tuple[HostDetails, datetime | None]:
-    """Build HostDetails from a host object (online or offline).
-
-    Returns the HostDetails and the SSH activity time (needed for agent idle calculation).
-    """
-    # Build SSH info if this is a remote host (only available for online hosts)
-    ssh_info: SSHInfo | None = None
-
-    is_locked: bool | None = None
-    locked_time: datetime | None = None
-    if isinstance(host, Host):
-        ssh_connection = host.get_ssh_connection_info()
-        if ssh_connection is not None:
-            user, hostname, port, key_path = ssh_connection
-            ssh_info = SSHInfo(
-                user=user,
-                host=hostname,
-                port=port,
-                key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
-            )
-        boot_time = host.get_boot_time()
-        uptime_seconds = host.get_uptime_seconds()
-        resource = host.get_provider_resources()
-        is_locked = host.is_lock_held()
-        # Only fetch locked_time when the lock is held to avoid a redundant
-        # SSH stat command on remote hosts (is_lock_held already checked existence).
-        locked_time = host.get_reported_lock_time() if is_locked else None
+def _handle_listing_error(
+    source: DiscoveredAgent | DiscoveredHost,
+    exception: BaseException,
+    params: _ListAgentsParams,
+    result: ListResult,
+    results_lock: Lock,
+) -> None:
+    """Handle an error during detail collection for an agent or host."""
+    if params.error_behavior == ErrorBehavior.ABORT:
+        raise exception
+    if isinstance(source, DiscoveredAgent):
+        error_info = AgentErrorInfo.build_for_agent(exception, source.agent_id)
     else:
-        boot_time = None
-        uptime_seconds = None
-        resource = None
-
-    certified_data = host.get_certified_data()
-    host_plugin_data = certified_data.plugin
-    # Always use the certified host_name for consistency between online and offline hosts.
-    # Online hosts would otherwise return the SSH hostname (e.g., "r438.modal.host") via
-    # get_name(), while offline hosts return the friendly name from certified data.
-    host_name = certified_data.host_name
-    # SSH activity is tracked at the host level (host_dir/activity/ssh)
-    ssh_activity = (
-        host.get_reported_activity_time(ActivitySource.SSH) if isinstance(host, OnlineHostInterface) else None
-    )
-    host_details = HostDetails(
-        id=host.id,
-        name=host_name,
-        provider_name=host_ref.provider_name,
-        state=host.get_state() if not is_authentication_failure else HostState.UNAUTHENTICATED,
-        image=host.get_image(),
-        tags=host.get_tags(),
-        boot_time=boot_time,
-        uptime_seconds=uptime_seconds,
-        resource=resource,
-        ssh=ssh_info,
-        snapshots=host.get_snapshots(),
-        is_locked=is_locked,
-        locked_time=locked_time,
-        plugin=host_plugin_data,
-        ssh_activity_time=ssh_activity,
-        failure_reason=host.get_failure_reason(),
-    )
-    return host_details, ssh_activity
-
-
-def _build_agent_details_from_online_agent(
-    agent: AgentInterface,
-    host_details: HostDetails,
-    host: OnlineHostInterface,
-    ssh_activity: datetime | None,
-    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
-) -> AgentDetails:
-    """Build AgentDetails from a live agent on an online host."""
-    # Get activity config from host
-    activity_config = host.get_activity_config()
-
-    # Activity times from file mtimes (per-agent)
-    user_activity = agent.get_reported_activity_time(ActivitySource.USER)
-    agent_activity = agent.get_reported_activity_time(ActivitySource.AGENT)
-
-    # start_time from activity/start file mtime (not the status/start_time file)
-    start_time = agent.get_reported_activity_time(ActivitySource.START)
-
-    # runtime_seconds computed from start_time
-    now = datetime.now(timezone.utc)
-    runtime_seconds = (now - start_time).total_seconds() if start_time else None
-
-    # idle_seconds: include host-level ssh_activity; 0.0 if no activity yet
-    idle_seconds = compute_idle_seconds(user_activity, agent_activity, ssh_activity) or 0.0
-
-    # Compute plugin-specific fields from field generators
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent, host)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
-
-    return AgentDetails(
-        id=agent.id,
-        name=agent.name,
-        type=str(agent.agent_type),
-        command=agent.get_command(),
-        work_dir=agent.work_dir,
-        initial_branch=agent.get_created_branch_name(),
-        create_time=agent.create_time,
-        start_on_boot=agent.get_is_start_on_boot(),
-        state=agent.get_lifecycle_state(),
-        url=agent.get_reported_url(),
-        start_time=start_time,
-        runtime_seconds=runtime_seconds,
-        user_activity_time=user_activity,
-        agent_activity_time=agent_activity,
-        idle_seconds=idle_seconds,
-        idle_mode=activity_config.idle_mode.value,
-        idle_timeout_seconds=activity_config.idle_timeout_seconds,
-        activity_sources=tuple(s.value for s in activity_config.activity_sources),
-        labels=agent.get_labels(),
-        host=host_details,
-        plugin=plugin_data,
-    )
-
-
-def _build_agent_details_from_offline_ref(
-    agent_ref: DiscoveredAgent,
-    host_details: HostDetails,
-) -> AgentDetails:
-    """Build AgentDetails from a discovered agent reference when the host is offline."""
-    create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
-    return AgentDetails(
-        id=agent_ref.agent_id,
-        name=agent_ref.agent_name,
-        type=str(agent_ref.agent_type) if agent_ref.agent_type else "unknown",
-        command=agent_ref.command or CommandString(""),
-        work_dir=agent_ref.work_dir or Path("/"),
-        initial_branch=agent_ref.created_branch_name,
-        create_time=create_time,
-        start_on_boot=agent_ref.start_on_boot,
-        state=AgentLifecycleState.STOPPED,
-        url=None,
-        start_time=None,
-        runtime_seconds=None,
-        user_activity_time=None,
-        agent_activity_time=None,
-        idle_seconds=None,
-        idle_mode=None,
-        labels=agent_ref.labels,
-        host=host_details,
-        plugin={},
-    )
+        error_info = HostErrorInfo.build_for_host(exception, source.host_id)
+    with results_lock:
+        result.errors.append(error_info)
+    if params.on_error:
+        params.on_error(error_info)
 
 
 def _collect_and_emit_details_for_host(
@@ -551,87 +409,21 @@ def _collect_and_emit_details_for_host(
     result: ListResult,
     results_lock: Lock,
 ) -> None:
-    is_authentication_failure = False
-    try:
-        # Try the provider's optimized listing method first
-        listing_data = provider.get_host_and_agent_details(host_ref, agent_refs)
-        if listing_data is not None:
-            host_details, agent_details_list = listing_data
-            for agent_details in agent_details_list:
-                # Apply CEL filters if provided
-                if params.compiled_include_filters or params.compiled_exclude_filters:
-                    if not _apply_cel_filters(
-                        agent_details, params.compiled_include_filters, params.compiled_exclude_filters
-                    ):
-                        continue
-                with results_lock:
-                    result.agents.append(agent_details)
-                if params.on_agent:
-                    params.on_agent(agent_details)
-            return
-
-        # Fall back to per-field collection
-        host = provider.get_host(host_ref.host_id)
-    except HostConnectionError as e:
-        logger.debug("Host {} unreachable, falling back to offline data: {}", host_ref.host_id, e)
-        host = provider.to_offline_host(host_ref.host_id)
-        is_authentication_failure = isinstance(e, HostAuthenticationError)
-
-    # Build host details
-    host_details, ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
-
-    # Get all agents on this host
-    agents = None
-    if isinstance(host, OnlineHostInterface):
-        agents = host.get_agents()
-
-    # Build AgentDetails for each agent on this host
-    for agent_ref in agent_refs:
-        try:
-            agent_details: AgentDetails | None = None
-            if agents is not None and isinstance(host, OnlineHostInterface):
-                # Find the agent in the list for running hosts
-                agent = next((a for a in (agents or []) if a.id == agent_ref.agent_id), None)
-
-                if agent is None:
-                    exception = AgentNotFoundOnHostError(agent_ref.agent_id, host_ref.host_id)
-                    if params.error_behavior == ErrorBehavior.ABORT:
-                        raise exception
-                    error_info = AgentErrorInfo.build_for_agent(exception, agent_ref.agent_id)
-                    with results_lock:
-                        result.errors.append(error_info)
-                    if params.on_error:
-                        params.on_error(error_info)
-                    continue
-
-                agent_details = _build_agent_details_from_online_agent(
-                    agent, host_details, host, ssh_activity, params.field_generators
-                )
-
-            # if this host is offline, or if we failed to get the online host (ex: because it went offline)
-            if agents is None or agent_details is None:
-                agent_details = _build_agent_details_from_offline_ref(agent_ref, host_details)
-
-            # Apply CEL filters if provided
-            if params.compiled_include_filters or params.compiled_exclude_filters:
-                if not _apply_cel_filters(
-                    agent_details, params.compiled_include_filters, params.compiled_exclude_filters
-                ):
-                    continue
-
-            with results_lock:
-                result.agents.append(agent_details)
-            if params.on_agent:
-                params.on_agent(agent_details)
-
-        except MngError as e:
-            if params.error_behavior == ErrorBehavior.ABORT:
-                raise
-            error_info = AgentErrorInfo.build_for_agent(e, agent_ref.agent_id)
-            with results_lock:
-                result.errors.append(error_info)
-            if params.on_error:
-                params.on_error(error_info)
+    _host_details, agent_details_list = provider.get_host_and_agent_details(
+        host_ref,
+        agent_refs,
+        params.field_generators,
+        lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+    )
+    for agent_details in agent_details_list:
+        # Apply CEL filters if provided
+        if params.compiled_include_filters or params.compiled_exclude_filters:
+            if not _apply_cel_filters(agent_details, params.compiled_include_filters, params.compiled_exclude_filters):
+                continue
+        with results_lock:
+            result.agents.append(agent_details)
+        if params.on_agent:
+            params.on_agent(agent_details)
 
 
 def _process_host_with_error_handling(

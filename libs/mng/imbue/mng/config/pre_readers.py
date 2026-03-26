@@ -63,20 +63,40 @@ def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path 
     return find_git_worktree_root(start, cg)
 
 
-def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found or malformed."""
+def resolve_project_config_dir(
+    context_dir: Path | None,
+    root_name: str,
+    cg: ConcurrencyGroup,
+) -> Path | None:
+    """Resolve the project config directory.
+
+    If MNG_PROJECT_DIR is set, returns that path directly.
+    Otherwise, returns <git_root>/.<root_name>/ (the default behavior).
+    Returns None if no project root can be determined and MNG_PROJECT_DIR is not set.
+    """
+    env_project_dir = os.environ.get("MNG_PROJECT_DIR")
+    if env_project_dir:
+        return Path(env_project_dir)
     root = context_dir or _find_project_root(cg=cg)
     if root is None:
         return None
-    return try_load_toml(root / get_project_config_name(root_name))
+    return root / f".{root_name}"
+
+
+def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
+    """Find and load the project config file, returning None if not found or malformed."""
+    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
+    if project_dir is None:
+        return None
+    return try_load_toml(project_dir / "settings.toml")
 
 
 def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
     """Find and load the local config file, returning None if not found or malformed."""
-    root = context_dir or _find_project_root(cg=cg)
-    if root is None:
+    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
+    if project_dir is None:
         return None
-    return try_load_toml(root / get_local_config_name(root_name))
+    return try_load_toml(project_dir / "settings.local.toml")
 
 
 # =============================================================================

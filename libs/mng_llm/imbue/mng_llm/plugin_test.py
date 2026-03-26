@@ -6,6 +6,9 @@ from typing import Any
 
 from imbue.mng.config.data_types import AgentTypeConfig
 from imbue.mng.primitives import CommandString
+from imbue.mng_llm.data_types import ChatModel
+from imbue.mng_llm.data_types import ChatSettings
+from imbue.mng_llm.data_types import LlmSettings
 from imbue.mng_llm.plugin import LlmAgent
 from imbue.mng_llm.plugin import LlmAgentConfig
 from imbue.mng_llm.plugin import register_agent_type
@@ -32,8 +35,25 @@ def test_set_uv_tool_env_vars_no_op_without_state_dir() -> None:
 # -- set_llm_model_env_var tests --
 
 
+def test_set_llm_model_env_var_uses_default_when_no_model() -> None:
+    settings = LlmSettings()
+    env: dict[str, str] = {}
+    set_llm_model_env_var(settings, env)
+    assert env["MNG_LLM_MODEL"] == "claude-haiku-4.5"
+
+
+def test_set_llm_model_env_var_reads_model_from_settings() -> None:
+    settings = LlmSettings(chat=ChatSettings(model=ChatModel("claude-haiku-4-5")))
+    env: dict[str, str] = {}
+    set_llm_model_env_var(settings, env)
+    assert env["MNG_LLM_MODEL"] == "claude-haiku-4-5"
+
+
+# -- LlmAgent.load_settings_from_host tests --
+
+
 def _make_host_stub(settings_file_exists: bool = False, settings_content: str = "") -> Any:
-    """Create a host stub for set_llm_model_env_var tests."""
+    """Create a host stub for load_settings_from_host tests."""
 
     def _execute_command(cmd: str, **kwargs: Any) -> Any:
         if "test -f" in cmd and settings_file_exists:
@@ -49,31 +69,21 @@ def _make_host_stub(settings_file_exists: bool = False, settings_content: str = 
     )
 
 
-def test_set_llm_model_env_var_uses_default_when_no_settings() -> None:
+def test_load_settings_from_host_returns_defaults_when_no_file() -> None:
     host = _make_host_stub(settings_file_exists=False)
-    env: dict[str, str] = {}
-    set_llm_model_env_var(host, Path("/work"), env)
-    assert env["MNG_LLM_MODEL"] == "claude-opus-4.6"
+    agent = LlmAgent.model_construct(work_dir=Path("/work"))
+    settings = agent.load_settings_from_host(host)
+    assert settings == LlmSettings()
 
 
-def test_set_llm_model_env_var_reads_model_from_settings() -> None:
+def test_load_settings_from_host_parses_model() -> None:
     host = _make_host_stub(
         settings_file_exists=True,
         settings_content='[chat]\nmodel = "claude-haiku-4-5"\n',
     )
-    env: dict[str, str] = {}
-    set_llm_model_env_var(host, Path("/work"), env)
-    assert env["MNG_LLM_MODEL"] == "claude-haiku-4-5"
-
-
-def test_set_llm_model_env_var_uses_default_when_model_not_in_settings() -> None:
-    host = _make_host_stub(
-        settings_file_exists=True,
-        settings_content="[chat]\n# no model key\n",
-    )
-    env: dict[str, str] = {}
-    set_llm_model_env_var(host, Path("/work"), env)
-    assert env["MNG_LLM_MODEL"] == "claude-opus-4.6"
+    agent = LlmAgent.model_construct(work_dir=Path("/work"))
+    settings = agent.load_settings_from_host(host)
+    assert settings.chat.model == ChatModel("claude-haiku-4-5")
 
 
 # -- LlmAgentConfig tests --

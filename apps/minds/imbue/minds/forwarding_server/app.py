@@ -33,6 +33,7 @@ from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterf
 from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.forwarding_server.cookie_manager import create_session_cookie
 from imbue.minds.forwarding_server.cookie_manager import verify_session_cookie
+from imbue.minds.forwarding_server.proxy import generate_backend_loading_html
 from imbue.minds.forwarding_server.proxy import generate_bootstrap_html
 from imbue.minds.forwarding_server.proxy import generate_service_worker_js
 from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
@@ -47,14 +48,12 @@ from imbue.minds.forwarding_server.templates import render_creating_page
 from imbue.minds.forwarding_server.templates import render_landing_page
 from imbue.minds.forwarding_server.templates import render_login_page
 from imbue.minds.forwarding_server.templates import render_login_redirect_page
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
 from imbue.mng.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
-
-_BACKEND_WAIT_TIMEOUT_SECONDS: Final[float] = 30.0
-_BACKEND_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 
 
 def _split_backend_url(backend_url: str) -> tuple[str, str]:
@@ -469,20 +468,18 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        # Wait server-side for the backend to become available (handles the
-        # case where the user is redirected to an agent still starting up).
-        wait_seconds: int = request.app.state.backend_wait_timeout_seconds
-        iterations = int(wait_seconds / _BACKEND_POLL_INTERVAL_SECONDS)
-        for _ in range(iterations):
-            await asyncio.sleep(_BACKEND_POLL_INTERVAL_SECONDS)
-            backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
-            if backend_url is not None:
-                break
-        if backend_url is None:
-            return Response(
-                status_code=502,
-                content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
-            )
+        # Return immediately instead of holding the connection open.
+        # For HTML-accepting requests, return a loading page that retries
+        # client-side after a short delay. This avoids saturating the
+        # browser's per-origin connection pool (typically 6 for HTTP/1.1)
+        # when a stale tab is pointed at an unavailable backend.
+        request_accept = request.headers.get("accept", "")
+        if "text/html" in request_accept:
+            return HTMLResponse(content=generate_backend_loading_html())
+        return Response(
+            status_code=502,
+            content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
+        )
 
     assert backend_url is not None
     resolved_backend_url = backend_url
@@ -712,11 +709,15 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     git_url = str(form.get("git_url", "")).strip()
     agent_name = str(form.get("agent_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
+    try:
+        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
+    except ValueError:
+        launch_mode = LaunchMode.LOCAL
     if not git_url:
-        html = render_create_form(git_url="", agent_name=agent_name, branch=branch)
+        html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
         return HTMLResponse(content=html, status_code=400)
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch)
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
     return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
 
 
@@ -757,6 +758,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     git_url = str(body.get("git_url", "")).strip()
     agent_name = str(body.get("agent_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
+    try:
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid launch_mode"}',
+            media_type="application/json",
+        )
     if not git_url:
         return Response(
             status_code=400,
@@ -764,7 +773,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
 
-    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch)
+    agent_id = agent_creator.start_creation(git_url, agent_name=agent_name, branch=branch, launch_mode=launch_mode)
     return Response(
         content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
         media_type="application/json",
@@ -892,7 +901,6 @@ def create_forwarding_server(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
-    backend_wait_timeout_seconds: int = int(_BACKEND_WAIT_TIMEOUT_SECONDS),
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
@@ -915,7 +923,6 @@ def create_forwarding_server(
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
-    app.state.backend_wait_timeout_seconds = backend_wait_timeout_seconds
     if http_client is not None:
         app.state.http_client = http_client
 

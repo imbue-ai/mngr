@@ -4,13 +4,18 @@ Reads ``[[vendor]]`` entries from minds.toml (via ``ClaudeMindSettings``) and
 adds each repository as a git subtree under ``vendor/<name>/``.
 
 When no vendor configuration is present, falls back to vendoring the mng
-repository.  In development mode (running from within the mng monorepo) the
-local checkout is used; otherwise the public GitHub URL is used.
+repository from the public GitHub URL.
+
+The ``MINDS_VENDOR_PATH`` environment variable can override vendor sources
+for development.  Format: ``name@/path/to/repo:other@/another/path``.
+Each ``name@/path`` pair overrides (or adds) a vendor entry to use a local
+path instead of whatever was configured.
 
 Local/editable repos must be "clean" (no uncommitted changes, no untracked
 files) before they can be vendored.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -30,36 +35,84 @@ VENDOR_DIR_NAME: Final[str] = "vendor"
 
 VENDOR_MNG_DIR_NAME: Final[NonEmptyStr] = NonEmptyStr("mng")
 
+VENDOR_PATH_ENV_VAR: Final[str] = "MINDS_VENDOR_PATH"
 
-def find_mng_repo_root() -> Path | None:
-    """Find the mng monorepo root by walking up from this module's source file.
 
-    Returns the repo root if this module is part of an mng checkout
-    (regular repo or worktree), or None if running from an installed package.
+def parse_vendor_path_env(raw: str) -> dict[str, Path]:
+    """Parse the MINDS_VENDOR_PATH env var into a name-to-path mapping.
+
+    Format: ``name@/path/to/repo:other_name@/another/path``
+
+    Raises VendorError if an entry is malformed (missing ``@`` separator
+    or empty name/path).
     """
-    current = Path(__file__).resolve().parent
-    while current != current.parent:
-        git_marker = current / ".git"
-        if git_marker.exists():
-            if (current / "libs" / "mng").is_dir():
-                return current
-            return None
-        current = current.parent
-    return None
+    result: dict[str, Path] = {}
+    for entry in raw.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "@" not in entry:
+            raise VendorError(
+                "Malformed {} entry '{}': expected 'name@/path' format".format(VENDOR_PATH_ENV_VAR, entry)
+            )
+        name, path_str = entry.split("@", 1)
+        name = name.strip()
+        path_str = path_str.strip()
+        if not name or not path_str:
+            raise VendorError(
+                "Malformed {} entry '{}': name and path must both be non-empty".format(VENDOR_PATH_ENV_VAR, entry)
+            )
+        result[name] = Path(path_str)
+    return result
 
 
-def default_vendor_configs(mng_repo_root: Path | None) -> tuple[VendorRepoConfig, ...]:
-    """Build the default vendor config (mng repo) when none is configured.
+def apply_vendor_overrides(
+    configs: tuple[VendorRepoConfig, ...],
+) -> tuple[VendorRepoConfig, ...]:
+    """Apply MINDS_VENDOR_PATH overrides to a set of vendor configs.
 
-    Uses the local checkout in development mode, GitHub URL otherwise.
+    For each override in the env var:
+    - If a config with that name already exists, replace its source with the local path.
+    - If no config with that name exists, append a new entry.
+
+    Returns the original configs unchanged when MINDS_VENDOR_PATH is not set.
     """
-    if mng_repo_root is not None:
-        return (
-            VendorRepoConfig(
-                name=VENDOR_MNG_DIR_NAME,
-                path=str(mng_repo_root),
-            ),
-        )
+    raw = os.environ.get(VENDOR_PATH_ENV_VAR)
+    if not raw:
+        return configs
+
+    overrides = parse_vendor_path_env(raw)
+    if not overrides:
+        return configs
+
+    existing_names = {c.name for c in configs}
+
+    replaced: list[VendorRepoConfig] = []
+    for config in configs:
+        if config.name in overrides:
+            replaced.append(
+                VendorRepoConfig(
+                    name=config.name,
+                    path=str(overrides[config.name]),
+                )
+            )
+        else:
+            replaced.append(config)
+
+    for name, path in overrides.items():
+        if name not in existing_names:
+            replaced.append(
+                VendorRepoConfig(
+                    name=NonEmptyStr(name),
+                    path=str(path),
+                )
+            )
+
+    return tuple(replaced)
+
+
+def default_vendor_configs() -> tuple[VendorRepoConfig, ...]:
+    """Build the default vendor config (mng repo from GitHub) when none is configured."""
     return (
         VendorRepoConfig(
             name=VENDOR_MNG_DIR_NAME,

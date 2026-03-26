@@ -200,6 +200,43 @@ def _inject_into_head(html_content: str, injection: str) -> str:
         return injection + html_content
 
 
+_BACKEND_LOADING_RETRY_INTERVAL_MS: Final[int] = 1000
+
+
+@pure
+def generate_backend_loading_html() -> str:
+    """Generate a lightweight loading page that retries the current URL after a short delay.
+
+    Returned when the backend server is not yet available. The page shows a
+    "Loading..." message and uses JavaScript to reload the page after 1 second,
+    which will either succeed (backend is now up) or return this page again.
+    """
+    return """<!DOCTYPE html>
+<html>
+<head>
+<title>Loading...</title>
+<style>
+body {{
+  font-family: system-ui, -apple-system, sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  margin: 0;
+  color: rgb(136, 136, 136);
+  background: rgb(26, 26, 26);
+}}
+</style>
+</head>
+<body>
+<p>Loading...</p>
+<script>
+setTimeout(function() {{ location.reload(); }}, {interval});
+</script>
+</body>
+</html>""".format(interval=_BACKEND_LOADING_RETRY_INTERVAL_MS)
+
+
 @pure
 def rewrite_proxied_html(
     html_content: str,

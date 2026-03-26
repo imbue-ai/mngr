@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from imbue.imbue_common.logging import log_span
 from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng_llm.data_types import LlmSettings
 
 SETTINGS_FILENAME = "minds.toml"
 
@@ -56,25 +55,3 @@ def load_from_host(host: OnlineHostInterface, work_dir: Path, settings_class: ty
         except ValueError as e:
             logger.warning("Failed to validate settings from {}: {}", settings_path, e)
             return settings_class()
-
-
-def load_settings_from_path(settings_path: Path) -> LlmSettings:
-    """Load LlmSettings from a local minds.toml file.
-
-    Returns an LlmSettings with defaults for any missing values.
-    If the file does not exist, returns all defaults.
-    Raises tomllib.TOMLDecodeError if the file exists but has invalid TOML syntax.
-    """
-    return load_from_path(settings_path, LlmSettings)
-
-
-def load_settings_from_host(
-    host: OnlineHostInterface,
-    work_dir: Path,
-) -> LlmSettings:
-    """Load LlmSettings from minds.toml in the agent's work directory.
-
-    Returns an LlmSettings with defaults for any missing values.
-    If the file does not exist or cannot be parsed, returns all defaults.
-    """
-    return load_from_host(host, work_dir, LlmSettings)

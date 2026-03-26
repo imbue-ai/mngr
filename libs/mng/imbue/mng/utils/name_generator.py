@@ -1,6 +1,7 @@
 from functools import cache
 from pathlib import Path
 
+import coolname
 from coolname import RandomGenerator
 
 from imbue.imbue_common.pure import pure
@@ -8,6 +9,9 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import AgentNameStyle
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostNameStyle
+
+# Number of words to use when generating coolname-style names
+_COOLNAME_WORD_COUNT = 3
 
 # Styles that use first_name + last_name format
 _STYLES_WITH_LAST_NAMES: frozenset[AgentNameStyle] = frozenset(
@@ -80,6 +84,8 @@ def _get_host_generator(style: HostNameStyle) -> RandomGenerator:
 
 def generate_agent_name(style: AgentNameStyle) -> AgentName:
     """Generate a random agent name based on the specified style."""
+    if style == AgentNameStyle.COOLNAME:
+        return AgentName(coolname.generate_slug(_COOLNAME_WORD_COUNT))
     generator = _get_agent_generator(style)
     if style in _STYLES_WITH_LAST_NAMES:
         # Use underscore separator for firstname_lastname format
@@ -91,6 +97,8 @@ def generate_agent_name(style: AgentNameStyle) -> AgentName:
 
 def generate_host_name(style: HostNameStyle) -> HostName:
     """Generate a random host name based on the specified style."""
+    if style == HostNameStyle.COOLNAME:
+        return HostName(coolname.generate_slug(_COOLNAME_WORD_COUNT))
     generator = _get_host_generator(style)
     name = generator.generate_slug()
     return HostName(name)

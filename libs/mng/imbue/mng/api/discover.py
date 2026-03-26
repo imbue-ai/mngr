@@ -69,7 +69,10 @@ def _discover_provider_hosts_and_agents(
 
 @log_call
 def discover_all_hosts_and_agents(
-    mng_ctx: MngContext, provider_names: tuple[str, ...] | None = None, include_destroyed: bool = False
+    mng_ctx: MngContext,
+    provider_names: tuple[str, ...] | None = None,
+    include_destroyed: bool = False,
+    reset_caches: bool = False,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
     """Discover all hosts and agents from all providers.
 
@@ -82,6 +85,11 @@ def discover_all_hosts_and_agents(
     with log_span("Discovering all hosts and agents from all providers"):
         providers = get_all_provider_instances(mng_ctx, provider_names)
         logger.trace("Found {} provider instances", len(providers))
+
+        if reset_caches:
+            logger.debug("Resetting provider caches before discovery")
+            for provider in providers:
+                provider.reset_caches()
 
         # Process all providers in parallel using ConcurrencyGroupExecutor
         futures: list[Future[None]] = []

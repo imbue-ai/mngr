@@ -1,5 +1,9 @@
+import sys
+import threading
 from collections.abc import Sequence
+from concurrent.futures import Future
 from pathlib import Path
+from typing import Any
 from typing import assert_never
 
 import click
@@ -9,7 +13,9 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mng.api.data_types import GcResourceTypes
 from imbue.mng.api.discovery_events import emit_agent_destroyed
 from imbue.mng.api.discovery_events import emit_discovery_events_for_host
@@ -45,6 +51,8 @@ from imbue.mng.primitives import ErrorBehavior
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.providers.base_provider import BaseProviderInstance
+from imbue.mng.utils.cel_utils import apply_cel_filters_to_context
+from imbue.mng.utils.cel_utils import compile_cel_filters
 from imbue.mng.utils.git_utils import find_source_repo_of_worktree
 from imbue.mng.utils.git_utils import remove_worktree
 
@@ -126,7 +134,6 @@ class DestroyCliOptions(CommonCliOptions):
     remove_created_branch: bool
     allow_worktree_removal: bool
     sessions: tuple[str, ...]
-    # Planned features (not yet implemented)
     include: tuple[str, ...]
     exclude: tuple[str, ...]
     stdin: bool
@@ -159,17 +166,17 @@ class DestroyCliOptions(CommonCliOptions):
 @optgroup.option(
     "--include",
     multiple=True,
-    help="Filter agents to destroy by CEL expression (repeatable). [future]",
+    help="Filter agents to destroy by CEL expression (repeatable)",
 )
 @optgroup.option(
     "--exclude",
     multiple=True,
-    help="Exclude agents matching CEL expression from destruction (repeatable). [future]",
+    help="Exclude agents matching CEL expression from destruction (repeatable)",
 )
 @optgroup.option(
     "--stdin",
     is_flag=True,
-    help="Read agent names/IDs from stdin, one per line. [future]",
+    help="Read agent names/IDs from stdin, one per line",
 )
 @optgroup.group("Behavior")
 @optgroup.option(
@@ -211,29 +218,19 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         is_format_template_supported=True,
     )
 
-    # Filter agents to destroy using CEL expressions like:
-    # --include 'name.startsWith("test-")' or --include 'host.provider == "docker"'
-    # See mng list --include for the pattern to follow
-    if opts.include:
-        raise NotImplementedError(
-            "The --include option is not yet implemented. See https://github.com/imbue-ai/mng/issues/XXX for progress."
-        )
-    # Exclude agents matching CEL expressions from destruction:
-    # --exclude 'state == "RUNNING"' to skip running agents
-    # See mng list --exclude for the pattern to follow
-    if opts.exclude:
-        raise NotImplementedError(
-            "The --exclude option is not yet implemented. See https://github.com/imbue-ai/mng/issues/XXX for progress."
-        )
-    # Read agent names/IDs from stdin to allow piping agent lists:
-    # mng list --format jsonl | jq -r .name | mng destroy --stdin
-    if opts.stdin:
-        raise NotImplementedError(
-            "The --stdin option is not yet implemented. See https://github.com/imbue-ai/mng/issues/XXX for progress."
-        )
+    # Compile CEL filters if provided
+    compiled_include_filters: list[Any] = []
+    compiled_exclude_filters: list[Any] = []
+    if opts.include or opts.exclude:
+        compiled_include_filters, compiled_exclude_filters = compile_cel_filters(opts.include, opts.exclude)
 
     # Validate input
     agent_identifiers = list(opts.agents) + list(opts.agent_list)
+
+    # Handle --stdin by reading agent names/IDs from stdin
+    if opts.stdin:
+        stdin_refs = [line.strip() for line in sys.stdin if line.strip()]
+        agent_identifiers.extend(stdin_refs)
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
@@ -248,8 +245,14 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                 )
             agent_identifiers.append(agent_name)
 
-    if not agent_identifiers and not opts.destroy_all:
-        raise UserInputError("Must specify at least one agent or use --all")
+    # --include alone (without --exclude) is sufficient to target agents (acts like --all with filtering).
+    # --exclude alone requires explicit agent names or --all, since it would otherwise implicitly
+    # target all agents for a destructive operation.
+    is_include_filter_only = not agent_identifiers and not opts.destroy_all and bool(opts.include)
+    effective_destroy_all = opts.destroy_all or is_include_filter_only
+
+    if not agent_identifiers and not effective_destroy_all:
+        raise UserInputError("Must specify at least one agent, use --all, or use --include filters")
 
     if agent_identifiers and opts.destroy_all:
         raise UserInputError("Cannot specify both agent names and --all")
@@ -258,8 +261,10 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     try:
         targets = _find_agents_to_destroy(
             agent_identifiers=agent_identifiers,
-            destroy_all=opts.destroy_all,
+            destroy_all=effective_destroy_all,
             mng_ctx=mng_ctx,
+            compiled_include_filters=compiled_include_filters,
+            compiled_exclude_filters=compiled_exclude_filters,
         )
     except AgentNotFoundError as e:
         if opts.force:
@@ -281,72 +286,57 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     if not opts.force:
         _confirm_destruction(targets)
 
-    # Destroy agents on online hosts
+    # Destroy all targets (online agents + offline hosts) in parallel
     destroyed_agents: list[AgentName] = []
-    # Collect worktree/branch info before destroy (destroy removes agent state)
-    branch_to_remove: tuple[str, Path] | None = None
-    # (work_dir, source_repo)
-    worktree_to_remove: tuple[Path, Path] | None = None
-    for agent, host in targets.online_agents:
-        try:
-            if agent.is_running() and not opts.force:
-                _output(
-                    f"Agent {agent.name} is running. Use --force to destroy running agents.",
+    worktrees_to_remove: list[tuple[Path, Path]] = []
+    branches_to_remove: list[tuple[str, Path]] = []
+    results_lock = threading.Lock()
+
+    with ConcurrencyGroupExecutor(
+        parent_cg=mng_ctx.concurrency_group, name="destroy_agents", max_workers=32
+    ) as executor:
+        futures: list[Future[None]] = []
+        for agent, host in targets.online_agents:
+            futures.append(
+                executor.submit(
+                    _destroy_single_online_agent,
+                    agent,
+                    host,
+                    opts,
                     output_opts,
+                    mng_ctx,
+                    results_lock,
+                    destroyed_agents,
+                    worktrees_to_remove,
+                    branches_to_remove,
                 )
-                continue
+            )
+        for offline in targets.offline_hosts:
+            futures.append(
+                executor.submit(
+                    _destroy_single_offline_host,
+                    offline,
+                    output_opts,
+                    mng_ctx,
+                    results_lock,
+                    destroyed_agents,
+                )
+            )
 
-            # Read worktree info before destroy removes the work_dir
-            source_repo_path = find_source_repo_of_worktree(agent.work_dir)
-            if source_repo_path is not None:
-                if opts.allow_worktree_removal:
-                    worktree_to_remove = (agent.work_dir, source_repo_path)
-                if opts.remove_created_branch:
-                    created_branch = agent.get_created_branch_name()
-                    if created_branch is not None:
-                        branch_to_remove = (created_branch, source_repo_path)
+    # Re-raise any unexpected exceptions from destroy threads
+    for future in futures:
+        future.result()
 
-            mng_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=host)
-            host.destroy_agent(agent)
-            mng_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
-            destroyed_agents.append(agent.name)
-            _output(f"Destroyed agent: {agent.name}", output_opts)
-
-            # Emit agent_destroyed event, then re-emit remaining host state
-            emit_agent_destroyed(mng_ctx.config, agent.id, host.id)
-            emit_discovery_events_for_host(mng_ctx.config, host)
-
-        except MngError as e:
-            _output(f"Error destroying agent {agent.name}: {e}", output_opts)
-
-    # Destroy offline hosts (which destroys all their agents)
-    for offline in targets.offline_hosts:
-        try:
-            _output(f"Destroying offline host with {len(offline.agent_names)} agent(s)...", output_opts)
-            mng_ctx.pm.hook.on_before_host_destroy(host=offline.host)
-            offline.provider.destroy_host(offline.host)
-            mng_ctx.pm.hook.on_host_destroyed(host=offline.host)
-            destroyed_agents.extend(offline.agent_names)
-            for name in offline.agent_names:
-                _output(f"Destroyed agent: {name} (via host destruction)", output_opts)
-
-            # Emit host_destroyed event with all agent IDs
-            emit_host_destroyed(mng_ctx.config, offline.host.id, offline.agent_ids)
-        except MngError as e:
-            _output(f"Error destroying offline host: {e}", output_opts)
-
-    # Remove worktree (must happen before branch deletion)
-    if worktree_to_remove is not None:
-        work_dir, source_repo_path = worktree_to_remove
+    # Remove worktrees (must happen before branch deletion)
+    for work_dir, source_repo_path in worktrees_to_remove:
         try:
             remove_worktree(work_dir, source_repo_path, mng_ctx.concurrency_group)
             _output(f"Removed worktree: {work_dir}", output_opts)
         except ProcessError as e:
             logger.warning("Failed to remove worktree {}: {}", work_dir, e)
 
-    # Delete the created branch (after worktree removal)
-    if branch_to_remove is not None:
-        created_branch, source_repo_path = branch_to_remove
+    # Delete created branches (after worktree removal)
+    for created_branch, source_repo_path in branches_to_remove:
         _remove_created_branch(created_branch, source_repo_path, mng_ctx.concurrency_group, output_opts)
 
     # Run garbage collection if enabled
@@ -361,26 +351,69 @@ def _find_agents_to_destroy(
     agent_identifiers: Sequence[str],
     destroy_all: bool,
     mng_ctx: MngContext,
+    compiled_include_filters: Sequence[Any] = (),
+    compiled_exclude_filters: Sequence[Any] = (),
 ) -> _DestroyTargets:
     """Find all agents to destroy.
 
     Uses find_agents_by_addresses for matching (supports NAME@HOST.PROVIDER syntax),
-    then partitions results into online agents vs offline hosts.
+    then optionally applies CEL include/exclude filters, then partitions results
+    into online agents vs offline hosts.
 
     Returns _DestroyTargets containing online agents and offline hosts to destroy.
     Raises AgentNotFoundError if any specified identifier does not match an agent.
     """
     # Step 1: Find matching agents using the shared address-aware resolution.
     # This handles address parsing, name/ID matching, and host/provider filtering.
+    # include_destroyed=True so we can find and clean up agents on already-destroyed hosts.
     matches = find_agents_by_addresses(
         raw_identifiers=agent_identifiers,
         filter_all=destroy_all,
         target_state=None,
         mng_ctx=mng_ctx,
+        include_destroyed=True,
     )
 
-    # Step 2: Partition matches into online agents vs offline hosts.
+    # Step 2: Apply CEL filters if provided
+    if compiled_include_filters or compiled_exclude_filters:
+        matches = _apply_cel_filters_to_matches(matches, compiled_include_filters, compiled_exclude_filters)
+
+    # Step 3: Partition matches into online agents vs offline hosts.
     return _partition_destroy_targets(matches, mng_ctx)
+
+
+@pure
+def _agent_match_to_cel_context(match: AgentMatch) -> dict[str, Any]:
+    """Convert an AgentMatch to a dict suitable for CEL evaluation."""
+    return {
+        "name": str(match.agent_name),
+        "id": str(match.agent_id),
+        "host": {
+            "name": str(match.host_name),
+            "id": str(match.host_id),
+            "provider": str(match.provider_name),
+        },
+    }
+
+
+def _apply_cel_filters_to_matches(
+    matches: Sequence[AgentMatch],
+    compiled_include_filters: Sequence[Any],
+    compiled_exclude_filters: Sequence[Any],
+) -> list[AgentMatch]:
+    """Apply compiled CEL include/exclude filters to a list of AgentMatch objects."""
+    filtered: list[AgentMatch] = []
+    for match in matches:
+        context = _agent_match_to_cel_context(match)
+        is_included = apply_cel_filters_to_context(
+            context=context,
+            include_filters=compiled_include_filters,
+            exclude_filters=compiled_exclude_filters,
+            error_context_description=f"agent {match.agent_name}",
+        )
+        if is_included:
+            filtered.append(match)
+    return filtered
 
 
 def _partition_destroy_targets(
@@ -392,48 +425,155 @@ def _partition_destroy_targets(
     For online hosts, resolves each matched agent to its AgentInterface.
     For offline hosts, verifies ALL agents on the host are being destroyed
     (since individual agent destruction requires the host to be online).
+
+    Each host is resolved in parallel via a ConcurrencyGroupExecutor.
     """
     online_agents: list[tuple[AgentInterface, OnlineHostInterface]] = []
     offline_hosts: list[_OfflineHostToDestroy] = []
+    results_lock = threading.Lock()
 
     # Group matched agent IDs by host for the offline "all targeted" check
     matched_ids_by_host: dict[str, set[AgentId]] = {}
     for match in matches:
         matched_ids_by_host.setdefault(str(match.host_id), set()).add(match.agent_id)
 
-    for host_id_str, matched_ids in matched_ids_by_host.items():
-        # Get the provider from any match on this host
-        provider_name = next(m.provider_name for m in matches if str(m.host_id) == host_id_str)
-        provider = get_provider_instance(provider_name, mng_ctx)
-        host_interface = provider.get_host(HostId(host_id_str))
+    futures: list[Future[None]] = []
+    with ConcurrencyGroupExecutor(
+        parent_cg=mng_ctx.concurrency_group, name="partition_destroy_targets", max_workers=32
+    ) as executor:
+        for host_id_str, matched_ids in matched_ids_by_host.items():
+            futures.append(
+                executor.submit(
+                    _resolve_host_for_partition,
+                    host_id_str,
+                    matched_ids,
+                    matches,
+                    mng_ctx,
+                    results_lock,
+                    online_agents,
+                    offline_hosts,
+                )
+            )
 
-        match host_interface:
-            case OnlineHostInterface() as online_host:
-                try:
-                    agents = online_host.get_agents()
-                except HostConnectionError as e:
-                    logger.warning(
-                        "Failed to connect to host {} to verify agent status. Treating host as offline: {}",
-                        host_id_str,
-                        str(e),
-                    )
-                    offline_host = host_interface.to_offline_host()
-                    _check_all_agents_targeted_on_offline_host(
-                        offline_host, matched_ids, host_id_str, offline_hosts, provider
-                    )
-                    continue
+    # Re-raise any exceptions (e.g. HostOfflineError from partial targeting)
+    for future in futures:
+        future.result()
 
+    return _DestroyTargets(online_agents=online_agents, offline_hosts=offline_hosts)
+
+
+def _resolve_host_for_partition(
+    host_id_str: str,
+    matched_ids: set[AgentId],
+    matches: Sequence[AgentMatch],
+    mng_ctx: MngContext,
+    results_lock: threading.Lock,
+    online_agents: list[tuple[AgentInterface, OnlineHostInterface]],
+    offline_hosts: list[_OfflineHostToDestroy],
+) -> None:
+    """Resolve a single host and categorize its agents for destruction."""
+    # Get the provider from any match on this host
+    provider_name = next(m.provider_name for m in matches if str(m.host_id) == host_id_str)
+    provider = get_provider_instance(provider_name, mng_ctx)
+    host_interface = provider.get_host(HostId(host_id_str))
+
+    match host_interface:
+        case OnlineHostInterface() as online_host:
+            try:
+                agents = online_host.get_agents()
+            except HostConnectionError as e:
+                logger.warning(
+                    "Failed to connect to host {} to verify agent status. Treating host as offline: {}",
+                    host_id_str,
+                    str(e),
+                )
+                offline_host_interface = host_interface.to_offline_host()
+                _check_all_agents_targeted_on_offline_host(
+                    offline_host_interface, matched_ids, host_id_str, offline_hosts, provider, results_lock
+                )
+                return
+
+            with results_lock:
                 for agent in agents:
                     if agent.id in matched_ids:
                         online_agents.append((agent, online_host))
-            case HostInterface() as offline_host:
-                _check_all_agents_targeted_on_offline_host(
-                    offline_host, matched_ids, host_id_str, offline_hosts, provider
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
+        case HostInterface() as offline_host:
+            _check_all_agents_targeted_on_offline_host(
+                offline_host, matched_ids, host_id_str, offline_hosts, provider, results_lock
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
-    return _DestroyTargets(online_agents=online_agents, offline_hosts=offline_hosts)
+
+def _destroy_single_online_agent(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    opts: DestroyCliOptions,
+    output_opts: OutputOptions,
+    mng_ctx: MngContext,
+    results_lock: threading.Lock,
+    destroyed_agents: list[AgentName],
+    worktrees_to_remove: list[tuple[Path, Path]],
+    branches_to_remove: list[tuple[str, Path]],
+) -> None:
+    """Destroy a single agent on an online host. Thread-safe."""
+    try:
+        if agent.is_running() and not opts.force:
+            _output(
+                f"Agent {agent.name} is running. Use --force to destroy running agents.",
+                output_opts,
+            )
+            return
+
+        # Read worktree info before destroy removes the work_dir
+        source_repo_path = find_source_repo_of_worktree(agent.work_dir)
+        if source_repo_path is not None:
+            if opts.allow_worktree_removal:
+                with results_lock:
+                    worktrees_to_remove.append((agent.work_dir, source_repo_path))
+            if opts.remove_created_branch:
+                created_branch = agent.get_created_branch_name()
+                if created_branch is not None:
+                    with results_lock:
+                        branches_to_remove.append((created_branch, source_repo_path))
+
+        mng_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=host)
+        host.destroy_agent(agent)
+        mng_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
+        with results_lock:
+            destroyed_agents.append(agent.name)
+        _output(f"Destroyed agent: {agent.name}", output_opts)
+
+        # Emit agent_destroyed event, then re-emit remaining host state
+        emit_agent_destroyed(mng_ctx.config, agent.id, host.id)
+        emit_discovery_events_for_host(mng_ctx.config, host)
+
+    except MngError as e:
+        _output(f"Error destroying agent {agent.name}: {e}", output_opts)
+
+
+def _destroy_single_offline_host(
+    offline: _OfflineHostToDestroy,
+    output_opts: OutputOptions,
+    mng_ctx: MngContext,
+    results_lock: threading.Lock,
+    destroyed_agents: list[AgentName],
+) -> None:
+    """Destroy a single offline host and all its agents. Thread-safe."""
+    try:
+        _output(f"Destroying offline host with {len(offline.agent_names)} agent(s)...", output_opts)
+        mng_ctx.pm.hook.on_before_host_destroy(host=offline.host)
+        offline.provider.destroy_host(offline.host)
+        mng_ctx.pm.hook.on_host_destroyed(host=offline.host)
+        with results_lock:
+            destroyed_agents.extend(offline.agent_names)
+        for name in offline.agent_names:
+            _output(f"Destroyed agent: {name} (via host destruction)", output_opts)
+
+        # Emit host_destroyed event with all agent IDs
+        emit_host_destroyed(mng_ctx.config, offline.host.id, offline.agent_ids)
+    except MngError as e:
+        _output(f"Error destroying offline host: {e}", output_opts)
 
 
 def _check_all_agents_targeted_on_offline_host(
@@ -442,6 +582,7 @@ def _check_all_agents_targeted_on_offline_host(
     host_id_str: str,
     offline_hosts: list[_OfflineHostToDestroy],
     provider: BaseProviderInstance,
+    results_lock: threading.Lock,
 ) -> None:
     """Verify all agents on an offline host are targeted, then queue it for destruction.
 
@@ -450,22 +591,23 @@ def _check_all_agents_targeted_on_offline_host(
     are targeted.
     """
     all_agent_refs = offline_host.discover_agents()
-    all_targeted = all(ref.agent_id in matched_ids for ref in all_agent_refs)
-    if all_targeted:
-        offline_hosts.append(
-            _OfflineHostToDestroy(
-                host=offline_host,
-                provider=provider,
-                agent_names=[ref.agent_name for ref in all_agent_refs],
-                agent_ids=[ref.agent_id for ref in all_agent_refs],
+    with results_lock:
+        all_targeted = all(ref.agent_id in matched_ids for ref in all_agent_refs)
+        if all_targeted:
+            offline_hosts.append(
+                _OfflineHostToDestroy(
+                    host=offline_host,
+                    provider=provider,
+                    agent_names=[ref.agent_name for ref in all_agent_refs],
+                    agent_ids=[ref.agent_id for ref in all_agent_refs],
+                )
             )
-        )
-    else:
-        raise HostOfflineError(
-            f"Host '{host_id_str}' is offline. Cannot destroy individual agents on an "
-            f"offline host. Either start the host first, or destroy all "
-            f"{len(all_agent_refs)} agent(s) on this host."
-        )
+        else:
+            raise HostOfflineError(
+                f"Host '{host_id_str}' is offline. Cannot destroy individual agents on an "
+                f"offline host. Either start the host first, or destroy all "
+                f"{len(all_agent_refs)} agent(s) on this host."
+            )
 
 
 def _confirm_destruction(targets: _DestroyTargets) -> None:
@@ -489,7 +631,7 @@ def _output_targets(
     output_opts: OutputOptions,
 ) -> None:
     """Output a list of agents to destroy."""
-    agent_data = [
+    agent_data: list[dict[str, object]] = [
         {"agent_id": str(agent.id), "agent_name": str(agent.name), "host_id": str(host.id)}
         for agent, host in targets.online_agents
     ]
@@ -606,7 +748,7 @@ def _run_post_destroy_gc(mng_ctx: MngContext, output_opts: OutputOptions) -> Non
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mng [destroy|rm] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [-f|--force] [--dry-run] [-b|--remove-created-branch]",
+    synopsis="mng [destroy|rm] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [--stdin] [-f|--force] [--dry-run] [-b|--remove-created-branch]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -625,6 +767,9 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Preview what would be destroyed", "mng destroy my-agent --dry-run"),
         ("Destroy using --agent flag (repeatable)", "mng destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mng destroy --session mng-my-agent"),
+        ("Destroy agents matching a CEL filter", "mng destroy --include 'name.startsWith(\"test-\")' --force"),
+        ("Destroy all except docker agents", "mng destroy --all --exclude 'host.provider == \"docker\"' --force"),
+        ("Pipe agent names from list", "mng list --format '{name}' | mng destroy --stdin --force"),
         ("Custom format template output", "mng destroy --all --force --format '{name}'"),
     ),
     see_also=(

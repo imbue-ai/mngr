@@ -73,14 +73,22 @@ class ModalLoguruWriter:
 
     app_id: str | None = None
     app_name: str | None = None
+    current_line: str = ""
 
     def write(self, text: str) -> int:
         """Write text to loguru, deduplicating consecutive identical messages."""
         # stripped = text.strip()
         if text.strip() == "":
             return len(text)
+        self.current_line += text
+        if not self.current_line.endswith("\n"):
+            return len(text)
+        text_to_log = self.current_line.strip()
+        self.current_line = ""
         try:
-            logger.log(LogLevel.BUILD.value, "{}", text, source="modal", app_id=self.app_id, app_name=self.app_name)
+            logger.log(
+                LogLevel.BUILD.value, "{}", text_to_log, source="modal", app_id=self.app_id, app_name=self.app_name
+            )
         except ValueError as e:
             if "I/O operation on closed file" in str(e):
                 pass

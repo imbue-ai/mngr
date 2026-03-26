@@ -121,7 +121,7 @@ class TranscriptParser:
 
                 # Separate tool results from other content
                 tool_results = [b for b in content_blocks if isinstance(b, ToolResultBlock)]
-                other_content = [b for b in content_blocks if not isinstance(b, ToolResultBlock)]
+                other_content: list[ContentBlock] = [b for b in content_blocks if not isinstance(b, ToolResultBlock)]
 
                 # Only create a user message if there's non-tool-result content
                 if other_content:

@@ -2,9 +2,17 @@
 
 import io
 import json
+import logging
 import sys
+import threading
+import types
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from typing import cast
 
+import paramiko.channel
+import pytest
 from loguru import logger
 
 import imbue.mng.utils.logging as mng_logging_module
@@ -20,10 +28,15 @@ from imbue.mng.utils.logging import LoggingConfig
 from imbue.mng.utils.logging import LoggingSuppressor
 from imbue.mng.utils.logging import RESET_COLOR
 from imbue.mng.utils.logging import WARNING_COLOR
+from imbue.mng.utils.logging import _ParamikoToLoguruHandler
 from imbue.mng.utils.logging import _format_user_message
+from imbue.mng.utils.logging import _is_expected_paramiko_thread_exception
+from imbue.mng.utils.logging import _patched_transport_log
 from imbue.mng.utils.logging import _resolve_log_dir
+from imbue.mng.utils.logging import _threading_excepthook
 from imbue.mng.utils.logging import remove_console_handlers
 from imbue.mng.utils.logging import setup_logging
+from imbue.mng.utils.logging import suppress_warnings
 
 
 def test_resolve_log_dir_uses_absolute_path(mng_test_prefix: str) -> None:
@@ -480,3 +493,273 @@ def test_setup_logging_writes_to_current_stderr_after_stream_replacement(
         assert "dynamic sink regression test message" in captured_output
     finally:
         sys.stderr = original_stderr
+
+
+# =============================================================================
+# Tests for _ParamikoToLoguruHandler
+# =============================================================================
+
+
+def _emit_paramiko_record(handler: _ParamikoToLoguruHandler, message: str, level: int) -> None:
+    """Create and emit a logging record through the paramiko handler."""
+    record = logging.LogRecord(
+        name="paramiko.transport",
+        level=level,
+        pathname="transport.py",
+        lineno=2288,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(record)
+
+
+@pytest.mark.parametrize(
+    "message, input_level, expected_substring, sink_level",
+    [
+        pytest.param(
+            "Exception (client): Error reading SSH protocol banner",
+            logging.ERROR,
+            "Exception (client)",
+            "DEBUG",
+            id="ssh_banner_error_to_debug",
+        ),
+        pytest.param(
+            "Socket exception: Connection refused (111)",
+            logging.ERROR,
+            "Socket exception",
+            "DEBUG",
+            id="socket_exception_to_debug",
+        ),
+        pytest.param(
+            "EOF in transport thread",
+            logging.ERROR,
+            "EOF in transport",
+            "DEBUG",
+            id="eof_to_debug",
+        ),
+        pytest.param(
+            "Some paramiko warning",
+            logging.WARNING,
+            "warning",
+            "DEBUG",
+            id="warning_level_to_debug",
+        ),
+        pytest.param(
+            "starting thread (client mode)",
+            logging.DEBUG,
+            "starting thread",
+            "TRACE",
+            id="debug_level_to_trace",
+        ),
+    ],
+)
+def test_paramiko_handler_routes_expected_messages(
+    message: str,
+    input_level: int,
+    expected_substring: str,
+    sink_level: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Enable paramiko logging so DEBUG-level messages are routed to TRACE
+    monkeypatch.setenv("MNG_ENABLE_PARAMIKO_LOGGING", "1")
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level=sink_level)
+    try:
+        _emit_paramiko_record(handler, message, input_level)
+        assert any("[paramiko]" in m and expected_substring in m for m in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_handler_routes_joined_traceback_body_to_debug() -> None:
+    """A joined traceback body (from tb_strings()) should be routed to debug.
+
+    Paramiko logs the header ("Exception (client): ...") and the traceback body
+    (from util.tb_strings()) as separate _log calls. The body starts with
+    "Traceback (most recent call last):" and should be matched by the regex.
+    """
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
+    try:
+        joined_traceback_body = (
+            "Traceback (most recent call last):\n"
+            '  File "/path/to/transport.py", line 42, in run\n'
+            "    self._check_banner()\n"
+            "paramiko.ssh_exception.SSHException: banner error"
+        )
+        _emit_paramiko_record(handler, joined_traceback_body, logging.ERROR)
+        paramiko_messages = [m for m in messages if "[paramiko]" in m]
+        assert len(paramiko_messages) == 1
+        assert "Traceback" in paramiko_messages[0]
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_handler_routes_unknown_error_to_warning() -> None:
+    """Unexpected paramiko errors should remain visible at warning level."""
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        _emit_paramiko_record(handler, "Something completely unexpected happened", logging.ERROR)
+        assert any("[paramiko]" in m and "unexpected" in m for m in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_handler_expected_errors_not_routed_to_warning() -> None:
+    """Expected connection errors should NOT appear at warning level."""
+    handler = _ParamikoToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        # Header (separate _log call)
+        _emit_paramiko_record(handler, "Exception (client): Error reading SSH protocol banner", logging.ERROR)
+        # Traceback body (joined by our patch, starts with "Traceback")
+        _emit_paramiko_record(
+            handler,
+            'Traceback (most recent call last):\n  File "transport.py"\nparamiko.SSHException: banner',
+            logging.ERROR,
+        )
+        assert not any("[paramiko]" in m for m in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_paramiko_transport_log_patch_joins_list_messages() -> None:
+    """The _log patch should join traceback list into a single log record.
+
+    Paramiko's Transport._log calls self.logger.log(level, m) for each line
+    in a list. Our patch joins the list into one message so the handler sees
+    a single record starting with "Traceback (most recent call last):".
+    """
+    suppress_warnings()
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
+    try:
+        # This is what util.tb_strings() returns -- the traceback body only,
+        # NOT the "Exception (client):" header (which is a separate _log call)
+        traceback_lines = [
+            "Traceback (most recent call last):",
+            '  File "transport.py", line 2373, in _check_banner',
+            "    raise SSHException(",
+            "paramiko.ssh_exception.SSHException: Error reading SSH protocol banner",
+        ]
+        transport_self = types.SimpleNamespace(
+            logger=logging.getLogger("paramiko.transport"),
+        )
+        # Call the patched function directly (it accepts self: Any)
+        _patched_transport_log(transport_self, logging.ERROR, traceback_lines)
+
+        # The patch should join the list into one record (not 4 separate ones)
+        paramiko_messages = [m for m in messages if "[paramiko]" in m]
+        assert len(paramiko_messages) == 1
+        assert "Traceback" in paramiko_messages[0]
+        assert "banner" in paramiko_messages[0]
+    finally:
+        logger.remove(handler_id)
+
+
+# =============================================================================
+# Tests for threading.excepthook
+# =============================================================================
+
+
+def _get_paramiko_traceback() -> types.TracebackType:
+    try:
+        cast(Any, paramiko.channel.Channel._send)(None, b"test", None)
+    except (AttributeError, TypeError, OSError) as e:
+        assert e.__traceback__ is not None
+        return e.__traceback__
+    raise AssertionError("should not reach here")
+
+
+def _make_paramiko_socket_closed_args() -> threading.ExceptHookArgs:
+    exc = OSError("Socket is closed")
+    tb = _get_paramiko_traceback()
+    return threading.ExceptHookArgs((type(exc), exc, tb, threading.current_thread()))
+
+
+def _make_paramiko_unexpected_args() -> threading.ExceptHookArgs:
+    exc = RuntimeError("something unexpected in paramiko")
+    tb = _get_paramiko_traceback()
+    return threading.ExceptHookArgs((type(exc), exc, tb, threading.current_thread()))
+
+
+def _make_non_paramiko_args() -> threading.ExceptHookArgs:
+    try:
+        raise RuntimeError("not paramiko")
+    except RuntimeError as e:
+        return threading.ExceptHookArgs((type(e), e, e.__traceback__, threading.current_thread()))
+    raise AssertionError("should not reach here")
+
+
+def test_is_expected_paramiko_thread_exception_matches_socket_closed() -> None:
+    """The specific paramiko "Socket is closed" OSError should be recognized as expected."""
+    args = _make_paramiko_socket_closed_args()
+    assert _is_expected_paramiko_thread_exception(args)
+
+
+def test_is_expected_paramiko_thread_exception_rejects_other_paramiko_errors() -> None:
+    """Other paramiko errors (not "Socket is closed") should not be considered expected."""
+    args = _make_paramiko_unexpected_args()
+    assert not _is_expected_paramiko_thread_exception(args)
+
+
+def test_is_expected_paramiko_thread_exception_rejects_non_paramiko() -> None:
+    args = _make_non_paramiko_args()
+    assert not _is_expected_paramiko_thread_exception(args)
+
+
+def test_threading_excepthook_routes_expected_paramiko_to_debug() -> None:
+    """The known paramiko "Socket is closed" error should be logged at debug."""
+    args = _make_paramiko_socket_closed_args()
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="DEBUG")
+    try:
+        _threading_excepthook(args)
+        paramiko_messages = [m for m in messages if "[paramiko]" in m]
+        assert len(paramiko_messages) == 1
+        assert "Expected exception" in paramiko_messages[0]
+    finally:
+        logger.remove(handler_id)
+
+
+@pytest.mark.parametrize(
+    "make_args",
+    [
+        pytest.param(_make_paramiko_unexpected_args, id="unexpected-paramiko"),
+        pytest.param(_make_non_paramiko_args, id="non-paramiko"),
+    ],
+)
+def test_threading_excepthook_routes_non_expected_exceptions_to_error(
+    make_args: Callable[[], threading.ExceptHookArgs],
+) -> None:
+    """Any thread exception that is not the known paramiko error should be logged at error."""
+    args = make_args()
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="ERROR")
+    try:
+        _threading_excepthook(args)
+        error_messages = [m for m in messages if "Unhandled exception in thread" in m]
+        assert len(error_messages) == 1
+    finally:
+        logger.remove(handler_id)
+
+
+def test_suppress_warnings_installs_threading_excepthook() -> None:
+    """suppress_warnings should install our threading excepthook."""
+    mng_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False
+    original = threading.excepthook
+    try:
+        suppress_warnings()
+        assert threading.excepthook is _threading_excepthook
+    finally:
+        threading.excepthook = original
+        mng_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False

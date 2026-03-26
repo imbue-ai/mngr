@@ -34,13 +34,13 @@ def test_provision_existing_agent(
 
 
 @pytest.mark.tmux
-def test_provision_with_user_command(
+def test_provision_with_extra_provision_command(
     cli_runner: CliRunner,
     create_test_agent,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
 ) -> None:
-    """Test that provisioning with --user-command executes the command."""
+    """Test that provisioning with --extra-provision-command executes the command."""
     agent_name = f"test-prov-cmd-{get_short_random_string()}"
     marker_file = tmp_path / "provision_marker.txt"
 
@@ -50,7 +50,7 @@ def test_provision_with_user_command(
         provision,
         [
             agent_name,
-            "--user-command",
+            "--extra-provision-command",
             f"echo 'provisioned' > {marker_file}",
         ],
         obj=plugin_manager,
@@ -58,7 +58,7 @@ def test_provision_with_user_command(
     )
 
     assert result.exit_code == 0, f"Provision failed with: {result.output}"
-    assert marker_file.exists(), "User command should have created the marker file"
+    assert marker_file.exists(), "Extra provision command should have created the marker file"
     assert marker_file.read_text().strip() == "provisioned"
 
 
@@ -122,6 +122,7 @@ def test_provision_preserves_existing_env_vars(
                 "sleep 849127",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
                 "--env",
@@ -308,15 +309,15 @@ def test_provision_stopped_agent(
 
 
 @pytest.mark.tmux
-def test_provision_stopped_agent_with_user_command(
+def test_provision_stopped_agent_with_extra_provision_command(
     cli_runner: CliRunner,
     create_test_agent,
     plugin_manager: pluggy.PluginManager,
     tmp_path: Path,
 ) -> None:
-    """Test that provisioning a stopped agent executes user commands.
+    """Test that provisioning a stopped agent executes extra provision commands.
 
-    Regression test: verifies that user commands run even when the agent
+    Regression test: verifies that extra provision commands run even when the agent
     process is stopped, since provisioning operates on the host, not
     the agent process.
     """
@@ -334,12 +335,12 @@ def test_provision_stopped_agent_with_user_command(
     )
     assert stop_result.exit_code == 0, f"Stop failed with: {stop_result.output}"
 
-    # Provision the stopped agent with a user command
+    # Provision the stopped agent with an extra provision command
     result = cli_runner.invoke(
         provision,
         [
             agent_name,
-            "--user-command",
+            "--extra-provision-command",
             f"echo 'provisioned-while-stopped' > {marker_file}",
         ],
         obj=plugin_manager,
@@ -347,7 +348,7 @@ def test_provision_stopped_agent_with_user_command(
     )
 
     assert result.exit_code == 0, f"Provision stopped agent failed with: {result.output}"
-    assert marker_file.exists(), "User command should have created the marker file"
+    assert marker_file.exists(), "Extra provision command should have created the marker file"
     assert marker_file.read_text().strip() == "provisioned-while-stopped"
 
 

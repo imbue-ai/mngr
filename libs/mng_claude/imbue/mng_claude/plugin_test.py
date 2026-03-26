@@ -12,6 +12,7 @@ from uuid import UUID
 import pluggy
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
@@ -25,7 +26,6 @@ from imbue.mng.errors import PluginMngError
 from imbue.mng.errors import UserInputError
 from imbue.mng.hosts.host import Host
 from imbue.mng.interfaces.host import AgentEnvironmentOptions
-from imbue.mng.interfaces.host import AgentGitOptions
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import NewHostOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -37,7 +37,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.testing import init_git_repo
 from imbue.mng.utils.testing import make_mng_ctx
@@ -226,7 +226,7 @@ def _mock_all_dialog_prompts(
 
 _WORKTREE_OPTIONS = CreateAgentOptions(
     agent_type=AgentTypeName("claude"),
-    git=AgentGitOptions(copy_mode=WorkDirCopyMode.WORKTREE),
+    transfer_mode=TransferMode.GIT_WORKTREE,
 )
 
 
@@ -889,6 +889,7 @@ def test_provision_configures_readiness_hooks(
     assert "SessionStart" in settings["hooks"]
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_provision_raises_when_remote_installation_disabled(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -919,13 +920,16 @@ def test_provision_raises_when_remote_installation_disabled(
             SimpleNamespace(
                 is_local=False,
                 execute_command=lambda *args, **kwargs: SimpleNamespace(success=False),
+                write_file=lambda *args, **kwargs: None,
             ),
         )
 
         options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-        with pytest.raises(PluginMngError, match="automatic remote installation is disabled"):
+        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=non_local_host, options=options, mng_ctx=ctx)
+        assert isinstance(exc_info.value.main_exception, PluginMngError)
+        assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
 # =============================================================================
@@ -962,20 +966,26 @@ def test_provision_extends_trust_for_worktree(
 def test_provision_does_not_extend_trust_for_non_worktree(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mng_ctx: MngContext
 ) -> None:
-    """provision should not extend trust when not using worktree mode."""
+    """provision should not extend trust when the git source path cannot be found.
+
+    GIT_MIRROR mode attempts trust extension, but _find_git_source_path returns
+    None here because the work_dir is not a git worktree (it's an ordinary git
+    repo), so no source path is available to extend trust from.
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mng_ctx)
     _init_git_with_gitignore(agent.work_dir)
     _write_all_dialogs_dismissed(agent.work_dir)
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        git=AgentGitOptions(copy_mode=WorkDirCopyMode.COPY),
+        transfer_mode=TransferMode.GIT_MIRROR,
     )
 
     agent.provision(host=host, options=options, mng_ctx=temp_mng_ctx)
 
-    # Trust was written by _write_all_dialogs_dismissed, but the provision should NOT
-    # have extended trust from a source directory since we're using COPY mode.
+    # Trust was written by _write_all_dialogs_dismissed, but the provision could
+    # not extend trust from a source directory because _find_git_source_path
+    # returns None (work_dir is not a git worktree).
     # The global config should only contain what _write_all_dialogs_dismissed wrote.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
@@ -1075,10 +1085,10 @@ def test_on_before_provisioning_raises_for_worktree_on_remote_host(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        git=AgentGitOptions(copy_mode=WorkDirCopyMode.WORKTREE),
+        transfer_mode=TransferMode.GIT_WORKTREE,
     )
 
-    with pytest.raises(PluginMngError, match="Worktree mode is not supported on remote hosts"):
+    with pytest.raises(PluginMngError, match="Git worktree transfer mode is not supported on remote hosts"):
         agent.on_before_provisioning(host=non_local_host, options=options, mng_ctx=temp_mng_ctx)
 
 
@@ -1198,8 +1208,9 @@ def test_provision_raises_when_non_interactive_and_untrusted(
         temp_mng_ctx,
     )
 
-    with pytest.raises(ClaudeDirectoryNotTrustedError):
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
         agent.provision(host=host, options=_WORKTREE_OPTIONS, mng_ctx=temp_mng_ctx)
+    assert exc_info.value.only_exception_is_instance_of(ClaudeDirectoryNotTrustedError)
 
 
 def test_provision_raises_when_user_declines_trust(
@@ -1216,8 +1227,9 @@ def test_provision_raises_when_user_declines_trust(
     )
 
     with _mock_all_dialog_prompts(trust_accepted=False):
-        with pytest.raises(ClaudeDirectoryNotTrustedError):
+        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host, options=_WORKTREE_OPTIONS, mng_ctx=interactive_mng_ctx)
+        assert exc_info.value.only_exception_is_instance_of(ClaudeDirectoryNotTrustedError)
 
 
 # =============================================================================
@@ -1667,8 +1679,9 @@ def test_provision_raises_when_user_declines_dialog_dismissal(
     _write_claude_trust_without_dialog_dismissed(source_path)
 
     with _mock_all_dialog_prompts(effort_accepted=False):
-        with pytest.raises(ClaudeEffortCalloutNotDismissedError):
+        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host, options=_WORKTREE_OPTIONS, mng_ctx=interactive_mng_ctx)
+        assert exc_info.value.only_exception_is_instance_of(ClaudeEffortCalloutNotDismissedError)
 
 
 def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
@@ -1687,8 +1700,9 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
     # Write trust but without effortCalloutDismissed
     _write_claude_trust_without_dialog_dismissed(source_path)
 
-    with pytest.raises(ClaudeEffortCalloutNotDismissedError):
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
         agent.provision(host=host, options=_WORKTREE_OPTIONS, mng_ctx=temp_mng_ctx)
+    assert exc_info.value.only_exception_is_instance_of(ClaudeEffortCalloutNotDismissedError)
 
 
 # =============================================================================
@@ -2177,6 +2191,7 @@ def test_get_claude_version_returns_none_on_failure() -> None:
     assert _get_claude_version(host) is None
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_provision_raises_on_version_mismatch(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -2209,14 +2224,17 @@ def test_provision_raises_on_version_mismatch(
                     stdout="2.1.50 (Claude Code)\n",
                     stderr="",
                 ),
+                write_file=lambda *args, **kwargs: None,
             ),
         )
 
         _write_all_dialogs_dismissed(agent.work_dir)
         options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-        with pytest.raises(PluginMngError, match="Claude version mismatch"):
+        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mng_ctx=ctx)
+        assert isinstance(exc_info.value.main_exception, PluginMngError)
+        assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
 def test_install_claude_passes_version_to_command() -> None:

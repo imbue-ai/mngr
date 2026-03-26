@@ -8,7 +8,7 @@ and supporting service infrastructure (chat, web UI, conversation watcher).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
+from typing import ClassVar
 
 import click
 from loguru import logger
@@ -22,15 +22,16 @@ from imbue.mng.interfaces.agent import AgentInterface
 from imbue.mng.interfaces.host import CreateAgentOptions
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import CommandString
+from imbue.mng_llm.data_types import LlmSettings
 from imbue.mng_llm.provisioning import configure_llm_user_path
 from imbue.mng_llm.provisioning import create_mind_conversations_table
 from imbue.mng_llm.provisioning import install_llm_toolchain
 from imbue.mng_llm.provisioning import provision_llm_tools
 from imbue.mng_llm.provisioning import provision_supporting_services
-from imbue.mng_llm.settings import load_settings_from_host
+from imbue.mng_llm.settings import load_from_host
 from imbue.mng_recursive.provisioning import provision_mng_for_agent
 
-_DEFAULT_LLM_MODEL = "claude-opus-4.6"
+_DEFAULT_LLM_MODEL = "claude-haiku-4.5"
 
 
 def set_uv_tool_env_vars(env_vars: dict[str, str]) -> None:
@@ -48,20 +49,17 @@ def set_uv_tool_env_vars(env_vars: dict[str, str]) -> None:
 
 
 def set_llm_model_env_var(
-    host: OnlineHostInterface,
-    work_dir: Path,
+    settings: LlmSettings,
     env_vars: dict[str, str],
 ) -> None:
-    """Set MNG_LLM_MODEL from minds.toml settings or hardcoded default.
+    """Set MNG_LLM_MODEL from loaded settings or hardcoded default.
 
-    Reads the ``[chat] model`` setting from the agent's work directory.
-    Falls back to the hardcoded default when the file is missing or
-    does not specify a model.
+    Reads the ``[chat] model`` setting from the provided settings object.
+    Falls back to the hardcoded default when the model is not specified.
 
     Shared by LlmAgent and ClaudeMindAgent so that chat.sh can read
     the model from the environment rather than parsing settings itself.
     """
-    settings = load_settings_from_host(host, work_dir)
     model = settings.chat.model or _DEFAULT_LLM_MODEL
     env_vars["MNG_LLM_MODEL"] = model
 
@@ -111,6 +109,18 @@ class LlmAgent(BaseAgent[LlmAgentConfig]):
     - Provisions chat scripts and llm tool functions
     """
 
+    _settings_class: ClassVar[type[LlmSettings]] = LlmSettings
+
+    def load_settings_from_host(self, host: OnlineHostInterface) -> LlmSettings:
+        """Load settings from minds.toml on the host, using this agent's settings class.
+
+        Returns settings with defaults for any missing values.
+        Uses ``_settings_class`` to determine the Pydantic model for parsing.
+        ClaudeMindAgent defines its own version of this method and ``_settings_class``
+        to load ClaudeMindSettings instead.
+        """
+        return load_from_host(host, self.work_dir, self._settings_class)
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -139,7 +149,8 @@ class LlmAgent(BaseAgent[LlmAgentConfig]):
     ) -> None:
         """Set UV tool dirs and MNG_LLM_MODEL for per-agent tool isolation and chat."""
         set_uv_tool_env_vars(env_vars)
-        set_llm_model_env_var(host, self.work_dir, env_vars)
+        settings = self.load_settings_from_host(host)
+        set_llm_model_env_var(settings, env_vars)
 
     def provision(
         self,
@@ -159,7 +170,7 @@ class LlmAgent(BaseAgent[LlmAgentConfig]):
         """
         provision_mng_for_agent(agent=self, host=host, mng_ctx=mng_ctx)
 
-        settings = load_settings_from_host(host, self.work_dir)
+        settings = self.load_settings_from_host(host)
         provisioning = settings.provisioning
         config = self.agent_config
 

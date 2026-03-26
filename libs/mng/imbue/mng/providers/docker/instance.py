@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import tempfile
 from datetime import datetime
 from datetime import timezone
@@ -23,6 +22,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mng.errors import HostNotFoundError
@@ -48,6 +48,7 @@ from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import ImageReference
+from imbue.mng.primitives import LogLevel
 from imbue.mng.primitives import SnapshotId
 from imbue.mng.primitives import SnapshotName
 from imbue.mng.primitives import VolumeId
@@ -353,7 +354,7 @@ class DockerProviderInstance(BaseProviderInstance):
                     self._exec_in_container(container, add_authorized_keys_cmd)
 
         with log_span("Starting sshd in container"):
-            self._exec_in_container(container, "/usr/sbin/sshd -D", detach=True)
+            self._exec_in_container(container, "/usr/sbin/sshd -D -o MaxSessions=100", detach=True)
 
     def _get_container_ssh_port(self, container: docker.models.containers.Container) -> int:
         """Get the host-mapped SSH port for a container."""
@@ -461,7 +462,7 @@ class DockerProviderInstance(BaseProviderInstance):
 # Auto-generated shutdown script for mng Docker host
 # Kills PID 1 to stop the container
 
-LOG_FILE="{host_dir_str}/events/logs/shutdown.log"
+LOG_FILE="{host_dir_str}/logs/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -529,23 +530,26 @@ kill -TERM 1
             env["DOCKER_HOST"] = self.config.host
         return env
 
-    def _run_docker_command(self, args: list[str], timeout: float = 300) -> subprocess.CompletedProcess[str]:
+    def _run_docker_creation_command(self, args: list[str], timeout: float = 300) -> FinishedProcess:
         """Run a docker CLI command and return the result."""
-        return subprocess.run(
+        return self.mng_ctx.concurrency_group.run_process_to_completion(
             ["docker"] + args,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             env=self._docker_env(),
+            on_output=self._log_docker_creation_command_output,
         )
+
+    def _log_docker_creation_command_output(self, line: str, is_stdout: bool) -> None:
+        """Log output from docker subprocess calls, prefixing with [DOCKER]."""
+        line = line.strip()
+        if line:
+            logger.log(LogLevel.BUILD.value, "{}", line.rstrip(), source="docker")
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using native docker build with passthrough args."""
         cmd = ["build", "-t", tag] + list(build_args)
         with log_span("Running docker build with {} args", len(build_args)):
-            result = self._run_docker_command(cmd)
-        if result.returncode != 0:
-            raise MngError(f"docker build failed:\n{result.stderr}")
+            self._run_docker_creation_command(cmd)
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -553,6 +557,8 @@ kill -TERM 1
         with tempfile.TemporaryDirectory() as tmpdir:
             dockerfile_path = Path(tmpdir) / "Dockerfile"
             dockerfile_path.write_text(DEFAULT_DOCKERFILE_CONTENTS)
+            # FIXME: this should not be using tmpdir as the build dir, but rather, the current project source
+            #  which, to be fair, is kind of hard to access from here... but we do kinda want it here so that we can properly include it...
             return self._build_image(["--file", str(dockerfile_path), tmpdir], tag)
 
     def _pull_image(self, image_name: str) -> str:
@@ -612,9 +618,7 @@ kill -TERM 1
             start_args=start_args,
             volume_mount=volume_mount,
         )
-        result = self._run_docker_command(cmd)
-        if result.returncode != 0:
-            raise MngError(f"docker run failed:\n{result.stderr}")
+        result = self._run_docker_creation_command(cmd)
 
         container_id = result.stdout.strip()
         return self._docker_client.containers.get(container_id)

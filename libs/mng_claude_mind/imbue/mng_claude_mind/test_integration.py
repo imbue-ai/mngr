@@ -382,7 +382,12 @@ def test_create_agent_creates_state_directory(
 @pytest.mark.timeout(30)
 def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
     """Verify that conversation records written by chat.sh are stored in the database."""
-    chat_env.set_default_model("claude-sonnet-4-6")
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
+    chat_env.set_default_model("matched-responses")
 
     result = chat_env.run("--new", "--name", "test-conv", "--as-agent")
 
@@ -390,7 +395,6 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
 
     output = parse_chat_output(result.stdout)
     conversation_id = output["conversation_id"]
-    assert conversation_id.startswith("conv-"), f"Expected conversation ID, got: {conversation_id!r}"
 
     assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
@@ -398,7 +402,12 @@ def test_conversation_record_written_to_db(chat_env: ChatScriptEnv) -> None:
 @pytest.mark.timeout(30)
 def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptEnv) -> None:
     """Verify that creating multiple conversations produces separate DB records."""
-    chat_env.set_default_model("claude-sonnet-4-6")
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
+    chat_env.set_default_model("matched-responses")
 
     conversation_ids = []
     for i in range(3):
@@ -415,7 +424,16 @@ def test_multiple_conversations_create_separate_db_records(chat_env: ChatScriptE
 
 @pytest.mark.timeout(30)
 def test_chat_model_read_from_env_var(chat_env: ChatScriptEnv) -> None:
-    """Verify that chat.sh reads the model from MNG_LLM_MODEL env var."""
+    """Verify that chat.sh reads the model from MNG_LLM_MODEL env var.
+
+    The no-message --as-agent path uses ``matched-responses`` for the placeholder
+    conversation, but the env var model should still appear in the log.
+    """
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
     chat_env.env["MNG_LLM_MODEL"] = "claude-haiku-4-5"
 
     # Ensure log directory exists so we can check the log for the model
@@ -428,7 +446,7 @@ def test_chat_model_read_from_env_var(chat_env: ChatScriptEnv) -> None:
     output = parse_chat_output(result.stdout)
     assert_conversation_exists_in_db(chat_env.llm_db_path, output["conversation_id"])
 
-    # Verify the model from env var was used (visible in log output)
+    # Verify the model from env var was logged (even though placeholder uses matched-responses)
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists()
     log_content = log_file.read_text()
@@ -853,6 +871,11 @@ def test_conversation_watcher_sync_is_idempotent(
 @pytest.mark.timeout(30)
 def test_chat_script_uses_hardcoded_default_when_no_env_var(chat_env: ChatScriptEnv) -> None:
     """Verify that chat.sh falls back to the hardcoded default model when MNG_LLM_MODEL is not set."""
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
     # Do NOT set MNG_LLM_MODEL -- rely on hardcoded default
 
     # Ensure log directory exists so we can check the log for the default model
@@ -869,7 +892,7 @@ def test_chat_script_uses_hardcoded_default_when_no_env_var(chat_env: ChatScript
     log_file = log_dir / "chat" / "events.jsonl"
     assert log_file.exists()
     log_content = log_file.read_text()
-    assert "claude-opus-4.6" in log_content
+    assert "claude-haiku-4.5" in log_content
 
 
 @pytest.mark.timeout(30)
@@ -908,27 +931,63 @@ def test_chat_script_db_model_lookup_finds_correct_model(chat_env: ChatScriptEnv
 
 
 @pytest.mark.timeout(30)
-def test_chat_script_new_as_agent_with_message_writes_record_without_llm(
+def test_chat_script_new_as_agent_with_message_fails_cleanly_without_llm(
     chat_env: ChatScriptEnv,
 ) -> None:
-    """Verify --new --as-agent with a message still writes the conversation record.
+    """Verify --new --as-agent with a message fails cleanly when llm is not installed.
 
-    The --as-agent path with a message calls `llm inject` which will fail if
-    llm is not installed. But the conversation record should still be
-    written to the DB regardless, since insert_conversation_record runs
-    before the llm inject call.
+    The --as-agent path calls ``llm inject`` (without --cid) to create the
+    conversation in the llm database first, then inserts into mind_conversations.
+    If llm is not installed, the command should fail without creating a
+    partial record in mind_conversations.
     """
+    if shutil.which("llm") is not None:
+        pytest.skip("llm CLI is installed; this test covers the missing-llm case")
+
     chat_env.env["MNG_LLM_MODEL"] = "claude-sonnet-4-6"
 
-    # This will fail at the `llm inject` call since llm is not installed,
-    # but the conversation record should already be inserted because
-    # insert_conversation_record runs before the llm inject call.
-    chat_env.run("--new", "--name", "msg-test", "--as-agent", "hello from test")
+    result = chat_env.run("--new", "--name", "msg-test", "--as-agent", "hello from test")
 
-    # At least one conversation should exist (the one just created)
+    # Command should fail because llm is not installed
+    assert result.returncode != 0
+
+    # No partial record should exist in mind_conversations
     with sqlite3.connect(str(chat_env.llm_db_path)) as conn:
         rows = conn.execute("SELECT conversation_id FROM mind_conversations").fetchall()
-    assert len(rows) >= 1, "conversation record should be written even when llm inject fails"
+    assert len(rows) == 0, "no partial record should be created when llm inject fails"
+
+
+@pytest.mark.timeout(30)
+def test_chat_script_new_as_agent_with_message_creates_conversation(
+    chat_env: ChatScriptEnv,
+) -> None:
+    """Verify --new --as-agent with a message creates the conversation in both tables.
+
+    Requires llm to be installed. The conversation should exist in both
+    the llm conversations table and the mind_conversations table.
+    """
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    # Delete the pre-created DB so llm inject can run its own migrations
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
+    chat_env.set_default_model("matched-responses")
+
+    result = chat_env.run("--new", "--name", "msg-test", "--as-agent", "hello from test")
+    assert result.returncode == 0, f"Failed: {result.stderr}"
+
+    output = parse_chat_output(result.stdout)
+    assert "conversation_id" in output, f"Expected conversation_id in output, got: {result.stdout!r}"
+    conversation_id = output["conversation_id"]
+
+    # Verify record exists in mind_conversations
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
+
+    # Verify record also exists in llm's native conversations table
+    with sqlite3.connect(str(chat_env.llm_db_path)) as conn:
+        row = conn.execute("SELECT id FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+    assert row is not None, "conversation should exist in llm conversations table"
 
 
 # -- Reply command tests --
@@ -1017,7 +1076,17 @@ def test_chat_script_reply_outputs_message_id(chat_env: ChatScriptEnv) -> None:
 
 @pytest.mark.timeout(30)
 def test_chat_script_new_as_agent_without_message_outputs_conversation_id(chat_env: ChatScriptEnv) -> None:
-    """Verify that --new --as-agent without a message outputs conversation_id."""
+    """Verify that --new --as-agent without a message outputs conversation_id.
+
+    Requires llm to be installed because the no-message path now creates
+    a placeholder conversation via ``llm inject``.
+    """
+    if shutil.which("llm") is None:
+        pytest.skip("llm CLI not installed")
+
+    # Delete the pre-created DB so llm inject can run its own migrations
+    chat_env.llm_db_path.unlink()
+    chat_env.env["LLM_MATCHED_RESPONSE"] = ""
     chat_env.set_default_model("matched-responses")
 
     result = chat_env.run("--new", "--name", "no-msg-test", "--as-agent")
@@ -1025,7 +1094,10 @@ def test_chat_script_new_as_agent_without_message_outputs_conversation_id(chat_e
 
     output = parse_chat_output(result.stdout)
     assert "conversation_id" in output, f"Expected conversation_id in output, got: {result.stdout!r}"
-    assert output["conversation_id"].startswith("conv-")
+
+    # Verify the conversation exists in mind_conversations
+    conversation_id = output["conversation_id"]
+    assert_conversation_exists_in_db(chat_env.llm_db_path, conversation_id)
 
 
 @pytest.mark.timeout(30)

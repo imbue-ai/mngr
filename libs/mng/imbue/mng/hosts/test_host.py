@@ -21,6 +21,8 @@ import pluggy
 import pytest
 from pyinfra.api.command import StringCommand
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.config.data_types import EnvVar
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.config.data_types import MngContext
@@ -48,6 +50,7 @@ from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
 from imbue.mng.primitives import IdleMode
 from imbue.mng.primitives import ProviderInstanceName
+from imbue.mng.primitives import TransferMode
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.providers.ssh.instance import SSHHostConfig
 from imbue.mng.providers.ssh.instance import SSHProviderInstance
@@ -447,6 +450,69 @@ def test_lock_timeout(host_with_temp_dir: tuple[Host, Path]) -> None:
         thread.join()
 
 
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_removes_lock_file_on_error(
+    ssh_host_factory: Callable[[str], Host],
+) -> None:
+    """Remote host lock_cooperatively should remove the lock file when an error occurs."""
+    host = ssh_host_factory("lock-err-cleanup")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with pytest.raises(RuntimeError):
+        with host.lock_cooperatively(timeout_seconds=5.0):
+            # Verify the lock file was created
+            result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+            assert "exists" in result.stdout
+            raise RuntimeError("simulated failure")
+
+    # After the error, the lock file should have been removed
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "missing" in result.stdout
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
+    ssh_host_factory: Callable[[str], Host],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remote host lock_cooperatively should retain the lock file on error when MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
+    monkeypatch.setenv("MNG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
+    host = ssh_host_factory("lock-err-retain")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with pytest.raises(RuntimeError):
+        with host.lock_cooperatively(timeout_seconds=5.0):
+            raise RuntimeError("simulated failure")
+
+    # With the env var set, the lock file should still exist
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "exists" in result.stdout
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(30)
+def test_remote_lock_cooperatively_removes_lock_file_on_success(
+    ssh_host_factory: Callable[[str], Host],
+) -> None:
+    """Remote host lock_cooperatively should remove the lock file on successful exit."""
+    host = ssh_host_factory("lock-success")
+    assert not host.is_local
+    lock_file_path = host.host_dir / "host_lock"
+
+    with host.lock_cooperatively(timeout_seconds=5.0):
+        # Lock file should exist while locked
+        result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+        assert "exists" in result.stdout
+
+    # After successful exit, the lock file should be removed
+    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    assert "missing" in result.stdout
+
+
 # =============================================================================
 # Certified Data Tests
 # =============================================================================
@@ -645,6 +711,7 @@ def test_unset_vars_applied_during_agent_start(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that unset_vars config is applied when starting agents."""
     config_with_unset = MngConfig(
@@ -653,7 +720,12 @@ def test_unset_vars_applied_during_agent_start(
         unset_vars=["HISTFILE", "PROFILE"],
     )
 
-    mng_ctx_with_unset = MngContext(config=config_with_unset, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx_with_unset = MngContext(
+        config=config_with_unset,
+        pm=plugin_manager,
+        profile_dir=temp_profile_dir,
+        concurrency_group=active_concurrency_group,
+    )
     provider_with_unset = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -761,10 +833,13 @@ def test_stop_agent_kills_single_pane_processes(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that stop_agents kills all processes in a single-pane session."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -816,10 +891,13 @@ def test_stop_agent_kills_multi_pane_processes(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that stop_agents kills all processes in a multi-pane session."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -879,10 +957,13 @@ def test_start_agent_creates_process_group(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents creates tmux sessions in their own process group."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -937,10 +1018,13 @@ def test_start_agent_starts_process_activity_monitor(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents launches a process activity monitor that writes PROCESS activity."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1001,23 +1085,11 @@ def test_start_agent_starts_process_activity_monitor(
 
 
 def test_additional_commands_stored_in_agent_data(
-    temp_host_dir: Path,
-    per_host_dir: Path,
+    host_with_temp_dir: tuple[Host, Path],
     temp_work_dir: Path,
-    temp_profile_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-    mng_test_prefix: str,
 ) -> None:
     """Test that additional_commands are stored in the agent's data.json."""
-    config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
-    provider = LocalProviderInstance(
-        name=ProviderInstanceName("local"),
-        host_dir=per_host_dir,
-        mng_ctx=mng_ctx,
-    )
-    host = provider.create_host(HostName("localhost"))
-    assert isinstance(host, Host)
+    host, _temp_dir = host_with_temp_dir
 
     agent = host.create_agent_state(
         work_dir_path=temp_work_dir,
@@ -1051,10 +1123,13 @@ def test_start_agent_creates_additional_tmux_windows(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that start_agents creates additional tmux windows for additional_commands."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1109,10 +1184,13 @@ def test_start_agent_additional_windows_run_commands(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that additional tmux windows actually run the specified commands."""
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -1301,31 +1379,31 @@ def test_provision_agent_prepend_to_new_file(host_with_temp_dir: tuple[Host, Pat
     assert target_file.read_text() == "new content"
 
 
-def test_provision_agent_user_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent runs user commands."""
+def test_provision_agent_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent runs extra provision commands."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
     marker_file = temp_dir / "provision_test" / "marker.txt"
 
     options = CreateAgentOptions(
-        name=AgentName("prov-user-cmd"),
+        name=AgentName("prov-extra-cmd"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
             create_directories=(marker_file.parent,),
-            user_commands=(f"echo 'user command executed' > {marker_file}",),
+            extra_provision_commands=(f"echo 'extra command executed' > {marker_file}",),
         ),
     )
 
     host.provision_agent(agent, options, host.mng_ctx)
 
     assert marker_file.exists()
-    assert "user command executed" in marker_file.read_text()
+    assert "extra command executed" in marker_file.read_text()
 
 
-def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that user commands run in the agent's work_dir."""
+def test_provision_agent_extra_provision_commands_in_work_dir(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that extra provision commands run in the agent's work_dir."""
     host, temp_dir = host_with_temp_dir
 
     # Create agent with a specific work_dir
@@ -1340,7 +1418,7 @@ def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Hos
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=(f"pwd > {marker_file}",),
+            extra_provision_commands=(f"pwd > {marker_file}",),
         ),
     )
 
@@ -1350,8 +1428,8 @@ def test_provision_agent_user_commands_in_work_dir(host_with_temp_dir: tuple[Hos
     assert str(work_dir) in marker_file.read_text()
 
 
-def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent runs multiple user commands in order."""
+def test_provision_agent_multiple_extra_provision_commands(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent runs multiple extra provision commands in order."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -1363,7 +1441,7 @@ def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, 
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(
+            extra_provision_commands=(
                 f"echo 'first' > {output_file}",
                 f"echo 'second' >> {output_file}",
                 f"echo 'third' >> {output_file}",
@@ -1381,8 +1459,8 @@ def test_provision_agent_multiple_user_commands(host_with_temp_dir: tuple[Host, 
     assert lines[2] == "third"
 
 
-def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that provision_agent raises on user command failure."""
+def test_provision_agent_extra_provision_command_failure_raises(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """Test that provision_agent raises on extra provision command failure."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -1391,14 +1469,16 @@ def test_provision_agent_user_command_failure_raises(host_with_temp_dir: tuple[H
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=("exit 1",),
+            extra_provision_commands=("exit 1",),
         ),
     )
 
-    with pytest.raises(MngError) as exc_info:
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
         host.provision_agent(agent, options, host.mng_ctx)
 
-    assert "User command failed" in str(exc_info.value)
+    assert exc_info.value.main_exception is not None
+    assert isinstance(exc_info.value.main_exception, MngError)
+    assert "Extra provision command failed" in str(exc_info.value.main_exception)
 
 
 def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path], tmp_path: Path) -> None:
@@ -1424,7 +1504,7 @@ def test_provision_agent_combined_options(host_with_temp_dir: tuple[Host, Path],
             create_directories=(provision_dir,),
             upload_files=(UploadFileSpec(local_path=local_file, remote_path=remote_upload),),
             append_to_files=(FileModificationSpec(remote_path=append_file, text="appended content"),),
-            user_commands=(f"echo 'marker' > {marker_file}",),
+            extra_provision_commands=(f"echo 'marker' > {marker_file}",),
         ),
     )
 
@@ -1474,8 +1554,7 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
     2. Upload files
     3. Append to files
     4. Prepend to files
-    5. Sudo commands (skipped in this test)
-    6. User commands
+    5. Extra provision commands
     """
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
@@ -1501,8 +1580,8 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
             append_to_files=(FileModificationSpec(remote_path=target_file, text="appended\n"),),
             # 4. Prepend - adds to beginning
             prepend_to_files=(FileModificationSpec(remote_path=target_file, text="prepended\n"),),
-            # 6. User commands - run last, can verify final state
-            user_commands=(f"cat {target_file} > {log_file}",),
+            # 5. Extra provision commands - run last, can verify final state
+            extra_provision_commands=(f"cat {target_file} > {log_file}",),
         ),
     )
 
@@ -1609,6 +1688,7 @@ def test_create_work_dir_copy_without_git(host_with_temp_dir: tuple[Host, Path])
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1639,6 +1719,8 @@ def test_create_work_dir_copy_with_git(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     work_dir = host.create_agent_work_dir(host, source_path, options).path
@@ -1682,6 +1764,8 @@ def test_create_work_dir_copy_with_git_copies_info_exclude(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
     )
 
     host.create_agent_work_dir(host, source_path, options)
@@ -1710,6 +1794,7 @@ def test_create_work_dir_copy_excludes_git_when_disabled(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         git=AgentGitOptions(is_git_synced=False),
     )
 
@@ -1752,6 +1837,7 @@ def test_create_work_dir_copy_with_untracked_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1787,6 +1873,7 @@ def test_create_work_dir_copy_with_gitignored_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_gitignored=True),
     )
 
@@ -1821,6 +1908,7 @@ def test_create_work_dir_copy_with_renamed_file(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_include_unclean=True),
     )
 
@@ -1852,6 +1940,7 @@ def test_create_work_dir_generates_new_branch(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/new-branch-test"),
     )
 
@@ -1900,6 +1989,7 @@ def test_create_work_dir_preserves_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/origin-test"),
     )
 
@@ -1940,6 +2030,7 @@ def test_create_work_dir_works_without_origin_remote(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(new_branch_name="test/no-origin-test"),
     )
 
@@ -2020,8 +2111,10 @@ def test_provision_agent_writes_env_files_to_agent_env(host_with_temp_dir: tuple
     assert "SECOND_VAR=second_value" in content
 
 
-def test_provision_agent_user_commands_have_access_to_env_vars(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that user commands can access the environment variables."""
+def test_provision_agent_extra_provision_commands_have_access_to_env_vars(
+    host_with_temp_dir: tuple[Host, Path],
+) -> None:
+    """Test that extra provision commands can access the environment variables."""
     host, temp_dir = host_with_temp_dir
     agent = _create_minimal_agent(host, temp_dir)
 
@@ -2036,7 +2129,7 @@ def test_provision_agent_user_commands_have_access_to_env_vars(host_with_temp_di
         ),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(f"echo $PROVISION_TEST_VAR > {output_file}",),
+            extra_provision_commands=(f"echo $PROVISION_TEST_VAR > {output_file}",),
         ),
     )
 
@@ -2087,6 +2180,7 @@ def test_start_agent_has_access_to_env_vars(
     temp_profile_dir: Path,
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that started agents have access to environment variables.
 
@@ -2095,7 +2189,9 @@ def test_start_agent_has_access_to_env_vars(
     that prints an env var to a file to verify this.
     """
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -2152,6 +2248,7 @@ def test_new_tmux_window_inherits_env_vars(
     plugin_manager: pluggy.PluginManager,
     mng_test_prefix: str,
     tmp_home_dir: Path,
+    active_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Test that new tmux windows created by the user also have env vars.
 
@@ -2169,7 +2266,9 @@ def test_new_tmux_window_inherits_env_vars(
     (tmp_home_dir / ".bashrc").write_text(f"PS1='{prompt_sentinel} '\n")
 
     config = MngConfig(default_host_dir=temp_host_dir, prefix=mng_test_prefix)
-    mng_ctx = MngContext(config=config, pm=plugin_manager, profile_dir=temp_profile_dir)
+    mng_ctx = MngContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
     provider = LocalProviderInstance(
         name=ProviderInstanceName("local"),
         host_dir=per_host_dir,
@@ -2288,7 +2387,7 @@ def test_provision_agent_host_env_sourced_before_agent_env(host_with_temp_dir: t
         ),
         provisioning=AgentProvisioningOptions(
             create_directories=(output_file.parent,),
-            user_commands=(f"echo HOST_VAR=$HOST_VAR SHARED_VAR=$SHARED_VAR > {output_file}",),
+            extra_provision_commands=(f"echo HOST_VAR=$HOST_VAR SHARED_VAR=$SHARED_VAR > {output_file}",),
         ),
     )
 
@@ -2321,6 +2420,7 @@ def test_rsync_extra_args_parsing(host_with_temp_dir: tuple[Host, Path]) -> None
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--exclude exclude_me.txt",
@@ -2355,6 +2455,7 @@ def test_rsync_extra_args_with_spaces(host_with_temp_dir: tuple[Host, Path]) -> 
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args='--exclude "file with spaces.txt"',
@@ -2394,6 +2495,7 @@ def test_transfer_extra_files_with_many_files(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
         git=AgentGitOptions(is_git_synced=True, is_include_unclean=True),
     )
 
@@ -2557,6 +2659,7 @@ def test_rsync_does_not_delete_existing_files_by_default(host_with_temp_dir: tup
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2591,6 +2694,7 @@ def test_rsync_with_delete_removes_extra_files(host_with_temp_dir: tuple[Host, P
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         target_path=target_path,
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(
             is_rsync_enabled=True,
             rsync_args="--delete",
@@ -2657,6 +2761,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-one"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 
@@ -2671,6 +2776,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         name=AgentName("agent-two"),
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
+        transfer_mode=TransferMode.RSYNC,
         data_options=AgentDataOptions(is_rsync_enabled=True),
     )
 

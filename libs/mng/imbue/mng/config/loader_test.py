@@ -475,7 +475,7 @@ def test_parse_create_templates_multiple_templates() -> None:
     raw = {
         "modal": {"new_host": "modal"},
         "docker": {"new_host": "docker"},
-        "local": {"in_place": True},
+        "local": {"transfer": "none"},
     }
     result = _parse_create_templates(raw)
     assert len(result) == 3

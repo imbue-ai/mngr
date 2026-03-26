@@ -1,6 +1,8 @@
 import os
 
 from imbue.mng.config.data_types import EnvVar
+from imbue.mng.errors import UserInputError
+from imbue.mng.interfaces.host import AgentLabelOptions
 
 
 def resolve_env_vars(
@@ -24,3 +26,14 @@ def resolve_env_vars(
         merged[env_var.key] = env_var.value
 
     return tuple(EnvVar(key=k, value=v) for k, v in merged.items())
+
+
+def resolve_labels(label_strings: tuple[str, ...]) -> AgentLabelOptions:
+    """Parse KEY=VALUE label strings into AgentLabelOptions."""
+    labels_dict: dict[str, str] = {}
+    for label_string in label_strings:
+        if "=" not in label_string:
+            raise UserInputError(f"Label must be in KEY=VALUE format, got: {label_string}")
+        key, value = label_string.split("=", 1)
+        labels_dict[key.strip()] = value.strip()
+    return AgentLabelOptions(labels=labels_dict)

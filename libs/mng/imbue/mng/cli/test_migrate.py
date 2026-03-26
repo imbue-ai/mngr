@@ -35,6 +35,7 @@ def test_migrate_clones_and_destroys_source(
                 target_name,
                 "--command",
                 "sleep 482917",
+                "--transfer=none",
                 "--no-connect",
             ],
             obj=plugin_manager,
