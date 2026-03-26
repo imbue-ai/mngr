@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
@@ -146,7 +147,7 @@ class DockerHostStore(MutableModel):
 
         return records
 
-    def persist_agent_data(self, host_id: HostId, agent_data: dict[str, object]) -> None:
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         """Write agent data for offline listing."""
         agent_id = agent_data.get("id")
         if not agent_id:

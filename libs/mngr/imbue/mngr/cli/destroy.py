@@ -631,7 +631,7 @@ def _output_targets(
     output_opts: OutputOptions,
 ) -> None:
     """Output a list of agents to destroy."""
-    agent_data = [
+    agent_data: list[dict[str, object]] = [
         {"agent_id": str(agent.id), "agent_name": str(agent.name), "host_id": str(host.id)}
         for agent, host in targets.online_agents
     ]

@@ -541,7 +541,7 @@ def _make_state(tmp_path: Path, marks: set[str]) -> _PerTestGuardState:
     return _PerTestGuardState(
         tracking_dir=tracking_dir,
         marks=marks,
-        env_patcher=None,  # ty: ignore[invalid-type-form]
+        env_patcher=None,
     )
 
 

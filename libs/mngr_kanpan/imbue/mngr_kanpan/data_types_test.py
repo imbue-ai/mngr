@@ -65,7 +65,7 @@ def test_pr_info_is_frozen() -> None:
         is_draft=False,
     )
     with pytest.raises(ValidationError):
-        pr.number = 99  # type: ignore[misc]
+        pr.number = 99
 
 
 def test_agent_board_entry_construction() -> None:

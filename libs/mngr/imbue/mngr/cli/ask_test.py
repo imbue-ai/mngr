@@ -6,12 +6,16 @@ import pytest
 from click.testing import CliRunner
 
 import imbue.mngr.cli.ask as ask_module
+from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.ask import ClaudeBackendInterface
 from imbue.mngr.cli.ask import _accumulate_chunks
 from imbue.mngr.cli.ask import _build_ask_context
+from imbue.mngr.cli.ask import _check_headless_claude_available
 from imbue.mngr.cli.ask import _execute_response
 from imbue.mngr.cli.ask import _show_command_summary
 from imbue.mngr.cli.ask import ask
+from imbue.mngr.config.agent_class_registry import set_default_agent_class
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
 
@@ -239,3 +243,11 @@ def test_show_command_summary_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "commands"
+
+
+def test_check_headless_claude_available_raises_when_plugin_missing() -> None:
+    """When the headless_claude plugin is not registered, raises with an actionable error."""
+    reset_agent_registry()
+    set_default_agent_class(BaseAgent)
+    with pytest.raises(MngrError, match="headless_claude.*not available"):
+        _check_headless_claude_available()

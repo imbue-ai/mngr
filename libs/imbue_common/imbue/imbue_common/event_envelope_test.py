@@ -54,7 +54,7 @@ def test_event_envelope_is_frozen() -> None:
         source=_SRC,
     )
     with pytest.raises(ValidationError):
-        envelope.type = EventType("changed")  # type: ignore[misc]
+        envelope.type = EventType("changed")
 
 
 def test_iso_timestamp_rejects_empty() -> None:
