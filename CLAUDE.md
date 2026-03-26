@@ -67,6 +67,7 @@ Only after doing all of the above should you begin writing code.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Flaky tests must be fixed as soon as possible. Ideally you should finish your task, then if you are allowed to commit, commit, and try to fix the flaky test in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
+- Prefer making code naturally portable rather than branching on `is_local` (or similar implementation-discriminating checks). If calling code needs to behave differently for local vs remote hosts, that is a sign the host interface is missing a method. Add the method to the interface, implement it in each host class, and let the caller use it uniformly. Everything that can naturally be done via host methods alone should be.
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
 # Ratchets
