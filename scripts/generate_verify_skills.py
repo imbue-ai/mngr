@@ -238,8 +238,8 @@ def _git(vet_repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _warn_if_behind_origin(vet_repo: Path, base_commit: str) -> None:
-    """Warn if the pinned base commit is behind vet's origin/main."""
+def _is_behind_origin(vet_repo: Path, base_commit: str) -> bool:
+    """Check if the pinned base commit is behind vet's origin/main."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     vet = str(vet_repo)
 
@@ -250,12 +250,12 @@ def _warn_if_behind_origin(vet_repo: Path, base_commit: str) -> None:
         env=env,
     )
     if origin_result.returncode != 0:
-        return
+        return False
     origin_main = origin_result.stdout.strip()
     if origin_main == base_commit:
-        return
+        return False
 
-    is_ancestor = (
+    return (
         subprocess.run(
             ["git", "-C", vet, "merge-base", "--is-ancestor", base_commit, origin_main],
             capture_output=True,
@@ -264,20 +264,19 @@ def _warn_if_behind_origin(vet_repo: Path, base_commit: str) -> None:
         == 0
     )
 
-    if is_ancestor:
-        print(
-            f"warning: pinned vet base ({base_commit[:12]}) is behind origin/main ({origin_main[:12]}). "
-            f"To update:\n"
-            f"  git -C {vet_repo} rev-parse origin/main > {VET_BASE_COMMIT_PATH}",
-            file=sys.stderr,
-        )
-
 
 def load_vet(vet_repo: Path) -> dict:
     """Import vet modules at the pinned base commit, restoring vet HEAD after."""
     base_commit = VET_BASE_COMMIT_PATH.read_text().strip()
     original_head = _git(vet_repo, "rev-parse", "HEAD")
-    _warn_if_behind_origin(vet_repo, base_commit)
+
+    if _is_behind_origin(vet_repo, base_commit):
+        print(
+            f"warning: pinned vet base ({base_commit[:12]}) is behind origin/main. "
+            f"To update:\n"
+            f"  git -C {vet_repo} rev-parse origin/main > {VET_BASE_COMMIT_PATH}",
+            file=sys.stderr,
+        )
 
     if original_head != base_commit:
         print(
