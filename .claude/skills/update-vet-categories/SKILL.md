@@ -27,23 +27,19 @@ Before doing any work:
 
 ## Instructions
 
-### 1. Verify the generator is a no-op on the committed content
+### 1. Ensure the generator is a no-op on the committed content
 
-Before making any edits, confirm the generator reproduces the current committed files exactly:
+Confirm the generator reproduces the current committed files exactly:
 
 ```bash
 uv run python scripts/generate_verify_skills.py --check
 ```
 
-If this fails, the overrides are out of sync. Fix them first before proceeding.
+If this fails, the overrides are out of sync and need to be fixed -- that is the purpose of this skill. Read `scripts/verify_skill_overrides.py` to understand the existing overrides, then update them using the guidance below until the check passes.
 
-### 2. Understand the current overrides
+### 2. Update the override script to match desired changes
 
-Read `scripts/verify_skill_overrides.py` to understand the existing overrides. For each category section that changed in the diff, determine whether it is currently handled by an APPEND or REPLACE override (or has no override at all).
-
-### 3. Update the override script to produce the desired output
-
-Edit `scripts/verify_skill_overrides.py` to make the generator output match the edited `.md` file:
+Edit `scripts/verify_skill_overrides.py` to make the generator output match the `.md` file content you want:
 
 - **If a category section's guide/examples/exceptions were changed**: use `REPLACE_GUIDE`, `REPLACE_EXAMPLES`, or `REPLACE_EXCEPTIONS` to set the complete desired content. REPLACE overrides completely discard whatever vet provides for that field, so include ALL desired content (not just the delta).
 - **If an existing APPEND override needs to become a REPLACE**: remove the APPEND entry and add a REPLACE entry with the full desired content.
@@ -51,23 +47,15 @@ Edit `scripts/verify_skill_overrides.py` to make the generator output match the 
 - **If content was only appended** (not replacing vet's base): use `APPEND_*` as before.
 - Keep overrides organized by the order categories appear in the output file.
 
-### 4. Regenerate and verify
-
-Regenerate the category files from vet + updated overrides:
+After each edit, regenerate and check:
 
 ```bash
 uv run python scripts/generate_verify_skills.py
-```
-
-Then verify the output matches what was desired:
-
-```bash
 uv run python scripts/generate_verify_skills.py --check
-git diff .claude/agents/categories/
 ```
 
-The `--check` must pass, and the diff against the original edits should be empty (or only contain intended adjustments). If the generated output doesn't match, iterate on the overrides.
+Iterate until the check passes and the generated files match the desired content.
 
-### 5. Commit
+### 3. Commit
 
 Commit both the override script changes and the regenerated category files together in a single commit.
