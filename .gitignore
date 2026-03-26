@@ -274,3 +274,4 @@ current.tar.gz
 cov.xml
 .autofix/
 .reviews/
+test-results
