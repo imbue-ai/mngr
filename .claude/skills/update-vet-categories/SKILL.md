@@ -1,86 +1,73 @@
 ---
 name: update-vet-categories
-description: Update the vet issue category override script to match changes in the generated category files. Use when vet upstream has changed and the category .md files need updating.
+description: Update vet issue category overrides after editing the category .md files directly. Use when you've changed code-issue-categories.md or conversation-issue-categories.md and need to sync the override script.
 ---
 
 # Updating Vet Issue Categories
 
-This skill guides the process of updating `scripts/verify_skill_overrides.py` to reflect changes in vet's upstream issue categories. The override script is the source of truth for mng-specific customizations to vet's issue identification guides.
+This skill enables editing the issue category `.md` files directly and then updating `scripts/verify_skill_overrides.py` to match, so the generator stays consistent with your edits.
 
 ## Background
 
 The issue category files in `.claude/agents/categories/` are generated from vet (an external repo) plus mng-specific overrides defined in `scripts/verify_skill_overrides.py`. The generator script `scripts/generate_verify_skills.py` reads vet's base categories, applies the overrides, and writes the final `.md` files.
 
-Override actions:
+The workflow is: edit the `.md` files to say what you want, then update the override script so the generator reproduces your edits.
+
+Override actions available:
 - `APPEND_GUIDE` / `APPEND_EXAMPLES` / `APPEND_EXCEPTIONS` -- add content after vet's base
-- `REPLACE_GUIDE` / `REPLACE_EXAMPLES` / `REPLACE_EXCEPTIONS` -- completely replace vet's base content (use when you need the output to be stable regardless of vet version)
+- `REPLACE_GUIDE` / `REPLACE_EXAMPLES` / `REPLACE_EXCEPTIONS` -- completely replace vet's base content for that field (use when you want full control over the output regardless of what vet provides)
 - `ADD_CATEGORY` -- add an entirely new category (via `NEW_CATEGORIES` dict)
 
 ## Safety Checks
 
 Before doing any work:
 
-1. **Ensure the working tree is clean.** Run `git status` and confirm there are no uncommitted changes. The override script must always be updated from a known-good committed state so that changes can be reviewed and reverted cleanly.
+1. **Ensure the working tree is clean (aside from the category file edits).** Run `git status` and confirm there are no other uncommitted changes. The override script must always be updated from a known-good committed state so that changes can be reviewed and reverted cleanly.
 2. **Ensure VET_REPO is set.** The generator requires a vet checkout. Run `echo $VET_REPO` to confirm. If not set, ask the user for the path.
 
 ## Instructions
 
-### 1. Regenerate from current vet to see what changed
+### 1. Save aside the desired category file content
 
-Run the generator to produce the latest output from vet + current overrides:
-
-```bash
-uv run python scripts/generate_verify_skills.py
-```
-
-Then diff the result against what's committed:
+The user has edited `.claude/agents/categories/code-issue-categories.md` (or `conversation-issue-categories.md`) to contain the content they want. Save a copy or note the diff:
 
 ```bash
 git diff .claude/agents/categories/
 ```
 
-This shows you the vet upstream changes that are not yet captured by the overrides.
+This diff is what you need the overrides to produce.
 
-### 2. Analyze each change
+### 2. Understand the current overrides
 
-For each changed category section, determine:
+Read `scripts/verify_skill_overrides.py` to understand the existing overrides. For each category section that changed in the diff, determine whether it is currently handled by an APPEND or REPLACE override (or has no override at all).
 
-- **What changed in the guide text?** If vet simplified or rewrote the guide, you may need a `REPLACE_GUIDE` override.
-- **What changed in examples?** If examples were added, removed, or reworded, you may need `REPLACE_EXAMPLES`.
-- **What changed in exceptions?** Same logic -- use `REPLACE_EXCEPTIONS` if needed.
+### 3. Update the override script to produce the desired output
 
-Key decision: use APPEND when you are adding mng-specific content on top of vet's base. Use REPLACE when you want the override to be the sole source of truth for that section (i.e., vet's base content for that field is completely overridden).
+Edit `scripts/verify_skill_overrides.py` to make the generator output match the edited `.md` file:
 
-### 3. Update the override script
-
-Edit `scripts/verify_skill_overrides.py`:
-
-- For each changed category, add or update the appropriate `Override` entries in `CATEGORY_EXTENSIONS`.
-- When using `REPLACE_*`, provide the complete desired content (including any items that originally came from vet's base, since REPLACE discards the base entirely).
-- When converting from `APPEND_*` to `REPLACE_*`, remove the old APPEND entry and add a REPLACE entry with the full desired content.
+- **If a category section's guide/examples/exceptions were changed**: use `REPLACE_GUIDE`, `REPLACE_EXAMPLES`, or `REPLACE_EXCEPTIONS` to set the complete desired content. REPLACE overrides completely discard whatever vet provides for that field, so include ALL desired content (not just the delta).
+- **If an existing APPEND override needs to become a REPLACE**: remove the APPEND entry and add a REPLACE entry with the full desired content.
+- **If a new category needs to be added**: add it to `NEW_CATEGORIES` with the guide text and the `insert_after` anchor.
+- **If content was only appended** (not replacing vet's base): use `APPEND_*` as before.
 - Keep overrides organized by the order categories appear in the output file.
 
 ### 4. Regenerate and verify
 
+Regenerate the category files from vet + updated overrides:
+
 ```bash
 uv run python scripts/generate_verify_skills.py
-uv run python scripts/generate_verify_skills.py --check
 ```
 
-Both commands should succeed. The `--check` command verifies the on-disk files match what the generator produces.
-
-### 5. Review the final diff
+Then verify the output matches what was desired:
 
 ```bash
-git diff scripts/verify_skill_overrides.py
+uv run python scripts/generate_verify_skills.py --check
 git diff .claude/agents/categories/
 ```
 
-Verify that:
-- The override script changes are minimal and correct
-- The category file changes match the desired vet upstream changes
-- No unintended categories were affected
+The `--check` must pass, and the diff against the original edits should be empty (or only contain intended adjustments). If the generated output doesn't match, iterate on the overrides.
 
-### 6. Commit
+### 5. Commit
 
 Commit both the override script changes and the regenerated category files together in a single commit.
