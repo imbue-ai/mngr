@@ -17,6 +17,7 @@ from typing import IO
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
+from typing import assert_never
 from typing import cast
 from uuid import uuid4
 
@@ -37,7 +38,6 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
@@ -78,7 +78,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng.utils.env_utils import build_source_env_shell_commands
 from imbue.mng.utils.env_utils import parse_env_file
 from imbue.mng.utils.git_utils import get_current_git_branch
@@ -1118,106 +1118,124 @@ class Host(BaseHost, OnlineHostInterface):
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
         """Create the work_dir directory for a new agent."""
-        copy_mode = options.git.copy_mode if options.git else WorkDirCopyMode.COPY
-        with log_span("Creating agent work directory", copy_mode=str(copy_mode)):
-            if copy_mode == WorkDirCopyMode.WORKTREE:
-                return self._create_work_dir_as_git_worktree(host, path, options)
-            elif copy_mode in (WorkDirCopyMode.COPY, WorkDirCopyMode.CLONE):
-                return self._create_work_dir_as_copy(host, path, options)
-            else:
-                raise SwitchError(f"Unsupported work dir copy mode: {copy_mode}")
+        transfer_mode = options.transfer_mode
+        with log_span("Creating agent work directory", transfer_mode=str(transfer_mode)):
+            match transfer_mode:
+                case TransferMode.NONE:
+                    return self._create_work_dir_in_place(host, path, options)
+                case TransferMode.RSYNC:
+                    return self._create_work_dir_via_rsync(host, path, options)
+                case TransferMode.GIT_MIRROR:
+                    return self._create_work_dir_via_git_mirror(host, path, options)
+                case TransferMode.GIT_WORKTREE:
+                    return self._create_work_dir_as_git_worktree(host, path, options)
+                case _ as unreachable:
+                    assert_never(unreachable)
 
-    def _create_work_dir_as_copy(
+    def _create_work_dir_in_place(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
         options: CreateAgentOptions,
     ) -> CreateWorkDirResult:
-        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_as_copy") as concurrency_group:
-            # Check if source and target are on the same host
-            source_is_same_host = source_host.id == self.id
+        """Use the source directory directly as the work_dir (no transfer).
 
-            # If target path is specified, use it; otherwise derive one
-            if options.target_path:
-                target_path = options.target_path
-                # If target equals source and same host, it's in-place
-                is_generated_work_dir = not (source_is_same_host and source_path == target_path)
-            elif source_is_same_host:
-                # Same host, no target path: run in-place at source path
-                target_path = source_path
-                is_generated_work_dir = False
-            else:
-                # Different host (remote copy): generate a unique work directory so that
-                # multiple agents sharing the same host each get their own directory.
-                target_path = self.host_dir / "projects" / str(AgentId.generate())
-                is_generated_work_dir = True
+        Does not modify generated_work_dirs. If the path was previously generated
+        by mng (e.g., as a worktree for another agent), GC already handles this
+        correctly: it only deletes directories that are in generated_work_dirs
+        AND have no living agent using them as work_dir.
+        """
+        target_path = options.target_path or source_path
+        logger.debug("Skipped file transfer: transfer mode is none (in-place)")
+        return CreateWorkDirResult(path=target_path)
 
-            # just doing this work in a thread for latency reasons
-            mark_generated_work_dir_thread = concurrency_group.start_new_thread(
-                self._mark_generated_work_dir, (target_path, is_generated_work_dir)
+    def _resolve_transfer_target(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> Path:
+        """Determine the target directory for a transfer operation.
+
+        For RSYNC and GIT_MIRROR modes, a target directory is always generated
+        if not explicitly specified. Local hosts use host_dir/copies/<id>,
+        remote hosts use host_dir/projects/<id>.
+        """
+        if options.target_path:
+            return options.target_path
+        source_is_same_host = source_host.id == self.id
+        subdir = "copies" if source_is_same_host else "projects"
+        return self.host_dir / subdir / str(AgentId.generate())
+
+    def _create_work_dir_via_rsync(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir by rsyncing files from source to target."""
+        target_path = self._resolve_transfer_target(source_host, source_path, options)
+
+        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_via_rsync") as cg:
+            self._mkdir(target_path)
+
+            # Track generated work dir in a thread to reduce latency
+            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
+
+            # Exclude .git if git options are present (the user is making an explicit
+            # choice about git handling, e.g. is_git_synced=False means "skip .git").
+            exclude_git = options.git is not None
+
+            self._rsync_files(
+                source_host,
+                source_path,
+                target_path,
+                extra_args=options.data_options.rsync_args,
+                exclude_git=exclude_git,
             )
+
+            track_thread.join(60.0)
+
+        return CreateWorkDirResult(path=target_path)
+
+    def _create_work_dir_via_git_mirror(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        options: CreateAgentOptions,
+    ) -> CreateWorkDirResult:
+        """Create a work_dir by mirroring the git repo and optionally rsyncing extra files."""
+        target_path = self._resolve_transfer_target(source_host, source_path, options)
+
+        with self.mng_ctx.concurrency_group.make_concurrency_group("_create_work_dir_via_git_mirror") as cg:
+            self._mkdir(target_path)
+
+            # Track generated work dir in a thread to reduce latency
+            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
 
             created_branch_name: str | None = None
 
-            # If source and target are same path on same host, nothing to transfer
-            if source_is_same_host and source_path == target_path:
-                logger.debug("Skipped file transfer: source and target are the same path")
-                return CreateWorkDirResult(path=target_path)
-
-            # Check if source has a .git directory
-            if source_host.is_local:
-                source_has_git = (source_path / ".git").exists()
-            else:
-                result = source_host.execute_command(f"test -d {shlex.quote(str(source_path / '.git'))}")
-                source_has_git = result.success
-
-            # Transfer files based on whether source has .git and whether we want to include it
             is_git_synced = options.git is not None and options.git.is_git_synced
-            # Exclude .git from rsync if user has specified any git options (they're making an explicit choice)
-            # If options.git is None, include .git (simple file copy of everything)
-            has_git_options = options.git is not None
             if is_git_synced:
-                # fall back to file copy if source is not a git repo
-                if not source_has_git:
-                    logger.warning("Source path is not a git repository, falling back to file copy")
-                    self._mkdir(target_path)
-                    self._rsync_files(source_host, source_path, target_path, "--delete", exclude_git=True)
-                # Source is a git repo, transfer via git
-                else:
-                    created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
-                    self._transfer_extra_files(source_host, source_path, target_path, options)
+                created_branch_name = self._transfer_git_repo(source_host, source_path, target_path, options)
+                self._transfer_extra_files(source_host, source_path, target_path, options)
 
             # Run rsync if enabled. This is designed for adding extra files (e.g., data files not in git),
             # not for full directory sync. By default, rsync does NOT use --delete, so existing files
             # in the target won't be removed. Users can add --delete to rsync_args if they want
             # full sync behavior with file deletion.
-            # Exclude .git from rsync if user specified git options (they're making an explicit choice about git handling)
             if options.data_options.is_rsync_enabled:
-                self._mkdir(target_path)
                 self._rsync_files(
                     source_host,
                     source_path,
                     target_path,
                     extra_args=options.data_options.rsync_args,
-                    exclude_git=has_git_options,
+                    exclude_git=True,
                 )
 
-            # make sure we finished updating the generated work dir state
-            mark_generated_work_dir_thread.join(60.0)
+            track_thread.join(60.0)
 
         return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
-
-    def _mark_generated_work_dir(self, target_path: Path, is_generated_work_dir: bool):
-        # Track generated work directories at the host level.
-        # When running in-place, actively remove from generated_work_dirs in case
-        # a previous agent had registered this path (e.g., a worktree agent created
-        # this directory, then the user ran --in-place from it). Without this removal,
-        # GC would treat the directory as orphaned and delete it after the in-place
-        # agent is destroyed.
-        if is_generated_work_dir:
-            self._add_generated_work_dir(target_path)
-        else:
-            self._remove_generated_work_dir(target_path)
 
     def _transfer_git_repo(
         self,

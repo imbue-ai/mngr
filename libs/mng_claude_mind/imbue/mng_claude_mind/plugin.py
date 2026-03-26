@@ -72,7 +72,7 @@ class ClaudeMindConfig(ClaudeAgentConfig):
     """Config for the claude-mind agent type.
 
     Defaults trust_working_directory to True because minds run
-    --in-place in their own repo directory (e.g. ~/.minds/<name>/)
+    --transfer=none in their own repo directory (e.g. ~/.minds/<name>/)
     and should not show the trust dialog on startup.
     """
 

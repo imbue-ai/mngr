@@ -172,16 +172,16 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_copy(e2e: E2eSession) -> None:
+def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can create a copy instead of a worktree:
-    mng create my-task --copy
-    # that is used by default if you're not in a git repo
+    # you can create a git mirror instead of a worktree:
+    mng create my-task --transfer=git-mirror
+    # git-mirror is used by default for remote agents
     """)
     expect(
         e2e.run(
-            "mng create my-task --copy --command 'sleep 99999' --no-ensure-clean",
-            comment="you can create a copy instead of a worktree",
+            "mng create my-task --transfer=git-mirror --command 'sleep 99999' --no-ensure-clean",
+            comment="you can create a git mirror instead of a worktree",
         )
     ).to_succeed()
 
@@ -192,10 +192,10 @@ def test_create_with_copy(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_copy_with_existing_branch(e2e: E2eSession) -> None:
+def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can disable new branch creation entirely by omitting the :NEW part (requires --in-place or --copy due to how worktrees work, and --in-place implies no new branch):
-    mng create my-task --copy --branch main
+    # you can disable new branch creation entirely by omitting the :NEW part (requires --transfer=none or --transfer=git-mirror due to how worktrees work, and --transfer=none implies no new branch):
+    mng create my-task --transfer=git-mirror --branch main
     """)
     current_branch_result = e2e.run(
         "git rev-parse --abbrev-ref HEAD",
@@ -206,7 +206,7 @@ def test_create_copy_with_existing_branch(e2e: E2eSession) -> None:
 
     expect(
         e2e.run(
-            f"mng create my-task --copy --branch {current_branch} --command 'sleep 99999' --no-ensure-clean",
+            f"mng create my-task --transfer=git-mirror --branch {current_branch} --command 'sleep 99999' --no-ensure-clean",
             comment="you can disable new branch creation entirely by omitting the :NEW part",
         )
     ).to_succeed()
@@ -218,15 +218,15 @@ def test_create_copy_with_existing_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-def test_create_with_clone(e2e: E2eSession) -> None:
+def test_create_with_transfer_none(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
-    mng create my-task --clone
+    # you can run the agent in-place (directly in your source directory) without any transfer:
+    mng create my-task --transfer=none
     """)
     expect(
         e2e.run(
-            "mng create my-task --clone --command 'sleep 99999' --no-ensure-clean",
-            comment='you can create a "clone" instead of worktree or copy',
+            "mng create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
+            comment="you can run the agent in-place without any transfer",
         )
     ).to_succeed()
 

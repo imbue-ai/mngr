@@ -122,6 +122,7 @@ def test_provision_preserves_existing_env_vars(
                 "sleep 849127",
                 "--source",
                 str(temp_work_dir),
+                "--transfer=none",
                 "--no-connect",
                 "--no-ensure-clean",
                 "--env",

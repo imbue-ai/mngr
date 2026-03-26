@@ -35,12 +35,12 @@ def test_create_default(e2e: E2eSession) -> None:
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
-    mng create --in-place
+    mng create --transfer=none
     # mng defaults to creating a new worktree for each agent because the whole point of mng is to let you run multiple agents in parallel.
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
-        "mng create my-task --in-place --command 'sleep 99999' --no-ensure-clean",
+        "mng create my-task --transfer=none --command 'sleep 99999' --no-ensure-clean",
         comment="if you want the default behavior of claude (starting in-place), you can specify that",
     )
     expect(result).to_succeed()
@@ -55,7 +55,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent_work_dir = matching[0]["work_dir"]
-    # With --in-place, the work directory should be the session cwd (the temp git repo),
+    # With --transfer=none, the work directory should be the session cwd (the temp git repo),
     # not a generated worktree path.
     assert "worktrees" not in agent_work_dir, f"Expected in-place work_dir to not be a worktree, got: {agent_work_dir}"
 

@@ -19,12 +19,12 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 from imbue.mng_tmr.api import CollectTestsError
 from imbue.mng_tmr.api import _build_agent_options
-from imbue.mng_tmr.api import _copy_mode_for_provider
 from imbue.mng_tmr.api import _sanitize_test_name_for_agent
 from imbue.mng_tmr.api import _short_random_id
+from imbue.mng_tmr.api import _transfer_mode_for_provider
 from imbue.mng_tmr.api import build_current_results
 from imbue.mng_tmr.api import collect_tests
 from imbue.mng_tmr.api import read_agent_result
@@ -90,13 +90,13 @@ def test_sanitize_single_part() -> None:
     assert result == "simple-test"
 
 
-def test_copy_mode_local_provider_uses_worktree() -> None:
-    assert _copy_mode_for_provider(ProviderInstanceName("local")) == WorkDirCopyMode.WORKTREE
+def test_transfer_mode_local_provider_uses_git_worktree() -> None:
+    assert _transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
 
 
-def test_copy_mode_remote_provider_uses_clone() -> None:
-    assert _copy_mode_for_provider(ProviderInstanceName("docker")) == WorkDirCopyMode.CLONE
-    assert _copy_mode_for_provider(ProviderInstanceName("modal")) == WorkDirCopyMode.CLONE
+def test_transfer_mode_remote_provider_uses_git_mirror() -> None:
+    assert _transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
+    assert _transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
 
 
 def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:
@@ -124,13 +124,13 @@ def test_build_agent_options_rsync_disabled() -> None:
 def test_build_agent_options_local_uses_worktree() -> None:
     opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"))
     assert opts.git is not None
-    assert opts.git.copy_mode == WorkDirCopyMode.WORKTREE
+    assert opts.transfer_mode == TransferMode.GIT_WORKTREE
 
 
-def test_build_agent_options_remote_uses_clone() -> None:
+def test_build_agent_options_remote_uses_git_mirror() -> None:
     opts = _build_agent_options(AgentName("test"), "branch", _make_config("modal"))
     assert opts.git is not None
-    assert opts.git.copy_mode == WorkDirCopyMode.CLONE
+    assert opts.transfer_mode == TransferMode.GIT_MIRROR
 
 
 def test_build_agent_options_local_ready_timeout() -> None:

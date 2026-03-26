@@ -516,6 +516,7 @@ def create_test_agent_via_cli(
             agent_cmd,
             "--source",
             str(temp_work_dir),
+            "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
         ],

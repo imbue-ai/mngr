@@ -39,7 +39,7 @@ from imbue.mng.primitives import HostState
 from imbue.mng.primitives import Permission
 from imbue.mng.primitives import ProviderInstanceName
 from imbue.mng.primitives import SnapshotName
-from imbue.mng.primitives import WorkDirCopyMode
+from imbue.mng.primitives import TransferMode
 
 # Default timeout for waiting for agent readiness before sending messages.
 # With hook-based polling, we return early when the agent signals readiness,
@@ -504,10 +504,6 @@ class AgentGitOptions(FrozenModel):
         default=True,
         description="Whether to sync git data from the source repository",
     )
-    copy_mode: WorkDirCopyMode = Field(
-        default=WorkDirCopyMode.COPY,
-        description="How to set up the work_dir: copy, clone, or worktree",
-    )
     base_branch: str | None = Field(
         default=None,
         description="Starting branch for the agent (default: current branch)",
@@ -739,6 +735,10 @@ class CreateAgentOptions(FrozenModel):
     target_path: Path | None = Field(
         default=None,
         description="Target path for the agent work_dir",
+    )
+    transfer_mode: TransferMode = Field(
+        default=TransferMode.NONE,
+        description="How to transfer the project into the agent work_dir",
     )
     initial_message: str | None = Field(
         default=None,

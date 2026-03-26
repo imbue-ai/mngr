@@ -42,7 +42,7 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
     # Initialize git repo in mind dir
     init_and_commit_git_repo(mind_dir, mind_dir.parent, allow_empty=True)
 
-    # Create the agent directly via mng create (cwd must be mind_dir for --in-place)
+    # Create the agent directly via mng create (cwd must be mind_dir for --transfer=none)
     create_result = run_mng(
         "create",
         agent_name,
@@ -54,7 +54,7 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
         "--label",
         "mind=true",
         "--yes",
-        "--in-place",
+        "--transfer=none",
         cwd=mind_dir,
     )
     assert create_result.returncode == 0, "mng create failed:\nstdout: {}\nstderr: {}".format(

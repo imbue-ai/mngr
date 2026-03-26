@@ -174,6 +174,7 @@ def _create_agent(
             "sleep 728451",
             "--source",
             str(temp_work_dir),
+            "--transfer=none",
             "--no-connect",
             "--no-ensure-clean",
         ],
