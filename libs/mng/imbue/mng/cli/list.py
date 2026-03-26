@@ -44,6 +44,7 @@ from imbue.mng.errors import MngError
 from imbue.mng.interfaces.data_types import AgentDetails
 from imbue.mng.primitives import AgentLifecycleState
 from imbue.mng.primitives import ErrorBehavior
+from imbue.mng.primitives import HostState
 from imbue.mng.primitives import OutputFormat
 from imbue.mng.utils.cel_utils import build_cel_context
 from imbue.mng.utils.cel_utils import compile_cel_sort_keys
@@ -121,6 +122,8 @@ class ListCliOptions(CommonCliOptions):
     exclude: tuple[str, ...]
     running: bool
     stopped: bool
+    archived: bool
+    active: bool
     local: bool
     remote: bool
     provider: tuple[str, ...]
@@ -158,6 +161,16 @@ class ListCliOptions(CommonCliOptions):
     "--stopped",
     is_flag=True,
     help="Show only stopped agents (alias for --include 'state == \"STOPPED\"')",
+)
+@optgroup.option(
+    "--archived",
+    is_flag=True,
+    help="Show only stopped agents (alias for --include 'has(labels.archived_at)')",
+)
+@optgroup.option(
+    "--active",
+    is_flag=True,
+    help="Show only stopped agents (anything not archived/destroyed/crashed/failed)",
 )
 @optgroup.option(
     "--local",
@@ -215,6 +228,7 @@ class ListCliOptions(CommonCliOptions):
     help="Limit number of results (applied after fetching from all providers)",
 )
 @optgroup.group("Watch / Stream Mode")
+# FIXME: remove the watch option, it's pointless
 @optgroup.option(
     "-w",
     "--watch",
@@ -318,6 +332,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         include_filters.append(f'state == "{AgentLifecycleState.STOPPED.value}"')
     if opts.local:
         include_filters.append('host.provider == "local"')
+    if opts.archived:
+        include_filters.append("has(labels.archived_at)")
 
     # --project X: alias for --include 'labels.project == "X"'
     # Multiple values are OR'd together
@@ -353,6 +369,11 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     exclude_filters = list(opts.exclude)
     if opts.remote:
         exclude_filters.append('host.provider == "local"')
+    if opts.active:
+        exclude_filters.append("has(labels.archived_at)")
+        include_filters.append(f'host.state != "{HostState.CRASHED.value}"')
+        include_filters.append(f'host.state != "{HostState.FAILED.value}"')
+        include_filters.append(f'host.state != "{HostState.DESTROYED.value}"')
 
     # --sort EXPR: CEL expression(s) with optional direction, e.g. "name asc, create_time desc"
     compiled_sort_keys = compile_cel_sort_keys(opts.sort)
