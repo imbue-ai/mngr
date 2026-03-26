@@ -255,7 +255,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mng [stop|s] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mng stop [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
@@ -268,7 +268,7 @@ be filtered out of listings while preserving its state. The 'mng archive'
 command is a shorthand for 'mng stop --archive'.
 
 Supports custom format templates via --format. Available fields: name.""",
-    aliases=("s",),
+    aliases=(),
     examples=(
         ("Stop an agent by name", "mng stop my-agent"),
         ("Stop multiple agents", "mng stop agent1 agent2"),
