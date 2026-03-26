@@ -44,7 +44,7 @@ def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None) -> FetchPrsResu
             is_checked_by_group=False,
         )
         all_proc = cg.run_process_in_background(
-            ["gh", "pr", "list", "--author", "@me", "--state", "all", "--json", _BASE_FIELDS, "--limit", "100"],
+            ["gh", "pr", "list", "--author", "@me", "--state", "all", "--json", _BASE_FIELDS, "--limit", "500"],
             timeout=30,
             cwd=cwd,
             is_checked_by_group=False,
@@ -65,12 +65,13 @@ def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None) -> FetchPrsResu
         open_proc.returncode,
         open_proc.read_stderr(),
     )
-    if isinstance(open_parsed, str):
-        errors.append(f"open: {open_parsed}")
-    else:
-        for raw in open_parsed:
-            pr = _parse_pr(raw)
-            prs_by_number[pr.number] = pr
+    match open_parsed:
+        case str(err):
+            errors.append(f"open: {err}")
+        case list(raw_prs):
+            for raw in raw_prs:
+                pr = _parse_pr(raw)
+                prs_by_number[pr.number] = pr
 
     # Closed/merged PRs from the all-states query (no CI status)
     all_parsed = _parse_gh_output(
@@ -78,13 +79,14 @@ def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None) -> FetchPrsResu
         all_proc.returncode,
         all_proc.read_stderr(),
     )
-    if isinstance(all_parsed, str):
-        errors.append(f"all: {all_parsed}")
-    else:
-        for raw in all_parsed:
-            pr = _parse_pr(raw)
-            if pr.number not in prs_by_number:
-                prs_by_number[pr.number] = pr
+    match all_parsed:
+        case str(err):
+            errors.append(f"all: {err}")
+        case list(raw_prs):
+            for raw in raw_prs:
+                pr = _parse_pr(raw)
+                if pr.number not in prs_by_number:
+                    prs_by_number[pr.number] = pr
 
     if not prs_by_number and errors:
         return FetchPrsResult(prs=(), error=f"gh pr list failed ({'; '.join(errors)})")
