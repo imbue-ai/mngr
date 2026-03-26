@@ -105,19 +105,20 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
             raise UserInputError(f"Session file not found: {session_file}")
         return session_file.stem, session_file.parent
 
-    # Search by session ID in both $CLAUDE_CONFIG_DIR and ~/.claude/.
+    # Search by session ID in $CLAUDE_CONFIG_DIR first, then fall back to ~/.claude/.
     # We check both because when running inside an mng agent, CLAUDE_CONFIG_DIR
     # points to the agent's isolated config dir, but the user's sessions are
     # in ~/.claude/. In non-agent contexts, CLAUDE_CONFIG_DIR may point to a
     # custom config dir that also has sessions.
     default_config_dir = Path.home() / ".claude"
-    search_dirs: list[Path] = [default_config_dir / "projects"]
+    search_dirs: list[Path] = []
     env_config_dir_str = os.environ.get("CLAUDE_CONFIG_DIR")
     if env_config_dir_str:
-        env_config_dir = Path(env_config_dir_str)
-        env_projects_dir = env_config_dir / "projects"
-        if env_projects_dir != search_dirs[0]:
-            search_dirs.append(env_projects_dir)
+        env_projects_dir = Path(env_config_dir_str) / "projects"
+        search_dirs.append(env_projects_dir)
+    default_projects_dir = default_config_dir / "projects"
+    if default_projects_dir not in search_dirs:
+        search_dirs.append(default_projects_dir)
 
     matches: list[Path] = []
     searched: list[Path] = []
