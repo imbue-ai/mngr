@@ -43,14 +43,13 @@ Edit `scripts/verify_skill_overrides.py` to make the generator output match the 
 
 ### 2. Verify your work
 
-Regenerate and confirm the generator reproduces the desired files exactly:
+Confirm the generator reproduces the desired files exactly:
 
 ```bash
-uv run python scripts/generate_verify_skills.py
 uv run python scripts/generate_verify_skills.py --check
 ```
 
-If the check fails or the generated content doesn't match, iterate on the overrides.
+If the check fails, iterate on the overrides.
 
 ### 3. Commit
 
