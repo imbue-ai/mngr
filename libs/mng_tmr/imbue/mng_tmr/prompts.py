@@ -49,6 +49,12 @@ Consider whether the test can be improved:
 
 - Is the code run in the pytest function close enough to the tutorial block?
 
+- Does it make sense to add additional pytest functions that cover the same
+  tutorial block? It is perfectly fine for two pytest functions to share the same
+  block. Think about "happy" and "unhappy" paths -- for example, a test that
+  verifies normal behavior and a separate test that verifies error handling or
+  edge cases for the same command.
+
 If you make improvements, record a change under the key "IMPROVE_TEST". If you
 identify an improvement that needs a larger-scale intervention, use status
 "BLOCKED". If no improvements are needed, leave the changes object empty.
