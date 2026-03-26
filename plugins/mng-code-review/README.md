@@ -12,27 +12,19 @@ claude plugin marketplace add imbue-ai/mng && claude plugin install mng-code-rev
 
 ## Enabling the stop hook
 
-After installing, configure when the hook should fire by setting `stop_hook.enabled_when` to a shell expression. Examples:
+After installing, enable the stop hook by running:
 
-```json
-{
-    "stop_hook": {
-        "enabled_when": "true"
-    }
-}
+```
+/mng-code-review:reviewer-enable
 ```
 
 This enables enforcement for all sessions. To only enforce on mng-managed agent sessions:
 
-```json
-{
-    "stop_hook": {
-        "enabled_when": "test -n \"${MNG_AGENT_STATE_DIR:-}\""
-    }
-}
+```
+/mng-code-review:reviewer-enable test -n "${MNG_AGENT_STATE_DIR:-}"
 ```
 
-Put this in `.reviewer/settings.json` (checked in, shared with team) or `.reviewer/settings.local.json` (gitignored, personal). Individual gates can be disabled with `/mng-code-review:reviewer-disable`.
+The argument is a shell expression evaluated before each stop hook invocation. Individual gates can be disabled with `/mng-code-review:reviewer-disable`.
 
 ## Skills
 
