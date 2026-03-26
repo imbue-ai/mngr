@@ -67,12 +67,6 @@ WORKDIR /code/mng/
 # install python dependencies
 RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mng/libs/mng && uv tool install modal
 
-# Make the project directory writable by the test runner user
-RUN chown -R mng-test-runner:mng-test-runner /code/mng/
-
-# Switch to non-root user for runtime (tests, sandboxes).
-USER mng-test-runner
-
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
 # `tail -f /dev/null` does not do this.
