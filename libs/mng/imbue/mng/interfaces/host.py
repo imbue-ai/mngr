@@ -613,13 +613,9 @@ class FileModificationSpec(FrozenModel):
 class AgentProvisioningOptions(FrozenModel):
     """Simple provisioning options for the agent."""
 
-    user_commands: tuple[str, ...] = Field(
+    extra_provision_commands: tuple[str, ...] = Field(
         default=(),
         description="Custom shell commands to run during provisioning",
-    )
-    sudo_commands: tuple[str, ...] = Field(
-        default=(),
-        description="Custom shell commands to run as root during provisioning",
     )
     upload_files: tuple[UploadFileSpec, ...] = Field(
         default=(),

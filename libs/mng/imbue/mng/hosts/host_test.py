@@ -1887,15 +1887,15 @@ def test_host_provision_agent_with_env_vars(
     assert "DEBUG=true" in env_content
 
 
-def test_host_provision_agent_with_user_commands(
+def test_host_provision_agent_with_extra_provision_commands(
     local_host: Host,
     temp_host_dir: Path,
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
 ) -> None:
-    """provision_agent should run user commands."""
+    """provision_agent should run extra provision commands."""
     host = local_host
-    # Create a marker file via user command to verify execution
+    # Create a marker file via extra provision command to verify execution
     marker_file = temp_work_dir / "provision_marker.txt"
 
     options = CreateAgentOptions(
@@ -1903,7 +1903,7 @@ def test_host_provision_agent_with_user_commands(
         agent_type=AgentTypeName("generic"),
         command=CommandString("sleep 1"),
         provisioning=AgentProvisioningOptions(
-            user_commands=(f"echo 'provisioned' > {marker_file}",),
+            extra_provision_commands=(f"echo 'provisioned' > {marker_file}",),
         ),
     )
 

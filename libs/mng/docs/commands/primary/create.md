@@ -10,7 +10,7 @@ mng [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDO
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--in-place|--copy|--clone|--worktree]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--user-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--[no-]connect] [--[no-]auto-start] [--] [<AGENT_ARGS>...]
 ```
@@ -137,8 +137,7 @@ See [Provision Options](../secondary/provision.md) for full details.
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--grant` | text | Grant a permission to the agent [repeatable] | None |
-| `--user-command` | text | Run custom shell command during provisioning [repeatable] | None |
-| `--sudo-command` | text | Run custom shell command as root during provisioning [repeatable] | None |
+| `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 | `--append-to-file` | text | Append REMOTE:TEXT to file [repeatable] | None |
 | `--prepend-to-file` | text | Prepend REMOTE:TEXT to file [repeatable] | None |

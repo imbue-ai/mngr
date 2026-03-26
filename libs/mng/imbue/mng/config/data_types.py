@@ -793,8 +793,7 @@ class CreateCliOptions(CommonCliOptions):
     start_on_boot: bool | None
     start_host: bool
     grant: tuple[str, ...]
-    user_command: tuple[str, ...]
-    sudo_command: tuple[str, ...]
+    extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]

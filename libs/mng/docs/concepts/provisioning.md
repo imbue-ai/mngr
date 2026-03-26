@@ -12,7 +12,7 @@ mng provision --agent my-agent # Re-run provisioning manually
 Provisioning steps come from three sources, executed in order:
 
 1. **Plugin defaults**: The [agent type's](./agent_types.md) plugin defines required setup (e.g., installing Node.js for Claude)
-2. **User commands**: Flags like `--user-command`, `--upload-file`, etc. for the `mng create` and `mng provision` commands
+2. **User commands**: Flags like `--extra-provision-command`, `--upload-file`, etc. for the `mng create` and `mng provision` commands
 3. **Devcontainer hooks** [future]: If using a devcontainer, its lifecycle hooks (`onCreateCommand`, etc.) run as part of provisioning
 
 ## Custom steps
@@ -20,9 +20,8 @@ Provisioning steps come from three sources, executed in order:
 Add your own provisioning steps when creating an agent:
 
 ```bash
-mng create my-agent claude --user-command "pip install pandas"
+mng create my-agent claude --extra-provision-command "pip install pandas"
 mng create my-agent claude --upload-file ./config.json:/app/config.json
-mng create my-agent claude --sudo-command "apt-get install -y ffmpeg"
 ```
 
 These run after plugin defaults but before the agent starts.
