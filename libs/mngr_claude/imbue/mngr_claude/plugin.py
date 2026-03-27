@@ -955,40 +955,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
         return f"( {script_path} {shlex.quote(session_name)} ) &"
 
-    def _bootstrap_session_tracking(self) -> None:
-        """Bootstrap the session tracking file for agents that predate it.
-
-        Agents created before the session tracking feature was added have no
-        claude_session_id file, so the assembled command falls back to the
-        agent UUID -- which doesn't match any existing session. This method
-        scans the Claude project directory for the most recent session file
-        and writes its ID to the tracking file, enabling resume on next start.
-
-        Only acts when the tracking file is absent and sessions exist. Once
-        the SessionStart hook fires, it takes over tracking going forward.
-        """
-        tracking_path = self._get_agent_dir() / "claude_session_id"
-        if tracking_path.exists():
-            return
-
-        # Determine where Claude stores sessions for this agent's work_dir.
-        # Claude Code encodes the project path by replacing / and . with -.
-        config_base = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
-        encoded_path = str(self.work_dir).replace("/", "-").replace(".", "-")
-        project_dir = config_base / "projects" / encoded_path
-
-        if not project_dir.is_dir():
-            return
-
-        # Find the most recently modified session file
-        session_files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not session_files:
-            return
-
-        session_id = session_files[0].stem
-        tracking_path.write_text(session_id)
-        logger.info("Bootstrapped session tracking for agent {} (session {})", self.name, session_id)
-
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -1006,9 +972,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         An activity updater is started in the background to keep the agent's activity
         timestamp up-to-date while the tmux session is alive.
         """
-        # Bootstrap the session tracking file for old agents that predate it
-        if host.is_local:
-            self._bootstrap_session_tracking()
         if command_override is not None:
             base = str(command_override)
         elif self.agent_config.command is not None:
@@ -1033,10 +996,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         )
 
         # Build both command variants using the dynamic session ID.
-        # Use $CLAUDE_CONFIG_DIR to find session files in the per-agent config dir,
-        # falling back to ~/.claude/ for agents that haven't been provisioned yet
-        # (e.g. old agents created before per-agent config isolation was added).
-        resume_cmd = f'( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
+        # in the per-agent config dir rather than ~/.claude/.
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && {base} --resume "$MAIN_CLAUDE_SESSION_ID"'
         create_cmd = f"{base} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present

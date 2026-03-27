@@ -2468,13 +2468,7 @@ class Host(BaseHost, OnlineHostInterface):
                 if agent is None:
                     raise AgentNotFoundOnHostError(agent_id, self.id)
 
-                # Re-assemble the command fresh at start time so that agents
-                # created with older code get the latest command logic (e.g.
-                # session resume, background tasks). Also refresh env vars
-                # to pick up any new vars from modify_env_vars (e.g.
-                # CLAUDE_CONFIG_DIR). Both the command and env are persisted
-                # back to data.json / env file so they stay in sync.
-                command = self._reassemble_agent_command(agent)
+                command = self._get_agent_command(agent)
                 additional_commands = self._get_agent_additional_commands(agent)
 
                 onboarding_text: str | None = None
@@ -2586,98 +2580,6 @@ class Host(BaseHost, OnlineHostInterface):
             if agent.id == agent_id:
                 return agent
         return None
-
-    def _reassemble_agent_command(self, agent: AgentInterface) -> str:
-        """Re-assemble the agent command and persist the result.
-
-        For agent types that define a base command in their config (e.g. Claude's
-        "claude"), calls assemble_command to produce a fresh command string using
-        the current plugin logic. This ensures agents created with older code
-        (e.g. before session resume was added) get updated commands.
-
-        For agents that were created with a per-instance command override (e.g.
-        generic "sleep 42" agents), uses the stored command from data.json as-is
-        since re-assembly would lose the original command or duplicate cli_args.
-
-        In both cases, refreshes the env file via modify_env_vars so any new
-        vars (like CLAUDE_CONFIG_DIR) are picked up.
-        """
-        if agent.agent_config.command is not None:
-            # The agent type defines a base command -- re-assemble fresh to pick
-            # up the latest assembly logic (e.g. Claude's session resume logic,
-            # background tasks, updated session name prefix).
-            command_str = str(agent.assemble_command(host=self, agent_args=(), command_override=None))
-
-            # Update data.json with the fresh command
-            data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
-            try:
-                content = self.read_text_file(data_path)
-                data = json.loads(content)
-                if data.get("command") != command_str:
-                    data["command"] = command_str
-                    self.write_text_file(data_path, json.dumps(data, indent=2))
-                    logger.debug("Updated stale command in data.json for agent {}", agent.name)
-            except FileNotFoundError as e:
-                raise NoCommandDefinedError(f"No data.json file for agent {agent.name} ({agent.id})") from e
-        else:
-            # Per-instance command override -- use as-is from data.json
-            command_str = self._get_agent_command(agent)
-
-        # Refresh env vars so that any new vars from modify_env_vars
-        # (e.g. CLAUDE_CONFIG_DIR added after agent was created) are present
-        self._refresh_agent_env_vars(agent)
-
-        return command_str
-
-    def _refresh_agent_env_vars(self, agent: AgentInterface) -> None:
-        """Refresh an agent's env file by re-applying modify_env_vars.
-
-        Reads the existing env file, lets the agent add/update vars (e.g.
-        CLAUDE_CONFIG_DIR), and writes the result back. Preserves all
-        existing vars that the agent doesn't override.
-
-        Any env vars that point to non-existent directories are dropped to
-        avoid directing tools to empty config dirs. This handles the case
-        where modify_env_vars sets CLAUDE_CONFIG_DIR for an agent that was
-        never provisioned with the per-agent config dir -- without this
-        guard, Claude Code would use the empty dir instead of falling back
-        to ~/.claude/.
-        """
-        env_path = self.get_agent_env_path(agent)
-        try:
-            content = self.read_text_file(env_path)
-            env_vars = parse_env_file(content)
-        except FileNotFoundError:
-            env_vars = {}
-
-        old_vars = dict(env_vars)
-        agent.modify_env_vars(host=self, env_vars=env_vars)
-
-        # Drop config-dir env vars when the agent hasn't been provisioned.
-        # Without this guard, CLAUDE_CONFIG_DIR would point to a dir without
-        # credentials/settings, causing Claude Code to show onboarding instead
-        # of falling back to ~/.claude/. We detect provisioning by checking
-        # for the background tasks script that provision() creates.
-        agent_state_dir = self._get_agent_state_dir(agent)
-        is_provisioned = (
-            any((agent_state_dir / "commands").iterdir()) if (agent_state_dir / "commands").is_dir() else False
-        )
-        if not is_provisioned:
-            _CONFIG_DIR_VARS = frozenset({"CLAUDE_CONFIG_DIR"})
-            for var_name in _CONFIG_DIR_VARS:
-                if var_name in env_vars:
-                    logger.debug(
-                        "Dropping {} from env (agent not provisioned -- run 'mngr provision {}' to set up per-agent config)",
-                        var_name,
-                        agent.name,
-                    )
-                    del env_vars[var_name]
-            # Also drop MNGR_EMIT_COMMON_TRANSCRIPT since the transcript
-            # machinery depends on provisioning artifacts
-            env_vars.pop("MNGR_EMIT_COMMON_TRANSCRIPT", None)
-
-        if env_vars != old_vars:
-            self._write_agent_env_file(agent, env_vars)
 
     def _get_agent_command(self, agent: AgentInterface) -> str:
         """Get the command for an agent."""

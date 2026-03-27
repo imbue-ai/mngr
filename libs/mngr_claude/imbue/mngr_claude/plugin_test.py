@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -314,7 +313,7 @@ def test_claude_agent_assemble_command_with_no_args(
     sid_export = _sid_export_for(uuid)
     # Local hosts should NOT have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -332,7 +331,7 @@ def test_claude_agent_assemble_command_with_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
     )
 
 
@@ -355,7 +354,7 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
     )
 
 
@@ -377,7 +376,7 @@ def test_claude_agent_assemble_command_with_command_override(
     background_cmd = agent._build_background_tasks_command(session_name)
     sid_export = _sid_export_for(uuid)
     assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
+        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
     )
 
 
@@ -417,77 +416,8 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
-
-
-# =============================================================================
-# Session Tracking Bootstrap Tests
-# =============================================================================
-
-
-def test_bootstrap_session_tracking_writes_latest_session(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """_bootstrap_session_tracking should write the latest session ID to the tracking file."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-
-    # Ensure the agent state dir exists
-    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
-
-    # Set up a fake project dir with session files
-    encoded_path = str(agent.work_dir).replace("/", "-").replace(".", "-")
-    project_dir = Path.home() / ".claude" / "projects" / encoded_path
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    old_session = project_dir / "old-session-id.jsonl"
-    new_session = project_dir / "new-session-id.jsonl"
-    try:
-        old_session.write_text('{"old": true}\n')
-        os.utime(old_session, (1000000, 1000000))
-        new_session.write_text('{"new": true}\n')
-        os.utime(new_session, (2000000, 2000000))
-
-        agent._bootstrap_session_tracking()
-
-        tracking_path = agent._get_agent_dir() / "claude_session_id"
-        assert tracking_path.exists()
-        assert tracking_path.read_text() == "new-session-id"
-    finally:
-        old_session.unlink(missing_ok=True)
-        new_session.unlink(missing_ok=True)
-        project_dir.rmdir()
-
-
-def test_bootstrap_session_tracking_noop_when_tracking_exists(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """_bootstrap_session_tracking should not overwrite an existing tracking file."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-
-    # Ensure the agent state dir exists and has a tracking file
-    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
-    tracking_path = agent._get_agent_dir() / "claude_session_id"
-    tracking_path.write_text("existing-session-id")
-
-    agent._bootstrap_session_tracking()
-
-    assert tracking_path.read_text() == "existing-session-id"
-
-
-def test_bootstrap_session_tracking_noop_when_no_sessions(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """_bootstrap_session_tracking should not create tracking file when no sessions exist."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-
-    # Ensure the agent state dir exists
-    agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
-
-    agent._bootstrap_session_tracking()
-
-    tracking_path = agent._get_agent_dir() / "claude_session_id"
-    assert not tracking_path.exists()
 
 
 # =============================================================================

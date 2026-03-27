@@ -10,7 +10,6 @@ from typing import Any
 from typing import IO
 from typing import cast
 
-import pluggy
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
@@ -18,11 +17,9 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
-from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
@@ -54,7 +51,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -2183,225 +2179,6 @@ def test_host_get_agent_command_raises_when_no_data_file(
 
     with pytest.raises(NoCommandDefinedError):
         host._get_agent_command(agent)
-
-
-# =========================================================================
-# Tests for Host._reassemble_agent_command
-# =========================================================================
-
-
-def test_reassemble_agent_command_uses_stored_for_generic(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """For generic agents (no type command), _reassemble_agent_command should return the stored command."""
-    host = local_host
-    options = CreateAgentOptions(
-        name=AgentName("generic-reassemble"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 99"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    result = host._reassemble_agent_command(agent)
-    assert result == "sleep 99"
-
-
-def test_reassemble_agent_command_reassembles_typed_agent(
-    temp_host_dir: Path,
-    per_host_dir: Path,
-    temp_work_dir: Path,
-    temp_profile_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-    mngr_test_prefix: str,
-    active_concurrency_group: ConcurrencyGroup,
-) -> None:
-    """_reassemble_agent_command should re-assemble command when agent type has a config command."""
-    # Create a config with a custom typed agent that has a command defined
-    config = MngrConfig(
-        default_host_dir=temp_host_dir,
-        prefix=mngr_test_prefix,
-        agent_types={
-            AgentTypeName("typed-test"): AgentTypeConfig(
-                parent_type=AgentTypeName("generic"),
-                command=CommandString("test-binary"),
-            )
-        },
-    )
-    mngr_ctx = MngrContext(
-        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
-    )
-    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=per_host_dir, mngr_ctx=mngr_ctx)
-    host = provider.create_host(HostName("localhost"))
-
-    options = CreateAgentOptions(
-        name=AgentName("typed-agent"),
-        agent_type=AgentTypeName("typed-test"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    # Tamper with data.json to simulate a stale command
-    data_path = per_host_dir / "agents" / str(agent.id) / "data.json"
-    data = json.loads(data_path.read_text())
-    data["command"] = "stale-command"
-    data_path.write_text(json.dumps(data))
-
-    # Re-assembly should produce the fresh command from agent_config, not the stale one
-    result = host._reassemble_agent_command(agent)
-    assert result == "test-binary"
-
-    # Verify data.json was updated
-    updated_data = json.loads(data_path.read_text())
-    assert updated_data["command"] == "test-binary"
-
-
-def test_reassemble_agent_command_skips_update_when_command_unchanged(
-    temp_host_dir: Path,
-    per_host_dir: Path,
-    temp_work_dir: Path,
-    temp_profile_dir: Path,
-    plugin_manager: pluggy.PluginManager,
-    mngr_test_prefix: str,
-    active_concurrency_group: ConcurrencyGroup,
-) -> None:
-    """_reassemble_agent_command should not write data.json when the command hasn't changed."""
-    config = MngrConfig(
-        default_host_dir=temp_host_dir,
-        prefix=mngr_test_prefix,
-        agent_types={
-            AgentTypeName("typed-test"): AgentTypeConfig(
-                parent_type=AgentTypeName("generic"),
-                command=CommandString("test-binary"),
-            )
-        },
-    )
-    mngr_ctx = MngrContext(
-        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
-    )
-    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=per_host_dir, mngr_ctx=mngr_ctx)
-    host = provider.create_host(HostName("localhost"))
-
-    options = CreateAgentOptions(
-        name=AgentName("typed-same"),
-        agent_type=AgentTypeName("typed-test"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    data_path = per_host_dir / "agents" / str(agent.id) / "data.json"
-    mtime_before = data_path.stat().st_mtime
-
-    result = host._reassemble_agent_command(agent)
-    assert result == "test-binary"
-
-    # data.json should not have been rewritten since the command is the same
-    mtime_after = data_path.stat().st_mtime
-    assert mtime_before == mtime_after
-
-
-def test_reassemble_agent_command_uses_stored_for_generic_override(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """For generic agents, _reassemble_agent_command should return the stored command from data.json."""
-    host = local_host
-    options = CreateAgentOptions(
-        name=AgentName("update-cmd"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 88"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    # Tamper with the stored command
-    data_path = temp_host_dir / "agents" / str(agent.id) / "data.json"
-    data = json.loads(data_path.read_text())
-    data["command"] = "stale-command"
-    data_path.write_text(json.dumps(data))
-
-    # For generic agents, it reads from data.json as-is
-    result = host._reassemble_agent_command(agent)
-    assert result == "stale-command"
-
-
-def test_refresh_agent_env_vars_preserves_existing(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """_refresh_agent_env_vars should preserve existing env vars."""
-    host = local_host
-    options = CreateAgentOptions(
-        name=AgentName("env-refresh"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    # Write an env file
-    env_path = host.get_agent_env_path(agent)
-    env_path.write_text("MNGR_AGENT_NAME=env-refresh\n")
-
-    host._refresh_agent_env_vars(agent)
-
-    content = env_path.read_text()
-    assert "MNGR_AGENT_NAME=env-refresh" in content
-
-
-def test_refresh_agent_env_vars_drops_claude_config_dir_when_unprovisioned(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """_refresh_agent_env_vars should drop CLAUDE_CONFIG_DIR when the agent is not provisioned."""
-    host = local_host
-    options = CreateAgentOptions(
-        name=AgentName("unprov"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    # Write env with a stale CLAUDE_CONFIG_DIR pointing to a non-existent dir
-    env_path = host.get_agent_env_path(agent)
-    env_path.write_text("CLAUDE_CONFIG_DIR=/nonexistent/path\nMNGR_EMIT_COMMON_TRANSCRIPT=1\nKEEP_ME=yes\n")
-
-    host._refresh_agent_env_vars(agent)
-
-    content = env_path.read_text()
-    assert "CLAUDE_CONFIG_DIR" not in content
-    assert "MNGR_EMIT_COMMON_TRANSCRIPT" not in content
-    assert "KEEP_ME=yes" in content
-
-
-def test_refresh_agent_env_vars_keeps_claude_config_dir_when_provisioned(
-    local_host: Host,
-    temp_host_dir: Path,
-    temp_work_dir: Path,
-) -> None:
-    """_refresh_agent_env_vars should keep CLAUDE_CONFIG_DIR when the agent is provisioned."""
-    host = local_host
-    options = CreateAgentOptions(
-        name=AgentName("prov"),
-        agent_type=AgentTypeName("generic"),
-        command=CommandString("sleep 1"),
-    )
-    agent = host.create_agent_state(temp_work_dir, options)
-
-    # Add a script to commands/ to simulate provisioning (create_agent_state
-    # creates the dir, but provisioning populates it with scripts)
-    agent_state = temp_host_dir / "agents" / str(agent.id)
-    (agent_state / "commands" / "claude_background_tasks.sh").write_text("#!/bin/bash\n")
-
-    # Write env with CLAUDE_CONFIG_DIR
-    env_path = host.get_agent_env_path(agent)
-    config_dir = str(agent_state / "plugin" / "claude" / "anthropic")
-    env_path.write_text(f"CLAUDE_CONFIG_DIR={config_dir}\n")
-
-    host._refresh_agent_env_vars(agent)
-
-    content = env_path.read_text()
-    assert "CLAUDE_CONFIG_DIR" in content
 
 
 # =========================================================================
