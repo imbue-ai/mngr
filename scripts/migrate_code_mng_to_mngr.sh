@@ -211,23 +211,15 @@ elif [ "$moved" -eq 0 ]; then
 fi
 
 # Remove leftover libs/mng* directories.
-# After step 0 (artifacts) and step 1 (orphaned files), these should be empty.
-# In dry-run, exclude both artifacts and files that step 1 would have moved.
+# After artifact cleanup, orphaned file moves, and git mv renames,
+# these should be empty (or contain only gitignored artifacts).
 for d in libs/mng libs/mng_*; do
     [ -d "$d" ] || continue
-    has_real_files=$(find "$d" -type f \
-        -not -path '*/__pycache__/*' \
-        -not -path '*/htmlcov/*' \
-        -not -path '*/.pytest_cache/*' \
-        -not -path '*/.test_output/*' \
-        -not -name 'coverage.xml' \
-        -not -path '*/imbue/mng/*' \
-        -not -path '*/imbue/mng_*/*' \
-        -print -quit 2>/dev/null || true)
-    if [ -n "$has_real_files" ]; then
-        echo -e "  ${YELLOW}WARNING: $d has unexpected files and may need manual cleanup${NC}"
-    elif [ "$DRY_RUN" = true ]; then
-        dry "would remove $d"
+    if [ "$DRY_RUN" = true ]; then
+        dry "would remove $d (after previous steps clean it out)"
+    elif find "$d" -type f | read -r; then
+        # In real mode, if still non-empty after all cleanup, warn
+        echo -e "  ${YELLOW}WARNING: $d is not empty after cleanup -- keeping it${NC}"
     else
         rm -rf "$d"
         ok "Removed $d"
