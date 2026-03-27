@@ -271,7 +271,7 @@ def _install_mngr_editable_remote(
 ) -> None:
     """Install mngr in editable mode on a remote host by uploading a tarball."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        tarball_path = Path(tmpdir) / "imbue-mngr-repo.tar.gz"
+        tarball_path = Path(tmpdir) / "mngr-repo.tar.gz"
 
         # Create tarball of the monorepo using git archive
         with log_span("Packaging mngr monorepo for transfer"):
