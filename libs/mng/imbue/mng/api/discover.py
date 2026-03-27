@@ -152,8 +152,9 @@ def discover_hosts_and_agents(
     already knows which providers to query).
     """
     with log_span("Discovering hosts and agents from providers"):
-        # When the caller already specified providers, skip the optimization
-        if provider_names is not None or agent_identifiers is None:
+        # When the caller already specified providers, or no identifiers given,
+        # or safe mode is enabled, skip the optimization
+        if provider_names is not None or agent_identifiers is None or mng_ctx.is_full_discovery:
             return _run_discovery(mng_ctx, provider_names, include_destroyed, reset_caches)
 
         # Try to resolve identifiers to provider names from the event stream

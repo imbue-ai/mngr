@@ -639,6 +639,10 @@ class MngContext(FrozenModel):
         default_factory=lambda: ConcurrencyGroup(name="default"),
         description="Top-level concurrency group for managing spawned processes",
     )
+    is_full_discovery: bool = Field(
+        default=False,
+        description="When True, always query all providers during discovery (skip event-stream optimization)",
+    )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
         """Get a plugin's typed config, falling back to defaults if absent."""
@@ -708,6 +712,7 @@ class CommonCliOptions(FrozenModel):
     """
 
     headless: bool = False
+    safe: bool = False
     output_format: str
     quiet: bool
     verbose: int
