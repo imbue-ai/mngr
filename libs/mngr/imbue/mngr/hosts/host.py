@@ -580,12 +580,12 @@ class Host(BaseHost, OnlineHostInterface):
             )
 
     def execute_stateful_command(
-            self,
-            command: str,
-            user: str | None = None,
-            cwd: Path | None = None,
-            env: Mapping[str, str] | None = None,
-            timeout_seconds: float | None = None,
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
         """
         Execute a shell command on this host *that cannot be retried* and return the result.
@@ -683,7 +683,9 @@ class Host(BaseHost, OnlineHostInterface):
                 return datetime.fromtimestamp(mtime, tz=timezone.utc)
             except (FileNotFoundError, OSError):
                 return None
-        result = self.execute_idempotent_command(f"stat -c %Y '{str(path)}' 2>/dev/null || stat -f %m '{str(path)}' 2>/dev/null")
+        result = self.execute_idempotent_command(
+            f"stat -c %Y '{str(path)}' 2>/dev/null || stat -f %m '{str(path)}' 2>/dev/null"
+        )
         if result.success and result.stdout.strip():
             try:
                 mtime = int(result.stdout.strip())
@@ -1543,7 +1545,9 @@ class Host(BaseHost, OnlineHostInterface):
                 )
                 submodule_output = result_obj.stdout.strip()
             else:
-                result = source_host.execute_idempotent_command("git submodule status", cwd=source_path, timeout_seconds=10)
+                result = source_host.execute_idempotent_command(
+                    "git submodule status", cwd=source_path, timeout_seconds=10
+                )
                 submodule_output = result.stdout.strip() if result.success else ""
         except (ProcessError, Exception):
             # If we can't check for submodules, just skip the warning
@@ -2517,7 +2521,9 @@ class Host(BaseHost, OnlineHostInterface):
         current window. This is important for sessions with additional command windows.
         """
         all_pids: list[str] = []
-        result = self.execute_idempotent_command(f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true")
+        result = self.execute_idempotent_command(
+            f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
+        )
         if result.success and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):
                 if pane_pid:

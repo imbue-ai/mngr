@@ -771,7 +771,9 @@ def test_unset_vars_applied_during_agent_start(
     #
     # wait_for(shell_ready, error_message="Shell prompt not ready after Ctrl-C")
 
-    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter")
+    host.execute_stateful_command(
+        f"tmux send-keys -t '{session_name}' 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter"
+    )
     host.execute_stateful_command(f"tmux send-keys -t '{session_name}' 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter")
 
     def check_output() -> bool:

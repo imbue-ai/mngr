@@ -220,7 +220,9 @@ def _get_message_content(
 
     # If stdin was consumed by '-' for agent names, we can't also read it for message content
     if stdin_consumed:
-        raise UserInputError("When using '-' for agent names, message content must be provided via --message or --message-file")
+        raise UserInputError(
+            "When using '-' for agent names, message content must be provided via --message or --message-file"
+        )
 
     # Check if stdin has piped data (not a tty)
     if not sys.stdin.isatty():
@@ -228,7 +230,9 @@ def _get_message_content(
 
     # In headless mode, we cannot open an editor
     if not is_interactive:
-        raise UserInputError("No message provided and running in headless mode (use --message or --message-file to provide one)")
+        raise UserInputError(
+            "No message provided and running in headless mode (use --message or --message-file to provide one)"
+        )
 
     # Interactive mode: open editor
     message_from_editor = click.edit()

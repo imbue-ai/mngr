@@ -394,7 +394,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                         str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
                     )
             finally:
-                self.host.execute_idempotent_command(f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}")
+                self.host.execute_idempotent_command(
+                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
+                )
 
     def _send_message_simple(self, tmux_target: str, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""

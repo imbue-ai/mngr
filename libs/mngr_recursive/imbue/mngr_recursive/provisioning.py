@@ -128,7 +128,9 @@ def _ensure_uv_available(host: OnlineHostInterface) -> None:
 
         # Verify uv is findable after installation. Each execute_command runs
         # in a new shell, so we need to check common install locations.
-        verify_result = host.execute_idempotent_command('export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && command -v uv')
+        verify_result = host.execute_idempotent_command(
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && command -v uv'
+        )
         if not verify_result.success:
             raise MngrError("uv was installed but cannot be found on PATH")
 

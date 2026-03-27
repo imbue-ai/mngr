@@ -197,7 +197,9 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         """
         config_dir = self.get_pi_config_dir()
 
-        result = host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
+        result = host.execute_idempotent_command(
+            f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0
+        )
         if not result.success:
             raise PluginMngrError(f"Failed to create per-agent config dir {config_dir}: {result.stderr}")
 

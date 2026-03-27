@@ -620,11 +620,17 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
             continue
         dest = config_dir / item_name
         if symlink:
-            host.execute_idempotent_command(f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(
+                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
         elif source.is_dir():
-            host.execute_idempotent_command(f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(
+                f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
         else:
-            host.execute_idempotent_command(f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(
+                f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
 
 
 def _load_claude_resource_script(filename: str) -> str:
@@ -1296,7 +1302,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Resolve the work_dir on the remote host so the trust entry matches
         # the path Claude Code sees (e.g., Modal symlinks /mngr/... to /__modal/volumes/...)
         resolved_work_dir = self.work_dir
-        realpath_result = host.execute_idempotent_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
+        realpath_result = host.execute_idempotent_command(
+            f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
         if realpath_result.success and realpath_result.stdout.strip():
             resolved_work_dir = Path(realpath_result.stdout.strip())
         claude_json_data = build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)

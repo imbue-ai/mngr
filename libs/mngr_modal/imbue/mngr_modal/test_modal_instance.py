@@ -648,7 +648,9 @@ def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalPr
         )
 
         # curl to a public IP should succeed because 0.0.0.0/0 allows everything
-        result = host.execute_idempotent_command("curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com")
+        result = host.execute_idempotent_command(
+            "curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com"
+        )
         assert result.success
         assert "200" in result.stdout
 
@@ -707,7 +709,9 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         assert "/host_volume" in result.stdout.strip()
 
         # Verify data written to /mngr lands on the volume
-        result = host.execute_idempotent_command("echo 'test data' > /mngr/test_file.txt && cat /host_volume/test_file.txt")
+        result = host.execute_idempotent_command(
+            "echo 'test data' > /mngr/test_file.txt && cat /host_volume/test_file.txt"
+        )
         assert result.success
         assert "test data" in result.stdout
 

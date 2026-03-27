@@ -157,9 +157,7 @@ def _partition_running_agents(
         match host:
             case OnlineHostInterface() as online_host:
                 host_agents = online_host.get_agents()
-                running_agent_ids = {
-                    agent.id for agent in host_agents if agent.is_running()
-                }
+                running_agent_ids = {agent.id for agent in host_agents if agent.is_running()}
                 for agent_match in agent_list:
                     if agent_match.agent_id in running_agent_ids:
                         running.append(agent_match)
