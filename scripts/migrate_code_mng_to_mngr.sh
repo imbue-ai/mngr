@@ -48,6 +48,17 @@ find "$REPO_ROOT" -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
 find "$REPO_ROOT" -name coverage.xml -delete 2>/dev/null || true
 ok "Cleaned __pycache__, htmlcov, coverage.xml"
 
+# Remove empty leftover directories from the old mng names
+for d in libs/mng libs/mng_*; do
+    [ -d "$d" ] || continue
+    if find "$d" -type f | read -r; then
+        echo -e "  ${YELLOW}WARNING: $d is not empty and may need manual cleanup${NC}"
+    else
+        rm -rf "$d"
+        ok "Removed empty $d"
+    fi
+done
+
 # ── Helper: perl script for content replacement ───────────────────
 # Written to a temp file to avoid shell escaping issues with negative
 # lookahead (zsh eats ! in command-line perl -e).

@@ -82,6 +82,17 @@ find "$REPO_ROOT" -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
 find "$REPO_ROOT" -name coverage.xml -delete 2>/dev/null || true
 ok "Cleaned __pycache__, htmlcov, coverage.xml"
 
+# Remove empty leftover directories from the old mng names
+for d in "$REPO_ROOT"/libs/mng "$REPO_ROOT"/libs/mng_*; do
+    [ -d "$d" ] || continue
+    if find "$d" -type f | read -r; then
+        warn "$(basename "$d") is not empty and may need manual cleanup"
+    else
+        rm -rf "$d"
+        ok "Removed empty $(basename "$d")"
+    fi
+done
+
 # ── 2. Remove mng binary ──────────────────────────────────────────
 
 step 2 "Removing mng binary..."
