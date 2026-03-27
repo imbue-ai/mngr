@@ -414,6 +414,20 @@ for file in "${symlinks[@]+"${symlinks[@]}"}"; do
     fi
 done
 
+# Also remove any broken symlinks with mng in the name (untracked,
+# left behind after merge brings in renamed versions)
+find "$REPO_ROOT" -maxdepth 2 -type l -name '*mng*' ! -name '*mngr*' | while IFS= read -r link; do
+    if [ ! -e "$link" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            dry "would remove broken symlink $link"
+        else
+            rm "$link"
+            ok "Removed broken symlink $link"
+        fi
+        fixed_links=$((fixed_links + 1))
+    fi
+done
+
 if [ "$fixed_links" -eq 0 ]; then
     ok "No symlinks needed fixing"
 fi
