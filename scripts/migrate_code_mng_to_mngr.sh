@@ -84,6 +84,31 @@ else
     ok "Cleaned build artifacts"
 fi
 
+# ── Helper: clean and remove old libs/mng* directories ────────────
+cleanup_old_mng_dirs() {
+    for d in libs/mng libs/mng_*; do
+        [ -d "$d" ] || continue
+        find "$d" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+        find "$d" -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
+        find "$d" -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+        find "$d" -type d -name .test_output -exec rm -rf {} + 2>/dev/null || true
+        find "$d" -name coverage.xml -delete 2>/dev/null || true
+        find "$d" -name '.coverage' -delete 2>/dev/null || true
+        find "$d" -path '*/.reviewer/outputs' -exec rm -rf {} + 2>/dev/null || true
+        find "$d" -name '.stop_hook_consecutive_blocks' -delete 2>/dev/null || true
+        find "$d" -depth -type d -empty -delete 2>/dev/null || true
+        if [ -d "$d" ]; then
+            if find "$d" -type f | read -r; then
+                echo -e "  ${YELLOW}WARNING: $d still has non-artifact files -- keeping it${NC}"
+            else
+                rm -rf "$d"
+                ok "Removed $d"
+            fi
+        else
+            ok "Removed $d"
+        fi
+    done
+}
 
 # ── Helper: perl script for content replacement ───────────────────
 # Written to a temp file to avoid shell escaping issues with negative
@@ -240,6 +265,18 @@ if [ -d ".mng" ] && [ ! -d ".mngr" ]; then
         git mv ".mng" ".mngr"
         ok ".mng -> .mngr"
     fi
+elif [ -d ".mngr" ] && [ -d ".mng" ]; then
+    # Both exist (e.g. after merging main reintroduces .mng/).
+    # Copy any untracked files (local config like settings.local.toml)
+    # from .mng/ to .mngr/ before removing .mng/.
+    if [ "$DRY_RUN" = true ]; then
+        dry "would copy untracked files from .mng/ to .mngr/ and remove .mng/"
+    else
+        cp -a -n .mng/. .mngr/ 2>/dev/null || true
+        git rm -rf .mng 2>/dev/null || true
+        rm -rf .mng
+        ok "Merged .mng/ into .mngr/ and removed .mng/"
+    fi
 elif [ -d ".mngr" ]; then
     ok "Already renamed"
 fi
@@ -268,6 +305,18 @@ for dir in libs/mng libs/mng_*; do
         else
             git mv "$dir" "$newdir"
             ok "$dir -> $newdir"
+        fi
+        renamed_libs=$((renamed_libs + 1))
+    elif [ -d "$dir" ] && [ -d "$newdir" ]; then
+        # Both exist (after merging main reintroduces old paths).
+        # Copy untracked files to new dir first, then remove old.
+        if [ "$DRY_RUN" = true ]; then
+            dry "would merge $dir into $newdir and remove $dir"
+        else
+            cp -a -n "$dir"/. "$newdir"/ 2>/dev/null || true
+            git rm -rf "$dir" 2>/dev/null || true
+            rm -rf "$dir"
+            ok "Merged $dir into $newdir and removed"
         fi
         renamed_libs=$((renamed_libs + 1))
     fi
@@ -344,18 +393,8 @@ elif [ "$moved" -eq 0 ]; then
     ok "No orphaned files"
 fi
 
-# Clean up empty leftover libs/mng* directories
-for d in libs/mng libs/mng_*; do
-    [ -d "$d" ] || continue
-    if [ "$DRY_RUN" = true ]; then
-        dry "would remove $d"
-    elif find "$d" -type f | read -r; then
-        echo -e "  ${YELLOW}WARNING: $d is not empty after cleanup -- keeping it${NC}"
-    else
-        rm -rf "$d"
-        ok "Removed $d"
-    fi
-done
+# Clean up old dirs (first pass -- second pass runs after uv lock)
+cleanup_old_mng_dirs
 
 # ── 5. Fix symlinks with stale targets ───────────────────────────
 
@@ -396,6 +435,20 @@ for file in "${symlinks[@]+"${symlinks[@]}"}"; do
             fi
             fixed_links=$((fixed_links + 1))
         fi
+    fi
+done
+
+# Also remove any broken symlinks with mng in the name (untracked,
+# left behind after merge brings in renamed versions)
+find "$REPO_ROOT" -maxdepth 2 -type l -name '*mng*' ! -name '*mngr*' | while IFS= read -r link; do
+    if [ ! -e "$link" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            dry "would remove broken symlink $link"
+        else
+            rm "$link"
+            ok "Removed broken symlink $link"
+        fi
+        fixed_links=$((fixed_links + 1))
     fi
 done
 
@@ -568,8 +621,9 @@ for my $file (@ARGV) {
     $content =~ s/--with mngr-(\w+)==/--with imbue-mngr-$1==/g;
     # Fix false positive: dir_name must stay "mngr"
     $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
-    # Fix false positive: resolve_mngr_install_mode takes a package slug, not PyPI name
-    $content =~ s/_resolve_mngr_install_mode\(mode, "imbue-mngr-/_resolve_mngr_install_mode(mode, "mngr-/g;
+    # NOTE: resolve_mngr_install_mode takes a PyPI distribution name (used by
+    # importlib.metadata.distribution()), so it SHOULD have the imbue- prefix.
+    # A previous version of this script incorrectly treated this as a false positive.
     # Fix false positive: path segments (/ "mngr-xxx") must stay "mngr-xxx"
     $content =~ s|/ "imbue-mngr-|/ "mngr-|g;
     if ($content ne $orig) {
@@ -616,6 +670,9 @@ elif command -v uv &>/dev/null; then
 else
     skip "uv not found, skipping lock regeneration"
 fi
+
+# Final cleanup: re-run after uv lock which can recreate __pycache__
+cleanup_old_mng_dirs
 
 echo -e "\n${GREEN}${BOLD}Code migration complete.${NC}"
 if [ "$DRY_RUN" = true ]; then

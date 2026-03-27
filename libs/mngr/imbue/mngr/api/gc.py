@@ -569,7 +569,7 @@ def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderIn
         # Get size if possible
         size = SizeBytes(0)
         try:
-            result = host.execute_command(f"du -sb {shlex.quote(str(work_dir_path))} | cut -f1")
+            result = host.execute_idempotent_command(f"du -sb {shlex.quote(str(work_dir_path))} | cut -f1")
             if result.success and result.stdout.strip():
                 size = SizeBytes(int(result.stdout.strip()))
         except (ValueError, OSError):
@@ -579,7 +579,7 @@ def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderIn
         # Get creation time from the directory
         created_at = datetime.now(timezone.utc)
         try:
-            stat_result = host.execute_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
+            stat_result = host.execute_idempotent_command(f"stat -c %Y {shlex.quote(str(work_dir_path))}")
             if stat_result.success and stat_result.stdout.strip():
                 created_at = datetime.fromtimestamp(int(stat_result.stdout.strip()), tz=timezone.utc)
         except (ValueError, OSError):
@@ -618,7 +618,7 @@ def _is_git_worktree(host: OnlineHostInterface, path: Path) -> bool:
     """
     git_path = path / ".git"
 
-    result = host.execute_command(f"test -f {shlex.quote(str(git_path))}")
+    result = host.execute_idempotent_command(f"test -f {shlex.quote(str(git_path))}")
     return result.success
 
 
@@ -641,7 +641,7 @@ def _remove_git_worktree(host: OnlineHostInterface, work_dir_path: Path) -> None
     else:
         cmd = f"git worktree remove --force {shlex.quote(str(work_dir_path))}"
 
-    result = host.execute_command(cmd)
+    result = host.execute_idempotent_command(cmd)
 
     if not result.success:
         logger.warning("git worktree remove failed, falling back to directory removal: {}", result.stderr)
@@ -665,10 +665,10 @@ def _remove_work_dir_from_certified_data(host: OnlineHostInterface, work_dir_pat
 
 def _remove_directory(host: OnlineHostInterface, path: Path) -> None:
     """Remove a directory and all its contents."""
-    result = host.execute_command(f"test -e {shlex.quote(str(path))}")
+    result = host.execute_idempotent_command(f"test -e {shlex.quote(str(path))}")
     if result.success:
         cmd = f"rm -rf {shlex.quote(str(path))}"
-        result = host.execute_command(cmd)
+        result = host.execute_idempotent_command(cmd)
 
         if not result.success:
             raise MngrError(f"Failed to remove directory {path}: {result.stderr}")

@@ -178,7 +178,7 @@ def list_files_on_host(
     command = f"python3 -c {shlex.quote(_LIST_SCRIPT)} {quoted_dir} {is_recursive_flag}"
 
     with log_span("Listing files on host"):
-        result = host.execute_command(command, timeout_seconds=30.0)
+        result = host.execute_idempotent_command(command, timeout_seconds=30.0)
 
     if not result.success:
         raise MngrError(f"Failed to list files at {directory}: {result.stderr}")

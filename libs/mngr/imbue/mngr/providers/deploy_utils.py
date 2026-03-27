@@ -30,7 +30,7 @@ class MngrInstallMode(UpperCaseStrEnum):
     SKIP = auto()
 
 
-def detect_mngr_install_mode(package_name: str = "mngr") -> MngrInstallMode:
+def detect_mngr_install_mode(package_name: str = "imbue-mngr") -> MngrInstallMode:
     """Detect whether a package is installed in editable or package mode.
 
     Checks the package's direct_url.json metadata (PEP 610) for the
@@ -53,7 +53,7 @@ def detect_mngr_install_mode(package_name: str = "mngr") -> MngrInstallMode:
     return MngrInstallMode.PACKAGE
 
 
-def resolve_mngr_install_mode(mode: MngrInstallMode, package_name: str = "mngr") -> MngrInstallMode:
+def resolve_mngr_install_mode(mode: MngrInstallMode, package_name: str = "imbue-mngr") -> MngrInstallMode:
     """Resolve AUTO mode to a concrete install mode, or pass through others."""
     if mode == MngrInstallMode.AUTO:
         resolved = detect_mngr_install_mode(package_name)

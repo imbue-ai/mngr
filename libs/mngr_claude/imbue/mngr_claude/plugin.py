@@ -295,7 +295,7 @@ def build_claude_json_for_agent(
 
 def _check_claude_installed(host: OnlineHostInterface) -> bool:
     """Check if claude is installed on the host."""
-    result = host.execute_command("command -v claude", timeout_seconds=10.0)
+    result = host.execute_idempotent_command("command -v claude", timeout_seconds=10.0)
     return result.success
 
 
@@ -317,7 +317,7 @@ def _get_claude_version(host: OnlineHostInterface) -> str | None:
     Returns the version string (e.g., '2.1.50') or None if claude is not installed
     or the version cannot be determined.
     """
-    result = host.execute_command("claude --version", timeout_seconds=10.0)
+    result = host.execute_idempotent_command("claude --version", timeout_seconds=10.0)
     if not result.success:
         logger.debug("Failed to get claude version on host: {}", result.stderr)
         return None
@@ -368,10 +368,10 @@ def _install_claude(host: OnlineHostInterface, version: str | None = None) -> No
         f"bash /tmp/install_claude.sh{version_arg}",
         "rm -f /tmp/install_claude.sh",
         f"test -x {CLAUDE_INSTALL_PATH}/claude",
-        f"""echo 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' >> ~/.bashrc""",
+        f"""grep -qF 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' ~/.bashrc 2>/dev/null || echo 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' >> ~/.bashrc""",
     ]
     install_command = " && ".join(steps)
-    result = host.execute_command(install_command, timeout_seconds=300.0)
+    result = host.execute_idempotent_command(install_command, timeout_seconds=300.0)
     if not result.success:
         raise PluginMngrError(f"Failed to install claude. stderr: {result.stderr}")
 
@@ -556,7 +556,7 @@ def _provision_file_credentials(host: OnlineHostInterface, config_dir: Path) -> 
     credentials_source = Path.home() / ".claude" / ".credentials.json"
     credentials_dest = config_dir / ".credentials.json"
     if credentials_source.exists():
-        host.execute_command(
+        host.execute_idempotent_command(
             f"ln -sf {shlex.quote(str(credentials_source))} {shlex.quote(str(credentials_dest))}",
             timeout_seconds=5.0,
         )
@@ -620,11 +620,11 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
             continue
         dest = config_dir / item_name
         if symlink:
-            host.execute_command(f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
         elif source.is_dir():
-            host.execute_command(f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
         else:
-            host.execute_command(f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            host.execute_idempotent_command(f"cp {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0)
 
 
 def _load_claude_resource_script(filename: str) -> str:
@@ -648,7 +648,7 @@ def _provision_background_scripts(
     directories, so we do not write it here.
     """
     commands_dir = agent_state_dir / "commands"
-    host.execute_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(commands_dir))}", timeout_seconds=5.0)
 
     # Claude-specific scripts from this plugin's resources
     threads: list[ObservableThread] = []
@@ -1120,14 +1120,14 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         settings_path = self.work_dir / settings_relative
 
         # Only check gitignore if git is available and this is a git repository
-        is_git_repo = host.execute_command(
+        is_git_repo = host.execute_idempotent_command(
             "git rev-parse --is-inside-work-tree",
             cwd=self.work_dir,
             timeout_seconds=5.0,
         )
         if is_git_repo.success:
             # Verify .claude/settings.local.json is gitignored to avoid unstaged changes
-            result = host.execute_command(
+            result = host.execute_idempotent_command(
                 f"git check-ignore -q {shlex.quote(str(settings_relative))}",
                 cwd=self.work_dir,
                 timeout_seconds=5.0,
@@ -1236,7 +1236,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         config_dir = self.get_claude_config_dir()
 
         # Create the config directory (0700: contains credentials and session data)
-        host.execute_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
+        host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
 
         if host.is_local:
             self._setup_local_config_dir(host, options, config, config_dir)
@@ -1296,7 +1296,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # Resolve the work_dir on the remote host so the trust entry matches
         # the path Claude Code sees (e.g., Modal symlinks /mngr/... to /__modal/volumes/...)
         resolved_work_dir = self.work_dir
-        realpath_result = host.execute_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
+        realpath_result = host.execute_idempotent_command(f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0)
         if realpath_result.success and realpath_result.stdout.strip():
             resolved_work_dir = Path(realpath_result.stdout.strip())
         claude_json_data = build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
@@ -1516,7 +1516,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         # session files. Claude Code rebuilds the index on next startup.
         dest_project_dir = config_dir / "projects" / dest_project_name
         stale_index = dest_project_dir / "sessions-index.json"
-        host.execute_command(f"rm -f {shlex.quote(str(stale_index))}")
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(stale_index))}")
 
         host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
@@ -1552,7 +1552,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         ~/.claude.json trust entry.
         """
         config_dir = self.get_claude_config_dir()
-        per_agent_config_exists = host.execute_command(
+        per_agent_config_exists = host.execute_idempotent_command(
             f"test -d {shlex.quote(str(config_dir))}", timeout_seconds=5.0
         ).success
 
@@ -1619,7 +1619,7 @@ def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_
     remote_folders: list[str] = []
     for dest_path, _dest_contents in transfers:
         remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_command(f"mkdir -p {' '.join(remote_folders)}")
+    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
     if not mkdir_result.success:
         raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 

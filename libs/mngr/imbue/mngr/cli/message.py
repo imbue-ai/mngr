@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from typing import assert_never
 
 import click
@@ -43,6 +44,7 @@ class MessageCliOptions(CommonCliOptions):
     include: tuple[str, ...]
     exclude: tuple[str, ...]
     message_content: str | None
+    message_file: str | None
     provider: tuple[str, ...]
     on_error: str
     start: bool
@@ -88,6 +90,11 @@ class MessageCliOptions(CommonCliOptions):
     "message_content",
     help="The message content to send",
 )
+@optgroup.option(
+    "--message-file",
+    type=click.Path(exists=True),
+    help="File containing the message content to send",
+)
 @optgroup.group("Error Handling")
 @optgroup.option(
     "--on-error",
@@ -118,6 +125,10 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         command_class=MessageCliOptions,
     )
 
+    # Validate that --message and --message-file are not both provided
+    if opts.message_content is not None and opts.message_file is not None:
+        raise UserInputError("Cannot provide both --message and --message-file")
+
     # Build list of agent identifiers
     stdin_consumed = STDIN_PLACEHOLDER in opts.agents
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
@@ -129,9 +140,14 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     if agent_identifiers and opts.all_agents:
         raise UserInputError("Cannot specify both agent names and --all")
 
+    # Read message from file if --message-file is provided
+    resolved_message_content = opts.message_content
+    if opts.message_file is not None:
+        resolved_message_content = Path(opts.message_file).read_text()
+
     # Get message content
     message_content = _get_message_content(
-        opts.message_content, ctx, is_interactive=mngr_ctx.is_interactive, stdin_consumed=stdin_consumed
+        resolved_message_content, ctx, is_interactive=mngr_ctx.is_interactive, stdin_consumed=stdin_consumed
     )
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
@@ -204,7 +220,7 @@ def _get_message_content(
 
     # If stdin was consumed by '-' for agent names, we can't also read it for message content
     if stdin_consumed:
-        raise UserInputError("When using '-' for agent names, message content must be provided via --message")
+        raise UserInputError("When using '-' for agent names, message content must be provided via --message or --message-file")
 
     # Check if stdin has piped data (not a tty)
     if not sys.stdin.isatty():
@@ -212,7 +228,7 @@ def _get_message_content(
 
     # In headless mode, we cannot open an editor
     if not is_interactive:
-        raise UserInputError("No message provided and running in headless mode (use --message to provide one)")
+        raise UserInputError("No message provided and running in headless mode (use --message or --message-file to provide one)")
 
     # Interactive mode: open editor
     message_from_editor = click.edit()
@@ -288,17 +304,18 @@ def _emit_json_output(result: MessageResult) -> None:
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>]",
+    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>] [--message-file <FILE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 
-If no message is specified with --message, reads from stdin (if not a tty)
-or opens an editor (if interactive).""",
+If no message is specified with --message or --message-file, reads from stdin
+(if not a tty) or opens an editor (if interactive).""",
     aliases=("msg",),
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
         ("Send to all agents", 'mngr message --all --message "Hello everyone"'),
+        ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),
     ),

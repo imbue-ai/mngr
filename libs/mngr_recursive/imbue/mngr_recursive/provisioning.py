@@ -25,7 +25,7 @@ from imbue.mngr_recursive.data_types import RecursivePluginConfig
 
 def _get_remote_home(host: OnlineHostInterface) -> str:
     """Get the home directory of the default user on the remote host."""
-    result = host.execute_command("echo $HOME")
+    result = host.execute_idempotent_command("echo $HOME")
     if not result.success:
         raise MngrError(f"Failed to determine remote home directory: {result.stderr}")
     return result.stdout.strip()
@@ -62,7 +62,7 @@ def _upload_deploy_files(
     for dest_path in deploy_files:
         resolved_path = _resolve_remote_path(dest_path, remote_home)
         remote_paths.append(shlex.quote(str(resolved_path.parent)))
-    mkdir_result = host.execute_command(f"mkdir -p {' '.join(remote_paths)}")
+    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_paths)}")
     if not mkdir_result.success:
         raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 
@@ -117,18 +117,18 @@ def _ensure_uv_available(host: OnlineHostInterface) -> None:
     ($HOME/.local/bin, $HOME/.cargo/bin). Subsequent commands that need uv
     should use _UV_PATH_PREFIX to ensure it is on the PATH.
     """
-    result = host.execute_command("command -v uv")
+    result = host.execute_idempotent_command("command -v uv")
     if result.success:
         return
 
     with log_span("Installing uv on host"):
-        install_result = host.execute_command("curl -LsSf https://astral.sh/uv/install.sh | sh")
+        install_result = host.execute_idempotent_command("curl -LsSf https://astral.sh/uv/install.sh | sh")
         if not install_result.success:
             raise MngrError(f"Failed to install uv on host: {install_result.stderr.strip()}")
 
         # Verify uv is findable after installation. Each execute_command runs
         # in a new shell, so we need to check common install locations.
-        verify_result = host.execute_command('export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && command -v uv')
+        verify_result = host.execute_idempotent_command('export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && command -v uv')
         if not verify_result.success:
             raise MngrError("uv was installed but cannot be found on PATH")
 
@@ -210,10 +210,10 @@ def _install_mngr_package_mode(
 
     install_cmd = _UV_PATH_PREFIX + uv_env + " ".join(parts)
     with log_span("Installing mngr (package mode)"):
-        result = host.execute_command(install_cmd)
+        result = host.execute_idempotent_command(install_cmd)
         if not result.success:
             # Try with --force-reinstall if already installed
-            result = host.execute_command(install_cmd + " --force-reinstall")
+            result = host.execute_idempotent_command(install_cmd + " --force-reinstall")
             if not result.success:
                 raise MngrError(f"Failed to install mngr: {result.stderr.strip()}")
 
@@ -257,9 +257,9 @@ def _install_mngr_editable_local(
 
     install_cmd = " ".join(install_parts)
     with log_span("Installing mngr (editable mode, local)"):
-        result = host.execute_command(install_cmd)
+        result = host.execute_idempotent_command(install_cmd)
         if not result.success:
-            result = host.execute_command(install_cmd + " --force-reinstall")
+            result = host.execute_idempotent_command(install_cmd + " --force-reinstall")
             if not result.success:
                 raise MngrError(f"Failed to install mngr in editable mode: {result.stderr.strip()}")
 
@@ -295,13 +295,13 @@ def _install_mngr_editable_remote(
         # Extract and install on remote
         with log_span("Installing mngr (editable mode, remote)"):
             extract_cmd = f"rm -rf {remote_repo_dir} && mkdir -p {remote_repo_dir} && tar -xzf {remote_tarball} -C {remote_repo_dir} && rm {remote_tarball}"
-            result = host.execute_command(extract_cmd)
+            result = host.execute_idempotent_command(extract_cmd)
             if not result.success:
                 raise MngrError(f"Failed to extract mngr tarball: {result.stderr.strip()}")
 
             # Build the install command with editable installs for all workspace packages
             # First, discover which libs exist in the tarball
-            ls_result = host.execute_command(f"ls {remote_repo_dir}/libs/")
+            ls_result = host.execute_idempotent_command(f"ls {remote_repo_dir}/libs/")
             if not ls_result.success:
                 raise MngrError(f"Failed to list mngr libs: {ls_result.stderr.strip()}")
 
@@ -312,10 +312,10 @@ def _install_mngr_editable_remote(
                     install_parts.append(f"--with-editable libs/{lib_name}")
 
             install_cmd = " ".join(install_parts)
-            result = host.execute_command(install_cmd)
+            result = host.execute_idempotent_command(install_cmd)
             if not result.success:
                 # Try with --force-reinstall
-                result = host.execute_command(install_cmd + " --force-reinstall")
+                result = host.execute_idempotent_command(install_cmd + " --force-reinstall")
                 if not result.success:
                     raise MngrError(f"Failed to install mngr in editable mode: {result.stderr.strip()}")
 
@@ -411,7 +411,7 @@ def provision_mngr_for_agent(
         with log_span("Installing mngr for agent '{}' into {}", agent.name, agent_state_dir):
             # Create the target directories
             for d in (tool_dir, bin_dir):
-                mkdir_result = host.execute_command(f"mkdir -p {shlex.quote(str(d))}")
+                mkdir_result = host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(d))}")
                 if not mkdir_result.success:
                     raise MngrError(f"Failed to create directory {d}: {mkdir_result.stderr}")
 

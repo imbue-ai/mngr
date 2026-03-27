@@ -13,7 +13,9 @@ from typing import cast
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
+from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
+from pyinfra.connectors.util import CommandOutput
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -844,6 +846,7 @@ class _FakePyinfraHost:
         self,
         get_file_results: list[bool | Exception] | None = None,
         put_file_results: list[bool | Exception] | None = None,
+        run_shell_command_results: list[tuple[bool, CommandOutput] | Exception] | None = None,
     ) -> None:
         self.connected = True
         self.name = "fake-ssh-host"
@@ -851,8 +854,10 @@ class _FakePyinfraHost:
         self.data: dict[str, str] = {}
         self._get_file_results: list[bool | Exception] = get_file_results or []
         self._put_file_results: list[bool | Exception] = put_file_results or []
+        self._run_shell_command_results: list[tuple[bool, CommandOutput] | Exception] = run_shell_command_results or []
         self._get_file_call_count = 0
         self._put_file_call_count = 0
+        self._run_shell_command_call_count = 0
         self.disconnect_call_count = 0
 
     def connect(self, raise_exceptions: bool = False) -> None:
@@ -891,6 +896,20 @@ class _FakePyinfraHost:
                 raise result
             return result
         return True
+
+    def run_shell_command(
+        self,
+        command: StringCommand,
+        **kwargs: Any,
+    ) -> tuple[bool, CommandOutput]:
+        idx = self._run_shell_command_call_count
+        self._run_shell_command_call_count += 1
+        if idx < len(self._run_shell_command_results):
+            result = self._run_shell_command_results[idx]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return True, CommandOutput([])
 
 
 def _create_host_with_fake_connector(
@@ -961,8 +980,13 @@ class _FakeHostWithSSH(_FakePyinfraHost):
         ssh_client: _FakeSSHClient | None = None,
         get_file_results: list[bool | Exception] | None = None,
         put_file_results: list[bool | Exception] | None = None,
+        run_shell_command_results: list[tuple[bool, CommandOutput] | Exception] | None = None,
     ) -> None:
-        super().__init__(get_file_results=get_file_results, put_file_results=put_file_results)
+        super().__init__(
+            get_file_results=get_file_results,
+            put_file_results=put_file_results,
+            run_shell_command_results=run_shell_command_results,
+        )
         self.connector = _FakeSSHConnector(client=ssh_client)
 
 
@@ -1395,6 +1419,151 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="Could not read file"):
         host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_get_file_channel_closed_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """SSHException("Channel closed.") should retry without calling disconnect.
+
+    "Channel closed" means a specific channel died, not the whole transport.
+    Disconnecting would kill other threads' in-flight operations.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SSHException("Channel closed.")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+def test_put_file_channel_closed_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """SSHException("Channel closed.") should retry without calling disconnect.
+
+    "Channel closed" means a specific channel died, not the whole transport.
+    Disconnecting would kill other threads' in-flight operations.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SSHException("Channel closed.")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [OSError("Socket is closed"), SSHException("SSH session not active"), EOFError()],
+    ids=["socket-closed", "ssh-exception", "eof-error"],
+)
+def test_run_shell_command_retries_on_transient_error(
+    local_provider: LocalProviderInstance,
+    exception: Exception,
+) -> None:
+    """Transient SSH errors should be transparently retried on _run_shell_command."""
+    ok_result = (True, CommandOutput([]))
+    fake = _FakePyinfraHost(run_shell_command_results=[exception, ok_result])
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("echo hello"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+
+
+def test_run_shell_command_channel_exception_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """ChannelException should retry without calling disconnect on the connector."""
+    ok_result = (True, CommandOutput([]))
+    fake = _FakePyinfraHost(run_shell_command_results=[ChannelException(2, "open failed"), ok_result])
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("echo hello"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+def test_run_shell_command_channel_closed_retries_without_disconnect(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """SSHException("Channel closed.") should retry without calling disconnect.
+
+    "Channel closed" means a specific channel died, not the whole transport.
+    Disconnecting would kill other threads' in-flight operations.
+    """
+    ok_result = (True, CommandOutput([]))
+    fake = _FakePyinfraHost(run_shell_command_results=[SSHException("Channel closed."), ok_result])
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("echo hello"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+    assert fake.disconnect_call_count == 0
+
+
+def test_run_shell_command_ssh_exception_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Non-ChannelException, non-channel-closed SSHException should disconnect before retrying."""
+    ok_result = (True, CommandOutput([]))
+    fake = _FakePyinfraHost(run_shell_command_results=[SSHException("SSH session not active"), ok_result])
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("echo hello"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After all retries are exhausted, SSHException should be wrapped in HostConnectionError."""
+
+    class _HostWithImmediateSSHFailure(Host):
+        def _run_shell_command_with_transient_retry(
+            self,
+            command: StringCommand,
+            pyinfra_kwargs: dict[str, Any],
+        ) -> tuple[bool, CommandOutput]:
+            raise SSHException("connection lost")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateSSHFailure(
+        id=HostId.generate(),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="Could not execute command"):
+        host._run_shell_command(StringCommand("echo hello"))
 
 
 # =========================================================================

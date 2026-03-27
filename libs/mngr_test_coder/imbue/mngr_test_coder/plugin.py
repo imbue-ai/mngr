@@ -102,7 +102,7 @@ def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
     """
     logger.info("Installing llm-matched-responses plugin")
 
-    result = host.execute_command(
+    result = host.execute_idempotent_command(
         "llm install llm-matched-responses",
         timeout_seconds=120.0,
     )
@@ -120,7 +120,7 @@ def _install_llm_matched_responses_plugin(host: OnlineHostInterface) -> None:
             f"to {local_checkout}."
         )
 
-    result = host.execute_command(
+    result = host.execute_idempotent_command(
         f"llm install -e {shlex.quote(str(local_checkout))}",
         timeout_seconds=120.0,
     )

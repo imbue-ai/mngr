@@ -31,7 +31,7 @@ def add_safe_directory_on_remote(host: OnlineHostInterface, path: Path) -> None:
     """
     if host.is_local:
         return
-    host.execute_command(
+    host.execute_idempotent_command(
         f"git config --global --add safe.directory {shlex.quote(str(path))}",
     )
 

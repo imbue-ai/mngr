@@ -53,13 +53,13 @@ class PiCodingAgentConfig(AgentTypeConfig):
 
 def _check_pi_installed(host: OnlineHostInterface) -> bool:
     """Check if pi is installed on the host."""
-    result = host.execute_command("command -v pi", timeout_seconds=10.0)
+    result = host.execute_idempotent_command("command -v pi", timeout_seconds=10.0)
     return result.success
 
 
 def _install_pi(host: OnlineHostInterface) -> None:
     """Install pi on the host via npm."""
-    result = host.execute_command(
+    result = host.execute_idempotent_command(
         "npm install -g @mariozechner/pi-coding-agent",
         timeout_seconds=300.0,
     )
@@ -153,7 +153,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         confirmed the text is visible in the pane before this is called.
         """
         send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_command(send_enter_cmd)
+        result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(
                 str(self.name),
@@ -197,7 +197,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         """
         config_dir = self.get_pi_config_dir()
 
-        result = host.execute_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
+        result = host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
         if not result.success:
             raise PluginMngrError(f"Failed to create per-agent config dir {config_dir}: {result.stderr}")
 
@@ -219,7 +219,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         if config.sync_auth:
             auth_source = home_pi / "auth.json"
             if auth_source.exists():
-                result = host.execute_command(
+                result = host.execute_idempotent_command(
                     f"ln -sf {shlex.quote(str(auth_source))} {shlex.quote(str(config_dir / 'auth.json'))}",
                     timeout_seconds=5.0,
                 )
@@ -229,7 +229,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         if config.sync_home_settings:
             settings_source = home_pi / "settings.json"
             if settings_source.exists():
-                result = host.execute_command(
+                result = host.execute_idempotent_command(
                     f"ln -sf {shlex.quote(str(settings_source))} {shlex.quote(str(config_dir / 'settings.json'))}",
                     timeout_seconds=5.0,
                 )
@@ -239,7 +239,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
             for dir_name in ("skills", "prompts", "extensions", "themes"):
                 source = home_pi / dir_name
                 if source.exists():
-                    result = host.execute_command(
+                    result = host.execute_idempotent_command(
                         f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(config_dir / dir_name))}",
                         timeout_seconds=5.0,
                     )

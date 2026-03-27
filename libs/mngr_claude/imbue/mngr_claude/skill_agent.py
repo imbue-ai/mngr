@@ -68,7 +68,7 @@ def _install_skill_remotely(skill_name: str, skill_content: str, host: OnlineHos
     skill_path = Path(f".claude/skills/{skill_name}/SKILL.md")
 
     with log_span("Installing {} skill on remote host", skill_name):
-        host.execute_command(
+        host.execute_idempotent_command(
             f"mkdir -p ~/.claude/skills/{skill_name}",
             timeout_seconds=10.0,
         )

@@ -43,7 +43,7 @@ step()  { echo -e "\n${BOLD}${CYAN}[$1/${TOTAL_STEPS}]${NC} ${BOLD}$2${NC}"; }
 skip()  { echo -e "  ${CYAN}skip${NC} $*"; }
 dry()   { echo -e "  ${CYAN}[dry-run] $*${NC}"; }
 
-TOTAL_STEPS=10
+TOTAL_STEPS=11
 
 # ── Helper: perl rename script ───────────────────────────────────
 # Written to temp file to avoid zsh history expansion eating ! in lookaheads.
@@ -296,12 +296,60 @@ for repo_dir in "${EXTRA_DIRS[@]+"${EXTRA_DIRS[@]}"}"; do
     echo ""
 done
 
-# ── 4. Fix tmux session environment variables ─────────────────────
+# ── 4. Fix worktree .git pointers ─────────────────────────────────
+# Each worktree has a .git file containing a gitdir path back to the
+# main repo. If the main repo was renamed (e.g. ~/mng -> ~/mngr),
+# these pointers break. Fix them by updating stale paths.
+
+step 4 "Fixing worktree .git pointers..."
+
+wt_fixed=0
+for wt_root in "$HOME/.mngr/worktrees"/*/; do
+    [ -d "$wt_root" ] || continue
+    git_file="$wt_root.git"
+    [ -f "$git_file" ] || continue
+    gitdir_line=$(cat "$git_file")
+    if echo "$gitdir_line" | perl -ne 'if (/mng(?!r)/) { $f=1; last } END { exit($f ? 0 : 1) }' 2>/dev/null; then
+        new_line=$(echo "$gitdir_line" | perl -pe 's|/mng/|/mngr/|g; s|/mng$|/mngr|g')
+        if [ "$DRY_RUN" = true ]; then
+            dry "would fix .git pointer in $(basename "$wt_root")"
+        else
+            echo "$new_line" > "$git_file"
+            ok "Fixed .git pointer in $(basename "$wt_root")"
+        fi
+        wt_fixed=$((wt_fixed + 1))
+    fi
+done
+
+# Also fix the reverse pointers: main repo's .git/worktrees/*/gitdir
+# points back to each worktree's .git file
+if [ -d "$REPO_ROOT/.git/worktrees" ]; then
+    for gitdir_file in "$REPO_ROOT/.git/worktrees"/*/gitdir; do
+        [ -f "$gitdir_file" ] || continue
+        old_path=$(cat "$gitdir_file")
+        if echo "$old_path" | perl -ne 'if (/mng(?!r)/) { $f=1; last } END { exit($f ? 0 : 1) }' 2>/dev/null; then
+            new_path=$(echo "$old_path" | perl -pe 's|/mng/|/mngr/|g; s|/mng$|/mngr|g')
+            if [ "$DRY_RUN" = true ]; then
+                dry "would fix reverse pointer in $(basename "$(dirname "$gitdir_file")")"
+            else
+                echo "$new_path" > "$gitdir_file"
+                ok "Fixed reverse pointer in $(basename "$(dirname "$gitdir_file")")"
+            fi
+            wt_fixed=$((wt_fixed + 1))
+        fi
+    done
+fi
+
+if [ "$wt_fixed" -eq 0 ]; then
+    ok "No worktree pointers need fixing"
+fi
+
+# ── 5. Fix tmux session environment variables ─────────────────────
 # Running tmux sessions have env vars pointing to ~/.mng/. Update the
 # session-level environment so new panes get the right values.
 # (Existing panes keep their old env until restarted.)
 
-step 4 "Fixing tmux session environment variables..."
+step 5 "Fixing tmux session environment variables..."
 
 if command -v tmux &>/dev/null && tmux ls &>/dev/null 2>&1; then
     tmux_fixed=0
@@ -331,7 +379,7 @@ fi
 
 # ── 5. Fix shell configs ────────────────────────────────────────
 
-step 5 "Fixing shell configs..."
+step 6 "Fixing shell configs..."
 
 fixed_any=false
 for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.config/fish/config.fish" "$HOME/.envrc"; do
@@ -347,7 +395,7 @@ fi
 
 # ── 5. Check current env vars for stale references ─────────────────
 
-step 6 "Checking environment variables..."
+step 7 "Checking environment variables..."
 
 stale_vars=$(env | grep -i '_mng_\|^mng_\|\.mng' | grep -iv 'mngr' || true)
 if [ -n "$stale_vars" ]; then
@@ -361,7 +409,7 @@ fi
 
 # ── 6. Fix agent data.json files ────────────────────────────────────
 
-step 7 "Fixing agent data.json and env files..."
+step 8 "Fixing agent data.json and env files..."
 
 agent_fixed=0
 for agent_dir in "$HOME/.mngr/agents"/*/; do
@@ -404,7 +452,7 @@ fi
 
 # ── 7. Fix Claude data ─────────────────────────────────────────────
 
-step 8 "Fixing Claude data..."
+step 9 "Fixing Claude data..."
 
 fix_claude_json "$HOME/.claude.json"
 
@@ -462,7 +510,7 @@ fi
 
 # ── 8. Rename ~/.config/mng ────────────────────────────────────────
 
-step 9 "Renaming ~/.config/mng..."
+step 10 "Renaming ~/.config/mng..."
 
 if [ -d "$HOME/.config/mng" ] && [ ! -d "$HOME/.config/mngr" ]; then
     if [ "$DRY_RUN" = true ]; then
@@ -479,12 +527,12 @@ fi
 
 # ── 9. Sync packages ──────────────────────────────────────────────
 
-step 10 "Syncing packages..."
+step 11 "Syncing packages..."
 if [ "$DRY_RUN" = true ]; then
     dry "would run uv sync --all-packages"
 else
     if command -v uv &>/dev/null; then
-        uv sync --all-packages
+        uv sync --reinstall --all-packages
         ok "Packages synced"
     else
         skip "uv not found"

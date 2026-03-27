@@ -463,12 +463,12 @@ def test_remote_lock_cooperatively_removes_lock_file_on_error(
     with pytest.raises(RuntimeError):
         with host.lock_cooperatively(timeout_seconds=5.0):
             # Verify the lock file was created
-            result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+            result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists")
             assert "exists" in result.stdout
             raise RuntimeError("simulated failure")
 
     # After the error, the lock file should have been removed
-    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
     assert "missing" in result.stdout
 
 
@@ -489,7 +489,7 @@ def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
             raise RuntimeError("simulated failure")
 
     # With the env var set, the lock file should still exist
-    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
     assert "exists" in result.stdout
 
 
@@ -505,11 +505,11 @@ def test_remote_lock_cooperatively_removes_lock_file_on_success(
 
     with host.lock_cooperatively(timeout_seconds=5.0):
         # Lock file should exist while locked
-        result = host.execute_command(f"test -f '{lock_file_path}' && echo exists")
+        result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists")
         assert "exists" in result.stdout
 
     # After successful exit, the lock file should be removed
-    result = host.execute_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
+    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
     assert "missing" in result.stdout
 
 
@@ -751,7 +751,7 @@ def test_unset_vars_applied_during_agent_start(
 
     # Wait for the tmux session to exist
     def session_ready() -> bool:
-        result = host.execute_command(f"tmux has-session -t '{session_name}'")
+        result = host.execute_idempotent_command(f"tmux has-session -t '{session_name}'")
         if not result.success:
             return False
         pane_content = capture_tmux_pane_content(host, session_name)
@@ -761,7 +761,7 @@ def test_unset_vars_applied_during_agent_start(
 
     # Send Ctrl-C to kill the foreground sleep, returning control to the shell.
     # This lets us send echo commands to check environment variables.
-    host.execute_command(f"tmux send-keys -t '{session_name}' C-c")
+    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' C-c")
 
     # This was enabled in modal, but caused things to fail locally. I don't think we need or want this (and I did do a better job of waiting above by ensuring that the sleep text shows up)
     # # Wait for the shell prompt to return after Ctrl-C
@@ -771,8 +771,8 @@ def test_unset_vars_applied_during_agent_start(
     #
     # wait_for(shell_ready, error_message="Shell prompt not ready after Ctrl-C")
 
-    host.execute_command(f"tmux send-keys -t '{session_name}' 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter")
-    host.execute_command(f"tmux send-keys -t '{session_name}' 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter")
+    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter")
+    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter")
 
     def check_output() -> bool:
         output = capture_tmux_pane_content(host, session_name)
@@ -2559,7 +2559,7 @@ def test_rsync_files_remote_files_from_handling(
 
     # Verify the temporary files_from file was cleaned up from the remote
     # by checking that no files matching the pattern exist
-    result = ssh_host.execute_command("ls /tmp/rsync_files_from_*.txt 2>/dev/null || true")
+    result = ssh_host.execute_idempotent_command("ls /tmp/rsync_files_from_*.txt 2>/dev/null || true")
     assert "rsync_files_from_" not in result.stdout
 
 

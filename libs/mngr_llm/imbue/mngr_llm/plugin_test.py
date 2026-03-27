@@ -64,7 +64,8 @@ def _make_host_stub(settings_file_exists: bool = False, settings_content: str = 
         return settings_content
 
     return SimpleNamespace(
-        execute_command=_execute_command,
+        execute_idempotent_command=_execute_command,
+        execute_stateful_command=_execute_command,
         read_text_file=_read_text_file,
     )
 

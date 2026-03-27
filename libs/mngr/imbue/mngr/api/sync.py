@@ -237,13 +237,13 @@ class RemoteGitContext(GitContextInterface):
         return self._host
 
     def has_uncommitted_changes(self, path: Path) -> bool:
-        result = self._host.execute_command("git status --porcelain", cwd=path)
+        result = self._host.execute_idempotent_command("git status --porcelain", cwd=path)
         if not result.success:
             raise MngrError(f"git status failed in {path}: {result.stderr}")
         return len(result.stdout.strip()) > 0
 
     def git_stash(self, path: Path) -> bool:
-        result = self._host.execute_command(
+        result = self._host.execute_stateful_command(
             'git stash push -u -m "mngr-sync-stash"',
             cwd=path,
         )
@@ -252,26 +252,26 @@ class RemoteGitContext(GitContextInterface):
         return "No local changes to save" not in result.stdout
 
     def git_stash_pop(self, path: Path) -> None:
-        result = self._host.execute_command("git stash pop", cwd=path)
+        result = self._host.execute_stateful_command("git stash pop", cwd=path)
         if not result.success:
             raise MngrError(f"git stash pop failed: {result.stderr}")
 
     def git_reset_hard(self, path: Path) -> None:
-        result = self._host.execute_command("git reset --hard HEAD", cwd=path)
+        result = self._host.execute_idempotent_command("git reset --hard HEAD", cwd=path)
         if not result.success:
             raise MngrError(f"git reset --hard failed: {result.stderr}")
-        result = self._host.execute_command("git clean -fd", cwd=path)
+        result = self._host.execute_idempotent_command("git clean -fd", cwd=path)
         if not result.success:
             raise MngrError(f"git clean failed: {result.stderr}")
 
     def get_current_branch(self, path: Path) -> str:
-        result = self._host.execute_command("git rev-parse --abbrev-ref HEAD", cwd=path)
+        result = self._host.execute_idempotent_command("git rev-parse --abbrev-ref HEAD", cwd=path)
         if not result.success:
             raise MngrError(f"Failed to get current branch: {result.stderr}")
         return result.stdout.strip()
 
     def is_git_repository(self, path: Path) -> bool:
-        result = self._host.execute_command("git rev-parse --git-dir", cwd=path)
+        result = self._host.execute_idempotent_command("git rev-parse --git-dir", cwd=path)
         return result.success
 
 
@@ -482,7 +482,7 @@ def sync_files(
             if host.is_local:
                 destination_path.mkdir(parents=True, exist_ok=True)
             else:
-                mkdir_result = host.execute_command(f"mkdir -p {shlex.quote(str(destination_path))}")
+                mkdir_result = host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(destination_path))}")
                 if not mkdir_result.success:
                     raise MngrError(f"Failed to create remote directory {destination_path}: {mkdir_result.stderr}")
 
@@ -495,7 +495,7 @@ def sync_files(
 
             with log_span("{} files from {} to {}", direction, source_path, destination_path):
                 logger.debug("Running rsync command: {}", cmd_str)
-                result: CommandResult = host.execute_command(cmd_str)
+                result: CommandResult = host.execute_idempotent_command(cmd_str)
 
             if not result.success:
                 raise MngrError(f"rsync failed: {result.stderr}")
@@ -548,7 +548,7 @@ def _dir_exists(host: OnlineHostInterface, path: Path) -> bool:
     """Check if a directory exists on the given host."""
     if host.is_local:
         return path.is_dir()
-    result = host.execute_command(f"test -d {shlex.quote(str(path))}")
+    result = host.execute_idempotent_command(f"test -d {shlex.quote(str(path))}")
     return result.success
 
 
@@ -646,7 +646,7 @@ def _local_git_push_mirror(
     # source_branch because in the worktree case (local agents), the source
     # branch may already be checked out in the source worktree, and git forbids
     # two worktrees from having the same branch checked out.
-    reset_result = host.execute_command(
+    reset_result = host.execute_idempotent_command(
         f"git reset --hard refs/heads/{source_branch}",
         cwd=destination_path,
     )
@@ -711,7 +711,7 @@ def _local_git_push_branch(
             )
 
     # Reset the target branch to the fetched commit
-    reset_result = host.execute_command(
+    reset_result = host.execute_idempotent_command(
         f"git reset --hard {fetched_commit}",
         cwd=destination_path,
     )
@@ -752,7 +752,7 @@ def _remote_git_push_mirror(
     logger.debug("Performing mirror push to {}", git_url)
 
     # Get pre-push HEAD from the remote
-    pre_push_head_result = host.execute_command("git rev-parse HEAD", cwd=destination_path)
+    pre_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
     pre_push_head = pre_push_head_result.stdout.strip() if pre_push_head_result.success else None
 
     if is_dry_run:
@@ -770,7 +770,7 @@ def _remote_git_push_mirror(
         "git config receive.denyDeleteCurrent ignore",
         "git checkout --detach HEAD",
     ]:
-        config_result = host.execute_command(config_cmd, cwd=destination_path)
+        config_result = host.execute_idempotent_command(config_cmd, cwd=destination_path)
         if not config_result.success:
             raise GitSyncError(f"Failed to configure remote for mirror push: {config_result.stderr}")
 
@@ -784,7 +784,7 @@ def _remote_git_push_mirror(
         raise GitSyncError(e.stderr) from e
 
     # Reset working tree on remote to match the source branch
-    reset_result = host.execute_command(
+    reset_result = host.execute_idempotent_command(
         f"git reset --hard refs/heads/{source_branch}",
         cwd=destination_path,
     )
@@ -792,7 +792,7 @@ def _remote_git_push_mirror(
         raise GitSyncError(f"Failed to update working tree: {reset_result.stderr}")
 
     # Count actual commits transferred by comparing pre/post HEAD
-    post_push_head_result = host.execute_command("git rev-parse HEAD", cwd=destination_path)
+    post_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
     post_push_head = post_push_head_result.stdout.strip() if post_push_head_result.success else None
 
     if pre_push_head is not None and post_push_head is not None and pre_push_head != post_push_head:
@@ -821,7 +821,7 @@ def _remote_git_push_branch(
     logger.debug("Pushing branch {} to {} via SSH", source_branch, git_url)
 
     # Get pre-push HEAD from the remote
-    pre_push_head_result = host.execute_command("git rev-parse HEAD", cwd=destination_path)
+    pre_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
     pre_push_head = pre_push_head_result.stdout.strip() if pre_push_head_result.success else None
 
     if is_dry_run:
@@ -830,7 +830,7 @@ def _remote_git_push_branch(
         return 0
 
     # Configure remote to accept pushes to the checked-out branch
-    config_result = host.execute_command(
+    config_result = host.execute_idempotent_command(
         "git config receive.denyCurrentBranch updateInstead",
         cwd=destination_path,
     )
@@ -858,7 +858,7 @@ def _remote_git_push_branch(
         raise GitSyncError(e.stderr) from e
 
     # Count actual commits transferred
-    post_push_head_result = host.execute_command("git rev-parse HEAD", cwd=destination_path)
+    post_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
     post_push_head = post_push_head_result.stdout.strip() if post_push_head_result.success else None
 
     commits_transferred = 0
