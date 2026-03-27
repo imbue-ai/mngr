@@ -178,9 +178,10 @@ def setup_command_context(
             # Handle cases where stdout is uninitialized (e.g., xdist workers)
             is_interactive = False
 
-    # Update MngrContext with the resolved is_interactive
+    # Update MngrContext with the resolved is_interactive and safe mode
     mngr_ctx = mngr_ctx.model_copy_update(
         to_update(mngr_ctx.field_ref().is_interactive, is_interactive),
+        to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
@@ -239,7 +240,7 @@ def setup_command_context(
             ctx.parent.meta["is_error_reporting_enabled"] = True
 
     # Run pre-command scripts if configured for this command
-    _run_pre_command_scripts(mngr_ctx.config, command_name, cg)
+    _run_pre_command_scripts(mngr_ctx.config, command_name, cg, cwd=mngr_ctx.project_root)
 
     # Store command metadata for lifecycle hooks (on_after_command, on_error)
     if ctx.parent is not None:
@@ -525,7 +526,7 @@ def _run_single_script(script: str, cg: ConcurrencyGroup, cwd: Path | None) -> t
         return (script, e.returncode if e.returncode is not None else -1, e.stdout, e.stderr)
 
 
-def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: ConcurrencyGroup) -> None:
+def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: ConcurrencyGroup, cwd: Path | None) -> None:
     """Run pre-command scripts configured for this command.
 
     Scripts are run in parallel and all must succeed (exit code 0).

@@ -11,8 +11,10 @@ import pluggy
 import pytest
 from loguru import logger
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import _all_identifiers_found
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.list import AgentErrorInfo
@@ -654,11 +656,17 @@ def test_list_agents_with_include_filter_excludes_non_matching(
 # =============================================================================
 
 
-def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
+def test_discover_hosts_and_agents_returns_empty_for_no_agents(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """discover_all_hosts_and_agents should return empty dict when no agents exist."""
-    agents_by_host, providers = discover_all_hosts_and_agents(temp_mngr_ctx)
+    """discover_hosts_and_agents should return empty dict when no agents exist."""
+    agents_by_host, providers = discover_hosts_and_agents(
+        temp_mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
     assert isinstance(agents_by_host, dict)
     assert isinstance(providers, list)
     # At least the local provider should be present
@@ -923,7 +931,13 @@ def test_discover_hosts_and_agents_groups_agents_by_host(
         ),
     )
 
-    agents_by_host, providers = discover_all_hosts_and_agents(temp_mngr_ctx)
+    agents_by_host, providers = discover_hosts_and_agents(
+        temp_mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
 
     local_host.destroy_agent(agent)
 

@@ -42,6 +42,7 @@ from imbue.mngr_kanpan.data_types import PrState
 from imbue.mngr_kanpan.data_types import RefreshHook
 from imbue.mngr_kanpan.fetcher import fetch_agent_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
+from imbue.mngr_kanpan.fetcher import repo_path_from_labels
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0

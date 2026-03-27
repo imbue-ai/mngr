@@ -16,6 +16,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import merge_cli_args
 from imbue.mngr.config.data_types import merge_dict_fields
@@ -32,6 +33,12 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.logging import LoggingConfig
+
+
+class _TestAgentTypeConfig(AgentTypeConfig):
+    """Test subclass with an extra field for testing subclass-specific field handling."""
+
+    custom_flag: bool = Field(default=False)
 
 
 def test_logging_config_merge_overrides_all_fields() -> None:

@@ -67,6 +67,7 @@ from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
+from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import ensure_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import get_claude_config_path

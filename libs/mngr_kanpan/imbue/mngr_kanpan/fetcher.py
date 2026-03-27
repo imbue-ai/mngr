@@ -11,7 +11,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
@@ -88,7 +88,7 @@ def fetch_agent_snapshot(
 
 
 def fetch_github_data(mngr_ctx: MngrContext, agents: list[AgentDetails]) -> GitHubData:
-    """Fetch GitHub PR data and build the PR-to-branch index.
+    """Fetch GitHub PR data from all unique repos and build the PR-to-branch index.
 
     Discovers repos from each agent's 'remote' label (set at creation time).
     Fetches PRs once per unique repo via gh --repo (no local cwd needed).
@@ -292,7 +292,13 @@ def _build_hook_env(entry: AgentBoardEntry) -> dict[str, str]:
 
 def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
-    agents_by_host, _ = discover_all_hosts_and_agents(mngr_ctx)
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=(str(agent_name),),
+        include_destroyed=False,
+        reset_caches=False,
+    )
     agent, _host = find_and_maybe_start_agent_by_name_or_id(
         str(agent_name),
         agents_by_host,
@@ -311,7 +317,13 @@ def _load_muted_agents(mngr_ctx: MngrContext) -> set[AgentName]:
     """Load the set of muted agent names from certified data."""
     muted: set[AgentName] = set()
     try:
-        agents_by_host, _providers = discover_all_hosts_and_agents(mngr_ctx)
+        agents_by_host, _providers = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
         for _host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
                 if _is_agent_muted(agent_ref.certified_data):

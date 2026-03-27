@@ -993,6 +993,7 @@ def test_dispatch_immediate_custom_command_does_not_mark() -> None:
 
 
 def test_carry_forward_pr_data_preserves_old_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mngr/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1042,6 +1043,12 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url="https://github.com/org/repo/compare/mngr/agent-1?expand=1",
+        column_data=repo_labels,
+    )
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        repo_pr_loaded={"org/repo": True},
+        fetch_time_seconds=1.0,
     )
 
     new_entry = AgentBoardEntry(
@@ -1078,6 +1085,12 @@ def test_carry_forward_pr_data_handles_new_agents() -> None:
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("modal"),
         branch="mngr/agent-new",
+        column_data=repo_labels,
+    )
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        repo_pr_loaded={},
+        fetch_time_seconds=2.0,
     )
 
     result = _carry_forward_pr_data(old, new)
@@ -1118,6 +1131,7 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url="https://github.com/org/repo/compare/mngr/agent-1?expand=1",
+        column_data=ColumnData(labels={"remote": "git@github.com:org/repo.git"}),
     )
     snapshot = BoardSnapshot(
         entries=(entry,),
@@ -1132,6 +1146,7 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
 
 
 def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mngr/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),

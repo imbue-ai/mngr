@@ -11,8 +11,6 @@ mngr schedule [add|remove|update|list|run] [OPTIONS]
 
 Schedule invocations of mngr commands.
 
-Schedule invocations of mngr commands.
-
 Manage cron-scheduled triggers that run mngr commands (create, start, message,
 exec) on a specified provider at regular intervals. This is useful for setting
 up autonomous agents that run on a recurring schedule.

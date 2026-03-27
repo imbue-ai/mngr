@@ -2,7 +2,7 @@
 
 ## Test artifacts
 
-Each e2e test produces artifacts in `.test_output/e2e/<timestamp>/<test_name>/` (relative to the repo root):
+Each e2e test produces artifacts in `.test_output/<timestamp>/<test_name>/`:
 
 - **transcript.txt** -- a log of every command run during the test, with stdout, stderr, and exit codes
 - **tutorial_block.txt** -- the original tutorial script block the test covers (if any)
@@ -81,7 +81,7 @@ MNGR_HOST_DIR=/path/from/output mngr exec <agent_name> 'ps aux'
 When you're done debugging, run the destroy script that was saved alongside the test artifacts:
 
 ```bash
-./.test_output/e2e/<timestamp>/<test_name>/destroy-env
+./libs/mngr/imbue/mngr/e2e/.test_output/<timestamp>/<test_name>/destroy-env
 ```
 
 This destroys all agents and kills the isolated tmux server.

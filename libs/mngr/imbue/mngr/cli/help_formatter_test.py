@@ -21,6 +21,7 @@ from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.main import BUILTIN_COMMANDS
+from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
 
 

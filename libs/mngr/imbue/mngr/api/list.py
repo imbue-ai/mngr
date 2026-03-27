@@ -16,7 +16,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
@@ -247,8 +247,12 @@ def _list_agents_batch(
 ) -> None:
     """Batch mode: load all agents from all providers, then process hosts."""
     with log_span("Loading agents from all providers"):
-        agents_by_host, providers = discover_all_hosts_and_agents(
-            mngr_ctx, provider_names, include_destroyed=True, reset_caches=reset_caches
+        agents_by_host, providers = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=provider_names,
+            agent_identifiers=None,
+            include_destroyed=True,
+            reset_caches=reset_caches,
         )
     provider_map = {provider.name: provider for provider in providers}
     logger.trace("Found {} hosts with agents", len(agents_by_host))

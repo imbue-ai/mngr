@@ -46,9 +46,11 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
@@ -2376,7 +2378,7 @@ class Host(BaseHost, OnlineHostInterface):
             tmux_config_path = self._create_host_tmux_config()
 
             onboarding_marker = self.mngr_ctx.profile_dir / "tmux_onboarding_shown"
-            is_onboarding_needed = not onboarding_marker.exists()
+            is_onboarding_needed = not onboarding_marker.exists() and os.environ.get("IS_AUTONOMOUS", "0") != "1"
 
             for agent_id in agent_ids:
                 agent = self._get_agent_by_id(agent_id)

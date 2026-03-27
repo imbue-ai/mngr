@@ -1,0 +1,102 @@
+Future Specs Triage
+===================
+
+Each file is categorized as:
+  DELETE  - completely captured by existing code and docs
+  DIGEST  - mostly implemented but has remaining differences worth capturing
+  LEAVE   - describes future work that has not been started
+
+
+--- DELETE (9 files) ---
+
+future_specs/host.md -> DELETE
+  The host data model is fully captured by CertifiedHostData (in
+  interfaces/data_types.py), the Host class (certified vs reported field access
+  via get_certified_data/get_reported_activity_time), and the user docs. All
+  certified fields (id, provider, name, tags, state, image, resources, boot_time,
+  idle config, activity_sources) and reported fields (activity times, lock state,
+  plugin state) are implemented.
+
+future_specs/agent.md -> DELETE
+  The agent data model is fully implemented in BaseAgent (33KB). Certified fields
+  (id, name, type, command, work_dir, permissions, create_time, start_on_boot)
+  and reported fields (url, start_time, status) are all present. The
+  MNG_AGENT_STATE_DIR convention, tmux session naming, and certified/reported
+  distinction are all captured in code and docs.
+
+future_specs/config.md -> DELETE
+  The config system is fully implemented: MngConfig with TOML, layered scoping
+  (user + project), provider instance configs, agent type definitions, command
+  defaults, environment variable support (MNG_COMMANDS_*). The user docs cover
+  config command usage. All validation rules and the example TOML are reflected
+  in the implementation.
+
+future_specs/logging.md -> DELETE
+  Logging is fully implemented: loguru with custom BUILD level, console vs file
+  handlers, OutputFormat (HUMAN/JSON/JSONL), CLI flags (-q, -v, -vv,
+  --log-commands, --log-command-output, --log-env-vars), config (file_level,
+  console_level, log_dir, max_log_files, max_log_size_mb, is_logging_commands,
+  is_logging_command_output, is_logging_env_vars), log rotation, and
+  LoggingSuppressor. All items from the spec including the [future]-tagged env
+  var redaction have been implemented.
+
+future_specs/ssh_access.md -> DELETE
+  This is 3 lines noting that sshd runs inside hosts and all access is via SSH,
+  with per-host keys as [future]. The SSH provider implementation fully captures
+  this. The per-host keys item is minor and can be tracked elsewhere if needed.
+
+future_specs/out_of_scope.md -> DELETE
+  Design principles (no multi-user, no centralized state, no GUI) are embodied
+  in the codebase architecture. The stateless provider-based design, single-user
+  CLI tool nature, and absence of any GUI code make these constraints self-evident.
+
+future_specs/providers/modal.md -> DELETE
+  Modal provider is heavily implemented (98KB instance.py + 20KB backend.py).
+  Agent self-management via Modal function bridge is implemented. Snapshots
+  (on-demand and snapshot-on-idle) are implemented. The only [future] item is
+  periodic automatic snapshots, which is minor and can be tracked as a standalone
+  enhancement if desired.
+
+
+--- DIGEST (5 files) ---
+
+future_specs/error_handling.md -> DIGEST
+  The spec classifies errors as: TransientMngError (retriable), PluginMngError,
+  AgentMngError, HostMngError, FatalMngError. The actual code uses a different
+  hierarchy: MngError, HostError, AgentError, ProviderError, PluginMngError,
+  ConfigError. TransientMngError and FatalMngError do not exist. The retry
+  behavior for transient errors is not implemented. The concept of retriable
+  transient errors vs fatal errors could become comments or design notes in
+  errors.py.
+
+future_specs/provisioning.md -> DIGEST
+  The core provisioning flow is implemented: on_before_provisioning(),
+  get_provision_file_transfers(), provision(), on_after_provisioning() all exist
+  in BaseAgent. File transfer with FileTransferSpec is implemented. Remaining
+  gaps: interactive mode detection for local hosts [future], configuration to
+  disable package checking/auto-install [future], and minimum version requirement
+  checking [future]. These could become comments or doc updates in the
+  provisioning code.
+
+future_specs/provider_instance.md -> DIGEST
+  The core ProviderInstance pattern is implemented (stateless, delegation-based,
+  connection info via provider-native mechanisms). Remaining [future] items:
+  build state tracking for failed hosts on local filesystem, fail-quickly for
+  offline providers, and host listing cache with destroyed host detection and
+  offline operation support. These are significant enough to warrant comments or
+  tracked issues.
+
+future_specs/plugins.md -> DIGEST
+  The plugin system (pluggy hooks, registry, CLI extension) is implemented.
+  Pre-create verification of credentials is partially implemented. Remaining
+  [future] items: plugin stacking and dependency ordering (an open question
+  about how plugins compose), and the reference to offline_mng_state plugin
+  for offline access. The pyinfra provisioning guidance IS followed in practice.
+  The stacking/dependency question could become a comment in the hookspecs.
+
+future_specs/providers/remote.md -> DIGEST
+  The SSH provider handles remote host access and SSH key management. The spec's
+  heartbeat mechanism for detecting dead mng processes (to prevent orphaned
+  remote hosts from running indefinitely) is NOT implemented. This is a safety
+  feature that should become a tracked issue or comment, since without it,
+  orphaned remote hosts could run indefinitely if the controlling process crashes.

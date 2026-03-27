@@ -12,9 +12,7 @@ CommandHelpMetadata(
     key="schedule",
     one_line_description="Schedule invocations of mngr commands",
     synopsis="mngr schedule [add|remove|update|list|run] [OPTIONS]",
-    description="""Schedule invocations of mngr commands.
-
-Manage cron-scheduled triggers that run mngr commands (create, start, message,
+    description="""Manage cron-scheduled triggers that run mngr commands (create, start, message,
 exec) on a specified provider at regular intervals. This is useful for setting
 up autonomous agents that run on a recurring schedule.""",
     examples=(

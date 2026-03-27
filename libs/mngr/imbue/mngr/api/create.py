@@ -8,6 +8,7 @@ from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions

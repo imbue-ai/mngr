@@ -42,6 +42,7 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
 
 # Environment variable prefix for command config overrides.
@@ -216,6 +217,11 @@ def load_config(
             raise ConfigParseError(
                 "Running mngr within pytest is not allowed by the current configuration. This can happen when tests are poorly written, and load the .mngr/settings.toml file from the root of the mngr project"
             )
+
+    # Resolve project root for use as cwd in pre-command scripts.
+    # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
+    # directory (containing settings.toml), not the project root.
+    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
 
     # Return MngrContext containing both config and plugin manager
     return MngrContext(

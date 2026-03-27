@@ -1,0 +1,25 @@
+# Error Handling Spec
+
+How mng handles errors across commands.
+
+## General Principles
+
+- Errors result in non-zero exit codes and clear error messages
+- The CLI should clearly state *why* it failed (and ideally what to do about it)
+- The user story for recovery is usually "fix the problem and try again" (standard CLI behavior)
+
+## Error Classification
+
+All errors are one of these four types:
+
+- **Expected transient**: Inherits from TransientMngError. Is retriable
+- **Expected plugin**: Inherits from PluginMngError. Never retried. Disables the plugin that raised this.
+- **Expected agent**: Inherits from AgentMngError. Never retried. Fails the agent that raised this.
+- **Expected host**: Inherits from HostMngError. Never retried. Fails the host that raised this.
+- **Expected fatal**: Inherits from FatalMngError. Never retried. Fail the entire command immediately.
+- **Unexpected**: All other errors. Retry behavior depends on configuration.
+
+## Retry Behavior
+
+- Transient errors are retried according to configuration
+- PluginMngError, AgentMngError, and/or HostMngError are either warnings or errors, depending on configuration

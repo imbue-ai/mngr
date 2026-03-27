@@ -181,7 +181,7 @@ def test_read_receipt_with_git(tmp_path: Path) -> None:
 
 
 def test_read_receipt_fallback_when_mngr_missing(tmp_path: Path) -> None:
-    """read_receipt should fall back to a plain mngr base if not in requirements."""
+    """read_receipt should fall back to a plain imbue-mngr base if not in requirements."""
     receipt_path = tmp_path / "uv-receipt.toml"
     receipt_path.write_text('[tool]\nrequirements = [{ name = "something-else" }]\n')
 

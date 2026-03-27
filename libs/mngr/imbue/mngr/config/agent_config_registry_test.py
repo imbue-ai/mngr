@@ -1,6 +1,7 @@
 """Tests for agent_config_registry and agent_class_registry modules."""
 
 import pytest
+from pydantic import Field
 
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import register_agent_class
@@ -17,6 +18,13 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import Permission
+
+
+class _SubclassAgentConfig(AgentTypeConfig):
+    """Test subclass with an extra field for testing subclass-specific field handling."""
+
+    extra_bool: bool = Field(default=False)
+    extra_str: str | None = Field(default=None)
 
 
 def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
