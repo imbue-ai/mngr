@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-pair"
-version = "0.1.4"
+version = "0.2.0"
 description = "Pair command plugin for mngr - continuous file sync between agent and local directory"
 readme = "README.md"
 requires-python = ">=3.11"

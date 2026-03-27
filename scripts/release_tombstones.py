@@ -50,13 +50,13 @@ TOMBSTONES: Final[dict[str, str]] = {
 # depending on imbue-mngr==0.2.0.
 # ---------------------------------------------------------------------------
 VERSIONS: Final[dict[str, tuple[str, str]]] = {
-    "mng": ("TODO", "TODO"),
-    "mng-claude": ("TODO", "TODO"),
-    "mng-kanpan": ("TODO", "TODO"),
-    "mng-modal": ("TODO", "TODO"),
-    "mng-opencode": ("TODO", "TODO"),
-    "mng-pair": ("TODO", "TODO"),
-    "mng-tutor": ("TODO", "TODO"),
+    "mng": ("0.1.9", "0.2.0"),
+    "mng-claude": ("0.1.1", "0.2.0"),
+    "mng-kanpan": ("0.1.4", "0.2.0"),
+    "mng-modal": ("0.1.1", "0.2.0"),
+    "mng-opencode": ("0.1.5", "0.2.0"),
+    "mng-pair": ("0.1.5", "0.2.0"),
+    "mng-tutor": ("0.1.4", "0.2.0"),
 }
 
 PUBLISH_WORKFLOW: Final[str] = "publish-tombstones.yml"
@@ -118,6 +118,10 @@ def build_tombstones(dist_dir: Path) -> None:
             (pkg_dir / "pyproject.toml").write_text(
                 _make_pyproject(old_name, new_name, tombstone_version, new_version)
             )
+            # Hatchling requires a package directory matching the project name.
+            pkg_name_dir = pkg_dir / old_name.replace("-", "_")
+            pkg_name_dir.mkdir()
+            (pkg_name_dir / "__init__.py").write_text("")
             subprocess.run(
                 ["pyproject-build", str(pkg_dir), "-o", str(dist_dir)],
                 check=True,
