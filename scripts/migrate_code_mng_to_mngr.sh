@@ -180,10 +180,7 @@ for my $file (@ARGV) {
     my $orig = $content;
     # importlib.metadata.distribution("mngr...") lookups
     $content =~ s/distribution\("mngr/distribution("imbue-mngr/g;
-    # Package metadata name comparisons (keyword argument or equality)
-    $content =~ s/name == "mngr"/name == "imbue-mngr"/g;
-    $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
-    $content =~ s/name="mngr"/name="imbue-mngr"/g;
+    # startswith("mngr-") in package metadata checks
     $content =~ s/startswith\("mngr-"\)/startswith("imbue-mngr-")/g;
     # PyPI URL slugs
     $content =~ s|pypi/mngr/|pypi/imbue-mngr/|g;
@@ -483,6 +480,47 @@ mapfile -t code_files < <(
     done
 )
 perl "$PYPI_CODE_PL" "${code_files[@]+"${code_files[@]}"}"
+
+# Targeted fixes for specific files where name=="mngr" means the PyPI name
+# (not vendor name, profile name, etc.)
+TARGETED_PL=$(mktemp)
+trap 'rm -f "$RENAME_PL" "$PYPI_TOML_PL" "$PYPI_CODE_PL" "$TARGETED_PL"' EXIT
+cat > "$TARGETED_PL" << 'PERL_SCRIPT'
+use strict;
+use warnings;
+my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
+my $count = 0;
+for my $file (@ARGV) {
+    open my $fh, '<', $file or next;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    my $orig = $content;
+    $content =~ s/name == "mngr"/name == "imbue-mngr"/g;
+    $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
+    $content =~ s/name="mngr"/name="imbue-mngr"/g;
+    # Fix false positive: dir_name must stay "mngr"
+    $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
+    if ($content ne $orig) {
+        $count++;
+        unless ($dry_run) {
+            open my $out, '>', $file or next;
+            print $out $content;
+            close $out;
+        }
+    }
+}
+PERL_SCRIPT
+
+for f in \
+    libs/mngr_recursive/imbue/mngr_recursive/provisioning.py \
+    libs/mngr_recursive/imbue/mngr_recursive/provisioning_test.py \
+    libs/mngr/imbue/mngr/uv_tool.py \
+    libs/mngr/imbue/mngr/uv_tool_test.py \
+    scripts/utils.py \
+    scripts/release.py \
+    scripts/verify_publish.py; do
+    [ -f "$f" ] && perl "$TARGETED_PL" "$f"
+done
 
 # ── 9. Regenerate uv.lock ────────────────────────────────────────
 
