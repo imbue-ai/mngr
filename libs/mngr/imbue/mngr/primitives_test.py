@@ -14,7 +14,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import InvalidAgentName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import default_branch_name
@@ -181,13 +181,13 @@ def test_default_branch_name_uses_custom_prefix() -> None:
 
 def test_agent_name_rejects_leading_dash() -> None:
     """AgentName should reject names starting with a dash."""
-    with pytest.raises(InvalidAgentName, match="cannot start or end with a dash"):
+    with pytest.raises(InvalidName, match="must be alphanumeric"):
         AgentName("-bad-name")
 
 
 def test_agent_name_rejects_trailing_dash() -> None:
     """AgentName should reject names ending with a dash."""
-    with pytest.raises(InvalidAgentName, match="cannot start or end with a dash"):
+    with pytest.raises(InvalidName, match="must be alphanumeric"):
         AgentName("bad-name-")
 
 

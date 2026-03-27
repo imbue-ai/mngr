@@ -25,7 +25,7 @@ set -euo pipefail
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 LLM_TOOLS_DIR="${MNGR_AGENT_STATE_DIR}/commands/llm_tools"
 # Standalone conversation DB script -- avoids the heavy mngr CLI startup cost.
-_CONV_DB="${MNGR_AGENT_STATE_DIR}/commands/conversation_db.py"
+_CONV_DB="${MNG_AGENT_STATE_DIR}/commands/conversation_db.py"
 TALKING_PROMPT="${MNGR_AGENT_WORK_DIR:-}/talking/PROMPT.md"
 
 # Path to the llm database (LLM_USER_PATH is always set during provisioning)
@@ -86,11 +86,14 @@ get_last_response_id() {
 
 build_tool_args() {
     local args=""
-    if [ -f "$LLM_TOOLS_DIR/context_tool.py" ]; then
-        args="$args --functions $LLM_TOOLS_DIR/context_tool.py"
-    fi
-    if [ -f "$LLM_TOOLS_DIR/extra_context_tool.py" ]; then
-        args="$args --functions $LLM_TOOLS_DIR/extra_context_tool.py"
+    # disabling tool use by default for now, because it wasn't that helpful...
+    if [ -n "$USE_TOOLS" ]; then
+        if [ -f "$LLM_TOOLS_DIR/context_tool.py" ]; then
+            args="$args --functions $LLM_TOOLS_DIR/context_tool.py"
+        fi
+        if [ -f "$LLM_TOOLS_DIR/extra_context_tool.py" ]; then
+            args="$args --functions $LLM_TOOLS_DIR/extra_context_tool.py"
+        fi
     fi
     echo "$args"
 }

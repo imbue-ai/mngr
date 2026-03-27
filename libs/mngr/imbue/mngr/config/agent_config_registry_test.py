@@ -1,6 +1,7 @@
 """Tests for agent_config_registry and agent_class_registry modules."""
 
 import pytest
+from pydantic import Field
 
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import register_agent_class
@@ -17,6 +18,13 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import Permission
+
+
+class _SubclassAgentConfig(AgentTypeConfig):
+    """Test subclass with an extra field for testing subclass-specific field handling."""
+
+    extra_bool: bool = Field(default=False)
+    extra_str: str | None = Field(default=None)
 
 
 def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
@@ -77,6 +85,39 @@ def test_apply_custom_overrides_applies_all_overrides_at_once() -> None:
     assert result.command == CommandString("my-cmd")
     assert result.cli_args == ("--parent-arg", "--custom-arg")
     assert result.permissions == [Permission("disk")]
+
+
+def test_apply_custom_overrides_applies_subclass_fields() -> None:
+    """Subclass-specific fields set in the custom config should be applied to the parent."""
+    parent = _SubclassAgentConfig()
+    custom = _SubclassAgentConfig.model_construct(
+        extra_bool=True,
+        extra_str="hello",
+        parent_type=AgentTypeName("test-parent"),
+    )
+
+    result = _apply_custom_overrides_to_parent_config(parent, custom)
+
+    assert isinstance(result, _SubclassAgentConfig)
+    assert result.extra_bool is True
+    assert result.extra_str == "hello"
+
+
+def test_apply_custom_overrides_preserves_unset_subclass_fields() -> None:
+    """Subclass-specific fields NOT set in the custom config should keep parent defaults."""
+    parent = _SubclassAgentConfig(extra_bool=True, extra_str="original")
+    # Only set command, not the subclass fields
+    custom = _SubclassAgentConfig.model_construct(
+        command=CommandString("new-cmd"),
+        parent_type=AgentTypeName("test-parent"),
+    )
+
+    result = _apply_custom_overrides_to_parent_config(parent, custom)
+
+    assert isinstance(result, _SubclassAgentConfig)
+    assert result.command == CommandString("new-cmd")
+    assert result.extra_bool is True
+    assert result.extra_str == "original"
 
 
 # =============================================================================
@@ -171,6 +212,43 @@ def test_resolve_agent_type_without_parent_type() -> None:
 
         assert result.agent_class is _FakeAgentClass
         assert isinstance(result.agent_config, AgentTypeConfig)
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_preserves_subclass_fields() -> None:
+    """resolve_agent_type should preserve subclass-specific fields from custom config."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("test-parent", _FakeAgentClass)
+        register_agent_config("test-parent", _SubclassAgentConfig)
+
+        # Simulate what _parse_agent_types now produces: a subclass config
+        # constructed with model_construct (so model_fields_set is accurate)
+        custom_config = _SubclassAgentConfig.model_construct(
+            parent_type=AgentTypeName("test-parent"),
+            command=CommandString("custom-cmd"),
+            cli_args=("--custom-arg",),
+            extra_bool=True,
+            extra_str="custom-value",
+        )
+
+        config = MngrConfig(
+            agent_types={AgentTypeName("my-worker"): custom_config},
+        )
+
+        result = resolve_agent_type(AgentTypeName("my-worker"), config)
+
+        assert result.agent_class is _FakeAgentClass
+        assert isinstance(result.agent_config, _SubclassAgentConfig)
+        assert result.agent_config.command == CommandString("custom-cmd")
+        assert result.agent_config.cli_args == ("--custom-arg",)
+        resolved_config = result.agent_config
+        assert isinstance(resolved_config, _SubclassAgentConfig)
+        assert resolved_config.extra_bool is True
+        assert resolved_config.extra_str == "custom-value"
     finally:
         reset_agent_class_registry()
         reset_agent_config_registry()

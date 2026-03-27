@@ -104,8 +104,33 @@ def test_lifecycle_done_when_shell_only() -> None:
     assert determine_lifecycle_state("0|bash|123", True, "claude", "") == AgentLifecycleState.DONE
 
 
-def test_lifecycle_replaced_when_unknown_command() -> None:
+def test_lifecycle_replaced_when_unknown_command_and_pane_not_shell() -> None:
+    """REPLACED when pane_current_command is unknown and pane PID's own process is not a shell."""
+    ps_output = "123 1 python3\n"
+    assert determine_lifecycle_state("0|python3|123", True, "claude", ps_output) == AgentLifecycleState.REPLACED
+
+
+def test_lifecycle_replaced_when_unknown_command_and_pane_pid_not_in_ps() -> None:
+    """REPLACED when pane_current_command is unknown and pane PID is not found in ps."""
     assert determine_lifecycle_state("0|python3|123", True, "claude", "") == AgentLifecycleState.REPLACED
+
+
+def test_lifecycle_done_when_modified_process_title_and_pane_is_shell() -> None:
+    """DONE when tmux reports a modified title (e.g. version string) but pane PID is a shell.
+
+    Claude Code sets its process title to its version (e.g. "2.1.73"), which tmux
+    reports as pane_current_command. After claude exits, the shell prompt returns
+    but tmux may briefly still report the stale title. The pane PID's own comm
+    from ps ("bash") is the authoritative source.
+    """
+    ps_output = "123 1 bash\n"
+    assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.DONE
+
+
+def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> None:
+    """WAITING when tmux reports version string but claude is running as descendant."""
+    ps_output = "123 1 bash\n456 123 claude\n"
+    assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.WAITING
 
 
 # =========================================================================

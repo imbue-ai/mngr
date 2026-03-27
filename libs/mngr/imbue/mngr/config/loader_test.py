@@ -7,8 +7,12 @@ from typing import Any
 import pluggy
 import pytest
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.agent_config_registry import register_agent_config
+from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
@@ -303,6 +307,44 @@ def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings:
     assert result[AgentTypeName("claude")].cli_args == ("--verbose",)
     assert "bogus_option" not in raw["claude"]
     assert any("bogus_option" in msg and "agent_types.claude" in msg for msg in log_warnings)
+
+
+class _TestParentConfig(AgentTypeConfig):
+    """Test config subclass with an extra field for loader tests."""
+
+    extra_field: bool = Field(default=False)
+
+
+def test_parse_agent_types_uses_parent_type_config_class() -> None:
+    """Custom types with parent_type should use the parent's config class for field validation."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("test-parent", _TestParentConfig)
+
+        # A custom type referencing parent_type should accept the parent's fields
+        raw = {"worker": {"parent_type": "test-parent", "extra_field": True, "cli_args": "--verbose"}}
+        result = _parse_agent_types(raw)
+
+        worker_config = result[AgentTypeName("worker")]
+        assert isinstance(worker_config, _TestParentConfig)
+        assert worker_config.extra_field is True
+        assert worker_config.cli_args == ("--verbose",)
+        assert worker_config.parent_type == AgentTypeName("test-parent")
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_rejects_unknown_fields_even_with_parent_type() -> None:
+    """Custom types with parent_type should still reject truly unknown fields."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("test-parent", AgentTypeConfig)
+
+        raw = {"worker": {"parent_type": "test-parent", "totally_bogus": True}}
+        with pytest.raises(ConfigParseError, match="Unknown fields in agent_types.worker.*totally_bogus"):
+            _parse_agent_types(raw)
+    finally:
+        reset_agent_config_registry()
 
 
 # =============================================================================

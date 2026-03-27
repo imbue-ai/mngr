@@ -1,0 +1,48 @@
+[project]
+name = "mng-notifications"
+version = "0.1.0"
+description = "Notification plugin for mng - alerts when agents transition to WAITING state"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mng==0.1.7",
+    "click-option-group>=0.5.6",
+]
+
+[project.entry-points.mng]
+notifications = "imbue.mng_notifications.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+
+[tool.uv.sources]
+mng = { workspace = true }
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+strict = ["**/*.py"]
+
+[tool.pytest.ini_options]
+timeout_func_only = true
+pythonpath = ["."]
+testpaths = ["."]
+addopts = [
+    "--cov=imbue.mng_notifications",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+    "--timeout=30",
+]
+
+[tool.coverage.run]
+source = ["imbue.mng_notifications"]
+omit = [
+    "*_test.py",
+    "test_*.py",
+    "*/conftest.py",
+]

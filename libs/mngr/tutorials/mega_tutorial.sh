@@ -11,7 +11,8 @@ set -euo pipefail
 
 ## BASIC CREATION
 
-# running mngr create is strictly better than running claude! It's less letters to type :-D
+# running mngr create is strictly better than running claude!
+# (if you use the alias `mngr c`, it's no more letters to type :-D)
 # running this command launches claude (Claude Code) immediately *in a new worktree*
 mngr create
 # the defaults are the following: agent=claude, provider=local, project=current dir
@@ -23,7 +24,7 @@ mngr create --in-place
 
 # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
 mngr create my-task
-# that command give the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
+# that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
 
 # you can use a short form for most commands (like create) as well--the above command is the same as these:
 mngr create my-task claude
@@ -31,7 +32,7 @@ mngr c my-task
 
 # for the rest of this doc, we'll use the explicit form (specifying "create") just to be extra clear,
 # but you might want to use the short form in your day-to-day work for speed and convenience.
-# you can (and should) create aliases and templated as well (see TEMPLATES, ALIASES, AND SHORTCUTS below)
+# you can (and should) create aliases and templates as well (see TEMPLATES, ALIASES, AND SHORTCUTS below)
 
 # you can also specify a different agent (ex: codex)
 mngr create my-task codex
@@ -50,7 +51,7 @@ mngr create my-task --command python -- my_script.py
 # remember that the arguments to the "agent" (or command) come after the `--` separator
 
 # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
-# this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
+# this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
 mngr create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
 # see "RUNNING NON-AGENT PROCESSES" below for more details
 
@@ -87,8 +88,10 @@ mngr create my-task --source-path /tmp/my_random_folder --command python -- scri
 mngr create my-task
 git branch | grep mngr/my-task
 
-# --branch controls branch creation. the default is :mngr/* which creates a new branch named mngr/{agent_name}
-# you can change the pattern (the * is replaced by the agent name):
+# --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
+# omitting BASE (i.e. starting with ":") uses the current branch. The * in NEW is replaced by the agent name.
+# the default is ":mngr/*", which creates a new branch named mngr/{agent_name} off the current branch.
+# you can change the pattern:
 mngr create my-task --branch ":feature/*"
 git branch | grep feature/my-task
 
@@ -187,7 +190,7 @@ mngr create my-task --provider modal --no-start-on-boot
 mngr create my-task --env DEBUG=true
 # (--env-file loads from a file, --pass-env forwards a variable from your current shell)
 
-# it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
+# it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
 export API_KEY=abc123
 mngr create my-task --pass-env API_KEY
 # that command passes the API_KEY environment variable from your current shell into the agent's environment, without you having to specify the value on the command line.
@@ -218,7 +221,7 @@ echo "alias mc='mngr create --in-place'" >> ~/.bashrc && source ~/.bashrc
 
 # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
 mngr create my-task --no-ensure-clean
-# this is particularly useful for starting agents when, eg, you are in the middle of a merge conflict and you just want the agent to finish it off, for example
+# this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
 # it should probably be avoided in general, because it makes it more difficult to merge work later.
 
 # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
@@ -318,7 +321,7 @@ mngr list --limit 10
 # watch mode: refresh the list every 5 seconds
 watch -n5 mngr list
 
-# output all objects as one bit json array when complete  (useful for scripting)
+# output all objects as one big JSON array when complete  (useful for scripting)
 mngr list --format json
 
 # output each entry as a JSON object (useful for scripting)
@@ -631,7 +634,7 @@ mngr gc --provider modal
 mngr config set commands.destroy.gc false
 # then make sure you constantly run gc in the background (this runs it once every 60 seconds)
 watch -n60 mngr gc
-# this would have the effect of making your calls to "mgn destroy" somewhat faster, at the cost of needing to have this background process running
+# this would have the effect of making your calls to "mngr destroy" somewhat faster, at the cost of needing to have this background process running
 
 ##############################################################################
 # VIEWING EVENTS AND LOGS
@@ -768,7 +771,7 @@ mngr conn fix-bug
 # 6. merge the resulting branch
 git merge mngr/fix-bug
 # 7. When done, stop and clean up
-mngr destroy fix-bug --f --remove-created-branch
+mngr destroy fix-bug -f --remove-created-branch
 
 # TODO: LOTS more examples to add here!
 
@@ -849,11 +852,11 @@ mngr exec my-task "git status --short"
 # see the agent's recent commits
 mngr exec my-task "git log --oneline -5"
 
-# ask the agent commit its work
+# ask the agent to commit its work
 mngr msg my-task -m "Please commit all your changes with a descriptive message"
 
 # or forcibly commit all of it yourself
-mngr exec my-task 'git add . && git commit -am "Please commit all your changes with a descriptive message"'
+mngr exec my-task 'git add . && git commit -m "WIP: save agent progress"'
 
 # check all agents' git status at once
 mngr list --ids | mngr exec - "git status --short"
@@ -876,7 +879,7 @@ mngr destroy my-task --force --remove-created-branch
 ##############################################################################
 # LABELS AND FILTERING
 #   Tag agents with labels and either use CEL filter expressions to target
-#   specific agents, or just use jq. Filter agentse for destroy, cleanup, and other commands
+#   specific agents, or just use jq. Filter agents for destroy, cleanup, and other commands
 #   by piping in the names or ids from a call to mngr list
 ##############################################################################
 
@@ -937,7 +940,7 @@ mngr create my-task --template modal-big
 mngr create my-task -t modal-big
 
 # stack multiple templates (later templates override earlier ones)
-mngr create my-task -template modal-big -template with-tests
+mngr create my-task --template modal-big --template with-tests
 
 ##############################################################################
 # CUSTOM AGENT TYPES
@@ -1102,7 +1105,7 @@ mngr list --fields "name,state,host.name"
 mngr stop agent-1
 # the host stays running as long as at least one agent is active.
 
-# TODO: many more examples of to add here of why this is useful!
+# TODO: many more examples to add here of why this is useful!
 
 ##############################################################################
 # RUNNING NON-AGENT PROCESSES
@@ -1140,7 +1143,7 @@ mngr create my-task --headless --no-connect --message "Do the thing"
 mngr config set headless true
 
 # idempotent creation: reuse an existing agent if it already exists
-mngr create worker --reuse --provider modal --no-connect && mngr message -m "Process the queue"
+mngr create worker --reuse --provider modal --no-connect && mngr message worker -m "Process the queue"
 
 # get JSON output for parsing in scripts
 AGENT_INFO=$(mngr list --format json)
@@ -1156,7 +1159,7 @@ done
 
 ##############################################################################
 # SETTING-ONLY OPTIONS
-#   Some behavior can only be chnaged from the settings (not from the CLI)
+#   Some behavior can only be changed from the settings (not from the CLI)
 #   These options are typically less commonly used or more advanced
 ##############################################################################
 
@@ -1264,7 +1267,7 @@ mngr gc
 ##############################################################################
 
 # use short forms for common commands to save typing
-# mngr c = mngr create, mngr ls = mngr list, mngr s = mngr stop, mngr destroy = mngr rm
+# mngr c = mngr create, mngr ls = mngr list, mngr s = mngr stop, mngr rm = mngr destroy
 # mngr conn = mngr connect, mngr msg = mngr message, mngr exec = mngr x
 
 # use --reuse to make create idempotent. This is handy, esp with remote scripts, so that you can detach, then hit up and enter

@@ -35,6 +35,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.logging import LoggingConfig
 
 
+class _TestAgentTypeConfig(AgentTypeConfig):
+    """Test subclass with an extra field for testing subclass-specific field handling."""
+
+    custom_flag: bool = Field(default=False)
+
+
 def test_logging_config_merge_overrides_all_fields() -> None:
     """Merging LoggingConfig should override all fields from override."""
     base = LoggingConfig()
@@ -168,6 +174,43 @@ def test_agent_type_config_merge_with_concatenates_permissions() -> None:
     override = AgentTypeConfig(permissions=[Permission("write")])
     merged = base.merge_with(override)
     assert merged.permissions == [Permission("read"), Permission("write")]
+
+
+def test_agent_type_config_merge_with_preserves_subclass_fields() -> None:
+    """AgentTypeConfig.merge_with on a subclass should preserve subclass-specific fields."""
+    base = _TestAgentTypeConfig.model_construct(
+        custom_flag=True,
+        cli_args=("--base",),
+    )
+    # Override only has cli_args set (simulates a secondary config file)
+    override = _TestAgentTypeConfig.model_construct(
+        cli_args=("--override",),
+    )
+    merged = base.merge_with(override)
+    assert isinstance(merged, _TestAgentTypeConfig)
+    assert merged.cli_args == ("--base", "--override")
+    # custom_flag from base should be preserved since override didn't set it
+    assert merged.custom_flag is True
+
+
+def test_agent_type_config_merge_with_overrides_subclass_fields_when_set() -> None:
+    """AgentTypeConfig.merge_with should override subclass fields that were explicitly set."""
+    base = _TestAgentTypeConfig(custom_flag=True)
+    override = _TestAgentTypeConfig.model_construct(custom_flag=False)
+    merged = base.merge_with(override)
+    assert isinstance(merged, _TestAgentTypeConfig)
+    assert merged.custom_flag is False
+
+
+def test_agent_type_config_merge_with_accepts_base_class_override() -> None:
+    """AgentTypeConfig.merge_with on a subclass should accept a base-class override."""
+    base = _TestAgentTypeConfig(custom_flag=True, cli_args=("--base",))
+    # Override is a base AgentTypeConfig (e.g., from a secondary config without parent_type)
+    override = AgentTypeConfig.model_construct(cli_args=("--override",))
+    merged = base.merge_with(override)
+    assert isinstance(merged, _TestAgentTypeConfig)
+    assert merged.cli_args == ("--base", "--override")
+    assert merged.custom_flag is True
 
 
 def test_merge_cli_args_concatenates_both_when_present() -> None:

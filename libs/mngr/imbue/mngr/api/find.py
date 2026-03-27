@@ -10,7 +10,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
@@ -484,7 +484,13 @@ def find_agents_by_identifiers_or_state(
 
     Raises AgentNotFoundError if any identifier does not match an agent.
     """
-    agents_by_host, _ = discover_all_hosts_and_agents(mngr_ctx, include_destroyed=include_destroyed)
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=tuple(agent_identifiers) if not filter_all and agent_identifiers else None,
+        include_destroyed=include_destroyed,
+        reset_caches=False,
+    )
 
     # Collect candidate matches from the lightweight agent references
     candidates: list[AgentMatch] = []

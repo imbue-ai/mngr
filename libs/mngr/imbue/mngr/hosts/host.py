@@ -50,6 +50,7 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
@@ -95,18 +96,6 @@ def _try_acquire_flock(lock_file: io.TextIOWrapper) -> bool:
         return True
     except BlockingIOError:
         return False
-
-
-def _check_local_symlink_state(source_abs: Path, target_abs: Path) -> tuple[bool, bool]:
-    """Check symlink state for a local target path.
-
-    Returns (is_correct_symlink, is_non_symlink_target).
-    """
-    if target_abs.is_symlink():
-        return (target_abs.resolve() == source_abs.resolve(), False)
-    if target_abs.exists():
-        return (False, True)
-    return (False, False)
 
 
 @pure
@@ -2208,6 +2197,12 @@ class Host(BaseHost, OnlineHostInterface):
         are safe to repeat.
         """
         with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+            # Prevent same-host name collisions (the tmux session name is derived
+            # from the agent name, so duplicates would share a session).
+            for existing_agent in self.get_agents():
+                if existing_agent.name == new_name and existing_agent.id != agent.id:
+                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+
             old_name = agent.name
             data_path = self._get_agent_state_dir(agent) / "data.json"
 
@@ -2383,7 +2378,7 @@ class Host(BaseHost, OnlineHostInterface):
             tmux_config_path = self._create_host_tmux_config()
 
             onboarding_marker = self.mngr_ctx.profile_dir / "tmux_onboarding_shown"
-            is_onboarding_needed = not onboarding_marker.exists()
+            is_onboarding_needed = not onboarding_marker.exists() and os.environ.get("IS_AUTONOMOUS", "0") != "1"
 
             for agent_id in agent_ids:
                 agent = self._get_agent_by_id(agent_id)

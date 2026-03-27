@@ -241,44 +241,45 @@ def run_local_command_modern_version(
         on_complete_line_from_stdout = None
         on_complete_line_from_stderr = None
 
-    gatherer = OutputGatherer.build_from_popen(
-        process,
-        on_complete_line_from_stdout=on_complete_line_from_stdout,
-        on_complete_line_from_stderr=on_complete_line_from_stderr,
-        shutdown_event=shutdown_event,
-    )
+    with process:
+        gatherer = OutputGatherer.build_from_popen(
+            process,
+            on_complete_line_from_stdout=on_complete_line_from_stdout,
+            on_complete_line_from_stderr=on_complete_line_from_stderr,
+            shutdown_event=shutdown_event,
+        )
 
-    timeout_time = time.time() + timeout if timeout is not None else None
+        timeout_time = time.time() + timeout if timeout is not None else None
 
-    while not shutdown_event.wait(poll_time) and not _is_timeout(timeout_time):
-        maybe_exit_code = process.poll()
-        gatherer.gather_output()
-        if maybe_exit_code is not None:
-            exit_code = maybe_exit_code
-            break
-    else:
-        exit_code = _shutdown_popen(process, command_as_string, shutdown_timeout_sec)
+        while not shutdown_event.wait(poll_time) and not _is_timeout(timeout_time):
+            maybe_exit_code = process.poll()
+            gatherer.gather_output()
+            if maybe_exit_code is not None:
+                exit_code = maybe_exit_code
+                break
+        else:
+            exit_code = _shutdown_popen(process, command_as_string, shutdown_timeout_sec)
 
-    stdout, stderr = gatherer.get_output()
+        stdout, stderr = gatherer.get_output()
 
-    # Send the final incomplete lines as well
-    incomplete_stdout_line, incomplete_stderr_line = gatherer.get_incomplete_lines()
-    if incomplete_stdout_line:
-        if trace_on_line_callback:
-            trace_on_line_callback(incomplete_stdout_line, True)
-    if incomplete_stderr_line:
-        if trace_on_line_callback:
-            trace_on_line_callback(incomplete_stderr_line, False)
+        # Send the final incomplete lines as well
+        incomplete_stdout_line, incomplete_stderr_line = gatherer.get_incomplete_lines()
+        if incomplete_stdout_line:
+            if trace_on_line_callback:
+                trace_on_line_callback(incomplete_stdout_line, True)
+        if incomplete_stderr_line:
+            if trace_on_line_callback:
+                trace_on_line_callback(incomplete_stderr_line, False)
 
-    result = FinishedProcess(
-        returncode=exit_code,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
-        command=tuple(command),
-        is_timed_out=_is_timeout(timeout_time),
-        is_output_already_logged=trace_output,
-    )
-    if is_checked:
-        result.check()
+        result = FinishedProcess(
+            returncode=exit_code,
+            stdout=stdout.decode("utf-8", errors="replace"),
+            stderr=stderr.decode("utf-8", errors="replace"),
+            command=tuple(command),
+            is_timed_out=_is_timeout(timeout_time),
+            is_output_already_logged=trace_output,
+        )
+        if is_checked:
+            result.check()
 
-    return result
+        return result

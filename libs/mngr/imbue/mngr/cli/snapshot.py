@@ -5,7 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
@@ -140,7 +140,13 @@ def _classify_mixed_identifiers(
     # Use try/except to gracefully handle provider errors (e.g. unreachable providers).
     # Partial results are acceptable here since we're only classifying identifiers.
     try:
-        agents_by_host, _ = discover_all_hosts_and_agents(mngr_ctx, include_destroyed=False)
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
     except BaseMngrError as e:
         logger.warning("Failed to load agents for identifier classification: {}", e)
         # Treat all identifiers as host identifiers when agents cannot be loaded

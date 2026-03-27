@@ -260,7 +260,7 @@ current.tar.gz
 .autofix/
 .reviewer/outputs/
 .reviewer/settings.local.json
-.reviewer/.stop_hook_consecutive_blocks
+**/.reviewer/.stop_hook_consecutive_blocks
 .reviews/
 
 # Stuck agent tracking (stop hook escape valve)
@@ -274,4 +274,3 @@ current.tar.gz
 
 # ignore coverage files generated within subprojects
 cov.xml
-.reviews/

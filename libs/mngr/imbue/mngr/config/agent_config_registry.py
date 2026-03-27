@@ -3,7 +3,6 @@ from typing import Any
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -70,19 +69,28 @@ def _apply_custom_overrides_to_parent_config(
 
     Handles the case where parent_config may be a subclass of AgentTypeConfig
     (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
-    concrete class with the base fields overridden.
+    concrete class with the base fields overridden. Iterates over all fields
+    that were explicitly set in the custom config (including subclass-specific
+    fields like trust_working_directory).
     """
+    explicitly_set_fields = custom_config.model_fields_set
+    if not explicitly_set_fields - {"parent_type"}:
+        return parent_config
+
+    custom_values = custom_config.model_dump()
     updates: list[tuple[str, Any]] = []
 
-    if custom_config.command is not None:
-        updates.append(to_update(parent_config.field_ref().command, custom_config.command))
-
-    merged_cli_args = merge_cli_args(parent_config.cli_args, custom_config.cli_args)
-    if merged_cli_args != parent_config.cli_args:
-        updates.append(to_update(parent_config.field_ref().cli_args, merged_cli_args))
-
-    if custom_config.permissions:
-        updates.append(to_update(parent_config.field_ref().permissions, custom_config.permissions))
+    for field_name in explicitly_set_fields:
+        if field_name == "parent_type":
+            continue
+        elif field_name == "cli_args":
+            # cli_args uses merge semantics (concatenation)
+            merged_cli_args = merge_cli_args(parent_config.cli_args, custom_config.cli_args)
+            if merged_cli_args != parent_config.cli_args:
+                updates.append((field_name, merged_cli_args))
+        else:
+            # All other fields: override wins
+            updates.append((field_name, custom_values[field_name]))
 
     if not updates:
         return parent_config

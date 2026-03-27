@@ -25,6 +25,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import Permission
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
@@ -1007,9 +1008,10 @@ class _StubHost:
         self.written_files.append((path, content))
 
 
-def _create_agent_with_stub_host(
+def _create_named_agent_with_stub_host(
     temp_mngr_ctx: MngrContext,
     stub: _StubHost,
+    name: AgentName,
     cls: type[BaseAgent] = BaseAgent,
     **kwargs: Any,
 ) -> BaseAgent:
@@ -1022,7 +1024,7 @@ def _create_agent_with_stub_host(
     """
     return cls.model_construct(
         id=AgentId.generate(),
-        name=AgentName("stub-agent"),
+        name=name,
         agent_type=AgentTypeName("test"),
         work_dir=Path("/tmp/stub-work"),
         create_time=datetime.now(timezone.utc),
@@ -1032,6 +1034,15 @@ def _create_agent_with_stub_host(
         agent_config=AgentTypeConfig(command=CommandString("sleep 1000")),
         **kwargs,
     )
+
+
+def _create_agent_with_stub_host(
+    temp_mngr_ctx: MngrContext,
+    stub: _StubHost,
+    cls: type[BaseAgent] = BaseAgent,
+    **kwargs: Any,
+) -> BaseAgent:
+    return _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("stub-agent"), cls, **kwargs)
 
 
 def test_send_tmux_literal_keys_short_message_uses_send_keys(
@@ -1117,6 +1128,12 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
 
     with pytest.raises(SendMessageError, match="send-keys failed"):
         agent._send_tmux_literal_keys("mngr-test:0", "hello")
+
+
+def test_agent_name_rejects_slash() -> None:
+    """AgentName must reject names containing '/' to prevent path issues."""
+    with pytest.raises(InvalidName):
+        AgentName("foo/bar")
 
 
 # =========================================================================

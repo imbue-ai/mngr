@@ -178,31 +178,37 @@ class AgentTypeConfig(FrozenModel):
 
         Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
 
-        Scalar fields: override wins if not None
-        Lists: concatenate both lists
+        Uses model_fields_set to determine which fields were explicitly set in
+        the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
+        trust_working_directory) are correctly preserved during merges.
+
+        Scalar fields: override wins if explicitly set
+        Tuples (cli_args): concatenate
+        Lists (permissions): concatenate if explicitly set
         """
-        # Ensure override is same type or subclass of self's type
-        if not isinstance(override, self.__class__):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different agent config type")
+        # Allow override to be the same class or a base class of self (e.g., when
+        # a secondary config file defines the same custom type without repeating
+        # parent_type, it gets parsed as the base AgentTypeConfig). Reject
+        # sibling subclasses (e.g., ClaudeAgentConfig vs CodexAgentConfig).
+        if not isinstance(self, type(override)):
+            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
 
-        # Merge parent_type (scalar - override wins if not None)
-        merged_parent_type = override.parent_type if override.parent_type is not None else self.parent_type
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
 
-        # Merge command (scalar - override wins if not None)
-        merged_command = override.command if override.command is not None else self.command
+        override_values = override.model_dump()
+        updates: list[tuple[str, Any]] = []
 
-        # Merge cli_args (concatenate both tuples)
-        merged_cli_args = merge_cli_args(self.cli_args, override.cli_args)
+        for field_name in explicitly_set:
+            if field_name == "cli_args":
+                updates.append((field_name, merge_cli_args(self.cli_args, override.cli_args)))
+            elif field_name == "permissions":
+                updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
+            else:
+                updates.append((field_name, override_values[field_name]))
 
-        # Merge permissions (list - concatenate if override is not None)
-        merged_permissions = merge_list_fields(self.permissions, override.permissions)
-
-        return self.__class__(
-            parent_type=merged_parent_type,
-            command=merged_command,
-            cli_args=merged_cli_args,
-            permissions=merged_permissions,
-        )
+        return self.model_copy_update(*updates)
 
 
 class ProviderInstanceConfig(FrozenModel):
@@ -661,6 +667,14 @@ class MngrContext(FrozenModel):
         default_factory=lambda: ConcurrencyGroup(name="default"),
         description="Top-level concurrency group for managing spawned processes",
     )
+    is_full_discovery: bool = Field(
+        default=False,
+        description="When True, always query all providers during discovery (skip event-stream optimization)",
+    )
+    project_root: Path | None = Field(
+        default=None,
+        description="Project root directory (--context or git worktree root)",
+    )
 
     def get_plugin_config(self, name: str, config_type: type[PluginConfigT]) -> PluginConfigT:
         """Get a plugin's typed config, falling back to defaults if absent."""
@@ -730,6 +744,7 @@ class CommonCliOptions(FrozenModel):
     """
 
     headless: bool = False
+    safe: bool = False
     output_format: str
     quiet: bool
     verbose: int

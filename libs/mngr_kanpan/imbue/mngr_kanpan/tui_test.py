@@ -145,7 +145,7 @@ def _make_snapshot(
     entries: tuple[AgentBoardEntry, ...] = (),
     errors: tuple[str, ...] = (),
 ) -> BoardSnapshot:
-    return BoardSnapshot(entries=entries, errors=errors, fetch_time_seconds=1.5)
+    return BoardSnapshot(entries=entries, errors=errors, repo_pr_loaded={}, fetch_time_seconds=1.5)
 
 
 def _make_state(
@@ -244,23 +244,45 @@ def _text_contains(texts: list[str], substring: str) -> bool:
 
 def test_classify_entry_muted_always_goes_to_muted_section() -> None:
     entry = _make_entry(is_muted=True, pr=_make_pr(state=PrState.MERGED))
-    assert _classify_entry(entry) == BoardSection.MUTED
+    assert _classify_entry(entry, {}) == BoardSection.MUTED
 
 
 def test_classify_entry_no_pr_is_still_cooking() -> None:
-    assert _classify_entry(_make_entry(pr=None)) == BoardSection.STILL_COOKING
+    assert _classify_entry(_make_entry(pr=None), {}) == BoardSection.STILL_COOKING
 
 
 def test_classify_entry_merged_pr() -> None:
-    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.MERGED))) == BoardSection.PR_MERGED
+    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.MERGED)), {}) == BoardSection.PR_MERGED
 
 
 def test_classify_entry_closed_pr() -> None:
-    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.CLOSED))) == BoardSection.PR_CLOSED
+    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.CLOSED)), {}) == BoardSection.PR_CLOSED
 
 
 def test_classify_entry_open_pr() -> None:
-    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.OPEN))) == BoardSection.PR_BEING_REVIEWED
+    assert _classify_entry(_make_entry(pr=_make_pr(state=PrState.OPEN)), {}) == BoardSection.PR_BEING_REVIEWED
+
+
+def test_classify_entry_failed_repo_goes_to_prs_failed() -> None:
+    entry = _make_entry(pr=None, labels={"remote": "git@github.com:org/repo.git"})
+    assert _classify_entry(entry, {"org/repo": False}) == BoardSection.PRS_FAILED
+
+
+def test_classify_entry_loaded_repo_stays_in_still_cooking() -> None:
+    entry = _make_entry(pr=None, labels={"remote": "git@github.com:org/repo.git"})
+    assert _classify_entry(entry, {"org/repo": True}) == BoardSection.STILL_COOKING
+
+
+def test_classify_entry_no_remote_label_stays_in_still_cooking() -> None:
+    """Agents without a remote label are not considered failed -- they have no upstream."""
+    entry = _make_entry(pr=None)
+    assert _classify_entry(entry, {}) == BoardSection.STILL_COOKING
+
+
+def test_classify_entry_repo_not_in_loaded_dict_stays_in_still_cooking() -> None:
+    """Agents whose repo is not tracked in repo_pr_loaded are not PRS_FAILED."""
+    entry = _make_entry(pr=None, labels={"remote": "git@github.com:org/repo.git"})
+    assert _classify_entry(entry, {}) == BoardSection.STILL_COOKING
 
 
 # =============================================================================
@@ -923,7 +945,7 @@ def test_unmark_all_noop_when_empty() -> None:
 
 def test_build_board_widgets_shows_mark_indicator() -> None:
     entry = _make_entry()
-    snapshot = BoardSnapshot(entries=(entry,), fetch_time_seconds=0.1)
+    snapshot = BoardSnapshot(entries=(entry,), repo_pr_loaded={}, fetch_time_seconds=0.1)
     marks = {AgentName("test-agent"): "d"}
     walker, index_to_entry = _build_board_widgets(snapshot, _BOARD_COLUMN_DEFS, marks)
     agent_idx = min(index_to_entry.keys())
@@ -971,6 +993,7 @@ def test_dispatch_immediate_custom_command_does_not_mark() -> None:
 
 
 def test_carry_forward_pr_data_preserves_old_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mngr/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -979,8 +1002,13 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
         branch="mngr/agent-1",
         pr=pr,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        repo_pr_loaded={"org/repo": True},
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -989,16 +1017,17 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
     new = BoardSnapshot(
         entries=(new_entry,),
         errors=("gh auth failed",),
-        prs_loaded=False,
+        repo_pr_loaded={},
         fetch_time_seconds=2.0,
     )
 
     result = _carry_forward_pr_data(old, new)
-    assert result.prs_loaded is True
+    assert result.repo_pr_loaded["org/repo"] is True
     assert result.entries[0].pr is not None
     assert result.entries[0].pr.number == 42
     assert "gh auth failed" in result.errors[0]
@@ -1006,6 +1035,7 @@ def test_carry_forward_pr_data_preserves_old_prs() -> None:
 
 
 def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
         state=AgentLifecycleState.RUNNING,
@@ -1013,8 +1043,13 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url="https://github.com/org/repo/compare/mngr/agent-1?expand=1",
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        repo_pr_loaded={"org/repo": True},
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1023,31 +1058,47 @@ def test_carry_forward_pr_data_preserves_create_pr_url_without_pr() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        repo_pr_loaded={},
+        fetch_time_seconds=2.0,
+    )
 
     result = _carry_forward_pr_data(old, new)
-    assert result.prs_loaded is True
+    assert result.repo_pr_loaded["org/repo"] is True
     assert result.entries[0].pr is None
     assert result.entries[0].create_pr_url == "https://github.com/org/repo/compare/mngr/agent-1?expand=1"
 
 
 def test_carry_forward_pr_data_handles_new_agents() -> None:
-    old = BoardSnapshot(entries=(), prs_loaded=True, fetch_time_seconds=1.0)
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
+    old = BoardSnapshot(
+        entries=(),
+        repo_pr_loaded={"org/repo": True},
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-new"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("modal"),
         branch="mngr/agent-new",
+        column_data=repo_labels,
     )
-    new = BoardSnapshot(entries=(new_entry,), prs_loaded=False, fetch_time_seconds=2.0)
+    new = BoardSnapshot(
+        entries=(new_entry,),
+        repo_pr_loaded={},
+        fetch_time_seconds=2.0,
+    )
 
     result = _carry_forward_pr_data(old, new)
     assert result.entries[0].pr is None
 
 
 def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     entry = AgentBoardEntry(
         name=AgentName("agent-1"),
         state=AgentLifecycleState.RUNNING,
@@ -1055,11 +1106,12 @@ def test_first_load_pr_failure_shows_prs_not_loaded() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
     snapshot = BoardSnapshot(
         entries=(entry,),
         errors=("gh pr list failed: auth required",),
-        prs_loaded=False,
+        repo_pr_loaded={"org/repo": False},
         fetch_time_seconds=1.0,
     )
     walker, _ = _build_board_widgets(snapshot, _BOARD_COLUMN_DEFS)
@@ -1079,10 +1131,11 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url="https://github.com/org/repo/compare/mngr/agent-1?expand=1",
+        column_data=ColumnData(labels={"remote": "git@github.com:org/repo.git"}),
     )
     snapshot = BoardSnapshot(
         entries=(entry,),
-        prs_loaded=True,
+        repo_pr_loaded={"org/repo": True},
         fetch_time_seconds=1.0,
     )
     walker, _ = _build_board_widgets(snapshot, _BOARD_COLUMN_DEFS)
@@ -1093,6 +1146,7 @@ def test_first_load_pr_success_shows_normal_heading() -> None:
 
 
 def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
+    repo_labels = ColumnData(labels={"remote": "git@github.com:org/repo.git"})
     pr = make_pr_info(number=42, head_branch="mngr/agent-1")
     old_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1101,8 +1155,13 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
         branch="mngr/agent-1",
         pr=pr,
         create_pr_url=None,
+        column_data=repo_labels,
     )
-    old = BoardSnapshot(entries=(old_entry,), prs_loaded=True, fetch_time_seconds=1.0)
+    old = BoardSnapshot(
+        entries=(old_entry,),
+        repo_pr_loaded={"org/repo": True},
+        fetch_time_seconds=1.0,
+    )
 
     new_entry = AgentBoardEntry(
         name=AgentName("agent-1"),
@@ -1111,11 +1170,12 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
         branch="mngr/agent-1",
         pr=None,
         create_pr_url=None,
+        column_data=repo_labels,
     )
     new = BoardSnapshot(
         entries=(new_entry,),
         errors=("gh pr list failed: network error",),
-        prs_loaded=False,
+        repo_pr_loaded={},
         fetch_time_seconds=2.0,
     )
 
@@ -1128,6 +1188,71 @@ def test_second_load_pr_failure_shows_carried_forward_prs() -> None:
     assert not _text_contains(texts, "no PR yet")
     assert not _text_contains(texts, "create PR")
     assert _text_contains(texts, "network error")
+
+
+def test_carry_forward_partial_failure_preserves_failed_repo_prs() -> None:
+    """When one repo fails in a multi-repo refresh, carry forward only agents from the failed repo."""
+    pr_good = make_pr_info(number=10, head_branch="mngr/good-agent")
+    pr_bad = make_pr_info(number=20, head_branch="mngr/bad-agent")
+    pr_good_refreshed = make_pr_info(number=10, head_branch="mngr/good-agent", state=PrState.MERGED)
+
+    old_good_entry = AgentBoardEntry(
+        name=AgentName("good-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mngr/good-agent",
+        pr=pr_good,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/good.git"}),
+    )
+    old_bad_entry = AgentBoardEntry(
+        name=AgentName("bad-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mngr/bad-agent",
+        pr=pr_bad,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/bad.git"}),
+    )
+    old = BoardSnapshot(
+        entries=(old_good_entry, old_bad_entry),
+        repo_pr_loaded={"org/good": True, "org/bad": True},
+        fetch_time_seconds=1.0,
+    )
+
+    # New snapshot: good repo succeeded (PR updated to MERGED), bad repo failed (PR is None)
+    new_good_entry = AgentBoardEntry(
+        name=AgentName("good-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mngr/good-agent",
+        pr=pr_good_refreshed,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/good.git"}),
+    )
+    new_bad_entry = AgentBoardEntry(
+        name=AgentName("bad-agent"),
+        state=AgentLifecycleState.RUNNING,
+        provider_name=ProviderInstanceName("local"),
+        branch="mngr/bad-agent",
+        pr=None,
+        column_data=ColumnData(labels={"remote": "git@github.com:org/bad.git"}),
+    )
+    new = BoardSnapshot(
+        entries=(new_good_entry, new_bad_entry),
+        repo_pr_loaded={"org/good": True, "org/bad": False},
+        fetch_time_seconds=2.0,
+    )
+
+    result = _carry_forward_pr_data(old, new)
+
+    # Good agent keeps its fresh data (MERGED)
+    assert result.entries[0].pr is not None
+    assert result.entries[0].pr.state == PrState.MERGED
+
+    # Bad agent gets its old PR carried forward
+    assert result.entries[1].pr is not None
+    assert result.entries[1].pr.number == 20
+
+    assert result.repo_pr_loaded["org/good"] is True
+    assert result.repo_pr_loaded["org/bad"] is True
 
 
 # === Debounce / refresh tests ===
@@ -1181,6 +1306,7 @@ def _make_dummy_snapshot(**overrides: Any) -> BoardSnapshot:
                 provider_name=ProviderInstanceName("modal"),
             ),
         ),
+        "repo_pr_loaded": {},
         "fetch_time_seconds": 0.1,
     }
     defaults.update(overrides)
@@ -1315,7 +1441,7 @@ def test_finish_refresh_uses_auto_cooldown_on_failure() -> None:
 def test_local_refresh_does_not_reset_last_refresh_time() -> None:
     """A local-only refresh should not update last_refresh_time."""
     loop = _TestableLoop()
-    snapshot = _make_dummy_snapshot(prs_loaded=False)
+    snapshot = _make_dummy_snapshot()
     future: Future[BoardSnapshot] = Future()
     future.set_result(snapshot)
     original_time = 1000.0
@@ -1335,7 +1461,7 @@ def test_local_refresh_does_not_reset_last_refresh_time() -> None:
 def test_local_refresh_does_not_schedule_next_auto_refresh() -> None:
     """A local-only refresh should not schedule the next periodic auto-refresh."""
     loop = _TestableLoop()
-    snapshot = _make_dummy_snapshot(prs_loaded=False)
+    snapshot = _make_dummy_snapshot()
     future: Future[BoardSnapshot] = Future()
     future.set_result(snapshot)
     state = _make_debounce_state(

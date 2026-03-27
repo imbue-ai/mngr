@@ -28,7 +28,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.data_types import SourceLocation
-from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import ResolvedSource
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
@@ -112,7 +112,13 @@ class _CachedAgentHostLoader(MutableModel):
 
     def __call__(self) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         if self.cached_result is None:
-            self.cached_result = discover_all_hosts_and_agents(self.mngr_ctx)[0]
+            self.cached_result = discover_hosts_and_agents(
+                self.mngr_ctx,
+                provider_names=None,
+                agent_identifiers=None,
+                include_destroyed=False,
+                reset_caches=False,
+            )[0]
         return self.cached_result
 
 
@@ -460,7 +466,10 @@ class _AutoLabels(FrozenModel):
     """Auto-derived agent labels. Field names are the label keys."""
 
     project: str = Field(description="Project name (from git remote or folder name)")
-    remote: str | None = Field(default=None, description="Git remote origin URL")
+    remote: str | None = Field(
+        default=None,
+        description="Git remote origin URL (stored verbatim, may include credentials if the remote uses HTTPS with an embedded PAT)",
+    )
 
 
 class _CreateSetup(FrozenModel):
@@ -821,7 +830,12 @@ def _handle_editor_message(
 
 
 def _get_source_remote_url(source_location: HostLocation) -> str | None:
-    """Get the git remote origin URL from the source location via execute_command."""
+    """Get the git remote origin URL from the source location via execute_command.
+
+    Returns the URL verbatim, which may include embedded credentials (e.g. a
+    GitHub PAT in an HTTPS URL). This is intentional -- stripping credentials
+    would break gh CLI auth for repos that rely on PAT-based HTTPS remotes.
+    """
     result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
     if result.success and result.stdout.strip():
         return result.stdout.strip()

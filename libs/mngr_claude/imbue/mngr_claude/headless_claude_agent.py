@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from pydantic import Field
+
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -174,7 +176,18 @@ class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
 
 
 class HeadlessClaudeAgentConfig(ClaudeAgentConfig):
-    """Config for the headless_claude agent type."""
+    """Config for the headless_claude agent type.
+
+    Disables sync_home_settings because headless agents are ephemeral and
+    should not inherit user-level hooks (e.g. Stop hooks) from
+    ~/.claude/settings.json.
+    """
+
+    sync_home_settings: bool = Field(
+        default=False,
+        description="Headless agents do not sync user settings from ~/.claude/ "
+        "to avoid inheriting hooks (e.g. Stop hooks) that interfere with ephemeral operation.",
+    )
 
 
 class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):

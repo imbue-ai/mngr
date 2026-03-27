@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from enum import auto
 from pathlib import Path
@@ -233,7 +234,32 @@ class VolumeId(RandomId):
     PREFIX = "vol"
 
 
-class ProviderInstanceName(NonEmptyStr):
+class InvalidName(ValueError):
+    pass
+
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
+
+
+class SafeName(NonEmptyStr):
+    """Base type for human-readable names used in filesystem paths and shell commands.
+
+    Must be alphanumeric with dashes and underscores allowed in the middle, must not start
+    or end with a dash. This is enforced because these names appear in
+    filesystem paths, tmux session names, and other contexts where special
+    characters like ``/`` would break things.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        value = value.strip()
+        if not _SAFE_NAME_RE.match(value):
+            raise InvalidName(
+                f"{cls.__name__} must be alphanumeric (with dashes and underscores allowed in the middle): '{value}'"
+            )
+        return super().__new__(cls, value)
+
+
+class ProviderInstanceName(SafeName):
     """Name of a provider instance."""
 
 
@@ -247,27 +273,20 @@ def default_branch_name(agent_name: "AgentName", prefix: str = DEFAULT_BRANCH_PR
     return f"{prefix}{agent_name}"
 
 
-class ProviderBackendName(NonEmptyStr):
+class ProviderBackendName(SafeName):
     """Name of a provider backend."""
 
 
-class InvalidAgentName(ValueError):
-    pass
-
-
-# FIXME: actually, there are more restrictions here, like: only alphanumeric and dashes, must not start or end with a dash, etc. We must enforce those.
-#  the same restrictions should apply to ProviderInstanceName, ProviderBackendName, HostName, AgentName, and AgentTypeName
-class AgentName(NonEmptyStr):
+class AgentName(SafeName):
     """Human-readable name for an agent."""
-
-    def __new__(cls, value: str) -> Self:
-        if value.startswith("-") or value.endswith("-"):
-            raise InvalidAgentName(f"{cls.__name__} cannot start or end with a dash: '{value}'")
-        return super().__new__(cls, value.strip())
 
 
 class HostName(NonEmptyStr):
-    """Human-readable name for a host."""
+    """Human-readable name for a host.
+
+    Supports the format ``host_name.provider_name``. Not validated with
+    SafeName because host names can be IP addresses or other formats.
+    """
 
     @property
     def provider_name(self) -> ProviderInstanceName | None:
@@ -284,7 +303,7 @@ class HostName(NonEmptyStr):
         return parts[0]
 
 
-class AgentTypeName(NonEmptyStr):
+class AgentTypeName(SafeName):
     """Type name for an agent (e.g., claude, codex)."""
 
 

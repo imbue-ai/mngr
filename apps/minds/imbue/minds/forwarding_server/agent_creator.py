@@ -201,6 +201,8 @@ def run_mngr_create(
         "--no-connect",
         "--type",
         agent_type,
+        "--host-env",
+        "IS_AUTONOMOUS=1",
         "--env",
         "ROLE=thinking",
         "--env",
@@ -222,6 +224,8 @@ def run_mngr_create(
                 [
                     "--provider",
                     "docker",
+                    "--host-env",
+                    "IS_SANDBOX=1",
                     "-vv",
                     "--source-path",
                     str(mind_dir),

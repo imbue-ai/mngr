@@ -42,6 +42,7 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import parse_bool_env
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
 
 # Environment variable prefix for command config overrides.
@@ -217,6 +218,11 @@ def load_config(
                 "Running mngr within pytest is not allowed by the current configuration. This can happen when tests are poorly written, and load the .mngr/settings.toml file from the root of the mngr project"
             )
 
+    # Resolve project root for use as cwd in pre-command scripts.
+    # Note: MNGR_PROJECT_DIR is NOT used here because it points to the config
+    # directory (containing settings.toml), not the project root.
+    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
+
     # Return MngrContext containing both config and plugin manager
     return MngrContext(
         config=final_config,
@@ -224,6 +230,7 @@ def load_config(
         is_interactive=is_interactive,
         profile_dir=profile_dir,
         concurrency_group=concurrency_group,
+        project_root=project_root,
     )
 
 
@@ -375,7 +382,12 @@ def _parse_agent_types(
     agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
 
     for name, raw_config in raw_types.items():
-        config_class = get_agent_config_class(name)
+        # Custom types with a parent_type should use the parent's config class,
+        # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
+        # has trust_working_directory). Without this, unregistered custom type names
+        # fall back to the base AgentTypeConfig which rejects parent-specific fields.
+        parent_type = raw_config.get("parent_type")
+        config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
         normalized_config = _normalize_cli_args_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)

@@ -19,6 +19,7 @@ from imbue.mngr.api.create import create
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import HostLocation
@@ -806,6 +807,55 @@ def test_create_work_dir_false_without_target_path_uses_source(
 
         data = json.loads(data_file.read_text())
         assert data["work_dir"] == str(temp_work_dir), "work_dir should be the source path when target_path is None"
+
+
+# =============================================================================
+# Duplicate Agent Name Tests
+# =============================================================================
+
+
+@pytest.mark.tmux
+def test_create_rejects_duplicate_agent_name_on_same_host(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Test that creating a second agent with the same name on the same host raises DuplicateAgentNameError."""
+    agent_name = AgentName(f"test-dup-name-{int(time.time())}")
+    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
+
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("echo"),
+            name=agent_name,
+            command=CommandString("sleep 847291"),
+        )
+
+        # First create succeeds
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        assert result.agent is not None
+
+        # Second create with same name should fail
+        with pytest.raises(DuplicateAgentNameError) as exc_info:
+            create(
+                source_location=source_location,
+                target_host=local_host,
+                agent_options=CreateAgentOptions(
+                    agent_type=AgentTypeName("echo"),
+                    name=agent_name,
+                    command=CommandString("sleep 847292"),
+                ),
+                mngr_ctx=temp_mngr_ctx,
+            )
+
+        assert exc_info.value.agent_name == agent_name
+        assert exc_info.value.existing_agent_id == result.agent.id
 
 
 # =============================================================================

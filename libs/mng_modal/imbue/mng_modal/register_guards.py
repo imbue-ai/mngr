@@ -1,0 +1,1 @@
+from imbue.modal_proxy.register_guards import register_modal_guard as register_modal_guard

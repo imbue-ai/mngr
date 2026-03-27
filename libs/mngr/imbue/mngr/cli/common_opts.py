@@ -74,6 +74,13 @@ def add_common_options(command: TDecorated) -> TDecorated:
         help="Project context directory (for build context and loading project-specific config) [default: local .git root]",
     )(command)
     command = optgroup.option(
+        "--safe",
+        is_flag=True,
+        default=False,
+        help="Always query all providers during discovery (disable event-stream optimization). "
+        "Use this when interfacing with mngr from multiple machines.",
+    )(command)
+    command = optgroup.option(
         "--headless",
         is_flag=True,
         default=False,
@@ -171,9 +178,10 @@ def setup_command_context(
             # Handle cases where stdout is uninitialized (e.g., xdist workers)
             is_interactive = False
 
-    # Update MngrContext with the resolved is_interactive
+    # Update MngrContext with the resolved is_interactive and safe mode
     mngr_ctx = mngr_ctx.model_copy_update(
         to_update(mngr_ctx.field_ref().is_interactive, is_interactive),
+        to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)
@@ -232,7 +240,7 @@ def setup_command_context(
             ctx.parent.meta["is_error_reporting_enabled"] = True
 
     # Run pre-command scripts if configured for this command
-    _run_pre_command_scripts(mngr_ctx.config, command_name, cg)
+    _run_pre_command_scripts(mngr_ctx.config, command_name, cg, cwd=mngr_ctx.project_root)
 
     # Store command metadata for lifecycle hooks (on_after_command, on_error)
     if ctx.parent is not None:
@@ -506,21 +514,23 @@ def _apply_plugin_option_overrides(
     )
 
 
-def _run_single_script(script: str, cg: ConcurrencyGroup) -> tuple[str, int, str, str]:
+def _run_single_script(script: str, cg: ConcurrencyGroup, cwd: Path | None) -> tuple[str, int, str, str]:
     """Run a single script and return (script, exit_code, stdout, stderr)."""
     try:
         result = cg.run_process_to_completion(
             ["sh", "-c", script],
+            cwd=cwd,
         )
         return (script, result.returncode if result.returncode is not None else 0, result.stdout, result.stderr)
     except ProcessError as e:
         return (script, e.returncode if e.returncode is not None else -1, e.stdout, e.stderr)
 
 
-def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: ConcurrencyGroup) -> None:
+def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: ConcurrencyGroup, cwd: Path | None) -> None:
     """Run pre-command scripts configured for this command.
 
     Scripts are run in parallel and all must succeed (exit code 0).
+    When cwd is provided, scripts run with that as their working directory.
     Raises click.ClickException if any script fails.
     """
     scripts = config.pre_command_scripts.get(command_name)
@@ -532,7 +542,7 @@ def _run_pre_command_scripts(config: MngrConfig, command_name: str, cg: Concurre
     futures: list[Future[tuple[str, int, str, str]]] = []
     with ConcurrencyGroupExecutor(parent_cg=cg, name="pre_command_scripts", max_workers=32) as executor:
         for script in scripts:
-            futures.append(executor.submit(_run_single_script, script, cg))
+            futures.append(executor.submit(_run_single_script, script, cg, cwd))
     for future in futures:
         script, exit_code, _stdout, stderr = future.result()
         if exit_code != 0:

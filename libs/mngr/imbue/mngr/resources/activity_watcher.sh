@@ -176,11 +176,18 @@ has_running_agent_sessions() {
         fi
     fi
 
-    # check how long this container has been running for--if it's been less than the grace period, skip the tmux check to avoid shutting down the host before agent sessions have a chance to start
-    local container_uptime_seconds
-    container_uptime_seconds=$(cat /proc/uptime | awk '{print int($1)}')
-    if [ "$container_uptime_seconds" -lt "$AGENT_SESSION_GRACE_PERIOD" ]; then
-        return 0
+    # Check how long since the last boot -- if less than the grace period, skip
+    # the tmux check to avoid shutting down before agent sessions can start.
+    # We use the boot activity file mtime rather than /proc/uptime because
+    # Docker container uptime accumulates across start/stop cycles and does
+    # not reset on container restart.
+    local boot_mtime
+    boot_mtime=$(get_mtime "$BOOT_ACTIVITY_PATH")
+    if [ -n "$boot_mtime" ]; then
+        local seconds_since_boot=$((current_time - boot_mtime))
+        if [ "$seconds_since_boot" -lt "$AGENT_SESSION_GRACE_PERIOD" ]; then
+            return 0
+        fi
     fi
 
     # List tmux sessions and check if any match the prefix.
