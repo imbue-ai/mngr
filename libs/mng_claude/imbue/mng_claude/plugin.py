@@ -77,7 +77,8 @@ from imbue.mng_claude.claude_config import merge_hooks_config
 from imbue.mng_claude.claude_config import read_claude_config
 from imbue.mng_claude.claude_config import remove_claude_trust_for_path
 
-_READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
+# just trying to bump this--is this what is causing the issue?
+_READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 30.0
 
 # Paths within ~/.claude/ to sync to the per-agent config dir.
 # Used by both get_files_for_deploy() and provision() to ensure consistency.
