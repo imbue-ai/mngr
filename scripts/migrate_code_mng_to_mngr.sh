@@ -2,11 +2,15 @@
 # Migrate code from mng -> mngr naming within the git checkout.
 #
 # Run from the repo root (or it will cd there automatically).
-# This script is idempotent -- safe to run multiple times, including
-# after merging main into a rename branch (to fix incoming code).
+# This script is idempotent -- safe to run multiple times.
 #
-# For open MRs: run this script on your branch, then merge in the new main.
-# After a merge with main: just run this script again to rename incoming code.
+# For open MRs:
+#   1. Run this script on your branch
+#   2. Commit the rename
+#   3. Merge main -- since both sides now use mngr names, git can
+#      three-way merge properly and only real conflicts remain
+#   4. Resolve any real conflicts manually (as you normally would)
+#   5. Commit the merge
 #
 # Usage:
 #   scripts/migrate_code_mng_to_mngr.sh              # run migration
@@ -145,6 +149,8 @@ for my $file (@ARGV) {
     $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
     $content =~ s/name="mngr"/name="imbue-mngr"/g;
     $content =~ s/startswith\("mngr-"\)/startswith("imbue-mngr-")/g;
+    # CI workflow step names: "Build mngr-X" -> "Build imbue-mngr-X"
+    $content =~ s/Build (?<!imbue-)mngr/Build imbue-mngr/g;
     # PyPI URL slugs
     $content =~ s|pypi/mngr/|pypi/imbue-mngr/|g;
     # uv tool install/run (but not already imbue-mngr)
@@ -423,7 +429,7 @@ mapfile -t pypi_files < <(
     for f in libs/*/pyproject.toml apps/*/pyproject.toml; do [ -f "$f" ] && echo "$f"; done
     for f in scripts/release.py scripts/verify_publish.py scripts/utils.py scripts/install.sh; do [ -f "$f" ] && echo "$f"; done
     grep -rl 'distribution("mngr' libs/ apps/ 2>/dev/null || true
-    for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py README.md libs/mngr/README.md; do [ -f "$f" ] && echo "$f"; done
+    for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py README.md libs/mngr/README.md .github/workflows/publish.yml; do [ -f "$f" ] && echo "$f"; done
 )
 # Deduplicate
 mapfile -t pypi_files < <(printf '%s\n' "${pypi_files[@]}" | sort -u)
