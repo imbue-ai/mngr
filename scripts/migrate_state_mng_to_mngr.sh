@@ -14,6 +14,10 @@
 
 set -euo pipefail
 
+# Auto-detect the repo root this script lives in
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
@@ -35,7 +39,8 @@ copy_missing_files() {
     local dst="$2"
     # Copy everything from src to dst that doesn't already exist in dst.
     # Uses cp -a to preserve permissions/symlinks and -n to skip existing.
-    cp -a -n "$src"/. "$dst"/
+    # macOS cp returns exit code 1 when -n skips files, so we ignore it.
+    cp -a -n "$src"/. "$dst"/ 2>/dev/null || true
 }
 
 migrate_dir() {
@@ -95,12 +100,22 @@ for wt in "$HOME/.mngr/worktrees"/*/; do
     [ -d "$wt/.mng" ] && migrate_dir "${wt%/}" "${wt%/}"
 done
 
+# Migrate .mng in the project this script lives in
+migrate_dir "$REPO_ROOT" "$REPO_ROOT"
+
+# Also migrate .mng dirs inside worktrees under this checkout
+if [ -d "$REPO_ROOT/.mngr/worktrees" ]; then
+    for wt in "$REPO_ROOT/.mngr/worktrees"/*/; do
+        [ -d "$wt/.mng" ] && migrate_dir "${wt%/}" "${wt%/}"
+    done
+fi
+
 echo ""
 
+# Migrate any additional checkout dirs passed as arguments
 for repo_dir in "$@"; do
     migrate_dir "$repo_dir" "$repo_dir"
 
-    # Also migrate .mng dirs inside worktrees under this checkout
     if [ -d "$repo_dir/.mngr/worktrees" ]; then
         for wt in "$repo_dir/.mngr/worktrees"/*/; do
             [ -d "$wt/.mng" ] && migrate_dir "${wt%/}" "${wt%/}"
