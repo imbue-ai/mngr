@@ -113,7 +113,23 @@ copy_missing_files() {
     local src="$1"
     local dst="$2"
     if [ "$DRY_RUN" = true ]; then
-        dry "would copy missing files from $src to $dst"
+        local missing_items=()
+        for item in "$src"/*; do
+            [ -e "$item" ] || continue
+            local base
+            base=$(basename "$item")
+            if [ ! -e "$dst/$base" ]; then
+                missing_items+=("$base")
+            fi
+        done
+        if [ ${#missing_items[@]} -gt 0 ]; then
+            dry "would copy from $src to $dst:"
+            for item in "${missing_items[@]}"; do
+                dry "  $item"
+            done
+        else
+            dry "nothing to copy from $src (all items already in $dst)"
+        fi
     else
         # macOS cp returns exit code 1 when -n skips files, so we ignore it.
         cp -a -n "$src"/. "$dst"/ 2>/dev/null || true
