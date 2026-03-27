@@ -248,32 +248,31 @@ class Host(BaseHost, OnlineHostInterface):
 
         Prefer using execute_command() instead whenever possible.
         """
+        pyinfra_kwargs: dict[str, Any] = {
+            "_timeout": _timeout,
+            "_success_exit_codes": _success_exit_codes,
+            "_env": _env,
+            "_chdir": _chdir,
+            "_shell_executable": _shell_executable,
+            "_su_user": _su_user,
+            "_use_su_login": _use_su_login,
+            "_su_shell": _su_shell,
+            "_preserve_su_env": _preserve_su_env,
+            "_sudo": _sudo,
+            "_sudo_user": _sudo_user,
+            "_use_sudo_login": _use_sudo_login,
+            "_sudo_password": _sudo_password,
+            "_sudo_askpass_path": _sudo_askpass_path,
+            "_preserve_sudo_env": _preserve_sudo_env,
+            "_doas": _doas,
+            "_doas_user": _doas_user,
+            "_retries": _retries,
+            "_retry_delay": _retry_delay,
+            "_retry_until": _retry_until,
+        }
         with self._notify_on_connection_error():
             try:
-                self._ensure_connected()
-                return self.connector.host.run_shell_command(
-                    command,
-                    _timeout=_timeout,
-                    _success_exit_codes=_success_exit_codes,
-                    _env=_env,
-                    _chdir=_chdir,
-                    _shell_executable=_shell_executable,
-                    _su_user=_su_user,
-                    _use_su_login=_use_su_login,
-                    _su_shell=_su_shell,
-                    _preserve_su_env=_preserve_su_env,
-                    _sudo=_sudo,
-                    _sudo_user=_sudo_user,
-                    _use_sudo_login=_use_sudo_login,
-                    _sudo_password=_sudo_password,
-                    _sudo_askpass_path=_sudo_askpass_path,
-                    _preserve_sudo_env=_preserve_sudo_env,
-                    _doas=_doas,
-                    _doas_user=_doas_user,
-                    _retries=_retries,
-                    _retry_delay=_retry_delay,
-                    _retry_until=_retry_until,
-                )
+                return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e
@@ -281,6 +280,42 @@ class Host(BaseHost, OnlineHostInterface):
                     raise
             except (EOFError, SSHException) as e:
                 raise HostConnectionError("Could not execute command due to connection error") from e
+
+    @_retry_on_transient_ssh_error
+    def _run_shell_command_with_transient_retry(
+        self,
+        command: StringCommand,
+        pyinfra_kwargs: dict[str, Any],
+    ) -> tuple[bool, CommandOutput]:
+        """Inner retry loop for _run_shell_command.
+
+        Retries transient SSH errors (socket closed, channel refused, channel
+        closed, EOF) with the same backoff used by file operations.
+        """
+        self._ensure_connected()
+        try:
+            return self.connector.host.run_shell_command(command, **pyinfra_kwargs)
+        except ChannelException as e:
+            logger.debug("Channel open refused while running command: {}, retrying without disconnect", e)
+            raise
+        except SSHException as e:
+            if "Channel closed" in str(e):
+                # "Channel closed" means a specific channel died, not the whole
+                # transport.  Do NOT disconnect -- same rationale as ChannelException.
+                logger.debug("Channel closed while running command: {}, retrying without disconnect", e)
+            else:
+                logger.debug("SSH error while running command: {}, disconnecting for retry", e)
+                self.connector.host.disconnect()
+            raise
+        except EOFError as e:
+            logger.debug("SSH error while running command: {}, disconnecting for retry", e)
+            self.connector.host.disconnect()
+            raise
+        except OSError as e:
+            if "Socket is closed" in str(e):
+                logger.debug("Socket closed while running command, disconnecting for retry")
+                self.connector.host.disconnect()
+            raise
 
     def _get_file(
         self,
@@ -349,7 +384,16 @@ class Host(BaseHost, OnlineHostInterface):
             # operations on the shared transport, causing hangs.
             logger.debug("Channel open refused while reading {}: {}, retrying without disconnect", remote_filename, e)
             raise
-        except (SSHException, EOFError) as e:
+        except SSHException as e:
+            if "Channel closed" in str(e):
+                # "Channel closed" means a specific channel died, not the whole
+                # transport.  Do NOT disconnect -- same rationale as ChannelException.
+                logger.debug("Channel closed while reading {}: {}, retrying without disconnect", remote_filename, e)
+            else:
+                logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
+                self.connector.host.disconnect()
+            raise
+        except EOFError as e:
             logger.debug("SSH error while reading {}: {}, disconnecting for retry", remote_filename, e)
             self.connector.host.disconnect()
             raise
@@ -442,7 +486,16 @@ class Host(BaseHost, OnlineHostInterface):
             # operations on the shared transport, causing hangs.
             logger.debug("Channel open refused while writing {}: {}, retrying without disconnect", remote_filename, e)
             raise
-        except (SSHException, EOFError) as e:
+        except SSHException as e:
+            if "Channel closed" in str(e):
+                # "Channel closed" means a specific channel died, not the whole
+                # transport.  Do NOT disconnect -- same rationale as ChannelException.
+                logger.debug("Channel closed while writing {}: {}, retrying without disconnect", remote_filename, e)
+            else:
+                logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
+                self.connector.host.disconnect()
+            raise
+        except EOFError as e:
             logger.debug("SSH error while writing {}: {}, disconnecting for retry", remote_filename, e)
             self.connector.host.disconnect()
             raise
