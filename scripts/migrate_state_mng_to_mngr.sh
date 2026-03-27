@@ -415,4 +415,14 @@ if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}This was a dry run. No changes were made.${NC}"
 else
     echo -e "${GREEN}Done.${NC}"
+    echo ""
+    echo -e "${BOLD}Note on existing resources:${NC}"
+    echo -e "  The resource prefix changed from ${CYAN}mng-${NC} to ${CYAN}mngr-${NC}."
+    echo -e "  Existing Modal environments and tmux sessions still use the old"
+    echo -e "  prefix. Add this to ${CYAN}~/.mngr/config.toml${NC} to keep using them:"
+    echo ""
+    echo -e "    ${CYAN}prefix = \"mng-\"${NC}"
+    echo ""
+    echo -e "  Once all your existing Modal agents have finished, remove this"
+    echo -e "  line to start using the new ${CYAN}mngr-${NC} prefix going forward."
 fi
