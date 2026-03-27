@@ -61,6 +61,9 @@ for my $file (@ARGV) {
     $content =~ s/MNG(?!R)/MNGR/g;
     $content =~ s/Mng(?!r)/Mngr/g;
     $content =~ s/mng(?!r)/mngr/g;
+    # uv tool paths: uv/tools/mngr/ -> uv/tools/imbue-mngr/
+    # (the basic rename produces mngr but the PyPI tool name is imbue-mngr)
+    $content =~ s|uv/tools/mngr/|uv/tools/imbue-mngr/|g;
     if ($content ne $orig) {
         open my $out, '>', $file or next;
         print $out $content;
