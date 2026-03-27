@@ -213,6 +213,13 @@ def connect_to_agent(
             if not mngr_ctx.config.is_nested_tmux_allowed:
                 raise NestedTmuxError(session_name)
             del env["TMUX"]
+        # Push agent env vars into the tmux session environment so new
+        # panes and the connect command shell can access them. tmux attach
+        # alone doesn't propagate the caller's environment to existing sessions.
+        import subprocess
+
+        for key, val in agent_env.items():
+            subprocess.run(["tmux", "set-environment", "-t", session_name, key, val], capture_output=True)
         os.execvpe("tmux", ["tmux", "attach", "-t", session_name], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
