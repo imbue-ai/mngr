@@ -364,7 +364,7 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
             agent.wait_for_ready_signal(
                 is_creating=False,
                 start_action=lambda: host.start_agents([agent.id]),
-                timeout=10.0,
+                timeout=30.0,
             )
         else:
             raise UserInputError(

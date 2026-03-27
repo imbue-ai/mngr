@@ -44,7 +44,7 @@ from imbue.mng.primitives import TransferMode
 # Default timeout for waiting for agent readiness before sending messages.
 # With hook-based polling, we return early when the agent signals readiness,
 # so this is a max wait time, not an unconditional delay.
-DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 10.0
+DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 class HostInterface(MutableModel, ABC):
