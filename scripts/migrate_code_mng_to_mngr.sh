@@ -60,19 +60,23 @@ fi
 
 echo -e "\n${BOLD}Cleaning build artifacts...${NC}"
 if [ "$DRY_RUN" = true ]; then
-    for pat in __pycache__ htmlcov .pytest_cache .test_output; do
+    for pat in __pycache__ htmlcov .pytest_cache .test_output .reviewer; do
         count=$(find "$REPO_ROOT" -type d -name "$pat" 2>/dev/null | wc -l | tr -d ' ')
         [ "$count" -gt 0 ] && dry "would remove $count $pat directories"
     done
-    count=$(find "$REPO_ROOT" -name coverage.xml 2>/dev/null | wc -l | tr -d ' ')
-    [ "$count" -gt 0 ] && dry "would remove $count coverage.xml files"
+    for pat in coverage.xml .coverage; do
+        count=$(find "$REPO_ROOT" -name "$pat" 2>/dev/null | wc -l | tr -d ' ')
+        [ "$count" -gt 0 ] && dry "would remove $count $pat files"
+    done
 else
     find "$REPO_ROOT" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find "$REPO_ROOT" -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
     find "$REPO_ROOT" -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
     find "$REPO_ROOT" -type d -name .test_output -exec rm -rf {} + 2>/dev/null || true
     find "$REPO_ROOT" -name coverage.xml -delete 2>/dev/null || true
-    ok "Cleaned __pycache__, htmlcov, .pytest_cache, .test_output, coverage.xml"
+    find "$REPO_ROOT" -name '.coverage' -delete 2>/dev/null || true
+    find "$REPO_ROOT" -type d -name '.reviewer' -exec rm -rf {} + 2>/dev/null || true
+    ok "Cleaned build artifacts"
 fi
 
 
@@ -214,6 +218,10 @@ for dir in libs/mng libs/mng_*; do
     esac
     newbase="${base/mng/mngr}"
     newdir="libs/$newbase"
+    # Remove newdir if it exists but has no git-tracked files (just artifacts)
+    if [ -d "$newdir" ] && ! git ls-files --error-unmatch "$newdir" >/dev/null 2>&1; then
+        rm -rf "$newdir"
+    fi
     if [ ! -d "$newdir" ]; then
         if [ "$DRY_RUN" = true ]; then
             dry "would rename $dir -> $newdir"
