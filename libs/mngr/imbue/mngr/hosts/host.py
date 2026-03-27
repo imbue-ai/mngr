@@ -1906,7 +1906,7 @@ class Host(BaseHost, OnlineHostInterface):
             cmd = " ".join(worktree_args)
             created_branch = new_branch_name
 
-            result = self.execute_idempotent_command(cmd)
+            result = self.execute_stateful_command(cmd)
             if not result.success:
                 stderr = result.stderr or ""
                 if "already checked out" in stderr or "already used by worktree" in stderr:
@@ -2490,7 +2490,7 @@ class Host(BaseHost, OnlineHostInterface):
                         host_dir=self.host_dir,
                         onboarding_text=onboarding_text,
                     )
-                    result = self.execute_idempotent_command(combined_command, cwd=agent.work_dir)
+                    result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 

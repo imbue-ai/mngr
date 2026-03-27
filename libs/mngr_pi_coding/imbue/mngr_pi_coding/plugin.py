@@ -153,7 +153,7 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig]):
         confirmed the text is visible in the pane before this is called.
         """
         send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_idempotent_command(send_enter_cmd)
+        result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(
                 str(self.name),

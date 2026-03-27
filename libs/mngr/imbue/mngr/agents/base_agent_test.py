@@ -998,11 +998,17 @@ class _StubHost:
         self.executed_commands: list[str] = []
         self.written_files: list[tuple[Path, str]] = []
 
-    def execute_command(self, command: str, **kwargs: object) -> CommandResult:
+    def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
         if self._command_results:
             return self._command_results.pop(0)
         return self._default_result
+
+    def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
+        return self._execute_command(command, **kwargs)
+
+    def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
+        return self._execute_command(command, **kwargs)
 
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))

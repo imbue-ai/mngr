@@ -372,7 +372,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         if len(message) < LONG_MESSAGE_THRESHOLD:
             send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
-            result = self.host.execute_idempotent_command(send_msg_cmd)
+            result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
         else:
@@ -382,13 +382,13 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             try:
                 self.host.write_text_file(tmp_path, message)
                 load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
-                result = self.host.execute_idempotent_command(load_cmd)
+                result = self.host.execute_stateful_command(load_cmd)
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
                 paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
-                result = self.host.execute_idempotent_command(paste_cmd)
+                result = self.host.execute_stateful_command(paste_cmd)
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
@@ -401,7 +401,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         self._send_tmux_literal_keys(tmux_target, message)
 
         send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_idempotent_command(send_enter_cmd)
+        result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
 
@@ -568,7 +568,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )
         try:
-            result = self.host.execute_idempotent_command(cmd, timeout_seconds=remaining_time)
+            result = self.host.execute_stateful_command(cmd, timeout_seconds=remaining_time)
         except TimeoutError:
             # The execute_command timeout can race with the bash `timeout` inside
             # the command. Treat the pyinfra-level timeout as a normal timeout.

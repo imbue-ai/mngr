@@ -920,7 +920,7 @@ def test_provision_raises_when_remote_installation_disabled(
             OnlineHostInterface,
             SimpleNamespace(
                 is_local=False,
-                execute_command=lambda *args, **kwargs: SimpleNamespace(success=False),
+                execute_idempotent_command=lambda *args, **kwargs: SimpleNamespace(success=False),
                 write_file=lambda *args, **kwargs: None,
             ),
         )
@@ -2143,18 +2143,18 @@ def _make_command_tracking_host() -> tuple[OnlineHostInterface, list[str]]:
     """Create a mock host that tracks executed commands.
 
     Returns (host, executed_commands) where executed_commands is a list that
-    accumulates command strings passed to execute_command.
+    accumulates command strings passed to execute_idempotent_command.
     """
     executed_commands: list[str] = []
 
-    def mock_execute_command(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
+    def mock_execute_idempotent_command(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
         executed_commands.append(cmd)
         return SimpleNamespace(success=True, stdout="", stderr="")
 
     host = cast(
         OnlineHostInterface,
         SimpleNamespace(
-            execute_command=mock_execute_command,
+            execute_idempotent_command=mock_execute_idempotent_command,
         ),
     )
     return host, executed_commands
@@ -2165,7 +2165,7 @@ def test_get_claude_version_returns_version_on_success() -> None:
     host = cast(
         OnlineHostInterface,
         SimpleNamespace(
-            execute_command=lambda cmd, *args, **kwargs: SimpleNamespace(
+            execute_idempotent_command=lambda cmd, *args, **kwargs: SimpleNamespace(
                 success=True,
                 stdout="2.1.50 (Claude Code)\n",
                 stderr="",
@@ -2181,7 +2181,7 @@ def test_get_claude_version_returns_none_on_failure() -> None:
     host = cast(
         OnlineHostInterface,
         SimpleNamespace(
-            execute_command=lambda cmd, *args, **kwargs: SimpleNamespace(
+            execute_idempotent_command=lambda cmd, *args, **kwargs: SimpleNamespace(
                 success=False,
                 stdout="",
                 stderr="command not found",
@@ -2220,7 +2220,7 @@ def test_provision_raises_on_version_mismatch(
             OnlineHostInterface,
             SimpleNamespace(
                 is_local=True,
-                execute_command=lambda cmd, *args, **kwargs: SimpleNamespace(
+                execute_idempotent_command=lambda cmd, *args, **kwargs: SimpleNamespace(
                     success=True,
                     stdout="2.1.50 (Claude Code)\n",
                     stderr="",

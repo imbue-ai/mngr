@@ -243,7 +243,7 @@ class RemoteGitContext(GitContextInterface):
         return len(result.stdout.strip()) > 0
 
     def git_stash(self, path: Path) -> bool:
-        result = self._host.execute_idempotent_command(
+        result = self._host.execute_stateful_command(
             'git stash push -u -m "mngr-sync-stash"',
             cwd=path,
         )
@@ -252,7 +252,7 @@ class RemoteGitContext(GitContextInterface):
         return "No local changes to save" not in result.stdout
 
     def git_stash_pop(self, path: Path) -> None:
-        result = self._host.execute_idempotent_command("git stash pop", cwd=path)
+        result = self._host.execute_stateful_command("git stash pop", cwd=path)
         if not result.success:
             raise MngrError(f"git stash pop failed: {result.stderr}")
 

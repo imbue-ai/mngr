@@ -368,7 +368,7 @@ def _install_claude(host: OnlineHostInterface, version: str | None = None) -> No
         f"bash /tmp/install_claude.sh{version_arg}",
         "rm -f /tmp/install_claude.sh",
         f"test -x {CLAUDE_INSTALL_PATH}/claude",
-        f"""echo 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' >> ~/.bashrc""",
+        f"""grep -qF 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' ~/.bashrc 2>/dev/null || echo 'export PATH="{CLAUDE_INSTALL_PATH}:$PATH"' >> ~/.bashrc""",
     ]
     install_command = " && ".join(steps)
     result = host.execute_idempotent_command(install_command, timeout_seconds=300.0)

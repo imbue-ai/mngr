@@ -261,7 +261,7 @@ def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
 
 def _create_work_dir_on_host(host: OnlineHostInterface) -> Path:
     """Create a temporary work directory on the host and return its path."""
-    result = host.execute_idempotent_command("mktemp -d /tmp/mngr-ask-XXXXXXXXXX")
+    result = host.execute_stateful_command("mktemp -d /tmp/mngr-ask-XXXXXXXXXX")
     if not result.success:
         raise MngrError(f"Failed to create temp directory on host: {result.stderr}")
     return Path(result.stdout.strip())
