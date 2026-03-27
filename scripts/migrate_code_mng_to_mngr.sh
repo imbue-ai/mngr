@@ -344,15 +344,31 @@ elif [ "$moved" -eq 0 ]; then
     ok "No orphaned files"
 fi
 
-# Clean up empty leftover libs/mng* directories
+# Clean up leftover libs/mng* directories.
+# After artifact cleanup and git mv, these should only contain build artifacts.
+# Re-run artifact cleanup specifically in these dirs, then remove if empty.
 for d in libs/mng libs/mng_*; do
     [ -d "$d" ] || continue
-    if [ "$DRY_RUN" = true ]; then
-        dry "would remove $d"
-    elif find "$d" -type f | read -r; then
-        echo -e "  ${YELLOW}WARNING: $d is not empty after cleanup -- keeping it${NC}"
+    # Clean known artifacts inside this specific directory
+    find "$d" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    find "$d" -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
+    find "$d" -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+    find "$d" -type d -name .test_output -exec rm -rf {} + 2>/dev/null || true
+    find "$d" -name coverage.xml -delete 2>/dev/null || true
+    find "$d" -name '.coverage' -delete 2>/dev/null || true
+    find "$d" -path '*/.reviewer/outputs' -exec rm -rf {} + 2>/dev/null || true
+    find "$d" -name '.stop_hook_consecutive_blocks' -delete 2>/dev/null || true
+    # Remove empty directories left behind
+    find "$d" -depth -type d -empty -delete 2>/dev/null || true
+    # Now check if anything remains
+    if [ -d "$d" ]; then
+        if find "$d" -type f | read -r; then
+            echo -e "  ${YELLOW}WARNING: $d still has non-artifact files -- keeping it${NC}"
+        else
+            rm -rf "$d"
+            ok "Removed $d"
+        fi
     else
-        rm -rf "$d"
         ok "Removed $d"
     fi
 done
