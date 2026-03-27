@@ -75,16 +75,24 @@ else
     ok "Cleaned __pycache__, htmlcov, .pytest_cache, .test_output, coverage.xml"
 fi
 
-# Remove empty leftover directories from the old mng names
+# Remove leftover directories from the old mng names (empty after artifact cleanup)
 for d in libs/mng libs/mng_*; do
     [ -d "$d" ] || continue
-    if find "$d" -type f | read -r; then
-        echo -e "  ${YELLOW}WARNING: $d is not empty and may need manual cleanup${NC}"
+    # Check for real files, excluding build artifacts that would have been cleaned
+    has_real_files=$(find "$d" -type f \
+        -not -path '*/__pycache__/*' \
+        -not -path '*/htmlcov/*' \
+        -not -path '*/.pytest_cache/*' \
+        -not -path '*/.test_output/*' \
+        -not -name 'coverage.xml' \
+        -print -quit 2>/dev/null || true)
+    if [ -n "$has_real_files" ]; then
+        echo -e "  ${YELLOW}WARNING: $d has non-artifact files and may need manual cleanup${NC}"
     elif [ "$DRY_RUN" = true ]; then
-        dry "would remove empty $d"
+        dry "would remove $d (only build artifacts)"
     else
         rm -rf "$d"
-        ok "Removed empty $d"
+        ok "Removed $d"
     fi
 done
 
@@ -216,9 +224,9 @@ if [ "$DRY_RUN" = false ]; then
         [ -d "$d" ] && rmdir "$d" 2>/dev/null || true
     done
 fi
-if [ "$moved" -gt 0 ]; then
+if [ "$moved" -gt 0 ] && [ "$DRY_RUN" = false ]; then
     ok "Moved $moved files from old paths"
-else
+elif [ "$moved" -eq 0 ]; then
     ok "No orphaned files at old paths"
 fi
 
