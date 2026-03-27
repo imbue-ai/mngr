@@ -1,4 +1,4 @@
-# mngr-tutor
+# imbue-mngr-tutor
 
 Interactive tutorial for learning mngr commands.
 

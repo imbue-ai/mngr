@@ -1,4 +1,4 @@
-# mngr-modal
+# imbue-mngr-modal
 
 Modal provider backend plugin for [mngr](../mngr/README.md).
 
@@ -6,10 +6,10 @@ This plugin enables mngr to create and manage agents running in [Modal](https://
 
 ## Installation
 
-`mngr-modal` is included by default when you install `mngr`. To install separately:
+`imbue-mngr-modal` is included by default when you install `mngr`. To install separately:
 
 ```bash
-uv pip install mngr-modal
+uv pip install imbue-mngr-modal
 ```
 
 ## Usage

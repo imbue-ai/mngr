@@ -24,15 +24,15 @@ class RecommendedPlugin(FrozenModel):
 # Descriptions sourced from each plugin's pyproject.toml.
 RECOMMENDED_PLUGINS: Final[tuple[RecommendedPlugin, ...]] = (
     RecommendedPlugin(
-        package_name="mngr-opencode",
+        package_name="imbue-mngr-opencode",
         description="OpenCode agent type plugin for mngr",
     ),
     RecommendedPlugin(
-        package_name="mngr-pair",
+        package_name="imbue-mngr-pair",
         description="Pair command plugin for mngr - continuous file sync between agent and local directory",
     ),
     RecommendedPlugin(
-        package_name="mngr-tutor",
+        package_name="imbue-mngr-tutor",
         description="Interactive tutorial plugin for mngr",
         is_preselected=True,
     ),
