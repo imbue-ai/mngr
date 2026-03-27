@@ -2,11 +2,15 @@
 # Migrate code from mng -> mngr naming within the git checkout.
 #
 # Run from the repo root (or it will cd there automatically).
-# This script is idempotent -- safe to run multiple times, including
-# after merging main into a rename branch (to fix incoming code).
+# This script is idempotent -- safe to run multiple times.
 #
-# For open MRs: run this script on your branch, then merge in the new main.
-# After a merge with main: just run this script again to rename incoming code.
+# For open MRs:
+#   1. Run this script on your branch
+#   2. Commit the rename
+#   3. Merge main -- since both sides now use mngr names, git can
+#      three-way merge properly and only real conflicts remain
+#   4. Resolve any real conflicts manually (as you normally would)
+#   5. Commit the merge
 #
 # Usage:
 #   scripts/migrate_code_mng_to_mngr.sh              # run migration
