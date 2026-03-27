@@ -267,14 +267,8 @@ current.tar.gz
 # Demo recordings (asciinema .cast, .txt, and scripts)
 .demos/
 
-# Conversation review artifacts
-.reviews/
-
 # for git worktrees from other repos
 .external_worktrees/
 
 # ignore coverage files generated within subprojects
 cov.xml
-.autofix/
-.reviews/
-test-results
