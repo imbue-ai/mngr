@@ -382,6 +382,33 @@ else
     ok "No Claude project dirs need renaming."
 fi
 
+# Agent-internal Claude project dirs (inside each agent's plugin data).
+# These encode the worktree path in the directory name.
+agent_claude_renamed=0
+for projects_dir in "$HOME/.mngr/agents"/*/plugin/claude/anthropic/projects; do
+    [ -d "$projects_dir" ] || continue
+    for dir in "$projects_dir"/*mng*; do
+        [ -d "$dir" ] || continue
+        case "$(basename "$dir")" in
+            *mngr*) continue ;;
+        esac
+        newdir=$(echo "$dir" | sed 's/--mng-/--mngr-/g; s/-mng-/-mngr-/g')
+        if [ "$dir" != "$newdir" ] && [ ! -e "$newdir" ]; then
+            if [ "$DRY_RUN" = true ]; then
+                dry "would rename agent project dir: $(basename "$dir")"
+            else
+                mv "$dir" "$newdir"
+            fi
+            agent_claude_renamed=$((agent_claude_renamed + 1))
+        fi
+    done
+done
+if [ "$agent_claude_renamed" -gt 0 ]; then
+    ok "Renamed $agent_claude_renamed agent Claude project dirs"
+elif [ "$DRY_RUN" = false ]; then
+    ok "No agent Claude project dirs need renaming."
+fi
+
 # ── 8. Rename ~/.config/mng ────────────────────────────────────────
 
 step 8 "Renaming ~/.config/mng..."
