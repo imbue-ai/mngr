@@ -481,10 +481,19 @@ mapfile -t code_files < <(
 )
 perl "$PYPI_CODE_PL" "${code_files[@]+"${code_files[@]}"}"
 
-# Targeted fixes for specific files where name=="mngr" means the PyPI name
+# Targeted fixes for specific files where "mngr" means the PyPI name
 # (not vendor name, profile name, etc.)
+#
+# Split into two scripts:
+#   TARGETED_PL      -- base "mngr" patterns (safe for all targeted files)
+#   TARGETED_DASH_PL -- "mngr-xxx" plugin/dep name patterns (only for files
+#                       where mngr-xxx strings are PyPI names, NOT package
+#                       metadata names like ToolRequirement(name="mngr-opencode"))
 TARGETED_PL=$(mktemp)
-trap 'rm -f "$RENAME_PL" "$PYPI_TOML_PL" "$PYPI_CODE_PL" "$TARGETED_PL"' EXIT
+TARGETED_DASH_PL=$(mktemp)
+trap 'rm -f "$RENAME_PL" "$PYPI_TOML_PL" "$PYPI_CODE_PL" "$TARGETED_PL" "$TARGETED_DASH_PL"' EXIT
+
+# -- Base patterns: "mngr" (the core package) as a PyPI name --
 cat > "$TARGETED_PL" << 'PERL_SCRIPT'
 use strict;
 use warnings;
@@ -495,11 +504,30 @@ for my $file (@ARGV) {
     my $content = do { local $/; <$fh> };
     close $fh;
     my $orig = $content;
+    # Comparisons: name == "mngr", name != "mngr"
     $content =~ s/name == "mngr"/name == "imbue-mngr"/g;
     $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
+    # Keyword arg: name="mngr"
     $content =~ s/name="mngr"/name="imbue-mngr"/g;
+    # TOML-style: name = "mngr" (with spaces, used in test TOML strings)
+    $content =~ s/name = "mngr"/name = "imbue-mngr"/g;
+    # Dict key access: ["mngr"]
+    $content =~ s/\["mngr"\]/["imbue-mngr"]/g;
+    # Dict/set membership: "mngr" not in / "mngr" in
+    $content =~ s/"mngr" not in/"imbue-mngr" not in/g;
+    $content =~ s/"mngr" in /"imbue-mngr" in /g;
+    # Assertions: assert "mngr" in (for package name checks)
+    $content =~ s/assert "mngr" in/assert "imbue-mngr" in/g;
+    # Tuple element: ("mngr", -- for package tuples like ("mngr", "0.1.4")
+    $content =~ s/\("mngr",/("imbue-mngr",/g;
+    # Version specifiers in docstrings: "mngr>=0.1.0" etc
+    $content =~ s/(?<!imbue-)"mngr(?=[><=!])/"imbue-mngr/g;
+    # Standalone quoted "mngr" (docstrings, error messages, TOML values)
+    $content =~ s/(?<!imbue-)"mngr"/"imbue-mngr"/g;
     # Fix false positive: dir_name must stay "mngr"
     $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
+    # Fix false positive: path segments (/ "mngr") must stay "mngr"
+    $content =~ s|/ "imbue-mngr"|/ "mngr"|g;
     if ($content ne $orig) {
         $count++;
         unless ($dry_run) {
@@ -511,6 +539,51 @@ for my $file (@ARGV) {
 }
 PERL_SCRIPT
 
+# -- Dash patterns: "mngr-xxx" as PyPI names --
+# Only for files where "mngr-xxx" strings are actual PyPI package names,
+# NOT for uv_tool.py/uv_tool_test.py where they are package metadata names.
+cat > "$TARGETED_DASH_PL" << 'PERL_SCRIPT'
+use strict;
+use warnings;
+my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
+my $count = 0;
+for my $file (@ARGV) {
+    open my $fh, '<', $file or next;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    my $orig = $content;
+    # pypi_name= with mngr or mngr-xxx (utils.py PackageInfo declarations)
+    $content =~ s/pypi_name="mngr-(\w+)"/pypi_name="imbue-mngr-$1"/g;
+    $content =~ s/pypi_name="mngr"/pypi_name="imbue-mngr"/g;
+    # internal_deps: "mngr-xxx", "other" and "mngr", "other"
+    $content =~ s/(?<!imbue-)"mngr-(\w+)",\s*"/"imbue-mngr-$1", "/g;
+    # Tuple element: ("mngr-xxx", for package tuples like ("mngr-pair", "0.1.0")
+    $content =~ s/\("mngr-(\w+)",/("imbue-mngr-$1",/g;
+    # Quoted plugin names as function args: "mngr-schedule" etc
+    $content =~ s/(?<!imbue-)"mngr-(\w+)"/"imbue-mngr-$1"/g;
+    # Unquoted in error messages: mngr-schedule package
+    $content =~ s/(?<!imbue-)mngr-schedule package/imbue-mngr-schedule package/g;
+    # Also handle --with imbue-mngr-xxx in assertion strings (already correct
+    # from PYPI_CODE_PL, but the version-pinned form may be missed)
+    $content =~ s/--with mngr-(\w+)==/--with imbue-mngr-$1==/g;
+    # Fix false positive: dir_name must stay "mngr"
+    $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
+    # Fix false positive: resolve_mngr_install_mode takes a package slug, not PyPI name
+    $content =~ s/_resolve_mngr_install_mode\(mode, "imbue-mngr-/_resolve_mngr_install_mode(mode, "mngr-/g;
+    # Fix false positive: path segments (/ "mngr-xxx") must stay "mngr-xxx"
+    $content =~ s|/ "imbue-mngr-|/ "mngr-|g;
+    if ($content ne $orig) {
+        $count++;
+        unless ($dry_run) {
+            open my $out, '>', $file or next;
+            print $out $content;
+            close $out;
+        }
+    }
+}
+PERL_SCRIPT
+
+# Apply base patterns to all targeted files
 for f in \
     libs/mngr_recursive/imbue/mngr_recursive/provisioning.py \
     libs/mngr_recursive/imbue/mngr_recursive/provisioning_test.py \
@@ -521,6 +594,15 @@ for f in \
     scripts/release.py \
     scripts/verify_publish.py; do
     [ -f "$f" ] && perl "$TARGETED_PL" "$f"
+done
+
+# Apply dash patterns only to files where "mngr-xxx" means a PyPI name
+for f in \
+    libs/mngr_recursive/imbue/mngr_recursive/provisioning.py \
+    libs/mngr_recursive/imbue/mngr_recursive/provisioning_test.py \
+    libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/deploy.py \
+    scripts/utils.py; do
+    [ -f "$f" ] && perl "$TARGETED_DASH_PL" "$f"
 done
 
 # ── 9. Regenerate uv.lock ────────────────────────────────────────
