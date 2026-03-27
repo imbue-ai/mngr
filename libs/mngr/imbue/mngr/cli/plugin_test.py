@@ -438,12 +438,12 @@ def test_emit_plugin_toggle_result_jsonl_has_event_type(capsys: pytest.CaptureFi
 
 def test_parse_pypi_package_name_valid_name() -> None:
     """_parse_pypi_package_name should return the package name for a valid specifier."""
-    assert _parse_pypi_package_name("mngr-opencode") == "mngr-opencode"
+    assert _parse_pypi_package_name("imbue-mngr-opencode") == "imbue-mngr-opencode"
 
 
 def test_parse_pypi_package_name_name_with_version() -> None:
     """_parse_pypi_package_name should return the package name for specifiers with versions."""
-    assert _parse_pypi_package_name("mngr-opencode>=1.0") == "mngr-opencode"
+    assert _parse_pypi_package_name("imbue-mngr-opencode>=1.0") == "imbue-mngr-opencode"
 
 
 def test_parse_pypi_package_name_invalid_format() -> None:
@@ -465,7 +465,7 @@ def test_get_installed_package_names_returns_package_names() -> None:
                 stdout = json.dumps(
                     [
                         {"name": "mngr", "version": "1.0.0"},
-                        {"name": "mngr-opencode", "version": "0.1.0"},
+                        {"name": "imbue-mngr-opencode", "version": "0.1.0"},
                         {"name": "pluggy", "version": "1.5.0"},
                     ]
                 )
@@ -473,7 +473,7 @@ def test_get_installed_package_names_returns_package_names() -> None:
             return Result()
 
     names = _get_installed_package_names(FakeConcurrencyGroup())
-    assert names == {"mngr", "mngr-opencode", "pluggy"}
+    assert names == {"mngr", "imbue-mngr-opencode", "pluggy"}
 
 
 def test_get_installed_package_names_empty_list() -> None:
@@ -526,12 +526,12 @@ def test_read_package_name_from_pyproject_missing_name(tmp_path: Path) -> None:
 def test_emit_plugin_add_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_plugin_add_result with JSON format should output valid JSON."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _emit_plugin_add_result("mngr-opencode", "mngr-opencode", True, output_opts)
+    _emit_plugin_add_result("imbue-mngr-opencode", "imbue-mngr-opencode", True, output_opts)
 
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
-    assert data["specifier"] == "mngr-opencode"
-    assert data["package"] == "mngr-opencode"
+    assert data["specifier"] == "imbue-mngr-opencode"
+    assert data["package"] == "imbue-mngr-opencode"
     assert data["has_entry_points"] is True
 
 
@@ -556,22 +556,22 @@ def test_emit_plugin_add_result_jsonl_format(capsys: pytest.CaptureFixture[str])
 def test_emit_plugin_remove_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_plugin_remove_result with JSON format should output valid JSON."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _emit_plugin_remove_result("mngr-opencode", output_opts)
+    _emit_plugin_remove_result("imbue-mngr-opencode", output_opts)
 
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
-    assert data["package"] == "mngr-opencode"
+    assert data["package"] == "imbue-mngr-opencode"
 
 
 def test_emit_plugin_remove_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_plugin_remove_result with JSONL format should include event type."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    _emit_plugin_remove_result("mngr-opencode", output_opts)
+    _emit_plugin_remove_result("imbue-mngr-opencode", output_opts)
 
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "plugin_removed"
-    assert data["package"] == "mngr-opencode"
+    assert data["package"] == "imbue-mngr-opencode"
 
 
 # =============================================================================
@@ -616,20 +616,20 @@ def test_parse_add_sources_no_source_raises_abort() -> None:
 
 def test_parse_add_sources_valid_pypi_name() -> None:
     """_parse_add_sources should return a list with _PypiSource for a valid PyPI name."""
-    opts = _make_plugin_cli_options(names=("mngr-opencode",))
+    opts = _make_plugin_cli_options(names=("imbue-mngr-opencode",))
     sources = _parse_add_sources(opts)
     assert len(sources) == 1
     assert isinstance(sources[0], _PypiSource)
-    assert sources[0].name == "mngr-opencode"
+    assert sources[0].name == "imbue-mngr-opencode"
 
 
 def test_parse_add_sources_valid_pypi_name_with_version() -> None:
     """_parse_add_sources should return a list with _PypiSource for a name with version constraint."""
-    opts = _make_plugin_cli_options(names=("mngr-opencode>=1.0",))
+    opts = _make_plugin_cli_options(names=("imbue-mngr-opencode>=1.0",))
     sources = _parse_add_sources(opts)
     assert len(sources) == 1
     assert isinstance(sources[0], _PypiSource)
-    assert sources[0].name == "mngr-opencode>=1.0"
+    assert sources[0].name == "imbue-mngr-opencode>=1.0"
 
 
 def test_parse_add_sources_multiple_names() -> None:
@@ -723,11 +723,11 @@ def test_parse_remove_sources_no_source_raises_abort() -> None:
 
 def test_parse_remove_sources_valid_pypi_name() -> None:
     """_parse_remove_sources should return a list with _PypiSource for a valid PyPI name."""
-    opts = _make_plugin_cli_options(names=("mngr-opencode",))
+    opts = _make_plugin_cli_options(names=("imbue-mngr-opencode",))
     sources = _parse_remove_sources(opts)
     assert len(sources) == 1
     assert isinstance(sources[0], _PypiSource)
-    assert sources[0].name == "mngr-opencode"
+    assert sources[0].name == "imbue-mngr-opencode"
 
 
 def test_parse_remove_sources_multiple_names() -> None:

@@ -288,7 +288,7 @@ def _check_headless_claude_available() -> None:
             "The 'headless_claude' agent type is not available. "
             "The mngr_claude plugin may not be installed.\n"
             "Install it with:\n"
-            "  mngr plugin add mngr-claude"
+            "  mngr plugin add imbue-mngr-claude"
         )
 
 

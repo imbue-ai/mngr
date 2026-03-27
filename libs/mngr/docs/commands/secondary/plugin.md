@@ -121,7 +121,7 @@ $ mngr plugin list --format '{name}\t{enabled}'
 Install a plugin package.
 
 All source types are repeatable and can be freely mixed in one command.
-NAME is a PyPI package specifier (e.g., 'mngr-pair' or 'mngr-pair>=1.0').
+NAME is a PyPI package specifier (e.g., 'imbue-mngr-pair' or 'imbue-mngr-pair>=1.0').
 --path installs from a local directory in editable mode.
 --git installs from a git URL.
 All plugins are installed in a single operation for speed.
@@ -164,13 +164,13 @@ mngr plugin add [OPTIONS] [NAMES]...
 **Install from PyPI**
 
 ```bash
-$ mngr plugin add mngr-pair
+$ mngr plugin add imbue-mngr-pair
 ```
 
 **Install with version constraint**
 
 ```bash
-$ mngr plugin add mngr-pair>=1.0
+$ mngr plugin add imbue-mngr-pair>=1.0
 ```
 
 **Install from a local path**
@@ -242,13 +242,13 @@ mngr plugin remove [OPTIONS] [NAMES]...
 **Remove by name**
 
 ```bash
-$ mngr plugin remove mngr-pair
+$ mngr plugin remove imbue-mngr-pair
 ```
 
 **Remove multiple by name**
 
 ```bash
-$ mngr plugin remove mngr-pair mngr-opencode
+$ mngr plugin remove imbue-mngr-pair imbue-mngr-opencode
 ```
 
 **Remove by local path**
@@ -260,7 +260,7 @@ $ mngr plugin remove --path ./my-plugin
 **Mix names and paths**
 
 ```bash
-$ mngr plugin remove mngr-pair --path ./my-plugin
+$ mngr plugin remove imbue-mngr-pair --path ./my-plugin
 ```
 
 ## mngr plugin enable
@@ -388,7 +388,7 @@ Interactive wizard to install recommended plugins.
 Presents a TUI with recommended plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
 
-Pre-selects mngr-tutor by default. Use Space to toggle selections,
+Pre-selects imbue-mngr-tutor by default. Use Space to toggle selections,
 Enter to confirm, and q or Ctrl+C to cancel.
 
 **Usage:**
@@ -458,7 +458,7 @@ $ mngr plugin list --fields name,enabled
 **Install a plugin from PyPI**
 
 ```bash
-$ mngr plugin add mngr-pair
+$ mngr plugin add imbue-mngr-pair
 ```
 
 **Install a local plugin**
@@ -476,7 +476,7 @@ $ mngr plugin add pkg-a --path ./local-b --git https://example.com/c.git
 **Remove a plugin**
 
 ```bash
-$ mngr plugin remove mngr-pair
+$ mngr plugin remove imbue-mngr-pair
 ```
 
 **Enable a plugin**

@@ -221,7 +221,7 @@ CommandHelpMetadata(
     description="""Presents a TUI with recommended plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
 
-Pre-selects mngr-tutor by default. Use Space to toggle selections,
+Pre-selects imbue-mngr-tutor by default. Use Space to toggle selections,
 Enter to confirm, and q or Ctrl+C to cancel.""",
     examples=(("Launch the plugin install wizard", "mngr plugin install-wizard"),),
     see_also=(

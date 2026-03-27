@@ -1,4 +1,4 @@
-# mngr-opencode
+# imbue-mngr-opencode
 
 Plugin that registers the `opencode` agent type for mngr.
 

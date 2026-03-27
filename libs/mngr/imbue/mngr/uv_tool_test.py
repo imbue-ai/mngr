@@ -58,14 +58,14 @@ def test_tool_requirement_with_git() -> None:
 
 def test_requirement_to_with_arg_plain_name() -> None:
     """Plain name should produce --with name."""
-    requirement = ToolRequirement(name="mngr-opencode")
-    assert _requirement_to_with_arg(requirement) == ("--with", "mngr-opencode")
+    requirement = ToolRequirement(name="imbue-mngr-opencode")
+    assert _requirement_to_with_arg(requirement) == ("--with", "imbue-mngr-opencode")
 
 
 def test_requirement_to_with_arg_with_specifier() -> None:
     """Name with specifier should produce --with name+specifier."""
-    requirement = ToolRequirement(name="mngr-opencode", specifier=">=1.0")
-    assert _requirement_to_with_arg(requirement) == ("--with", "mngr-opencode>=1.0")
+    requirement = ToolRequirement(name="imbue-mngr-opencode", specifier=">=1.0")
+    assert _requirement_to_with_arg(requirement) == ("--with", "imbue-mngr-opencode>=1.0")
 
 
 def test_requirement_to_with_arg_editable() -> None:
@@ -130,7 +130,7 @@ def test_read_receipt_with_extras(tmp_path: Path) -> None:
         "[tool]\nrequirements = [\n"
         '  { name = "imbue-mngr" },\n'
         '  { name = "coolname" },\n'
-        '  { name = "mngr-opencode", editable = "/path/to/opencode" },\n'
+        '  { name = "imbue-mngr-opencode", editable = "/path/to/opencode" },\n'
         "]\n"
     )
 
@@ -138,7 +138,7 @@ def test_read_receipt_with_extras(tmp_path: Path) -> None:
     assert receipt.base.name == "imbue-mngr"
     assert len(receipt.extras) == 2
     assert receipt.extras[0].name == "coolname"
-    assert receipt.extras[1].name == "mngr-opencode"
+    assert receipt.extras[1].name == "imbue-mngr-opencode"
     assert receipt.extras[1].editable == "/path/to/opencode"
 
 
@@ -172,7 +172,7 @@ def test_read_receipt_with_git(tmp_path: Path) -> None:
     receipt_path.write_text(
         "[tool]\nrequirements = [\n"
         '  { name = "imbue-mngr" },\n'
-        '  { name = "mngr-opencode", git = "https://github.com/imbue-ai/mngr.git" },\n'
+        '  { name = "imbue-mngr-opencode", git = "https://github.com/imbue-ai/mngr.git" },\n'
         "]\n"
     )
 
@@ -224,7 +224,7 @@ def test_build_uv_tool_install_command_with_extras() -> None:
     base = ToolRequirement(name="imbue-mngr")
     extras = [
         ToolRequirement(name="coolname"),
-        ToolRequirement(name="mngr-opencode", editable="/path/to/opencode"),
+        ToolRequirement(name="imbue-mngr-opencode", editable="/path/to/opencode"),
     ]
     cmd = _build_uv_tool_install_command(base, extras)
     assert cmd == (
@@ -265,7 +265,7 @@ def _make_receipt(
 def test_build_uv_tool_install_add_appends_new_dep() -> None:
     """build_uv_tool_install_add should preserve existing extras and append."""
     receipt = _make_receipt(extras=[ToolRequirement(name="coolname")])
-    cmd = build_uv_tool_install_add(receipt, "mngr-opencode")
+    cmd = build_uv_tool_install_add(receipt, "imbue-mngr-opencode")
     assert cmd == (
         "uv",
         "tool",
@@ -275,7 +275,7 @@ def test_build_uv_tool_install_add_appends_new_dep() -> None:
         "--with",
         "coolname",
         "--with",
-        "mngr-opencode",
+        "imbue-mngr-opencode",
     )
 
 
@@ -314,10 +314,10 @@ def test_build_uv_tool_install_remove_filters_dep() -> None:
     receipt = _make_receipt(
         extras=[
             ToolRequirement(name="coolname"),
-            ToolRequirement(name="mngr-opencode"),
+            ToolRequirement(name="imbue-mngr-opencode"),
         ]
     )
-    cmd = build_uv_tool_install_remove(receipt, "mngr-opencode")
+    cmd = build_uv_tool_install_remove(receipt, "imbue-mngr-opencode")
     assert cmd == (
         "uv",
         "tool",
@@ -331,8 +331,8 @@ def test_build_uv_tool_install_remove_filters_dep() -> None:
 
 def test_build_uv_tool_install_remove_last_dep() -> None:
     """build_uv_tool_install_remove should work when removing the only extra."""
-    receipt = _make_receipt(extras=[ToolRequirement(name="mngr-opencode")])
-    cmd = build_uv_tool_install_remove(receipt, "mngr-opencode")
+    receipt = _make_receipt(extras=[ToolRequirement(name="imbue-mngr-opencode")])
+    cmd = build_uv_tool_install_remove(receipt, "imbue-mngr-opencode")
     assert cmd == ("uv", "tool", "install", "imbue-mngr", "--reinstall")
 
 
@@ -344,7 +344,7 @@ def test_build_uv_tool_install_remove_last_dep() -> None:
 def test_build_uv_tool_install_add_many_appends_all() -> None:
     """build_uv_tool_install_add_many should add all specifiers in one command."""
     receipt = _make_receipt(extras=[ToolRequirement(name="existing")])
-    cmd = build_uv_tool_install_add_many(receipt, ["mngr-pair", "mngr-tutor"])
+    cmd = build_uv_tool_install_add_many(receipt, ["imbue-mngr-pair", "imbue-mngr-tutor"])
     assert cmd == (
         "uv",
         "tool",
@@ -354,9 +354,9 @@ def test_build_uv_tool_install_add_many_appends_all() -> None:
         "--with",
         "existing",
         "--with",
-        "mngr-pair",
+        "imbue-mngr-pair",
         "--with",
-        "mngr-tutor",
+        "imbue-mngr-tutor",
     )
 
 
@@ -378,7 +378,7 @@ def test_build_uv_tool_install_add_many_empty_list() -> None:
 def test_build_uv_tool_install_add_many_no_existing_extras() -> None:
     """build_uv_tool_install_add_many should work with no prior extras."""
     receipt = _make_receipt()
-    cmd = build_uv_tool_install_add_many(receipt, ["mngr-opencode", "mngr-pair", "mngr-tutor"])
+    cmd = build_uv_tool_install_add_many(receipt, ["imbue-mngr-opencode", "imbue-mngr-pair", "imbue-mngr-tutor"])
     assert cmd == (
         "uv",
         "tool",
@@ -386,11 +386,11 @@ def test_build_uv_tool_install_add_many_no_existing_extras() -> None:
         "imbue-mngr",
         "--reinstall",
         "--with",
-        "mngr-opencode",
+        "imbue-mngr-opencode",
         "--with",
-        "mngr-pair",
+        "imbue-mngr-pair",
         "--with",
-        "mngr-tutor",
+        "imbue-mngr-tutor",
     )
 
 
