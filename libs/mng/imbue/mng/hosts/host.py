@@ -2685,12 +2685,6 @@ def _build_start_agent_shell_command(
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
 
-    # Store the agent type in the tmux session environment so lifecycle
-    # detection can identify the expected process without relying on tmux's
-    # pane_current_command (which reports a modified process title on macOS
-    # for programs like Claude Code that call setproctitle).
-    steps.append(f"tmux set-environment -t {quoted_session} MNG_AGENT_TYPE {shlex.quote(str(agent.agent_type))}")
-
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
     # before send-keys triggers the agent command, because fast-exiting
