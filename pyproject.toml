@@ -58,27 +58,27 @@ testpaths = [
 addopts = [
   "-n 4",
   "--dist=worksteal",
-  "--cov=imbue.mng",
+  "--cov=imbue.mngr",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
-  "--cov=imbue.mng_claude",
-  "--cov=imbue.mng_opencode",
-  "--cov=imbue.mng_pi_coding",
-  "--cov=imbue.mng_pair",
-  "--cov=imbue.mng_schedule",
-  "--cov=imbue.mng_ttyd",
-  "--cov=imbue.mng_tutor",
-  "--cov=imbue.mng_llm",
-  "--cov=imbue.mng_mind",
-  "--cov=imbue.mng_claude_mind",
-  "--cov=imbue.mng_elena_code",
-  "--cov=imbue.mng_kanpan",
-  "--cov=imbue.mng_recursive",
-  "--cov=imbue.mng_notifications",
-  "--cov=imbue.mng_mind_chat",
-  "--cov=imbue.mng_test_coder",
-  "--cov=imbue.mng_file",
-  "--cov=imbue.mng_tmr",
+  "--cov=imbue.mngr_claude",
+  "--cov=imbue.mngr_opencode",
+  "--cov=imbue.mngr_pi_coding",
+  "--cov=imbue.mngr_pair",
+  "--cov=imbue.mngr_schedule",
+  "--cov=imbue.mngr_ttyd",
+  "--cov=imbue.mngr_tutor",
+  "--cov=imbue.mngr_llm",
+  "--cov=imbue.mngr_mind",
+  "--cov=imbue.mngr_claude_mind",
+  "--cov=imbue.mngr_elena_code",
+  "--cov=imbue.mngr_kanpan",
+  "--cov=imbue.mngr_recursive",
+  "--cov=imbue.mngr_notifications",
+  "--cov=imbue.mngr_mind_chat",
+  "--cov=imbue.mngr_test_coder",
+  "--cov=imbue.mngr_file",
+  "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
@@ -124,7 +124,7 @@ order-by-type = false
 known-first-party = [
     "imbue",
     "imbue_common",
-    "mng",
+    "mngr",
     "sculptor_desktop",
 ]
 
@@ -154,18 +154,18 @@ omit = [
     "*/utils/plugin_testing.py",
     "libs/imbue_common/imbue/imbue_common/ratchet_testing/ratchets.py",
     # Modal provider plugin requires network access for testing
-    "libs/mng_modal/imbue/mng_modal/*",
+    "libs/mngr_modal/imbue/mngr_modal/*",
     # Docker provider requires a Docker daemon for testing
-    "libs/mng/imbue/mng/providers/docker/instance.py",
-    "libs/mng/imbue/mng/providers/docker/volume.py",
-    "libs/mng/imbue/mng/providers/docker/testing.py",
+    "libs/mngr/imbue/mngr/providers/docker/instance.py",
+    "libs/mngr/imbue/mngr/providers/docker/volume.py",
+    "libs/mngr/imbue/mngr/providers/docker/testing.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",
     "apps/minds/imbue/minds/deploy/verification.py",
     # Schedule plugin cron runner and verification run on Modal and require infrastructure to test
-    "libs/mng_schedule/imbue/mng_schedule/implementations/modal/cron_runner.py",
-    "libs/mng_schedule/imbue/mng_schedule/implementations/modal/verification.py",
+    "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/cron_runner.py",
+    "libs/mngr_schedule/imbue/mngr_schedule/implementations/modal/verification.py",
     # don't bother with anything in scripts
     "scripts/*",
 ]
@@ -174,22 +174,22 @@ omit = [
 root_package = "imbue"
 
 [[tool.importlinter.contracts]]
-name = "mng layers contract"
+name = "mngr layers contract"
 type = "layers"
 layers = [
-    "imbue.mng.main",
-    "imbue.mng.cli",
-    "imbue.mng.api",
-    "imbue.mng.agents",
-    "imbue.mng.providers",
-    "imbue.mng.hosts",
-    "imbue.mng.plugins",
-    "imbue.mng.interfaces",
-    "imbue.mng.config",
-    "imbue.mng.utils",
-    "imbue.mng.errors",
-    "imbue.mng.primitives",
-    "imbue.mng.resources",
+    "imbue.mngr.main",
+    "imbue.mngr.cli",
+    "imbue.mngr.api",
+    "imbue.mngr.agents",
+    "imbue.mngr.providers",
+    "imbue.mngr.hosts",
+    "imbue.mngr.plugins",
+    "imbue.mngr.interfaces",
+    "imbue.mngr.config",
+    "imbue.mngr.utils",
+    "imbue.mngr.errors",
+    "imbue.mngr.primitives",
+    "imbue.mngr.resources",
 ]
 
 [[tool.importlinter.contracts]]

@@ -1,6 +1,6 @@
 {
     "stop_hook": {
-        "enabled_when": "test -n \"${MNG_AGENT_STATE_DIR:-}\""
+        "enabled_when": "test -n \"${MNGR_AGENT_STATE_DIR:-}\""
     },
     "autofix": {
         "is_enabled": true,

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Print paths to Claude Code session JSONL files for all sessions.
 # Outputs one line per file: "<source>\t<path>"
-# where source is one of: mng_tracked, current, mng_agent_dir,
-# or a subagent variant like mng_tracked:subagent, current:subagent, etc.
+# where source is one of: mngr_tracked, current, mngr_agent_dir,
+# or a subagent variant like mngr_tracked:subagent, current:subagent, etc.
 #
 # Discovery is controlled by .reviewer/settings.json (under verify_conversation),
 # with optional local overrides from .reviewer/settings.local.json.
 # If the config file is not present, all toggles default to true.
 #
-# Session IDs are read from $MNG_AGENT_STATE_DIR/claude_session_id_history.
-# If $MNG_CLAUDE_SESSION_ID is set and not already in the history, it is
+# Session IDs are read from $MNGR_AGENT_STATE_DIR/claude_session_id_history.
+# If $MNGR_CLAUDE_SESSION_ID is set and not already in the history, it is
 # included in the output so the current session is always covered.
 # The agent_dir mode scans $CLAUDE_CONFIG_DIR/projects/ for all .jsonl files.
 
@@ -73,20 +73,20 @@ _TRACKED_SESSION_IDS=()
 declare -A _SEEN_SIDS
 
 if [ "$INCLUDE_TRACKED" = "true" ]; then
-    if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_session_id_history" ]; then
+    if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -f "$MNGR_AGENT_STATE_DIR/claude_session_id_history" ]; then
         while read -r sid _rest; do
             if [ -n "$sid" ] && [ -z "${_SEEN_SIDS[$sid]:-}" ]; then
                 _TRACKED_SESSION_IDS+=("$sid")
                 _SEEN_SIDS[$sid]=1
             fi
-        done < "$MNG_AGENT_STATE_DIR/claude_session_id_history"
+        done < "$MNGR_AGENT_STATE_DIR/claude_session_id_history"
     fi
 
     for sid in "${_TRACKED_SESSION_IDS[@]}"; do
         file=$(_find_session_file "$sid")
         if [ -n "$file" ]; then
-            _emit "mng_tracked" "$file"
-            [ "$INCLUDE_SUBAGENTS" = "true" ] && _emit_subagents "mng_tracked" "$file"
+            _emit "mngr_tracked" "$file"
+            [ "$INCLUDE_SUBAGENTS" = "true" ] && _emit_subagents "mngr_tracked" "$file"
         fi
     done
 fi
@@ -94,10 +94,10 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Current session (only if not already emitted via tracked)
 # ---------------------------------------------------------------------------
-if [ "$INCLUDE_CURRENT" = "true" ] && [ -n "${MNG_CLAUDE_SESSION_ID:-}" ]; then
-    if [ -z "${_SEEN_SIDS[$MNG_CLAUDE_SESSION_ID]:-}" ]; then
-        _SEEN_SIDS[$MNG_CLAUDE_SESSION_ID]=1
-        file=$(_find_session_file "$MNG_CLAUDE_SESSION_ID")
+if [ "$INCLUDE_CURRENT" = "true" ] && [ -n "${MNGR_CLAUDE_SESSION_ID:-}" ]; then
+    if [ -z "${_SEEN_SIDS[$MNGR_CLAUDE_SESSION_ID]:-}" ]; then
+        _SEEN_SIDS[$MNGR_CLAUDE_SESSION_ID]=1
+        file=$(_find_session_file "$MNGR_CLAUDE_SESSION_ID")
         if [ -n "$file" ]; then
             _emit "current" "$file"
             [ "$INCLUDE_SUBAGENTS" = "true" ] && _emit_subagents "current" "$file"
@@ -117,8 +117,8 @@ if [ "$INCLUDE_AGENT_DIR" = "true" ]; then
             case "$jsonl_file" in
                 */subagents/*) continue ;;
             esac
-            _emit "mng_agent_dir" "$jsonl_file"
-            [ "$INCLUDE_SUBAGENTS" = "true" ] && _emit_subagents "mng_agent_dir" "$jsonl_file"
+            _emit "mngr_agent_dir" "$jsonl_file"
+            [ "$INCLUDE_SUBAGENTS" = "true" ] && _emit_subagents "mngr_agent_dir" "$jsonl_file"
         done < <(find "$search_dir" -name '*.jsonl' 2>/dev/null | sort)
     fi
 fi

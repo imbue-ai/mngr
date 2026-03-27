@@ -52,7 +52,7 @@ Authentication is global (one session grants access to all agents). The forwardi
     redirects to the agent's default web server at /agents/{agent_id}/web/
 
 `/agents/{agent_id}/servers/` route (requires auth):
-    shows a page listing all known server names for the agent (discovered via `mng events`)
+    shows a page listing all known server names for the agent (discovered via `mngr events`)
 
 `/agents/{agent_id}/{server_name}/{path}` route (requires auth):
     proxies any request from the user to the specific server's backend URL

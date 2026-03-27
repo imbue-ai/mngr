@@ -6,7 +6,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 DEFAULT_DATA_DIR_NAME: Final[str] = ".minds"
 
@@ -14,7 +14,7 @@ DEFAULT_FORWARDING_SERVER_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_FORWARDING_SERVER_PORT: Final[int] = 8420
 
-MNG_BINARY: Final[str] = "mng"
+MNGR_BINARY: Final[str] = "mngr"
 
 
 class MindPaths(FrozenModel):
@@ -37,8 +37,8 @@ def get_default_data_dir() -> Path:
     return Path.home() / DEFAULT_DATA_DIR_NAME
 
 
-def parse_agents_from_mng_output(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from ``mng list --format json`` stdout.
+def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
+    """Extract agent records from ``mngr list --format json`` stdout.
 
     The stdout may contain non-JSON lines (e.g. SSH error tracebacks)
     mixed with the JSON. Finds the first line starting with ``{`` and
@@ -51,6 +51,6 @@ def parse_agents_from_mng_output(stdout: str) -> list[dict[str, object]]:
                 data = json.loads(stripped)
                 return list(data.get("agents", []))
             except json.JSONDecodeError:
-                logger.trace("Failed to parse JSON from mng list output line: {}", stripped[:200])
+                logger.trace("Failed to parse JSON from mngr list output line: {}", stripped[:200])
                 continue
     return []

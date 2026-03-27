@@ -18,7 +18,7 @@ Environment variables:
 - PYTEST_MAX_DURATION_SECONDS: Override the maximum allowed test suite duration in seconds.
   Without this, defaults are chosen based on test type and environment (see
   _compute_max_duration for details).
-- MNG_TEST_PROFILE: Force a specific test profile (overrides branch detection).
+- MNGR_TEST_PROFILE: Force a specific test profile (overrides branch detection).
   Set to "all" to disable profile filtering entirely.
 
 Usage in each project's conftest.py:

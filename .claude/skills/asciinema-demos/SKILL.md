@@ -103,8 +103,8 @@ To make the demo look natural (as if someone is typing), you can echo the comman
 
 ```bash
 # Show the command being "typed", then run it
-echo '$ mng list'
-mng list
+echo '$ mngr list'
+mngr list
 sleep 1
 ```
 
@@ -122,7 +122,7 @@ type_cmd() {
     eval "$cmd"
 }
 
-type_cmd "mng list"
+type_cmd "mngr list"
 sleep 1
 ```
 

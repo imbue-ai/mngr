@@ -5,16 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
 from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import parse_agents_from_json
 from imbue.minds.forwarding_server.backend_resolver import parse_server_log_records
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import AgentName
-from imbue.mng.primitives import DiscoveredAgent
-from imbue.mng.primitives import HostId
-from imbue.mng.primitives import ProviderInstanceName
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVER_NAME: ServerName = ServerName("web")
 
@@ -32,7 +32,7 @@ def short_tmp_path() -> Iterator[Path]:
 
 
 def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
-    """Build a JSON string matching `mng list --format json` output for the given agent IDs."""
+    """Build a JSON string matching `mngr list --format json` output for the given agent IDs."""
     effective_labels = labels if labels is not None else {"mind": "true"}
     return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
 
@@ -45,14 +45,14 @@ def make_server_log(server: str, url: str) -> str:
 def make_resolver_with_data(
     agents_json: str | None = None,
     server_logs: dict[str, str] | None = None,
-) -> MngCliBackendResolver:
-    """Create a MngCliBackendResolver pre-populated with test data.
+) -> MngrCliBackendResolver:
+    """Create a MngrCliBackendResolver pre-populated with test data.
 
-    agents_json is a JSON string matching `mng list --format json` format, used to populate
+    agents_json is a JSON string matching `mngr list --format json` format, used to populate
     agent IDs and SSH info. server_logs is a mapping of agent ID string to raw
     servers/events.jsonl content, parsed to populate the server URL map for each agent.
     """
-    resolver = MngCliBackendResolver()
+    resolver = MngrCliBackendResolver()
 
     if agents_json is not None:
         parsed = parse_agents_from_json(agents_json)

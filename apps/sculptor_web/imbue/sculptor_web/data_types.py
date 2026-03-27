@@ -44,7 +44,7 @@ class AgentDisplayInfo(FrozenModel):
 
 
 class AgentListResult(FrozenModel):
-    """Result of listing agents from mng."""
+    """Result of listing agents from mngr."""
 
     agents: tuple[AgentDisplayInfo, ...] = Field(default=(), description="List of agents")
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered")

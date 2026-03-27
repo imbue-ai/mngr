@@ -1,7 +1,7 @@
 # Interfaces that mirror the Modal SDK object model.
 #
 # Each Modal object type (App, Sandbox, Image, Volume, etc.) gets its own
-# abstract interface exposing only the methods and arguments that mng_modal
+# abstract interface exposing only the methods and arguments that mngr_modal
 # actually uses. The top-level ModalInterface provides all class-method and
 # module-level operations (object creation, lookup, CLI commands).
 #

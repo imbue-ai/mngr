@@ -14,14 +14,14 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import MNG_BINARY
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.forwarding_server.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServerName
-from imbue.mng.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mng.api.discovery_events import HostSSHInfoEvent
-from imbue.mng.api.discovery_events import parse_discovery_event_line
-from imbue.mng.primitives import AgentId
-from imbue.mng.primitives import DiscoveredAgent
+from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 
 SERVERS_EVENT_SOURCE_NAME: Final[str] = "servers"
 
@@ -108,7 +108,7 @@ class StaticBackendResolver(BackendResolverInterface):
 
 
 class ParsedAgentsResult(FrozenModel):
-    """Result of parsing agent and SSH info from discovery events or mng list --format json output."""
+    """Result of parsing agent and SSH info from discovery events or mngr list --format json output."""
 
     agent_ids: tuple[AgentId, ...] = Field(default=(), description="All discovered agent IDs")
     discovered_agents: tuple[DiscoveredAgent, ...] = Field(
@@ -121,7 +121,7 @@ class ParsedAgentsResult(FrozenModel):
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
-    """Parse agent IDs and SSH info from mng list --format json output.
+    """Parse agent IDs and SSH info from mngr list --format json output.
 
     Returns both agent IDs and a mapping of agent ID -> RemoteSSHInfo for agents
     that have SSH connection info (i.e., are running on remote hosts).
@@ -131,7 +131,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     try:
         data = json.loads(json_output)
     except json.JSONDecodeError as e:
-        logger.warning("Failed to parse mng list output: {}", e)
+        logger.warning("Failed to parse mngr list output: {}", e)
         return ParsedAgentsResult()
 
     agents = data.get("agents", [])
@@ -169,7 +169,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
 
 
 def parse_agent_ids_from_json(json_output: str | None) -> tuple[AgentId, ...]:
-    """Parse agent IDs from mng list --format json output, discarding SSH info."""
+    """Parse agent IDs from mngr list --format json output, discarding SSH info."""
     return parse_agents_from_json(json_output).agent_ids
 
 
@@ -204,15 +204,15 @@ def parse_server_log_records(text: str) -> list[ServerLogRecord]:
     return records
 
 
-# -- MngCliBackendResolver --
+# -- MngrCliBackendResolver --
 
 
-class MngCliBackendResolver(BackendResolverInterface):
+class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
     State is updated externally via update_agents() and update_servers() methods.
-    In production, a MngStreamManager calls these methods from background threads
-    that stream data from `mng list --stream` and `mng events --follow`.
+    In production, a MngrStreamManager calls these methods from background threads
+    that stream data from `mngr list --stream` and `mngr events --follow`.
 
     All reads are thread-safe via an internal lock.
     """
@@ -256,24 +256,24 @@ class MngCliBackendResolver(BackendResolverInterface):
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
 
 
-# -- MngStreamManager --
+# -- MngrStreamManager --
 
 
-class MngStreamManager(MutableModel):
-    """Manages background streaming subprocesses that feed data to a MngCliBackendResolver.
+class MngrStreamManager(MutableModel):
+    """Manages background streaming subprocesses that feed data to a MngrCliBackendResolver.
 
     Runs two types of long-lived subprocesses via ConcurrencyGroup:
-    1. `mng list --stream --quiet` to discover agents and hosts.
+    1. `mngr list --stream --quiet` to discover agents and hosts.
        Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
        and HOST_SSH_INFO events for SSH connection details per host.
-    2. `mng events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
+    2. `mngr events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
        to discover each agent's servers.
     """
 
-    resolver: MngCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
-    mng_binary: str = Field(default=MNG_BINARY, frozen=True, description="Path to mng binary")
+    resolver: MngrCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
+    mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary")
 
-    _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mng-stream-manager"))
+    _cg: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="mngr-stream-manager"))
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _discovered_agents: tuple[DiscoveredAgent, ...] = PrivateAttr(default=())
@@ -286,7 +286,7 @@ class MngStreamManager(MutableModel):
         """Start the streaming subprocess for continuous agent discovery."""
         self._cg.__enter__()
         self._cg.run_process_in_background(
-            command=[self.mng_binary, "list", "--stream", "--quiet"],
+            command=[self.mngr_binary, "list", "--stream", "--quiet"],
             on_output=self._on_list_stream_output,
         )
 
@@ -295,7 +295,7 @@ class MngStreamManager(MutableModel):
         self._cg.__exit__(None, None, None)
 
     def _on_list_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from mng list --stream."""
+        """Handle a line of output from mngr list --stream."""
         if not is_stdout:
             return
         stripped = line.strip()
@@ -399,7 +399,7 @@ class MngStreamManager(MutableModel):
                 self._start_events_stream(AgentId(aid_str))
 
     def _on_events_stream_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
-        """Handle a line of output from mng events --follow for a specific agent."""
+        """Handle a line of output from mngr events --follow for a specific agent."""
         if not is_stdout:
             return
         stripped = line.strip()
@@ -418,12 +418,12 @@ class MngStreamManager(MutableModel):
             logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mng events <agent-id> servers/events.jsonl --follow for a single agent."""
+        """Start mngr events <agent-id> servers/events.jsonl --follow for a single agent."""
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 
         process = self._cg.run_process_in_background(
-            command=[self.mng_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
+            command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
             on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
         )
         self._events_processes[aid_str] = process

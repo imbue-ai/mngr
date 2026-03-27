@@ -14,7 +14,7 @@ from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
 from imbue.minds.forwarding_server.backend_resolver import StaticBackendResolver
 from imbue.minds.forwarding_server.conftest import DEFAULT_SERVER_NAME
 from imbue.minds.forwarding_server.conftest import make_agents_json
@@ -26,7 +26,7 @@ from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelError
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 
 def _create_multi_backend_http_client(
@@ -566,11 +566,11 @@ def test_agent_auth_covers_all_servers(tmp_path: Path) -> None:
     assert response_api.status_code == 200
 
 
-# -- Integration test: MngCliBackendResolver with forwarding server --
+# -- Integration test: MngrCliBackendResolver with forwarding server --
 
 
-def test_mng_cli_resolver_proxies_to_backend_discovered_via_mng_cli(tmp_path: Path) -> None:
-    """Full integration test: the MngCliBackendResolver calls mng CLI to discover
+def test_mngr_cli_resolver_proxies_to_backend_discovered_via_mngr_cli(tmp_path: Path) -> None:
+    """Full integration test: the MngrCliBackendResolver calls mngr CLI to discover
     the agent's server URL, and the forwarding server proxies HTTP requests through."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
@@ -609,8 +609,8 @@ def test_mng_cli_resolver_proxies_to_backend_discovered_via_mng_cli(tmp_path: Pa
     assert response.json() == {"echo": "integration-test"}
 
 
-def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
-    """Integration test: MngCliBackendResolver with multiple servers per agent."""
+def test_mngr_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
+    """Integration test: MngrCliBackendResolver with multiple servers per agent."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
@@ -660,12 +660,12 @@ def test_mng_cli_resolver_multi_server_integration(tmp_path: Path) -> None:
     assert api_response.json() == {"source": "api"}
 
 
-def test_mng_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_path: Path) -> None:
+def test_mngr_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_path: Path) -> None:
     """When backend is not available, the proxy returns a loading page that retries client-side."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 
-    backend_resolver = MngCliBackendResolver()
+    backend_resolver = MngrCliBackendResolver()
     client, auth_store = _create_test_forwarding_server(
         tmp_path=data_dir,
         backend_resolver=backend_resolver,
@@ -681,7 +681,7 @@ def test_mng_cli_resolver_returns_loading_page_when_backend_unavailable(tmp_path
     assert "location.reload()" in response.text
 
 
-def test_mng_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
+def test_mngr_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_path: Path) -> None:
     """When a single agent is discovered and authenticated, the landing page redirects to it."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
@@ -703,8 +703,8 @@ def test_mng_cli_resolver_landing_page_redirects_single_discovered_agent(tmp_pat
     assert response.headers["location"] == "/agents/{}/".format(agent_id)
 
 
-def test_mng_cli_resolver_agent_servers_page_via_mng_cli(tmp_path: Path) -> None:
-    """The agent servers page lists servers discovered via mng events."""
+def test_mngr_cli_resolver_agent_servers_page_via_mngr_cli(tmp_path: Path) -> None:
+    """The agent servers page lists servers discovered via mngr events."""
     agent_id = AgentId()
     data_dir = tmp_path / "minds_data"
 

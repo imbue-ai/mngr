@@ -18,7 +18,7 @@ set -euo pipefail
 # If COMMIT_HASH is omitted, uses the current HEAD.
 #
 # This script is used by:
-#   - main_claude_stop_hook.sh (the full mng stop hook orchestrator)
+#   - main_claude_stop_hook.sh (the full mngr stop hook orchestrator)
 #   - The imbue-code-review Claude Code plugin (as a standalone Stop hook)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +33,7 @@ REVIEWER_SETTINGS=".reviewer/settings.json"
 # bash -c; if it exits 0, the hook runs. Examples:
 #
 #   "true"                                     -- always run
-#   "test -n \"${MNG_AGENT_STATE_DIR:-}\""     -- only mng-managed sessions
+#   "test -n \"${MNGR_AGENT_STATE_DIR:-}\""     -- only mngr-managed sessions
 #
 ENABLED_WHEN=$(read_json_config "$REVIEWER_SETTINGS" "stop_hook.enabled_when" "")
 if [[ -z "$ENABLED_WHEN" ]]; then

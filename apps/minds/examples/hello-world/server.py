@@ -157,14 +157,14 @@ class _Handler(BaseHTTPRequestHandler):
 def _write_server_log(port: int) -> None:
     """Write a server log record so the forwarding server can discover this agent.
 
-    Writes to $MNG_AGENT_STATE_DIR/events/servers/events.jsonl following the convention
+    Writes to $MNGR_AGENT_STATE_DIR/events/servers/events.jsonl following the convention
     that agents self-report their running servers. Includes EventEnvelope fields
-    (timestamp, type, event_id, source) so mng events can parse the records.
+    (timestamp, type, event_id, source) so mngr events can parse the records.
 
     Note: envelope generation is duplicated from web_server.py because this
     example runs standalone on the host without access to shared libraries.
     """
-    agent_state_dir = os.environ.get("MNG_AGENT_STATE_DIR")
+    agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR")
     if not agent_state_dir:
         return
     servers_dir = os.path.join(agent_state_dir, "events", "servers")

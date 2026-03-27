@@ -14,8 +14,8 @@ from loguru import logger
 
 from imbue.minds.testing import find_agent
 from imbue.minds.testing import init_and_commit_git_repo
-from imbue.minds.testing import run_mng
-from imbue.mng.utils.polling import wait_for
+from imbue.minds.testing import run_mngr
+from imbue.mngr.utils.polling import wait_for
 
 
 @pytest.fixture(scope="module")
@@ -26,7 +26,7 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
     avoiding redundant creation cycles (~30s each). Handles creation and
     cleanup so individual tests only need to exercise the created agent.
 
-    Waits for provisioning to complete (mng create backgrounds provisioning
+    Waits for provisioning to complete (mngr create backgrounds provisioning
     when called with --no-connect) before yielding.
     """
     agent_name = "e2e-test-{}".format(uuid4().hex)
@@ -36,14 +36,14 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
     mind_dir = Path.home() / ".minds" / agent_id
     mind_dir.mkdir(parents=True, exist_ok=True)
 
-    init_result = run_mng("--version")
-    assert init_result.returncode == 0, "mng not available: {}".format(init_result.stderr)
+    init_result = run_mngr("--version")
+    assert init_result.returncode == 0, "mngr not available: {}".format(init_result.stderr)
 
     # Initialize git repo in mind dir
     init_and_commit_git_repo(mind_dir, mind_dir.parent, allow_empty=True)
 
-    # Create the agent directly via mng create (cwd must be mind_dir for --transfer=none)
-    create_result = run_mng(
+    # Create the agent directly via mngr create (cwd must be mind_dir for --transfer=none)
+    create_result = run_mngr(
         "create",
         agent_name,
         "--id",
@@ -57,12 +57,12 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
         "--transfer=none",
         cwd=mind_dir,
     )
-    assert create_result.returncode == 0, "mng create failed:\nstdout: {}\nstderr: {}".format(
+    assert create_result.returncode == 0, "mngr create failed:\nstdout: {}\nstderr: {}".format(
         create_result.stdout, create_result.stderr
     )
 
     agent = find_agent(agent_name)
-    assert agent is not None, "Agent {} not found in mng list".format(agent_name)
+    assert agent is not None, "Agent {} not found in mngr list".format(agent_name)
 
     settings_path = Path(str(agent["work_dir"])) / "minds.toml"
     wait_for(
@@ -80,7 +80,7 @@ def created_test_coder() -> Generator[dict[str, object], None, None]:
 
 def _cleanup_agent(agent_name: str, agent_id: str) -> None:
     """Destroy an agent and clean up its mind directory."""
-    result = run_mng("destroy", agent_name, "--force", timeout=30.0)
+    result = run_mngr("destroy", agent_name, "--force", timeout=30.0)
     if result.returncode != 0:
         logger.warning("Failed to destroy agent {}: {}", agent_name, result.stderr[:200])
 

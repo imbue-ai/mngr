@@ -5,7 +5,7 @@ import pytest
 from imbue.minds.cli.update import MindAgentRecord
 from imbue.minds.cli.update import parse_mind_agent_record
 from imbue.minds.errors import MindError
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 
 def test_mind_agent_record_stores_fields() -> None:

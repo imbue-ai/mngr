@@ -29,7 +29,7 @@ from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import StaticBackendResolver
 from imbue.minds.primitives import OneTimeCode
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 
 def _escape_html(text: str) -> str:

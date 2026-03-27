@@ -27,15 +27,15 @@ from threading import current_thread
 import pluggy
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mng.agents.agent_registry import load_agents_from_plugins
-from imbue.mng.api.discover import discover_all_hosts_and_agents
-from imbue.mng.api.providers import get_provider_instance
-from imbue.mng.config.data_types import MngContext
-from imbue.mng.config.loader import load_config
-from imbue.mng.interfaces.host import OnlineHostInterface
-from imbue.mng.plugins import hookspecs
-from imbue.mng.primitives import HostName
-from imbue.mng.providers.registry import load_backends_from_plugins
+from imbue.mngr.agents.agent_registry import load_agents_from_plugins
+from imbue.mngr.api.discover import discover_all_hosts_and_agents
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.loader import load_config
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins import hookspecs
+from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.registry import load_backends_from_plugins
 
 HOST_NAME = HostName("spica")
 NUM_FILES = 10
@@ -43,16 +43,16 @@ FILE_SIZE_BYTES = 1024  # 1 KB of random data per file
 PARALLEL_TIMEOUT_SECONDS = 30
 
 
-def get_host(mng_ctx: MngContext) -> OnlineHostInterface:
+def get_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
     """Find the 'spica' host and return it."""
     print("  Discovering hosts (modal only)...")
-    agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx, provider_names=("modal",))
+    agents_by_host, _providers = discover_all_hosts_and_agents(mngr_ctx, provider_names=("modal",))
     print(f"  Discovery complete. Found {len(agents_by_host)} host(s).")
 
     for host_ref in agents_by_host:
         if host_ref.host_name == HOST_NAME:
             print(f"  Found target host ({host_ref.host_id}). Connecting...")
-            provider = get_provider_instance(host_ref.provider_name, mng_ctx)
+            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
             host = provider.get_host(host_ref.host_id)
             if not isinstance(host, OnlineHostInterface):
                 raise RuntimeError(f"Host {HOST_NAME} is not online")
@@ -128,19 +128,19 @@ def main() -> None:
     print(f"Target host: {HOST_NAME}")
     print(f"Files: {NUM_FILES} x {FILE_SIZE_BYTES} bytes each")
 
-    # Bootstrap mng context
-    pm = pluggy.PluginManager("mng")
+    # Bootstrap mngr context
+    pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
-    pm.load_setuptools_entrypoints("mng")
+    pm.load_setuptools_entrypoints("mngr")
     load_backends_from_plugins(pm)
     load_agents_from_plugins(pm)
 
     cg = ConcurrencyGroup(name="parallel-upload-test")
     with cg:
-        mng_ctx = load_config(pm, cg)
+        mngr_ctx = load_config(pm, cg)
 
         print("\nResolving host...")
-        host = get_host(mng_ctx)
+        host = get_host(mngr_ctx)
         print(f"Found host: {host.get_name()} (id={host.id})")
 
         # Sanity check

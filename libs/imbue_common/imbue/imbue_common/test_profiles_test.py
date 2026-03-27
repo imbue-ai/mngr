@@ -8,10 +8,10 @@ from imbue.imbue_common.test_profiles import load_profiles
 from imbue.imbue_common.test_profiles import resolve_active_profile
 
 _SAMPLE_CONFIG = """\
-[profiles.mng]
-branch_prefixes = ["mng-only/"]
-testpaths = ["libs/mng", "libs/imbue_common"]
-cov_packages = ["imbue.mng", "imbue.imbue_common"]
+[profiles.mngr]
+branch_prefixes = ["mngr-only/"]
+testpaths = ["libs/mngr", "libs/imbue_common"]
+cov_packages = ["imbue.mngr", "imbue.imbue_common"]
 
 [profiles.minds]
 branch_prefixes = ["minds-only/", "mind-only/"]
@@ -41,10 +41,10 @@ def test_load_profiles_from_toml(tmp_path: Path) -> None:
     result = load_profiles(config_path)
 
     assert len(result) == 2
-    assert result[0].name == "mng"
-    assert result[0].branch_prefixes == ("mng-only/",)
-    assert result[0].testpaths == ("libs/mng", "libs/imbue_common")
-    assert result[0].cov_packages == ("imbue.mng", "imbue.imbue_common")
+    assert result[0].name == "mngr"
+    assert result[0].branch_prefixes == ("mngr-only/",)
+    assert result[0].testpaths == ("libs/mngr", "libs/imbue_common")
+    assert result[0].cov_packages == ("imbue.mngr", "imbue.imbue_common")
     assert result[1].name == "minds"
     assert result[1].branch_prefixes == ("minds-only/", "mind-only/")
 
@@ -72,8 +72,8 @@ def test_load_profiles_are_frozen(tmp_path: Path) -> None:
 
 
 def test_detect_branch_uses_github_head_ref_for_prs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_HEAD_REF", "mng-only/fix-foo")
-    assert detect_branch() == "mng-only/fix-foo"
+    monkeypatch.setenv("GITHUB_HEAD_REF", "mngr-only/fix-foo")
+    assert detect_branch() == "mngr-only/fix-foo"
 
 
 def test_detect_branch_uses_github_ref_name_for_pushes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,9 +83,9 @@ def test_detect_branch_uses_github_ref_name_for_pushes(monkeypatch: pytest.Monke
 
 
 def test_detect_branch_prefers_github_head_ref_over_ref_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_HEAD_REF", "mng-only/fix")
+    monkeypatch.setenv("GITHUB_HEAD_REF", "mngr-only/fix")
     monkeypatch.setenv("GITHUB_REF_NAME", "main")
-    assert detect_branch() == "mng-only/fix"
+    assert detect_branch() == "mngr-only/fix"
 
 
 def test_detect_branch_ignores_empty_github_head_ref(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,14 +113,14 @@ def test_detect_branch_falls_back_to_git(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_resolve_explicit_all_disables_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.setenv("MNG_TEST_PROFILE", "all")
+    monkeypatch.setenv("MNGR_TEST_PROFILE", "all")
 
     assert resolve_active_profile(repo_root) is None
 
 
 def test_resolve_explicit_profile_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.setenv("MNG_TEST_PROFILE", "minds")
+    monkeypatch.setenv("MNGR_TEST_PROFILE", "minds")
 
     result = resolve_active_profile(repo_root)
 
@@ -132,7 +132,7 @@ def test_resolve_explicit_unknown_profile_warns_and_returns_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.setenv("MNG_TEST_PROFILE", "nonexistent")
+    monkeypatch.setenv("MNGR_TEST_PROFILE", "nonexistent")
 
     with pytest.warns(UserWarning, match="does not match any profile"):
         assert resolve_active_profile(repo_root) is None
@@ -140,18 +140,18 @@ def test_resolve_explicit_unknown_profile_warns_and_returns_none(
 
 def test_resolve_branch_prefix_matching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.delenv("MNG_TEST_PROFILE", raising=False)
-    monkeypatch.setenv("GITHUB_HEAD_REF", "mng-only/fix-something")
+    monkeypatch.delenv("MNGR_TEST_PROFILE", raising=False)
+    monkeypatch.setenv("GITHUB_HEAD_REF", "mngr-only/fix-something")
 
     result = resolve_active_profile(repo_root)
 
     assert result is not None
-    assert result.name == "mng"
+    assert result.name == "mngr"
 
 
 def test_resolve_second_prefix_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.delenv("MNG_TEST_PROFILE", raising=False)
+    monkeypatch.delenv("MNGR_TEST_PROFILE", raising=False)
     monkeypatch.setenv("GITHUB_HEAD_REF", "mind-only/new-feature")
 
     result = resolve_active_profile(repo_root)
@@ -162,14 +162,14 @@ def test_resolve_second_prefix_matches(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_resolve_no_matching_branch_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = _write_sample_config(tmp_path)
-    monkeypatch.delenv("MNG_TEST_PROFILE", raising=False)
+    monkeypatch.delenv("MNGR_TEST_PROFILE", raising=False)
     monkeypatch.setenv("GITHUB_HEAD_REF", "feature/something-else")
 
     assert resolve_active_profile(repo_root) is None
 
 
 def test_resolve_no_config_file_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MNG_TEST_PROFILE", raising=False)
+    monkeypatch.delenv("MNGR_TEST_PROFILE", raising=False)
 
     assert resolve_active_profile(tmp_path) is None
 
@@ -189,7 +189,7 @@ testpaths = ["libs/b"]
 cov_packages = ["b"]
 """
     )
-    monkeypatch.delenv("MNG_TEST_PROFILE", raising=False)
+    monkeypatch.delenv("MNGR_TEST_PROFILE", raising=False)
     monkeypatch.setenv("GITHUB_HEAD_REF", "feat/x")
 
     result = resolve_active_profile(tmp_path)

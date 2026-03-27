@@ -1,0 +1,21 @@
+#!/bin/bash
+# Connect script for e2e tests. Invoked by mngr's connect_command mechanism.
+#
+# Starts asciinema in headless mode to record the tmux session, writes the
+# recording PID to a file, and exits so the mngr create process can return
+# to the test runner.
+#
+# Environment (set by mngr's connect_command machinery):
+#   MNGR_AGENT_NAME    - name of the agent to connect to
+#   MNGR_SESSION_NAME  - full tmux session name (with prefix)
+#
+# Environment (set by e2e test fixture):
+#   MNGR_TEST_ASCIINEMA_DIR - directory for .cast and .pid output files
+
+set -euo pipefail
+
+cast_path="$MNGR_TEST_ASCIINEMA_DIR/$MNGR_AGENT_NAME.cast"
+pid_path="$MNGR_TEST_ASCIINEMA_DIR/$MNGR_AGENT_NAME.pid"
+
+asciinema rec --headless --command "mngr conn $MNGR_AGENT_NAME" "$cast_path" </dev/null >/dev/null 2>&1 &
+echo $! > "$pid_path"

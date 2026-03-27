@@ -12,8 +12,8 @@ from imbue.minds.config.data_types import MindPaths
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
-from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import MngStreamManager
+from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
 from imbue.minds.forwarding_server.ssh_tunnel import SSHTunnelManager
 from imbue.minds.primitives import OneTimeCode
 
@@ -29,12 +29,12 @@ def start_forwarding_server(
 
     Generates a one-time login URL and prints it to the console so the
     user can authenticate. Starts background streaming subprocesses via
-    MngStreamManager for continuous agent and server discovery.
+    MngrStreamManager for continuous agent and server discovery.
     """
     paths = MindPaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
-    backend_resolver = MngCliBackendResolver()
-    stream_manager = MngStreamManager(resolver=backend_resolver)
+    backend_resolver = MngrCliBackendResolver()
+    stream_manager = MngrStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
     agent_creator = AgentCreator(paths=paths)
 

@@ -19,7 +19,7 @@ PORT=8787
 
 # Create a temporary workspace that mimics what a real agent would have.
 TMPDIR_BASE="${TMPDIR:-/tmp}"
-WORK_DIR=$(mktemp -d "$TMPDIR_BASE/mng-web-dev.XXXXXX")
+WORK_DIR=$(mktemp -d "$TMPDIR_BASE/mngr-web-dev.XXXXXX")
 
 # Agent state directory (holds events/ subdirectories)
 AGENT_STATE_DIR="$WORK_DIR/agent_state"
@@ -34,12 +34,12 @@ mkdir -p "$LLM_DATA_DIR"
 AGENT_WORK_DIR="$WORK_DIR/workdir"
 mkdir -p "$AGENT_WORK_DIR"
 
-export UV_TOOL_BIN_DIR="$(dirname "$(which mng)")"
+export UV_TOOL_BIN_DIR="$(dirname "$(which mngr)")"
 export UV_TOOL_DIR="$(dirname "$UV_TOOL_BIN_DIR")"
-export MNG_AGENT_STATE_DIR="$AGENT_STATE_DIR"
-export MNG_AGENT_NAME="dev-agent"
-export MNG_HOST_NAME="localhost"
-export MNG_AGENT_WORK_DIR="$AGENT_WORK_DIR"
+export MNGR_AGENT_STATE_DIR="$AGENT_STATE_DIR"
+export MNGR_AGENT_NAME="dev-agent"
+export MNGR_HOST_NAME="localhost"
+export MNGR_AGENT_WORK_DIR="$AGENT_WORK_DIR"
 export LLM_USER_PATH="$LLM_DATA_DIR"
 export WEB_SERVER_PORT="$PORT"
 
@@ -56,7 +56,7 @@ stop_server() {
 }
 
 start_server() {
-    uv run python -m imbue.mng_claude_mind.resources.web_server < /dev/null &
+    uv run python -m imbue.mngr_claude_mind.resources.web_server < /dev/null &
     SERVER_PID=$!
     echo "[launch] Server started (PID $SERVER_PID)"
 }

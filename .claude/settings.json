@@ -35,15 +35,15 @@
     ]
   },
   "extraKnownMarketplaces": {
-    "imbue-mng": {
+    "imbue-mngr": {
       "source": {
         "source": "github",
-        "repo": "imbue-ai/mng"
+        "repo": "imbue-ai/mngr"
       }
     }
   },
   "enabledPlugins": {
-    "imbue-code-review@imbue-mng": true
+    "imbue-code-review@imbue-mngr": true
   },
   "model": "opus[1m]",
   "effortLevel": "high",

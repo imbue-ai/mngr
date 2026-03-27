@@ -33,7 +33,7 @@ def forward(host: str, port: int, data_dir: str | None) -> None:
 
     The forwarding server handles authentication and proxies web traffic
     to individual mind web servers. It discovers backends by calling
-    mng CLI commands (mng list, mng events).
+    mngr CLI commands (mngr list, mngr events).
     """
     data_directory = Path(data_dir) if data_dir else get_default_data_dir()
 

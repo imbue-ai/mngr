@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Generate markdown documentation for mng CLI commands and the PyPI README.
+"""Generate markdown documentation for mngr CLI commands and the PyPI README.
 
 Usage:
     uv run python scripts/make_cli_docs.py
 
 This script generates markdown documentation for all CLI commands
-and writes them to libs/mng/docs/commands/. It preserves option
+and writes them to libs/mngr/docs/commands/. It preserves option
 groups defined via click_option_group in the generated markdown.
 
-It also generates libs/mng/README.md from the top-level README.md
+It also generates libs/mngr/README.md from the top-level README.md
 by converting local relative paths to GitHub URLs (for PyPI rendering).
 
 All content comes from two sources:
@@ -22,12 +22,12 @@ from pathlib import Path
 import click
 from click_option_group import GroupedOption
 
-from imbue.mng.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
-from imbue.mng.cli.help_formatter import CommandHelpMetadata
-from imbue.mng.cli.help_formatter import get_help_metadata
-from imbue.mng.main import BUILTIN_COMMANDS
-from imbue.mng.main import PLUGIN_COMMANDS
-from imbue.mng.main import cli
+from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
+from imbue.mngr.cli.help_formatter import CommandHelpMetadata
+from imbue.mngr.cli.help_formatter import get_help_metadata
+from imbue.mngr.main import BUILTIN_COMMANDS
+from imbue.mngr.main import PLUGIN_COMMANDS
+from imbue.mngr.main import cli
 
 # Commands categorized by their documentation location
 PRIMARY_COMMANDS = {
@@ -370,7 +370,7 @@ def get_relative_link(from_command: str, to_command: str) -> str:
     to_category = get_command_category(to_command)
 
     if to_category is None:
-        return f"mng {to_command}"
+        return f"mngr {to_command}"
 
     if from_category == to_category:
         return f"./{to_command}.md"
@@ -386,7 +386,7 @@ def format_see_also_section(command_name: str, metadata: CommandHelpMetadata) ->
     lines = ["", "## See Also", ""]
     for ref_command, description in metadata.see_also:
         link = get_relative_link(command_name, ref_command)
-        lines.append(f"- [mng {ref_command}]({link}) - {description}")
+        lines.append(f"- [mngr {ref_command}]({link}) - {description}")
 
     lines.append("")
     return "\n".join(lines)
@@ -463,7 +463,7 @@ def generate_command_doc(command_name: str, base_dir: Path) -> None:
         print(f"Warning: Command '{command_name}' not found")
         return
 
-    prog_name = f"mng {command_name}"
+    prog_name = f"mngr {command_name}"
     metadata = get_help_metadata(command_name)
 
     # Build content parts
@@ -551,7 +551,7 @@ def generate_alias_doc(command_name: str, base_dir: Path) -> None:
     content_parts: list[str] = []
 
     # Title
-    content_parts.append(f"# mng {command_name}")
+    content_parts.append(f"# mngr {command_name}")
 
     # Synopsis
     synopsis = format_synopsis(metadata)
@@ -595,7 +595,7 @@ def generate_alias_doc(command_name: str, base_dir: Path) -> None:
         print(f"Updated: {output_file}")
 
 
-GITHUB_BASE_URL = "https://github.com/imbue-ai/mng/blob/main/"
+GITHUB_BASE_URL = "https://github.com/imbue-ai/mngr/blob/main/"
 
 # Matches markdown link targets: ](path) — but not absolute URLs, anchors, or mailto
 _RELATIVE_LINK_RE = re.compile(r"\]\((?!https?://|#|mailto:)([^)]+)\)")
@@ -608,13 +608,13 @@ def _local_path_to_github_url(match: re.Match[str]) -> str:
 
 
 def generate_pypi_readme(repo_root: Path) -> None:
-    """Generate libs/mng/README.md from the top-level README.md.
+    """Generate libs/mngr/README.md from the top-level README.md.
 
     Reads the top-level README (which uses local relative paths) and writes
     a version with GitHub absolute URLs for PyPI rendering.
     """
     source = repo_root / "README.md"
-    dest = repo_root / "libs" / "mng" / "README.md"
+    dest = repo_root / "libs" / "mngr" / "README.md"
 
     content = source.read_text()
 
@@ -643,7 +643,7 @@ def main() -> None:
     generate_pypi_readme(repo_root)
 
     # Generate CLI command docs
-    base_dir = repo_root / "libs" / "mng" / "docs" / "commands"
+    base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
 
     for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
         if cmd.name is not None:

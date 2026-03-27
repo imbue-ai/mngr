@@ -7,7 +7,7 @@ Automated code review enforcement for Claude Code. When enabled, a Stop hook blo
 ## Install
 
 ```
-claude plugin marketplace add imbue-ai/mng && claude plugin install imbue-code-review@imbue-mng
+claude plugin marketplace add imbue-ai/mngr && claude plugin install imbue-code-review@imbue-mngr
 ```
 
 ## Enabling the stop hook

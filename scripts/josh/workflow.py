@@ -7,7 +7,7 @@ import click
 
 
 def parse_agent_identifier(stdout: str, stderr: str) -> str:
-    """Parse agent name or ID from mng create output.
+    """Parse agent name or ID from mngr create output.
 
     Tries JSON stdout first (for --format json/jsonl), then falls back
     to scanning stderr for the "Agent name: " pattern (loguru output
@@ -39,7 +39,7 @@ def parse_agent_identifier(stdout: str, stderr: str) -> str:
 
 
 def find_agent_state_in_jsonl(jsonl_output: str, agent_identifier: str) -> str | None:
-    """Parse JSONL output from mng list to find an agent's state.
+    """Parse JSONL output from mngr list to find an agent's state.
 
     Returns the state string (e.g. "WAITING", "RUNNING") or None if not found.
     """
@@ -61,20 +61,20 @@ def find_agent_state_in_jsonl(jsonl_output: str, agent_identifier: str) -> str |
 
 
 def get_agent_state(agent_identifier: str) -> str | None:
-    """Get the lifecycle state of an agent by running mng list.
+    """Get the lifecycle state of an agent by running mngr list.
 
     Returns the state string (e.g. "WAITING", "RUNNING") or None if not found.
-    Logs a warning if mng list fails.
+    Logs a warning if mngr list fails.
     """
     result = subprocess.run(
-        ["uv", "run", "mng", "list", "--provider", "local", "--format", "jsonl"],
+        ["uv", "run", "mngr", "list", "--provider", "local", "--format", "jsonl"],
         capture_output=True,
         text=True,
     )
 
     if result.returncode != 0:
         click.echo(
-            f"Warning: mng list failed (exit code {result.returncode}): {result.stderr.strip()}",
+            f"Warning: mngr list failed (exit code {result.returncode}): {result.stderr.strip()}",
             err=True,
         )
         return None
@@ -87,7 +87,7 @@ def wait_for_agent_completion(
     max_task_time: float,
     poll_interval: float,
 ) -> str | None:
-    """Poll mng list until agent reaches a terminal state or timeout.
+    """Poll mngr list until agent reaches a terminal state or timeout.
 
     Returns the state when the agent is no longer RUNNING, or None if max_task_time is exceeded.
     """
@@ -108,12 +108,12 @@ def wait_for_agent_completion(
 
 
 def stop_agent(agent_identifier: str) -> None:
-    """Stop a timed-out agent via mng stop.
+    """Stop a timed-out agent via mngr stop.
 
     Raises click.ClickException if the stop command fails.
     """
     result = subprocess.run(
-        ["uv", "run", "mng", "stop", agent_identifier],
+        ["uv", "run", "mngr", "stop", agent_identifier],
         capture_output=True,
         text=True,
     )
@@ -160,10 +160,10 @@ def main(
     max_task_time: float,
     poll_interval: float,
 ) -> None:
-    """Launch mng agents repeatedly with incremented arguments.
+    """Launch mngr agents repeatedly with incremented arguments.
 
     Each agent is given an index (idx) and previous index (prev_idx).
-    The workflow polls mng list to detect when each agent reaches the
+    The workflow polls mngr list to detect when each agent reaches the
     WAITING state. On timeout, the agent is stopped and the same task
     is retried. The workflow continues until max_task_count tasks have
     completed or max_total_time has elapsed.
@@ -194,7 +194,7 @@ def main(
 
         click.echo(f"Task {idx}: Waiting for agent {agent_identifier} to complete")
 
-        # Poll mng list until WAITING or timeout
+        # Poll mngr list until WAITING or timeout
         final_state = wait_for_agent_completion(
             agent_identifier=agent_identifier,
             max_task_time=max_task_time,
