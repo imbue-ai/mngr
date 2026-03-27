@@ -1742,7 +1742,7 @@ dependencies = [
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-recursive", editable = "libs/mngr_recursive" },
-    { name = "llm-webchat", specifier = ">=2.3.0" },
+    { name = "llm-webchat", specifier = ">=2.4.0" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
 
@@ -2188,7 +2188,7 @@ wheels = [
 
 [[package]]
 name = "llm-webchat"
-version = "2.3.0"
+version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -2199,9 +2199,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/ed/c23999c80f0955f675884904fea2ccc20fb6a4b979897e0693b38fde6f43/llm_webchat-2.3.0.tar.gz", hash = "sha256:c99d0c5ae8efabcdd77ad9e1428cc42b657e784076bfca65c0778335efe8c834", size = 296804, upload-time = "2026-03-27T07:39:06.824Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6d/ea/d9895183ce8dafb4ec936d8cd2734c4ef0905dc9408c7cc6d13d0d8c99c8/llm_webchat-2.4.0.tar.gz", hash = "sha256:3f8f7b74b1f721ecf75ceb241eb63d4453ab3129c538e1991314411722912af4", size = 297576, upload-time = "2026-03-27T16:06:14.858Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/70/93675f3688d9120b8bb780d103d84dbd97db4075025d89dca05460b8c3e4/llm_webchat-2.3.0-py3-none-any.whl", hash = "sha256:c487a3fd5b10db65453ac2378eb2ec6e8ab4b9409ac0f54014669108e0b05c30", size = 121864, upload-time = "2026-03-27T07:39:04.793Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/8e/34cf149415cf9bcc182d6c176d19a2cddfb44d5a1cc827a847b5b3482383/llm_webchat-2.4.0-py3-none-any.whl", hash = "sha256:1939314708e9efe1249ba6251afbb34c93b74392f6691a76fab07f5604e35016", size = 122038, upload-time = "2026-03-27T16:06:11.778Z" },
 ]
 
 [[package]]
