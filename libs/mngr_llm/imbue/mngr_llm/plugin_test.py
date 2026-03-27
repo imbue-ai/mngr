@@ -140,5 +140,5 @@ def test_register_cli_commands_returns_commands() -> None:
     command_names = [c.name for c in commands]
     assert "llmconversations" in command_names
     assert "llmweb" in command_names
-    assert "llmweb2" in command_names
+    assert "llmweb-old" in command_names
     assert "llmdb" in command_names

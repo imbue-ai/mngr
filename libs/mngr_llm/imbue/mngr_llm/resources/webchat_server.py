@@ -73,7 +73,7 @@ def _inject_plugin_static_files() -> None:
 
 
 def main() -> None:
-    """Entry point for the llmweb2 CLI command."""
+    """Entry point for the llmweb CLI command."""
     with log_span("Starting webchat server (llm-webchat)"):
         _setup_agents_plugin()
         _inject_plugin_static_files()

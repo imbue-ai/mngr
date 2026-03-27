@@ -26,18 +26,18 @@ def llmconversations() -> None:
     main()
 
 
-@click.command("llmweb", hidden=True)
-def llmweb() -> None:
+@click.command("llmweb-old", hidden=True)
+def llmweb_old() -> None:
     """Run the llm web server (internal)."""
     from imbue.mngr_llm.resources.web_server import main
 
     main()
 
 
-@click.command("llmweb2", hidden=True)
-def llmweb2() -> None:
+@click.command("llmweb", hidden=True)
+def llmweb() -> None:
     """Run the llm-webchat based web server (internal)."""
-    from imbue.mng_llm.resources.webchat_server import main
+    from imbue.mngr_llm.resources.webchat_server import main
 
     main()
 
@@ -125,6 +125,6 @@ def get_all_commands() -> Sequence[click.Command]:
     return [
         llmconversations,
         llmweb,
-        llmweb2,
+        llmweb_old,
         llmdb,
     ]
