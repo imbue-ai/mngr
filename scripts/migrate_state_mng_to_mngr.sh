@@ -32,7 +32,7 @@ err()   { echo -e "  ${RED}ERROR${NC} $*"; }
 step()  { echo -e "\n${BOLD}${CYAN}[$1/${TOTAL_STEPS}]${NC} ${BOLD}$2${NC}"; }
 skip()  { echo -e "  ${CYAN}skip${NC} $*"; }
 
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 
 copy_missing_files() {
     local src="$1"
@@ -72,9 +72,22 @@ migrate_dir() {
     fi
 }
 
-# ── 1. Remove mng binary ──────────────────────────────────────────
+# ── 1. Clean __pycache__ directories ──────────────────────────────
+# Stale .pyc files with old module paths (imbue.mng) cause import
+# errors and false diffs. Remove them all up front.
 
-step 1 "Removing mng binary..."
+step 1 "Cleaning __pycache__ directories..."
+pycache_count=$(find "$REPO_ROOT" -type d -name __pycache__ 2>/dev/null | wc -l | tr -d ' ')
+find "$REPO_ROOT" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+if [ "$pycache_count" -gt 0 ]; then
+    ok "Removed $pycache_count __pycache__ directories"
+else
+    ok "No __pycache__ directories found"
+fi
+
+# ── 2. Remove mng binary ──────────────────────────────────────────
+
+step 2 "Removing mng binary..."
 mng_bin=$(command -v mng 2>/dev/null || true)
 if [ -n "$mng_bin" ]; then
     rm "$mng_bin"
@@ -92,7 +105,7 @@ echo ""
 
 # ── 2. Migrate ~/.mng/ -> ~/.mngr/ ─────────────────────────────────
 
-step 2 "Migrating data directories..."
+step 3 "Migrating data directories..."
 migrate_dir "$HOME" "~"
 
 # Migrate .mng dirs inside worktrees (these are gitignored local state)
@@ -134,7 +147,7 @@ done
 
 # ── 3. Check shell configs for stale references ────────────────────
 
-step 3 "Checking shell configs for stale references..."
+step 4 "Checking shell configs for stale references..."
 
 found_any=false
 for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.config/fish/config.fish" "$HOME/.envrc"; do
@@ -154,7 +167,7 @@ fi
 
 # ── 4. Check current env vars for stale references ─────────────────
 
-step 4 "Checking environment variables..."
+step 5 "Checking environment variables..."
 
 stale_vars=$(env | grep -i '_mng_\|^mng_\|\.mng' | grep -iv 'mngr' || true)
 if [ -n "$stale_vars" ]; then
@@ -167,7 +180,7 @@ fi
 
 # ── 5. Fix agent data.json files ────────────────────────────────────
 
-step 5 "Fixing agent data.json files..."
+step 6 "Fixing agent data.json files..."
 
 # Agent connect commands have baked-in MNG_ env var names and .mng paths
 agent_fixed=0
@@ -200,7 +213,7 @@ fi
 
 # ── 6. Fix Claude data ─────────────────────────────────────────────
 
-step 6 "Checking Claude data for stale mng references..."
+step 7 "Checking Claude data for stale mng references..."
 
 real_hits=0
 # ~/.claude.json: contains .mng/ paths as project keys, _mngCreated/_mngSourcePath properties
@@ -240,7 +253,7 @@ fi
 
 # ── 7. Rename ~/.config/mng ────────────────────────────────────────
 
-step 7 "Renaming ~/.config/mng..."
+step 8 "Renaming ~/.config/mng..."
 
 if [ -d "$HOME/.config/mng" ] && [ ! -d "$HOME/.config/mngr" ]; then
     mv "$HOME/.config/mng" "$HOME/.config/mngr"
@@ -253,7 +266,7 @@ fi
 
 # ── 8. Clean uv cache ──────────────────────────────────────────────
 
-step 8 "Cleaning uv cache..."
+step 9 "Cleaning uv cache..."
 uv cache clean 2>/dev/null && ok "uv cache cleaned" || true
 
 echo ""

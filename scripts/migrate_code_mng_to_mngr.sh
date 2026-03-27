@@ -38,6 +38,14 @@ skip() { echo -e "  ${YELLOW}skip: $*${NC}"; }
 
 echo -e "${BOLD}mng -> mngr code migration${NC}"
 
+# ── 0. Clean __pycache__ directories ─────────────────────────────
+# Stale .pyc files with old module paths prevent old directories
+# from being removed and cause import errors.
+
+echo -e "\n${BOLD}Cleaning __pycache__ directories...${NC}"
+find "$REPO_ROOT" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+ok "Cleaned __pycache__"
+
 # ── Helper: perl script for content replacement ───────────────────
 # Written to a temp file to avoid shell escaping issues with negative
 # lookahead (zsh eats ! in command-line perl -e).
