@@ -79,11 +79,11 @@ fix_file() {
     local real_file
     real_file=$(perl -e 'use Cwd "abs_path"; print abs_path($ARGV[0])' "$file")
     if [ "$DRY_RUN" = true ]; then
-        if perl -ne 'if (/mng(?!r)/i) { exit 0 } END { exit 1 }' "$real_file" 2>/dev/null; then
+        if perl -ne 'if (/mng(?!r)/i) { $f=1; last } END { exit($f ? 0 : 1) }' "$real_file" 2>/dev/null; then
             dry "would fix mng -> mngr in $file (backup: ${real_file}.bak)"
         fi
     else
-        if perl -ne 'if (/mng(?!r)/i) { exit 0 } END { exit 1 }' "$real_file" 2>/dev/null; then
+        if perl -ne 'if (/mng(?!r)/i) { $f=1; last } END { exit($f ? 0 : 1) }' "$real_file" 2>/dev/null; then
             cp "$real_file" "${real_file}.bak"
             perl "$RENAME_PL" "$real_file"
         fi
@@ -285,7 +285,7 @@ step 4 "Fixing shell configs..."
 fixed_any=false
 for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.config/fish/config.fish" "$HOME/.envrc"; do
     [ -f "$rc" ] || continue
-    if perl -ne 'if (/mng(?!r)/i) { exit 0 } END { exit 1 }' "$rc" 2>/dev/null; then
+    if perl -ne 'if (/mng(?!r)/i) { $f=1; last } END { exit($f ? 0 : 1) }' "$rc" 2>/dev/null; then
         fix_file "$rc"
         fixed_any=true
     fi
@@ -315,7 +315,7 @@ step 6 "Fixing agent data.json files..."
 agent_fixed=0
 for f in "$HOME/.mngr/agents"/*/data.json; do
     [ -f "$f" ] || continue
-    if perl -ne 'if (/MNG(?!R)_|\.mng(?!r)/) { exit 0 } END { exit 1 }' "$f" 2>/dev/null; then
+    if perl -ne 'if (/MNG(?!R)_|\.mng(?!r)/) { $f=1; last } END { exit($f ? 0 : 1) }' "$f" 2>/dev/null; then
         if [ "$DRY_RUN" = true ]; then
             dry "would fix stale references in $f"
         else
@@ -334,7 +334,7 @@ fi
 host_fixed=0
 for f in "$HOME/.mngr/data.json" "$HOME/.mngr/hosts"/*/data.json; do
     [ -f "$f" ] || continue
-    if perl -ne 'if (/\.mng(?!r)|MNG(?!R)_/) { exit 0 } END { exit 1 }' "$f" 2>/dev/null; then
+    if perl -ne 'if (/\.mng(?!r)|MNG(?!R)_/) { $f=1; last } END { exit($f ? 0 : 1) }' "$f" 2>/dev/null; then
         if [ "$DRY_RUN" = true ]; then
             dry "would fix stale references in $f"
         else
