@@ -273,9 +273,7 @@ step "4/9" "Moving orphaned files from old paths..."
 moved=0
 for old_root in libs/mng/imbue/mng libs/mng_*/imbue/mng_*; do
     [ -d "$old_root" ] || continue
-    new_root="${old_root//mng_/mngr_}"
-    new_root="${new_root//\/mng\//\/mngr\/}"
-    new_root="${new_root//libs\/mng\//libs\/mngr\/}"
+    new_root=$(echo "$old_root" | sed 's/mng_/mngr_/g; s|/mng/|/mngr/|g; s|^libs/mng/|libs/mngr/|')
     [ -d "$new_root" ] || continue
     count=$(find "$old_root" -type f | wc -l | tr -d ' ')
     if [ "$DRY_RUN" = true ]; then
