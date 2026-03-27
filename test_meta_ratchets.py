@@ -17,6 +17,7 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux", "claude_web_view", "sculptor_web"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
+_MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = ("migrate_code_mng_to_mngr.sh", "migrate_state_mng_to_mngr.sh")
 
 pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
@@ -118,25 +119,35 @@ def test_prevent_bash_without_strict_mode() -> None:
     )
 
 
-_PREVENT_OLD_MNGR_NAME = RegexRatchetRule(
-    rule_name="'mngr' occurrences",
-    rule_description="The old 'mngr' name should not be reintroduced.",
-    pattern_string=r"mngr",
+_PREVENT_OLD_MNG_NAME = RegexRatchetRule(
+    rule_name="'mng' (without 'r') occurrences",
+    rule_description="The old 'mng' name should not be reintroduced. Use 'mngr' instead.",
+    pattern_string=r"mng(?!r)",
 )
 
 
-def test_prevent_old_mngr_name_in_file_contents() -> None:
-    """Ensure the old 'mngr' name is not reintroduced in file contents."""
-    chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNGR_NAME, _REPO_ROOT, _SELF_EXCLUSION)
-    assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNGR_NAME.format_failure(chunks)
+def test_prevent_old_mng_name_in_file_contents() -> None:
+    """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
+    exclusions = _SELF_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
+    assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
 
-def test_prevent_old_mngr_name_in_file_paths() -> None:
-    """Ensure the old 'mngr' name is not reintroduced in file paths."""
+def test_prevent_old_mng_name_in_file_paths() -> None:
+    """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file paths."""
+    import re
+
+    mng_not_mngr = re.compile(r"mng(?!r)")
     all_paths = _get_all_files_with_extension(_REPO_ROOT, None)
-    mngr_paths = [p for p in all_paths if "mngr" in str(p.relative_to(_REPO_ROOT))]
-    assert len(mngr_paths) <= snapshot(0), f"Found {len(mngr_paths)} file paths containing 'mngr':\n" + "\n".join(
-        f"  {p.relative_to(_REPO_ROOT)}" for p in mngr_paths
+    mng_paths = [
+        p
+        for p in all_paths
+        if mng_not_mngr.search(str(p.relative_to(_REPO_ROOT)))
+        and not any(excl in p.name for excl in _MIGRATION_SCRIPT_EXCLUSION)
+    ]
+    assert len(mng_paths) <= snapshot(0), (
+        f"Found {len(mng_paths)} file paths containing 'mng' (not 'mngr'):\n"
+        + "\n".join(f"  {p.relative_to(_REPO_ROOT)}" for p in mng_paths)
     )
 
 

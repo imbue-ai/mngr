@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Nuke all Modal resources for this mng installation.
+"""Nuke all Modal resources for this mngr installation.
 
-Use this when mng state gets out of sync with Modal -- for example, when
-<host_id>.json files on the Modal volume are outdated and `mng destroy`
+Use this when mngr state gets out of sync with Modal -- for example, when
+<host_id>.json files on the Modal volume are outdated and `mngr destroy`
 no longer works.
 
-This script bypasses mng entirely and uses the Modal CLI directly.
+This script bypasses mngr entirely and uses the Modal CLI directly.
 
 It will:
-  1. Stop all Modal apps in the mng environment
-  2. Delete all Modal volumes in the mng environment
+  1. Stop all Modal apps in the mngr environment
+  2. Delete all Modal volumes in the mngr environment
 
 Usage:
     uv run python scripts/modal_nuke.py
     uv run python scripts/modal_nuke.py --dry-run
-    uv run python scripts/modal_nuke.py -e mng-<user_id>
+    uv run python scripts/modal_nuke.py -e mngr-<user_id>
 """
 
 import argparse
@@ -33,8 +33,8 @@ from loguru import logger
 
 from imbue.imbue_common.logging import setup_logging
 
-DEFAULT_MNG_DIR: Final[Path] = Path("~/.mng")
-DEFAULT_PREFIX: Final[str] = "mng-"
+DEFAULT_MNGR_DIR: Final[Path] = Path("~/.mngr")
+DEFAULT_PREFIX: Final[str] = "mngr-"
 
 
 def _get_app_id(app: Mapping[str, str]) -> str:
@@ -45,9 +45,9 @@ def _get_volume_name(volume: Mapping[str, str]) -> str:
     return volume.get("Name", volume.get("name", "unknown"))
 
 
-def _read_user_id(mng_dir: Path) -> str | None:
-    """Read the user_id from the mng profile directory."""
-    config_path = mng_dir / "config.toml"
+def _read_user_id(mngr_dir: Path) -> str | None:
+    """Read the user_id from the mngr profile directory."""
+    config_path = mngr_dir / "config.toml"
     if not config_path.exists():
         return None
     try:
@@ -56,7 +56,7 @@ def _read_user_id(mng_dir: Path) -> str | None:
         profile_id = root_config.get("profile")
         if not profile_id:
             return None
-        user_id_path = mng_dir / "profiles" / profile_id / "user_id"
+        user_id_path = mngr_dir / "profiles" / profile_id / "user_id"
         if user_id_path.exists():
             return user_id_path.read_text().strip()
     except (tomllib.TOMLDecodeError, OSError) as exc:
@@ -64,8 +64,8 @@ def _read_user_id(mng_dir: Path) -> str | None:
     return None
 
 
-def _detect_environment(mng_dir: Path, prefix: str) -> str | None:
-    user_id = _read_user_id(mng_dir=mng_dir)
+def _detect_environment(mngr_dir: Path, prefix: str) -> str | None:
+    user_id = _read_user_id(mngr_dir=mngr_dir)
     if user_id:
         return f"{prefix}{user_id}"
     return None
@@ -108,24 +108,24 @@ def _delete_volume(volume_name: str, environment: str) -> tuple[bool, str]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Nuke all Modal resources for this mng installation. "
-        "Use when mng state is out of sync with Modal.",
+        description="Nuke all Modal resources for this mngr installation. "
+        "Use when mngr state is out of sync with Modal.",
     )
     parser.add_argument(
         "--environment",
         "-e",
-        help="Modal environment name (auto-detected from ~/.mng profile if not specified)",
+        help="Modal environment name (auto-detected from ~/.mngr profile if not specified)",
     )
     parser.add_argument(
-        "--mng-dir",
+        "--mngr-dir",
         type=Path,
-        default=DEFAULT_MNG_DIR,
-        help=f"Path to mng directory (default: {DEFAULT_MNG_DIR})",
+        default=DEFAULT_MNGR_DIR,
+        help=f"Path to mngr directory (default: {DEFAULT_MNGR_DIR})",
     )
     parser.add_argument(
         "--prefix",
         default=DEFAULT_PREFIX,
-        help=f"Mng prefix (default: {DEFAULT_PREFIX})",
+        help=f"Mngr prefix (default: {DEFAULT_PREFIX})",
     )
     parser.add_argument(
         "--dry-run",
@@ -142,8 +142,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_environment(args: argparse.Namespace) -> str | None:
-    mng_dir = args.mng_dir.expanduser()
-    return args.environment or _detect_environment(mng_dir, args.prefix)
+    mngr_dir = args.mngr_dir.expanduser()
+    return args.environment or _detect_environment(mngr_dir, args.prefix)
 
 
 def _display_resources(apps: Sequence[Mapping[str, str]], volumes: Sequence[Mapping[str, str]]) -> None:

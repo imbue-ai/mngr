@@ -164,7 +164,7 @@ def trace_span(message: str, *args: Any, _is_trace_span_enabled: bool = True, **
 # envelope fields with all standard loguru fields.  The field names are
 # chosen so that the envelope fields (timestamp, type, event_id, source,
 # level, message, pid) have the same names and positions as in the bash
-# logs emitted by mng_log.sh.  Python logs simply have additional fields
+# logs emitted by mngr_log.sh.  Python logs simply have additional fields
 # (function, line, module, extra, exception, etc.).
 
 

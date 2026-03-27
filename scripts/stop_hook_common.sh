@@ -4,7 +4,7 @@ set -euo pipefail
 # stop_hook_common.sh
 #
 # Shared function definitions for stop hook scripts. Source this file to get
-# logging helpers and retry_command. Sources mng_log.sh for JSONL logging.
+# logging helpers and retry_command. Sources mngr_log.sh for JSONL logging.
 
 # Colors for output (disabled if not a terminal)
 if [[ -t 2 ]]; then
@@ -27,17 +27,17 @@ STOP_HOOK_SCRIPT_NAME="${STOP_HOOK_SCRIPT_NAME:-unknown}"
 
 # Source the shared logging library for _json_escape and _log_jsonl.
 # Configure the library variables so _log_to_file can delegate to _log_jsonl.
-_MNG_LOG_TYPE="stop_hook"
-_MNG_LOG_SOURCE="logs/stop_hook"
-_MNG_LOG_FILE="${STOP_HOOK_LOG:-/dev/null}"
-# shellcheck source=mng_log.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mng_log.sh"
+_MNGR_LOG_TYPE="stop_hook"
+_MNGR_LOG_SOURCE="logs/stop_hook"
+_MNGR_LOG_FILE="${STOP_HOOK_LOG:-/dev/null}"
+# shellcheck source=mngr_log.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mngr_log.sh"
 
 _log_to_file() {
     local level="$1"
     local msg="$2"
     if [[ -n "$STOP_HOOK_LOG" ]]; then
-        _MNG_LOG_FILE="$STOP_HOOK_LOG"
+        _MNGR_LOG_FILE="$STOP_HOOK_LOG"
         _log_jsonl "$level" "$msg"
     fi
 }

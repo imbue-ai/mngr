@@ -1,14 +1,14 @@
-# offload configuration for running mng tests on Modal
+# offload configuration for running mngr tests on Modal
 [offload]
 max_parallel = 50
 test_timeout_secs = 60
 stream_output = true
-sandbox_project_root = "/code/mng"
+sandbox_project_root = "/code/mngr"
 sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --all-packages"
 
 [provider]
 type = "modal"
-dockerfile = "libs/mng/imbue/mng/resources/Dockerfile"
+dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"
 
 [framework]
 type = "pytest"

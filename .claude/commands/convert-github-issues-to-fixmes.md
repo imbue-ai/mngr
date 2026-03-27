@@ -42,7 +42,7 @@ Create a branch off of main with the naming convention:
 ```bash
 git checkout main
 git pull origin main
-git checkout -b "mng/add-fixmes-$(date +%Y%m%d%H%M%S)"
+git checkout -b "mngr/add-fixmes-$(date +%Y%m%d%H%M%S)"
 ```
 
 ### 4. Process Each Issue
@@ -58,7 +58,7 @@ Look at the **last** comment from any authorized user:
 
 #### 4b. For "ignore" Comments - Add to non_issues.md
 
-Open the `non_issues.md` file in the relevant sub-project (e.g., `libs/mng/non_issues.md`) and add a single line describing why this is not an issue. The line should:
+Open the `non_issues.md` file in the relevant sub-project (e.g., `libs/mngr/non_issues.md`) and add a single line describing why this is not an issue. The line should:
 
 - Be concise (one sentence)
 - Reference the original issue content to prevent it from being flagged again

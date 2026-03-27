@@ -24,8 +24,8 @@ class GitCloneError(MindError):
     ...
 
 
-class MngCommandError(MindError):
-    """Raised when an mng CLI command fails."""
+class MngrCommandError(MindError):
+    """Raised when an mngr CLI command fails."""
 
     ...
 

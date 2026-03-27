@@ -1,8 +1,8 @@
 """Selectively bump and publish changed packages to PyPI.
 
 Only packages that changed since the last release (or their dependents) are bumped.
-The tag is always based on the mng version, so mng is always bumped to ensure a
-unique tag. This cascades to mng's dependents (they must update their pin).
+The tag is always based on the mngr version, so mngr is always bumped to ensure a
+unique tag. This cascades to mngr's dependents (they must update their pin).
 
 Bump levels cascade upward through the dependency DAG: if a package is bumped at
 a given level, all its dependents must be bumped at at least that level (because
@@ -11,7 +11,7 @@ above the base level.
 
 Usage:
     uv run scripts/release.py patch                    # all get patch
-    uv run scripts/release.py patch --minor mng        # mng+ get minor, rest get patch
+    uv run scripts/release.py patch --minor mngr        # mngr+ get minor, rest get patch
     uv run scripts/release.py patch --dry-run          # preview without changes
     uv run scripts/release.py --watch                  # watch publish workflow
     uv run scripts/release.py --retry                  # rerun failed jobs and watch
@@ -34,12 +34,12 @@ from utils import REPO_ROOT
 from utils import get_package_versions
 from utils import parse_dep_name
 
-from imbue.mng.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import poll_for_value
 
 BUMP_KINDS: Final[tuple[str, ...]] = ("major", "minor", "patch")
 BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
-ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mng/actions/workflows/publish.yml"
+ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
 POLL_INTERVAL_SECONDS: Final[int] = 10
 MAX_WAIT_FOR_RUN_SECONDS: Final[int] = 300
 SLOW_START_WARNING_SECONDS: Final[int] = 60
@@ -50,10 +50,10 @@ def run(*args: str) -> str:
     return subprocess.run(args, cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout.strip()
 
 
-def get_mng_version() -> str:
-    """Read the current mng package version (used for tag naming)."""
+def get_mngr_version() -> str:
+    """Read the current mngr package version (used for tag naming)."""
     versions = get_package_versions()
-    return versions["mng"]
+    return versions["imbue-mngr"]
 
 
 def _find_last_release_tag() -> str:
@@ -67,11 +67,11 @@ def _find_last_release_tag() -> str:
 
 
 def _get_pypi_version() -> str | None:
-    """Query PyPI for the latest published version of mng. Returns None if the query fails."""
+    """Query PyPI for the latest published version of mngr. Returns None if the query fails."""
     import httpx
 
     try:
-        response = httpx.get("https://pypi.org/pypi/mng/json", timeout=10)
+        response = httpx.get("https://pypi.org/pypi/imbue-mngr/json", timeout=10)
         response.raise_for_status()
         return response.json()["info"]["version"]
     except Exception:
@@ -157,10 +157,10 @@ def _compute_bump_set(directly_changed: set[str]) -> dict[str, str]:
         to_bump[name] = "changed"
     _cascade_reverse_deps(deque(directly_changed), reverse_deps, to_bump)
 
-    # mng is always bumped (tag is v<mng-version>)
-    if "mng" not in to_bump:
-        to_bump["mng"] = "always"
-        _cascade_reverse_deps(deque(["mng"]), reverse_deps, to_bump)
+    # mngr is always bumped (tag is v<mngr-version>)
+    if "imbue-mngr" not in to_bump:
+        to_bump["imbue-mngr"] = "always"
+        _cascade_reverse_deps(deque(["imbue-mngr"]), reverse_deps, to_bump)
 
     return to_bump
 
@@ -323,7 +323,7 @@ def wait_for_run_completion(run_id: str, after_workflow_attempt: int) -> str:
     if conclusion is not None:
         return conclusion
     print("ERROR: Workflow did not complete within 30 minutes.", file=sys.stderr)
-    print(f"Check manually: https://github.com/imbue-ai/mng/actions/runs/{run_id}", file=sys.stderr)
+    print(f"Check manually: https://github.com/imbue-ai/mngr/actions/runs/{run_id}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -335,7 +335,7 @@ def print_run_failure(run_id: str) -> None:
         print(logs)
     except subprocess.CalledProcessError:
         print("(Could not retrieve failure logs)")
-    print(f"\nFull details: https://github.com/imbue-ai/mng/actions/runs/{run_id}")
+    print(f"\nFull details: https://github.com/imbue-ai/mngr/actions/runs/{run_id}")
 
 
 def _get_workflow_attempt_number(run_id: str) -> int:
@@ -447,8 +447,8 @@ def main() -> None:
 
     # --watch / --retry mode
     if args.watch or args.retry:
-        mng_version = get_mng_version()
-        tag = f"v{mng_version}"
+        mngr_version = get_mngr_version()
+        tag = f"v{mngr_version}"
         run_id = find_publish_run_id(tag)
 
         after_attempt = 0
@@ -537,12 +537,12 @@ def main() -> None:
         print("\nNo packages to release (new packages were declined). Nothing to do.")
         return
 
-    # Compute the full bump set (includes cascades and mng-always rule)
+    # Compute the full bump set (includes cascades and mngr-always rule)
     to_bump = _compute_bump_set(directly_changed_for_bump)
 
     # Remove confirmed new packages from bump set -- they publish at current version,
-    # not a bumped version. They may have entered to_bump via cascade (e.g. mng is
-    # always bumped, and most packages depend on mng).
+    # not a bumped version. They may have entered to_bump via cascade (e.g. mngr is
+    # always bumped, and most packages depend on mngr).
     for name in confirmed_new:
         to_bump.pop(name, None)
 
@@ -560,8 +560,8 @@ def main() -> None:
     all_versions_after = dict(current_versions)
     all_versions_after.update(new_versions)
 
-    new_mng_version = all_versions_after["mng"]
-    tag = f"v{new_mng_version}"
+    new_mngr_version = all_versions_after["imbue-mngr"]
+    tag = f"v{new_mngr_version}"
 
     # Show summary
     _print_bump_summary(directly_changed, to_bump, bump_levels, current_versions, new_versions, confirmed_new)

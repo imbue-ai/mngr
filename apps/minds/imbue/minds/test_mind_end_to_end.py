@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.testing import extract_response
-from imbue.minds.testing import run_mng
+from imbue.minds.testing import run_mngr
 
 
 @pytest.mark.release
@@ -26,7 +26,7 @@ def test_create_test_coder_and_verify_matched_responses_model(created_test_coder
 
     Verifies:
     1. The mind was created successfully (via the fixture)
-    2. The matched-responses model is installed and responds correctly via mng exec
+    2. The matched-responses model is installed and responds correctly via mngr exec
     3. The chat settings are configured with model = "matched-responses"
     4. The env-var-based response override works in the agent environment
     """
@@ -34,7 +34,7 @@ def test_create_test_coder_and_verify_matched_responses_model(created_test_coder
 
     # Verify the model returns the expected default response
     test_message = "Hello from end-to-end test"
-    exec_result = run_mng("exec", agent_name, f'llm -m matched-responses "{test_message}"')
+    exec_result = run_mngr("exec", agent_name, f'llm -m matched-responses "{test_message}"')
     assert exec_result.returncode == 0, (
         f"llm matched-responses failed:\nstdout: {exec_result.stdout}\nstderr: {exec_result.stderr}"
     )
@@ -51,7 +51,7 @@ def test_create_test_coder_and_verify_matched_responses_model(created_test_coder
 
     # Verify the LLM_MATCHED_RESPONSE env var override works in the agent environment
     custom_response = "I am a test bot and this is my canned response."
-    exec_result = run_mng(
+    exec_result = run_mngr(
         "exec",
         agent_name,
         f'LLM_MATCHED_RESPONSE="{custom_response}" llm -m matched-responses "anything"',

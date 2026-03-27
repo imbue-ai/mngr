@@ -293,7 +293,7 @@ class TestingModalInterface(ModalInterface):
 
     All state is held in memory and on the local filesystem (for volumes).
     No network calls are made. This implementation is designed for testing
-    mng_modal without requiring Modal credentials or a Modal account.
+    mngr_modal without requiring Modal credentials or a Modal account.
 
     Requires a ConcurrencyGroup for process lifecycle management. Sandboxes
     create child ConcurrencyGroups so their processes are tracked and cleaned

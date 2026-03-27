@@ -28,8 +28,8 @@ dependencies = [
 dev = ["inline-snapshot>=0.13"]
 
 [project.urls]
-Homepage = "https://github.com/imbue-ai/mng"
-Repository = "https://github.com/imbue-ai/mng"
+Homepage = "https://github.com/imbue-ai/mngr"
+Repository = "https://github.com/imbue-ai/mngr"
 
 [build-system]
 requires = ["hatchling"]

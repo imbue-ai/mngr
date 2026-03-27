@@ -22,7 +22,7 @@ llm SQLite database ($LLM_USER_PATH/logs.db)
 Conversation watcher (syncs from that sqlite database to events/messages/events.jsonl)
     |
     v
-Event watcher (delivers all events, including message events, to thinking agent via mng message)
+Event watcher (delivers all events, including message events, to thinking agent via mngr message)
     |
     v
 Thinking agent (processes, delegates, replies via chat.sh, our wrapper around calls to llm)
@@ -72,7 +72,7 @@ User messages always arrive paired with the auto-generated assistant response fr
 Use `chat.sh` to add a message to a known conversation:
 
 ```bash
-$MNG_AGENT_STATE_DIR/commands/chat.sh --reply <conversation-id> "Your message here"
+$MNGR_AGENT_STATE_DIR/commands/chat.sh --reply <conversation-id> "Your message here"
 ```
 
 ### Starting a new conversation
@@ -80,7 +80,7 @@ $MNG_AGENT_STATE_DIR/commands/chat.sh --reply <conversation-id> "Your message he
 Use the chat script to create or resume a named conversation:
 
 ```bash
-$MNG_AGENT_STATE_DIR/commands/chat.sh --new --name "<descriptive name>" --as-agent "Your message here"
+$MNGR_AGENT_STATE_DIR/commands/chat.sh --new --name "<descriptive name>" --as-agent "Your message here"
 ```
 
 If a conversation with the given name already exists, the message is added to that thread. Otherwise, a new conversation is created. The command prints the conversation ID to stdout.
@@ -88,7 +88,7 @@ If a conversation with the given name already exists, the message is added to th
 ### Listing conversations
 
 ```bash
-$MNG_AGENT_STATE_DIR/commands/chat.sh --list
+$MNGR_AGENT_STATE_DIR/commands/chat.sh --list
 ```
 
 Shows all tracked conversations with their IDs, names, creation timestamps, and models.
@@ -97,7 +97,7 @@ Shows all tracked conversations with their IDs, names, creation timestamps, and 
 
 1. **User sends message**: Types in `llm live-chat` web terminal. The message and the model's response are written to the `llm` database.
 2. **Conversation watcher detects it**: Polls the database, finds new rows in `responses` table for tracked conversations, writes `MessageEvent` records to `events/messages/events.jsonl`.
-3. **Event watcher delivers**: Picks up the new events, applies chat pairing (holds user messages until the assistant response arrives), batches them, and delivers to the thinking agent via `mng message`.
+3. **Event watcher delivers**: Picks up the new events, applies chat pairing (holds user messages until the assistant response arrives), batches them, and delivers to the thinking agent via `mngr message`.
 4. **Thinking agent processes**: Reads the event batch file, sees the user message and auto-generated reply, decides on next steps (delegate work, send follow-up, etc.).
 5. **Agent replies**: Uses `llm inject` or `chat.sh` to write a response back to the database.
 6. **User sees reply**: The response appears in the `llm live-chat` interface.

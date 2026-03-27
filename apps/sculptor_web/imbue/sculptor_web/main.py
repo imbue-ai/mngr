@@ -49,12 +49,12 @@ _poll_thread: threading.Thread | None = None
 _stop_event = threading.Event()
 
 
-def _run_mng_list() -> AgentListResult:
-    """Run mng list command and parse the JSON output."""
-    logger.debug("Running mng list command")
+def _run_mngr_list() -> AgentListResult:
+    """Run mngr list command and parse the JSON output."""
+    logger.debug("Running mngr list command")
     try:
         result = subprocess.run(
-            ["mng", "list", "--format", "json"],
+            ["mngr", "list", "--format", "json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -120,13 +120,13 @@ def _parse_agent_info(data: dict) -> AgentDisplayInfo:
 
 
 def _poll_agents_loop() -> None:
-    """Background loop that polls mng list periodically."""
+    """Background loop that polls mngr list periodically."""
     logger.info("Starting agent polling loop")
     _agent_list_state.is_running = True
 
     while not _stop_event.is_set():
         try:
-            result = _run_mng_list()
+            result = _run_mngr_list()
             _agent_list_state.agents = result.agents
             _agent_list_state.errors = result.errors
             logger.trace("Polled {} agents", len(result.agents))
@@ -247,7 +247,7 @@ def _render_main_content(agents: tuple[AgentDisplayInfo, ...]) -> FT:
 
     # Always show placeholder initially until an agent is selected
     placeholder = Div(
-        "No agents found. Create an agent with 'mng create' to get started."
+        "No agents found. Create an agent with 'mngr create' to get started."
         if not agents
         else "Select an agent from the sidebar",
         cls="placeholder",

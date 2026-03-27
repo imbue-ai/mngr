@@ -172,7 +172,7 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
     Uses the known_hosts file from the same directory as the SSH key (this is
-    where mng stores it for each provider). Falls back to AutoAddPolicy if
+    where mngr stores it for each provider). Falls back to AutoAddPolicy if
     no known_hosts file is found.
     """
     client = paramiko.SSHClient()

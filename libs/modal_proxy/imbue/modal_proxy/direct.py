@@ -560,8 +560,8 @@ class DirectModalInterface(ModalInterface):
                 text=True,
                 env={
                     **os.environ,
-                    "MNG_MODAL_APP_NAME": app_name,
-                    "MNG_MODAL_APP_BUILD_PATH": tmpdir,
+                    "MNGR_MODAL_APP_NAME": app_name,
+                    "MNGR_MODAL_APP_BUILD_PATH": tmpdir,
                 },
             )
         if result.returncode != 0:

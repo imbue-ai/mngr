@@ -24,7 +24,7 @@ Adhere to the following guidelines:
 - You may need to gather more context about the project in order to resolve some ambiguities or uncertainty and figure out what was meant by the task. Feel free to do so.
 - The purpose of creating the prompt for me is to save me time. If you're unsure of what was meant, it's ok to make some assumptions, or even to make multiple variants (separated by "---" within the file)
 - Generally, your prompts should start with something like this:
-    Go gather all the context for the mng library (per instructions in CLAUDE.md).
+    Go gather all the context for the mngr library (per instructions in CLAUDE.md).
 
     Once you've gathered that context, please do the below (and commit when you're finished).
 - At the bottom of the prompt file, you may leave some open questions about the largest open questions or areas of uncertainty (if there are any that matter). Do NOT make these vague--make them very specific. Try to use the context and think and make reasonable assumptions before saying something is uncertain.

@@ -61,7 +61,7 @@ def _get_<project>_source_dir() -> Path:
     return Path(__file__).parent.parent
 ```
 
-This assumes the test file is in a subfolder (like `utils/`) of the main source package. Adjust the path navigation as needed based on where your test file is located. Replace `<project>` with the actual project name (e.g., "mng").
+This assumes the test file is in a subfolder (like `utils/`) of the main source package. Adjust the path navigation as needed based on where your test file is located. Replace `<project>` with the actual project name (e.g., "mngr").
 
 ### 4. Write the Test Function
 

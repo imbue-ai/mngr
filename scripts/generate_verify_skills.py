@@ -131,7 +131,7 @@ def _vet_guide_to_section(guide) -> CategorySection:
 
 
 def _apply_overrides(sections: list[CategorySection]) -> list[CategorySection]:
-    """Apply mng-specific overrides to the category sections.
+    """Apply mngr-specific overrides to the category sections.
 
     Inserts new categories and extends existing ones with additional guidance.
     """
@@ -184,7 +184,7 @@ def _split_list_items(text: str) -> list[str]:
 
 
 def generate_branch_categories(vet_modules) -> str:
-    """Generate branch issue categories from vet, with mng-specific overrides applied."""
+    """Generate branch issue categories from vet, with mngr-specific overrides applied."""
     codes_batch = vet_modules["ISSUE_CODES_FOR_BATCHED_COMMIT_CHECK"]
     codes_correctness = vet_modules["ISSUE_CODES_FOR_CORRECTNESS_CHECK"]
     guides_by_code = vet_modules["ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE"]

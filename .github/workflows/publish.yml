@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g. 0.1.0). Must match the mng version in pyproject.toml.'
+        description: 'Version to publish (e.g. 0.1.0). Must match the mngr version in pyproject.toml.'
         required: true
         type: string
   push:
@@ -37,7 +37,7 @@ jobs:
 
       - name: Verify versions and pin consistency
         run: |
-          # Determine expected mng version from tag or workflow_dispatch input
+          # Determine expected mngr version from tag or workflow_dispatch input
           EXPECTED=""
           if [ "${{ github.ref_type }}" = "tag" ]; then
             EXPECTED="${{ github.ref_name }}"
@@ -47,7 +47,7 @@ jobs:
           fi
 
           if [ -n "$EXPECTED" ]; then
-            uv run scripts/verify_publish.py --expected-mng-version "$EXPECTED"
+            uv run scripts/verify_publish.py --expected-mngr-version "$EXPECTED"
           else
             uv run scripts/verify_publish.py
           fi
@@ -61,29 +61,29 @@ jobs:
       - name: Build concurrency-group
         run: pyproject-build libs/concurrency_group -o dist/
 
-      - name: Build mng
-        run: pyproject-build libs/mng -o dist/
+      - name: Build imbue-mngr
+        run: pyproject-build libs/mngr -o dist/
 
       - name: Build modal-proxy
         run: pyproject-build libs/modal_proxy -o dist/
 
-      - name: Build mng-modal
-        run: pyproject-build libs/mng_modal -o dist/
+      - name: Build imbue-mngr-modal
+        run: pyproject-build libs/mngr_modal -o dist/
 
-      - name: Build mng-claude
-        run: pyproject-build libs/mng_claude -o dist/
+      - name: Build imbue-mngr-claude
+        run: pyproject-build libs/mngr_claude -o dist/
 
-      - name: Build mng-pair
-        run: pyproject-build libs/mng_pair -o dist/
+      - name: Build imbue-mngr-pair
+        run: pyproject-build libs/mngr_pair -o dist/
 
-      - name: Build mng-opencode
-        run: pyproject-build libs/mng_opencode -o dist/
+      - name: Build imbue-mngr-opencode
+        run: pyproject-build libs/mngr_opencode -o dist/
 
-      - name: Build mng-kanpan
-        run: pyproject-build libs/mng_kanpan -o dist/
+      - name: Build imbue-mngr-kanpan
+        run: pyproject-build libs/mngr_kanpan -o dist/
 
-      - name: Build mng-tutor
-        run: pyproject-build libs/mng_tutor -o dist/
+      - name: Build imbue-mngr-tutor
+        run: pyproject-build libs/mngr_tutor -o dist/
 
       - name: Publish packages to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

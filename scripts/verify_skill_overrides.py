@@ -1,8 +1,8 @@
-"""Mng-specific overrides for vet-generated code issue categories.
+"""Mngr-specific overrides for vet-generated code issue categories.
 
 These overrides are applied AFTER generating from vet, so the vet base is always
 the starting point. They add new categories and extend existing ones with
-mng-specific guidance.
+mngr-specific guidance.
 """
 
 from __future__ import annotations

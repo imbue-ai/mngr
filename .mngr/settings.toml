@@ -3,29 +3,29 @@ is_allowed_in_pytest = false
 default_destroyed_host_persisted_seconds = 10
 
 [pre_command_scripts]
-create = ["""bash -c './scripts/make_tar_of_repo.sh `cat .mng/image_commit_hash` .mng/dev/build'"""]
+create = ["""bash -c './scripts/make_tar_of_repo.sh `cat .mngr/image_commit_hash` .mngr/dev/build'"""]
 
 [create_templates.docker]
 provider = "docker"
-build_arg = ["--file=libs/mng/imbue/mng/resources/Dockerfile", ".mng/dev/build/"]
-target_path = "/code/mng"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", ".mngr/dev/build/"]
+target_path = "/code/mngr"
 # the agent added these, but I kinda doubt we need them...
 #pass_env = ["ANTHROPIC_API_KEY"]
-#extra_provision_command = ["bash -c 'cd /code/mng && uv sync --all-packages'"]
+#extra_provision_command = ["bash -c 'cd /code/mngr && uv sync --all-packages'"]
 
 [create_templates.coder]
 type = "coder"
 
 [create_templates.modal]
 provider = "modal"
-build_arg = ["file=libs/mng/imbue/mng/resources/Dockerfile", "context-dir=.mng/dev/build/", "volume=code-review-json:/code_reviews"]
-extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mng.git && gh auth setup-git'"]
+build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-target_path = "/code/mng"
+target_path = "/code/mngr"
 
 [agent_types.coder]
 parent_type = "claude"
-cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNG_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}], "Stop": [{"hooks": [{"type": "command", "command": "./scripts/check_commit_status.sh"}]}, {"hooks": [{"type": "command", "timeout": 600, "command": "./scripts/main_claude_stop_hook.sh"}]}]}}'"""
+cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}], "Stop": [{"hooks": [{"type": "command", "command": "./scripts/check_commit_status.sh"}]}, {"hooks": [{"type": "command", "timeout": 600, "command": "./scripts/main_claude_stop_hook.sh"}]}]}}'"""
 
 [providers.modal]
 is_enabled = true

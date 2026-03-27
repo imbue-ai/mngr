@@ -3,7 +3,7 @@ from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 _COOKIE_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"(;\s*[Pp]ath\s*=\s*)([^;]*)")
 

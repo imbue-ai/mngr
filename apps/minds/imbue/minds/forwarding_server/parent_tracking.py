@@ -24,8 +24,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import ParentTrackingError
-from imbue.minds.forwarding_server.vendor_mng import ensure_git_identity
-from imbue.minds.forwarding_server.vendor_mng import run_git
+from imbue.minds.forwarding_server.vendor_mngr import ensure_git_identity
+from imbue.minds.forwarding_server.vendor_mngr import run_git
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitCommitHash

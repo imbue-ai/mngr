@@ -5,27 +5,27 @@ This document describes how events flow through a mind, from creation to deliver
 ## Overview
 
 Events are the primary communication mechanism for the thinking agent.
-The thinking agent does not poll for work -- instead, batches of events are delivered to it by sticking them in a file and telling the agent to handle all events in that file via `mng message`, and it reacts to each event within.
+The thinking agent does not poll for work -- instead, batches of events are delivered to it by sticking them in a file and telling the agent to handle all events in that file via `mngr message`, and it reacts to each event within.
 
 ## Event flow
 
 ```
-Event source (DB, mng observe, scheduler, etc.)
+Event source (DB, mngr observe, scheduler, etc.)
     |
     v
-Event log file ($MNG_AGENT_STATE_DIR/events/<source>/events.jsonl)
+Event log file ($MNGR_AGENT_STATE_DIR/events/<source>/events.jsonl)
     |
     v
-Event watcher (mng mindevents) -- reads via `mng events --follow`
+Event watcher (mngr mindevents) -- reads via `mngr events --follow`
     |
     v
 Batching, rate limiting, chat pairing, aggregation
     |
     v
-Batch file ($MNG_AGENT_STATE_DIR/mind/event_batches/<uuid>.jsonl)
+Batch file ($MNGR_AGENT_STATE_DIR/mind/event_batches/<uuid>.jsonl)
     |
     v
-Delivery via `mng message <agent-id> "Please process all events in <file>"`
+Delivery via `mngr message <agent-id> "Please process all events in <file>"`
     |
     v
 Thinking agent reads the file, processes events, marks them handled
@@ -33,7 +33,7 @@ Thinking agent reads the file, processes events, marks them handled
 
 ## Event sources
 
-Each event source writes append-only JSONL to `$MNG_AGENT_STATE_DIR/events/<source>/events.jsonl`. Every event line has a standard envelope:
+Each event source writes append-only JSONL to `$MNGR_AGENT_STATE_DIR/events/<source>/events.jsonl`. Every event line has a standard envelope:
 
 ```json
 {"timestamp": "...", "type": "...", "event_id": "...", "source": "<source>", ...additional fields}
@@ -41,7 +41,7 @@ Each event source writes append-only JSONL to `$MNG_AGENT_STATE_DIR/events/<sour
 
 Built-in sources:
 - **messages** -- conversation messages, synced from the `llm` database by the conversation watcher
-- **mng/agent_states** -- agent state transitions, written by the observer (`mng observe`)
+- **mngr/agent_states** -- agent state transitions, written by the observer (`mngr observe`)
 - **scheduled** -- time-based triggers
 - **stop** -- shutdown detection (last chance to handle pending work)
 - **delivery_failures** -- event delivery failure notifications from the event watcher
@@ -49,17 +49,17 @@ Built-in sources:
 
 ## Supporting services
 
-Two background processes (each running in their own `mng` agent tmux windows) handle event creation and delivery:
+Two background processes (each running in their own `mngr` agent tmux windows) handle event creation and delivery:
 
-### Conversation watcher (`mng llmconversations`)
+### Conversation watcher (`mngr llmconversations`)
 
 Polls the `llm` SQLite database for new messages in tracked conversations (those registered in the `mind_conversations` table). New messages are synced to `events/messages/events.jsonl` as `MessageEvent` records with `conversation_id`, `role`, and `content`.
 
 User messages are always paired with assistant responses -- the watcher waits briefly for the assistant reply so the thinking agent sees both together.
 
-### Event watcher (`mng mindevents`)
+### Event watcher (`mngr mindevents`)
 
-Streams all events via `mng events <agent-id> --follow` and delivers batches to the thinking agent. This happens via `event_watcher.py`, which handles a number of different concerns:
+Streams all events via `mngr events <agent-id> --follow` and delivers batches to the thinking agent. This happens via `event_watcher.py`, which handles a number of different concerns:
 
 1. **Buffering**: Events are read from the subprocess into a shared buffer
 2. **Catch-up filtering**: On restart, already-delivered events are skipped using persisted delivery state
@@ -67,7 +67,7 @@ Streams all events via `mng events <agent-id> --follow` and delivers batches to 
 4. **Aggregation**: If a source has too many events in one batch, or any single event is too large, all events from that source are written to a separate file and replaced with a single aggregate event pointing to that file
 5. **Source filtering**: Events from excluded or dynamically ignored sources are dropped
 6. **Rate limiting**: A token bucket controls delivery rate (configurable burst size and sustained rate)
-7. **Delivery**: Events are written to `$MNG_AGENT_STATE_DIR/mind/event_batches/<uuid>.jsonl` and the file path is sent to the agent via `mng message`
+7. **Delivery**: Events are written to `$MNGR_AGENT_STATE_DIR/mind/event_batches/<uuid>.jsonl` and the file path is sent to the agent via `mngr message`
 8. **Retry**: On delivery failure, events are put back in the buffer with exponential backoff. After repeated failures, the user is notified via both a `delivery_failures` event and a chat message
 
 ## Handling and acknowledgement

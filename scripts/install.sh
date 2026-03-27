@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# mng installer
+# mngr installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/imbue-ai/mng/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 #
 # This script:
 #   1. Checks for prerequisites (curl, ssh)
 #   2. Prompts to install system dependencies:
 #      - Core: uv, git, tmux, jq
 #      - Optional: claude (agent type), rsync (push/pull), unison (pair)
-#   3. Installs mng via uv tool install
+#   3. Installs mngr via uv tool install
 #   4. Offers to enable shell completion
 #
 set -euo pipefail
@@ -38,7 +38,7 @@ detect_os() {
     case "$(uname -s)" in
         Darwin) echo "macos" ;;
         Linux)  echo "linux" ;;
-        *)      error "Unsupported operating system: $(uname -s). mng supports macOS and Linux." ;;
+        *)      error "Unsupported operating system: $(uname -s). mngr supports macOS and Linux." ;;
     esac
 }
 
@@ -129,7 +129,7 @@ install_uv() {
 
 info "Detected OS: ${OS}"
 
-# macOS ships /bin/bash 3.2 which lacks features mng scripts need.
+# macOS ships /bin/bash 3.2 which lacks features mngr scripts need.
 # `command -v bash` always succeeds, so find_missing won't detect this. We check
 # the version explicitly and force-add bash to the missing arrays if too old.
 _NEED_MODERN_BASH=false
@@ -150,7 +150,7 @@ if [ ${#missing_all[@]} -eq 0 ]; then
     info "All system dependencies already installed"
 else
     printf "\n"
-    printf "mng needs these system dependencies: ${BOLD}${missing_all[*]}${RESET}\n"
+    printf "mngr needs these system dependencies: ${BOLD}${missing_all[*]}${RESET}\n"
     printf "  claude, rsync, and unison are optional (needed for the claude agent type, push/pull, and pair).\n"
     printf "\n"
     printf "  [a] Install all (%s)\n" "${missing_all[*]}"
@@ -234,20 +234,20 @@ if ! command -v uv &>/dev/null; then
     fi
 fi
 
-# ── Install mng ──────────────────────────────────────────────────────────────
+# ── Install mngr ──────────────────────────────────────────────────────────────
 
-info "Installing mng..."
-uv tool install mng
+info "Installing mngr..."
+uv tool install imbue-mngr
 
-MNG_BIN="$(uv tool dir --bin)/mng"
+MNGR_BIN="$(uv tool dir --bin)/mngr"
 
-if ! command -v mng &>/dev/null; then
-    DEFERRED_WARNINGS="${DEFERRED_WARNINGS}mng was installed but is not on PATH.\nYou may need to add ~/.local/bin to your PATH:\n  export PATH=\"\$HOME/.local/bin:\$PATH\"\n"
+if ! command -v mngr &>/dev/null; then
+    DEFERRED_WARNINGS="${DEFERRED_WARNINGS}mngr was installed but is not on PATH.\nYou may need to add ~/.local/bin to your PATH:\n  export PATH=\"\$HOME/.local/bin:\$PATH\"\n"
 fi
 
 # ── Plugin install wizard ─────────────────────────────────────────────────────
 
-"$MNG_BIN" plugin install-wizard || warn "Plugin install wizard failed. You can run 'mng plugin install-wizard' later."
+"$MNGR_BIN" plugin install-wizard || warn "Plugin install wizard failed. You can run 'mngr plugin install-wizard' later."
 
 # ── Shell completion ───────────────────────────────────────────────────────────
 
@@ -260,7 +260,7 @@ else
 fi
 
 ALREADY_CONFIGURED=false
-if grep -qF '_mng_complete' "$SHELL_RC" 2>/dev/null; then
+if grep -qF '_mngr_complete' "$SHELL_RC" 2>/dev/null; then
     ALREADY_CONFIGURED=true
 fi
 
@@ -277,13 +277,13 @@ else
 
     case "$completion_choice" in
         y|Y|"")
-            COMPLETION_SCRIPT="$(uv tool run --from mng python3 -m imbue.mng.cli.complete --script "$SHELL_TYPE" 2>/dev/null)"
+            COMPLETION_SCRIPT="$(uv tool run --from imbue-mngr python3 -m imbue.mngr.cli.complete --script "$SHELL_TYPE" 2>/dev/null)"
             if [ -n "$COMPLETION_SCRIPT" ]; then
                 printf "\n%s\n" "$COMPLETION_SCRIPT" >> "$SHELL_RC"
                 info "Shell completion enabled in $SHELL_RC"
             else
                 warn "Could not generate completion script."
-                warn "You can set it up manually later -- see: https://github.com/imbue-ai/mng#shell-completion"
+                warn "You can set it up manually later -- see: https://github.com/imbue-ai/mngr#shell-completion"
             fi
             ;;
         *)
@@ -292,7 +292,7 @@ else
     esac
 fi
 
-info "Get started with: mng --help"
+info "Get started with: mngr --help"
 
 # IMPORTANT: Instructions that require user action after installation (e.g.
 # adding something to PATH) must always be printed last, so they remain visible

@@ -31,19 +31,19 @@ PACKAGES: Final[tuple[PackageInfo, ...]] = (
     PackageInfo(dir_name="imbue_common", pypi_name="imbue-common", internal_deps=()),
     PackageInfo(dir_name="concurrency_group", pypi_name="concurrency-group", internal_deps=("imbue-common",)),
     PackageInfo(
-        dir_name="mng", pypi_name="mng", internal_deps=("imbue-common", "concurrency-group", "resource-guards")
+        dir_name="mngr", pypi_name="imbue-mngr", internal_deps=("imbue-common", "concurrency-group", "resource-guards")
     ),
     PackageInfo(
         dir_name="modal_proxy",
         pypi_name="modal-proxy",
-        internal_deps=("imbue-common", "concurrency-group", "mng", "resource-guards"),
+        internal_deps=("imbue-common", "concurrency-group", "imbue-mngr", "resource-guards"),
     ),
-    PackageInfo(dir_name="mng_modal", pypi_name="mng-modal", internal_deps=("mng", "modal-proxy")),
-    PackageInfo(dir_name="mng_claude", pypi_name="mng-claude", internal_deps=("mng",)),
-    PackageInfo(dir_name="mng_pair", pypi_name="mng-pair", internal_deps=("mng",)),
-    PackageInfo(dir_name="mng_opencode", pypi_name="mng-opencode", internal_deps=("mng",)),
-    PackageInfo(dir_name="mng_kanpan", pypi_name="mng-kanpan", internal_deps=("mng",)),
-    PackageInfo(dir_name="mng_tutor", pypi_name="mng-tutor", internal_deps=("mng",)),
+    PackageInfo(dir_name="mngr_modal", pypi_name="imbue-mngr-modal", internal_deps=("imbue-mngr", "modal-proxy")),
+    PackageInfo(dir_name="mngr_claude", pypi_name="imbue-mngr-claude", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_pair", pypi_name="imbue-mngr-pair", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_opencode", pypi_name="imbue-mngr-opencode", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_kanpan", pypi_name="imbue-mngr-kanpan", internal_deps=("imbue-mngr",)),
+    PackageInfo(dir_name="mngr_tutor", pypi_name="imbue-mngr-tutor", internal_deps=("imbue-mngr",)),
 )
 
 PACKAGE_BY_PYPI_NAME: Final[dict[str, PackageInfo]] = {pkg.pypi_name: pkg for pkg in PACKAGES}

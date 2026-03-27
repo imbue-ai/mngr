@@ -15,7 +15,7 @@ Run your own Minds: self-improving, proactive, persistent, specialized AI agents
 
 ```bash
 # install the Minds application...
-curl -fsSL https://raw.githubusercontent.com/imbue-ai/mng/main/apps/minds/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install.sh | bash
 
 # Start the server...
 mind

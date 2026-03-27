@@ -1,7 +1,7 @@
 """Agent creation for the forwarding server.
 
-Creates mng agents from git repositories. Handles cloning, agent type
-resolution, and mng create invocation.
+Creates mngr agents from git repositories. Handles cloning, agent type
+resolution, and mngr create invocation.
 
 Agent creation runs in background threads so the server remains responsive.
 Callers can poll creation status via get_creation_info() or stream logs
@@ -29,23 +29,23 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import MNG_BINARY
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
-from imbue.minds.errors import MngCommandError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.forwarding_server.parent_tracking import setup_mind_branch_and_parent
-from imbue.minds.forwarding_server.vendor_mng import apply_vendor_overrides
-from imbue.minds.forwarding_server.vendor_mng import default_vendor_configs
-from imbue.minds.forwarding_server.vendor_mng import vendor_repos
+from imbue.minds.forwarding_server.vendor_mngr import apply_vendor_overrides
+from imbue.minds.forwarding_server.vendor_mngr import default_vendor_configs
+from imbue.minds.forwarding_server.vendor_mngr import vendor_repos
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
-from imbue.mng.primitives import AgentId
-from imbue.mng_claude_mind.data_types import ClaudeMindSettings
-from imbue.mng_llm.settings import SETTINGS_FILENAME
-from imbue.mng_llm.settings import load_from_path
+from imbue.mngr.primitives import AgentId
+from imbue.mngr_claude_mind.data_types import ClaudeMindSettings
+from imbue.mngr_llm.settings import SETTINGS_FILENAME
+from imbue.mngr_llm.settings import load_from_path
 
 OutputCallback = Callable[[str, bool], None]
 
@@ -166,7 +166,7 @@ def load_creation_settings(repo_dir: Path) -> ClaudeMindSettings:
         return ClaudeMindSettings()
 
 
-def run_mng_create(
+def run_mngr_create(
     launch_mode: LaunchMode,
     mind_dir: Path,
     agent_name: AgentName,
@@ -175,14 +175,14 @@ def run_mng_create(
     pass_env: tuple[str, ...],
     on_output: OutputCallback | None = None,
 ) -> None:
-    """Create an mng agent via ``mng create``.
+    """Create an mngr agent via ``mngr create``.
 
     Builds the appropriate command based on launch_mode:
     - DEV: runs in-place on the local provider.
     - LOCAL: runs in a Docker container.
     - CLOUD: raises NotImplementedError.
 
-    Raises MngCommandError if the command fails.
+    Raises MngrCommandError if the command fails.
     """
     match launch_mode:
         case LaunchMode.CLOUD:
@@ -192,8 +192,8 @@ def run_mng_create(
         case _ as unreachable:
             assert_never(unreachable)
 
-    mng_command: list[str] = [
-        MNG_BINARY,
+    mngr_command: list[str] = [
+        MNGR_BINARY,
         "create",
         agent_name,
         "--id",
@@ -201,6 +201,8 @@ def run_mng_create(
         "--no-connect",
         "--type",
         agent_type,
+        "--host-env",
+        "IS_AUTONOMOUS=1",
         "--env",
         "ROLE=thinking",
         "--env",
@@ -214,14 +216,16 @@ def run_mng_create(
 
     match launch_mode:
         case LaunchMode.DEV:
-            mng_command.append("--transfer=none")
+            mngr_command.append("--transfer=none")
         case LaunchMode.LOCAL:
             remote_data_dir = os.path.expanduser(f"~/.minds/data/{agent_id}")
             Path(remote_data_dir).mkdir(parents=True, exist_ok=True)
-            mng_command.extend(
+            mngr_command.extend(
                 [
                     "--provider",
                     "docker",
+                    "--host-env",
+                    "IS_SANDBOX=1",
                     "-vv",
                     "--source-path",
                     str(mind_dir),
@@ -232,32 +236,32 @@ def run_mng_create(
             # If the source directory contains a Dockerfile, use it for the build
             dockerfile_path = mind_dir / "Dockerfile"
             if dockerfile_path.is_file():
-                mng_command.extend(["-b", "--file={}".format(dockerfile_path), "-b", str(mind_dir)])
+                mngr_command.extend(["-b", "--file={}".format(dockerfile_path), "-b", str(mind_dir)])
             else:
                 raise Exception("Hmmm, idk about that")
         case _ as unreachable:
             assert_never(unreachable)
 
     for env_var in pass_env:
-        mng_command.extend(["--pass-env", env_var])
+        mngr_command.extend(["--pass-env", env_var])
 
     # FOLLOWUP: remove --dangerously-skip-permissions
-    mng_command.extend(["--", "--dangerously-skip-permissions"])
+    mngr_command.extend(["--", "--dangerously-skip-permissions"])
 
-    logger.info("Running: {}", " ".join(mng_command))
+    logger.info("Running: {}", " ".join(mngr_command))
 
-    cg = ConcurrencyGroup(name="mng-create")
+    cg = ConcurrencyGroup(name="mngr-create")
     with cg:
         result = cg.run_process_to_completion(
-            command=mng_command,
+            command=mngr_command,
             cwd=mind_dir,
             is_checked_after=False,
             on_output=on_output,
         )
 
     if result.returncode != 0:
-        raise MngCommandError(
-            "mng create failed (exit code {}):\n{}".format(
+        raise MngrCommandError(
+            "mngr create failed (exit code {}):\n{}".format(
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
             )
@@ -265,7 +269,7 @@ def run_mng_create(
 
 
 class AgentCreator(MutableModel):
-    """Creates mng agents in the background from git repositories.
+    """Creates mngr agents in the background from git repositories.
 
     Tracks creation status so the forwarding server can show progress
     and redirect users to agents when creation is complete.
@@ -343,7 +347,7 @@ class AgentCreator(MutableModel):
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
     ) -> None:
-        """Background thread that clones a repo and creates an mng agent."""
+        """Background thread that clones a repo and creates an mngr agent."""
         aid = str(agent_id)
         mind_dir = self.paths.mind_dir(agent_id)
         emit_log = make_log_callback(log_queue)
@@ -393,7 +397,7 @@ class AgentCreator(MutableModel):
                     self._statuses[aid] = AgentCreationStatus.DONE
                     self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
 
-        except (GitCloneError, MngCommandError, GitOperationError, NotImplementedError, ValueError, OSError) as e:
+        except (GitCloneError, MngrCommandError, GitOperationError, NotImplementedError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
@@ -414,11 +418,11 @@ class AgentCreator(MutableModel):
         log_queue: queue.Queue[str],
         emit_log: OutputCallback,
     ) -> None:
-        """Run mng create for the given launch mode, then perform any post-creation cleanup."""
+        """Run mngr create for the given launch mode, then perform any post-creation cleanup."""
         log_queue.put(
             "[minds] Creating agent '{}' (type: {}, mode: {})...".format(agent_name, agent_type, launch_mode.value)
         )
-        run_mng_create(
+        run_mngr_create(
             launch_mode=launch_mode,
             mind_dir=mind_dir,
             agent_name=agent_name,

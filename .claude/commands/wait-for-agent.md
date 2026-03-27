@@ -1,19 +1,19 @@
 ---
 argument-hint: [agent_name] [instructions...]
 description: Wait for another agent to enter WAITING state, then execute follow-up instructions
-allowed-tools: Bash(uv run mng list *), Bash(while true; do*)
+allowed-tools: Bash(uv run mngr list *), Bash(while true; do*)
 ---
 
 The user's message contains an agent name and optional follow-up instructions. Extract the agent name (the first word) and treat everything after it as follow-up instructions.
 
-Note: the user may paste a git branch name like `mng/some-agent` instead of the bare agent name. In that case, strip the `mng/` prefix to get the actual agent name (e.g. `mng/better-tabcomplete` -> `better-tabcomplete`).
+Note: the user may paste a git branch name like `mngr/some-agent` instead of the bare agent name. In that case, strip the `mngr/` prefix to get the actual agent name (e.g. `mngr/better-tabcomplete` -> `better-tabcomplete`).
 
 ## Agent Name Resolution
 
 First, verify the target agent exists by running:
 
 ```
-uv run mng list --format '{name}'
+uv run mngr list --format '{name}'
 ```
 
 If the extracted name doesn't match any agent exactly, check if the user's input was a description (e.g. "the agent working on X") rather than a name, and try to match against the listed agents and their git branches. If there's an unambiguous match, use it. Otherwise, use AskUserQuestion to ask the user which agent they meant, presenting the plausible candidates.
@@ -24,7 +24,7 @@ Run the following bash command (with a 600000ms timeout), substituting AGENT_NAM
 
 ```bash
 while true; do
-  OUTPUT=$(uv run mng list --include 'name == "AGENT_NAME"' --format '{state}|{plugin.claude.waiting_reason}' 2>/dev/null | head -1)
+  OUTPUT=$(uv run mngr list --include 'name == "AGENT_NAME"' --format '{state}|{plugin.claude.waiting_reason}' 2>/dev/null | head -1)
   STATE="${OUTPUT%%|*}"
   REASON="${OUTPUT#*|}"
   echo "[$(date '+%H:%M:%S')] Agent 'AGENT_NAME' state: ${STATE:-NOT_FOUND} (reason: ${REASON:-none})"
@@ -43,7 +43,7 @@ while true; do
 done
 ```
 
-If this command times out (after 10 minutes), check on the agent by running `tmux capture-pane -t mng-AGENT_NAME -p -S -30` to see its recent output. The tmux session name format is `mng-AGENT_NAME`. If it looks like the agent is still actively working, re-run the polling loop. If it looks stuck or dead, inform the user.
+If this command times out (after 10 minutes), check on the agent by running `tmux capture-pane -t mngr-AGENT_NAME -p -S -30` to see its recent output. The tmux session name format is `mngr-AGENT_NAME`. If it looks like the agent is still actively working, re-run the polling loop. If it looks stuck or dead, inform the user.
 
 ## After the Agent is Ready
 

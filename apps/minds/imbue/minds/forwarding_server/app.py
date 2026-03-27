@@ -51,7 +51,7 @@ from imbue.minds.forwarding_server.templates import render_login_redirect_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 

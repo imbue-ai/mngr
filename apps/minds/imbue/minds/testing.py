@@ -6,7 +6,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import parse_agents_from_mng_output
+from imbue.minds.config.data_types import parse_agents_from_mngr_output
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -82,15 +82,15 @@ def add_and_commit_git_repo(repo_dir: Path, tmp_path: Path, message: str = "upda
 
 
 # ---------------------------------------------------------------------------
-# End-to-end test helpers (for real mng/mind subprocess calls)
+# End-to-end test helpers (for real mngr/mind subprocess calls)
 # ---------------------------------------------------------------------------
 
 
 def _clean_env() -> dict[str, str]:
     """Build an environment dict for subprocesses that strips pytest markers.
 
-    mng refuses to run when PYTEST_CURRENT_TEST is set (safety check to
-    prevent tests from accidentally using real mng state). We strip it
+    mngr refuses to run when PYTEST_CURRENT_TEST is set (safety check to
+    prevent tests from accidentally using real mngr state). We strip it
     so that our end-to-end subprocess calls work against the real system.
     """
     env = dict(os.environ)
@@ -98,10 +98,10 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def run_mng(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a `uv run mng` command and return the result."""
+def run_mngr(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a `uv run mngr` command and return the result."""
     return subprocess.run(
-        ["uv", "run", "mng", *args],
+        ["uv", "run", "mngr", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -110,18 +110,18 @@ def run_mng(*args: str, timeout: float = 60.0, cwd: Path | None = None) -> subpr
     )
 
 
-def parse_mng_list_json(stdout: str) -> list[dict[str, object]]:
-    """Extract agent records from mng list --format json stdout.
+def parse_mngr_list_json(stdout: str) -> list[dict[str, object]]:
+    """Extract agent records from mngr list --format json stdout.
 
     Delegates to the shared implementation in config.data_types. Kept here
     for backward compatibility with existing test callers.
     """
-    return parse_agents_from_mng_output(stdout)
+    return parse_agents_from_mngr_output(stdout)
 
 
 def find_agent(agent_name: str) -> dict[str, object] | None:
     """Find an agent by name, returning its full record or None."""
-    result = run_mng(
+    result = run_mngr(
         "list",
         "--include",
         f'name == "{agent_name}"',
@@ -130,18 +130,18 @@ def find_agent(agent_name: str) -> dict[str, object] | None:
         "local",
     )
     if result.returncode != 0:
-        logger.debug("mng list failed (rc={}): {}", result.returncode, result.stderr[:200])
+        logger.debug("mngr list failed (rc={}): {}", result.returncode, result.stderr[:200])
         return None
-    agents = parse_mng_list_json(result.stdout)
+    agents = parse_mngr_list_json(result.stdout)
     if agents:
         return agents[0]
     return None
 
 
 def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:
-    """Extract the model response from mng exec output.
+    """Extract the model response from mngr exec output.
 
-    Filters out mng's "Command succeeded/failed" status lines,
+    Filters out mngr's "Command succeeded/failed" status lines,
     returning only the first line of actual model output.
     """
     response_lines = [

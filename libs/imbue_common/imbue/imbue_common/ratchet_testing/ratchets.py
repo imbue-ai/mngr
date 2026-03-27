@@ -480,7 +480,7 @@ def _is_test_module(module_path: str) -> bool:
     return any(fnmatch(last_segment, pattern) for pattern in _TEST_MODULE_GLOBS)
 
 
-def check_no_import_lint_errors(project_root: Path, contract_name: str = "mng layers contract") -> None:
+def check_no_import_lint_errors(project_root: Path, contract_name: str = "mngr layers contract") -> None:
     """Run import-linter and raise AssertionError if any production code violations are found.
 
     Uses import-linter's Python API to get structured results, then filters

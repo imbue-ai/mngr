@@ -16,9 +16,9 @@ repos:
         types: [python]
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
-        entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mng/docs/commands/ libs/mng/README.md'
+        entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mngr/docs/commands/ libs/mngr/README.md'
         language: system
-        files: 'libs/mng/imbue/mng/cli/.*\.py$|libs/mng/imbue/mng/main\.py$|scripts/make_cli_docs\.py$|libs/mng/docs/commands/.*\.md$|^README\.md$|^libs/mng/README\.md$'
+        files: 'libs/mngr/imbue/mngr/cli/.*\.py$|libs/mngr/imbue/mngr/main\.py$|scripts/make_cli_docs\.py$|libs/mngr/docs/commands/.*\.md$|^README\.md$|^libs/mngr/README\.md$'
         pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command
