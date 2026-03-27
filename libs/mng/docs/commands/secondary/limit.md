@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [limit|lim] [AGENTS...] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]
+mng [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]
 ```
 
 Configure limits for agents and hosts [experimental].
@@ -46,7 +46,6 @@ mng limit [OPTIONS] [AGENTS]...
 | `-a`, `--all`, `--all-agents` | boolean | Apply limits to all agents | `False` |
 | `--include` | text | Filter agents to configure by CEL expression (repeatable) [future] | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) [future] | None |
-| `--stdin` | boolean | Read agent and host names/IDs from stdin, one per line [future] | `False` |
 
 ## Behavior
 

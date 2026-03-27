@@ -466,7 +466,10 @@ class _AutoLabels(FrozenModel):
     """Auto-derived agent labels. Field names are the label keys."""
 
     project: str = Field(description="Project name (from git remote or folder name)")
-    remote: str | None = Field(default=None, description="Git remote origin URL")
+    remote: str | None = Field(
+        default=None,
+        description="Git remote origin URL (stored verbatim, may include credentials if the remote uses HTTPS with an embedded PAT)",
+    )
 
 
 class _CreateSetup(FrozenModel):
@@ -827,7 +830,12 @@ def _handle_editor_message(
 
 
 def _get_source_remote_url(source_location: HostLocation) -> str | None:
-    """Get the git remote origin URL from the source location via execute_command."""
+    """Get the git remote origin URL from the source location via execute_command.
+
+    Returns the URL verbatim, which may include embedded credentials (e.g. a
+    GitHub PAT in an HTTPS URL). This is intentional -- stripping credentials
+    would break gh CLI auth for repos that rely on PAT-based HTTPS remotes.
+    """
     result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
     if result.success and result.stdout.strip():
         return result.stdout.strip()
@@ -1167,11 +1175,9 @@ def _parse_agent_opts(
     # Parse --branch flag: [BASE_BRANCH][:NEW_BRANCH]
     base_branch, new_branch_name, has_explicit_base = _parse_branch_flag(opts.branch, parsed_agent_name)
 
-    # --transfer=git-worktree requires a new branch
-    if transfer_mode == TransferMode.GIT_WORKTREE and new_branch_name is None:
-        raise UserInputError(
-            "--transfer=git-worktree requires a new branch. Use --branch BASE:NEW instead of --branch BASE."
-        )
+    # Worktree mode supports both:
+    #   --branch foo       -> check out existing branch 'foo' in the worktree
+    #   --branch foo:bar   -> create new branch 'bar' from 'foo' in the worktree
 
     # if the user didn't specify whether to include unclean, then infer from ensure_clean
     if opts.include_unclean is None:

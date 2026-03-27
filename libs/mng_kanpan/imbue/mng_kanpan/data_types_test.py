@@ -111,6 +111,7 @@ def test_board_snapshot_construction() -> None:
     )
     snapshot = BoardSnapshot(
         entries=(entry,),
+        repo_pr_loaded={},
         fetch_time_seconds=1.5,
     )
     assert len(snapshot.entries) == 1
@@ -123,6 +124,7 @@ def test_board_snapshot_with_errors() -> None:
     snapshot = BoardSnapshot(
         entries=(),
         errors=("Connection failed", "Timeout"),
+        repo_pr_loaded={},
         fetch_time_seconds=0.3,
     )
     assert len(snapshot.entries) == 0

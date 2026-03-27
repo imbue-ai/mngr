@@ -26,7 +26,6 @@ def test_stop_cli_options_fields() -> None:
         sessions=(),
         include=(),
         exclude=(),
-        stdin=False,
         snapshot_mode=None,
         graceful=True,
         graceful_timeout=None,
@@ -202,7 +201,6 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         sessions=("mng-session-1", "mng-session-2"),
         include=("state == 'RUNNING'",),
         exclude=("name == 'keep-me'",),
-        stdin=True,
         snapshot_mode="auto",
         graceful=False,
         graceful_timeout="30s",
@@ -222,7 +220,6 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     assert opts.sessions == ("mng-session-1", "mng-session-2")
     assert opts.include == ("state == 'RUNNING'",)
     assert opts.exclude == ("name == 'keep-me'",)
-    assert opts.stdin is True
     assert opts.snapshot_mode == "auto"
     assert opts.graceful is False
     assert opts.graceful_timeout == "30s"

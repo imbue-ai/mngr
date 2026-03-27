@@ -1,4 +1,3 @@
-import sys
 import threading
 from collections.abc import Sequence
 from concurrent.futures import Future
@@ -33,6 +32,7 @@ from imbue.mng.cli.output_helpers import emit_event
 from imbue.mng.cli.output_helpers import emit_final_json
 from imbue.mng.cli.output_helpers import emit_format_template_lines
 from imbue.mng.cli.output_helpers import write_human_line
+from imbue.mng.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mng.config.data_types import CommonCliOptions
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.data_types import OutputOptions
@@ -136,7 +136,6 @@ class DestroyCliOptions(CommonCliOptions):
     sessions: tuple[str, ...]
     include: tuple[str, ...]
     exclude: tuple[str, ...]
-    stdin: bool
 
 
 @click.command(name="destroy")
@@ -172,11 +171,6 @@ class DestroyCliOptions(CommonCliOptions):
     "--exclude",
     multiple=True,
     help="Exclude agents matching CEL expression from destruction (repeatable)",
-)
-@optgroup.option(
-    "--stdin",
-    is_flag=True,
-    help="Read agent names/IDs from stdin, one per line",
 )
 @optgroup.group("Behavior")
 @optgroup.option(
@@ -225,12 +219,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         compiled_include_filters, compiled_exclude_filters = compile_cel_filters(opts.include, opts.exclude)
 
     # Validate input
-    agent_identifiers = list(opts.agents) + list(opts.agent_list)
-
-    # Handle --stdin by reading agent names/IDs from stdin
-    if opts.stdin:
-        stdin_refs = [line.strip() for line in sys.stdin if line.strip()]
-        agent_identifiers.extend(stdin_refs)
+    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
@@ -748,7 +737,7 @@ def _run_post_destroy_gc(mng_ctx: MngContext, output_opts: OutputOptions) -> Non
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mng [destroy|rm] [AGENTS...] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [--stdin] [-f|--force] [--dry-run] [-b|--remove-created-branch]",
+    synopsis="mng [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [-f|--force] [--dry-run] [-b|--remove-created-branch]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -769,7 +758,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Destroy by tmux session name", "mng destroy --session mng-my-agent"),
         ("Destroy agents matching a CEL filter", "mng destroy --include 'name.startsWith(\"test-\")' --force"),
         ("Destroy all except docker agents", "mng destroy --all --exclude 'host.provider == \"docker\"' --force"),
-        ("Pipe agent names from list", "mng list --format '{name}' | mng destroy --stdin --force"),
+        ("Pipe agent names from list", "mng list --format '{name}' | mng destroy - --force"),
         ("Custom format template output", "mng destroy --all --force --format '{name}'"),
     ),
     see_also=(

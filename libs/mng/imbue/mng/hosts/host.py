@@ -46,9 +46,11 @@ from imbue.imbue_common.pure import pure
 from imbue.mng import resources as mng_resources
 from imbue.mng.config.agent_config_registry import resolve_agent_type
 from imbue.mng.config.data_types import MngContext
+from imbue.mng.config.data_types import WorkDirExtraPathMode
 from imbue.mng.errors import AgentNotFoundOnHostError
 from imbue.mng.errors import AgentStartError
 from imbue.mng.errors import BaseMngError
+from imbue.mng.errors import DuplicateAgentNameError
 from imbue.mng.errors import HostAuthenticationError
 from imbue.mng.errors import HostConnectionError
 from imbue.mng.errors import HostDataSchemaError
@@ -102,7 +104,9 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
 
     Matches:
     - OSError with "Socket is closed" (stale socket from pyinfra)
-    - SSHException (e.g. "SSH session not active" when transport dies)
+    - SSHException (e.g. "SSH session not active" when transport dies),
+      including ChannelException (server refused to open a new channel,
+      e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
@@ -1233,6 +1237,10 @@ class Host(BaseHost, OnlineHostInterface):
                     exclude_git=True,
                 )
 
+            self._apply_work_dir_extra_paths(
+                source_host, source_path, target_path, self.mng_ctx.config.work_dir_extra_paths
+            )
+
             track_thread.join(60.0)
 
         return CreateWorkDirResult(path=target_path, created_branch_name=created_branch_name)
@@ -1528,16 +1536,126 @@ class Host(BaseHost, OnlineHostInterface):
             return
 
         with log_span("Transferring extra files", count=len(files_to_include)):
-            # Write files to a temp file to avoid command line length limits
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-                files_from_path = Path(f.name)
-                for file_path in files_to_include:
-                    f.write(file_path + "\n")
+            self._rsync_paths(source_host, source_path, target_path, files_to_include, exclude_git=True)
 
-            try:
-                self._rsync_files(source_host, source_path, target_path, files_from=files_from_path, exclude_git=True)
-            finally:
-                files_from_path.unlink(missing_ok=True)
+    def _rsync_paths(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+        paths: list[str],
+        *,
+        exclude_git: bool = False,
+    ) -> None:
+        """Rsync specific paths from source to target using a files-from list."""
+        if not paths:
+            return
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            files_from_path = Path(f.name)
+            for file_path in paths:
+                f.write(file_path + "\n")
+        try:
+            self._rsync_files(
+                source_host, source_path, target_path, files_from=files_from_path, exclude_git=exclude_git
+            )
+        finally:
+            files_from_path.unlink(missing_ok=True)
+
+    def _apply_work_dir_extra_paths(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        work_dir_path: Path,
+        extra_paths: dict[str, WorkDirExtraPathMode],
+    ) -> None:
+        """Apply work_dir_extra_paths config: symlink or copy paths into the work directory.
+
+        Batches all remote operations to minimize SSH round trips:
+        1. One command on source_host to check which paths exist
+        2. One command on self to create all symlinks (SHARE mode, same host)
+        3. One rsync call for all copy paths (COPY mode, or SHARE on different host)
+        """
+        same_host = source_host.id == self.id
+
+        # Validate all paths first (pure string ops, no remote calls)
+        validated: list[tuple[str, WorkDirExtraPathMode]] = []
+        for rel_path_str, mode in extra_paths.items():
+            normalized = os.path.normpath(rel_path_str)
+            if os.path.isabs(normalized):
+                raise UserInputError(f"work_dir_extra_paths: absolute paths are not allowed: {rel_path_str}")
+            if normalized.startswith(".."):
+                raise UserInputError(f"work_dir_extra_paths: path escapes project root: {rel_path_str}")
+            validated.append((rel_path_str, mode))
+
+        if not validated:
+            return
+
+        # Batch source-exists check: one command tests all paths, outputs those that exist
+        check_parts = []
+        for rel_path_str, _ in validated:
+            source_abs = source_path / rel_path_str
+            quoted = shlex.quote(str(source_abs))
+            check_parts.append(
+                f"if [ -e {quoted} ] || [ -L {quoted} ]; then printf '%s\\n' {shlex.quote(rel_path_str)}; fi"
+            )
+        result = source_host.execute_command("; ".join(check_parts))
+        if not result.success:
+            logger.warning(
+                "work_dir_extra_paths: failed to check source paths (stderr: {}), skipping all extra paths",
+                result.stderr.strip(),
+            )
+            return
+        existing_paths = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+
+        # Route each existing path to symlink or rsync
+        rsync_paths: list[str] = []
+        symlink_pairs: list[tuple[str, str]] = []
+        for rel_path_str, mode in validated:
+            if rel_path_str not in existing_paths:
+                logger.warning(
+                    "work_dir_extra_paths: source path does not exist, skipping: {}", source_path / rel_path_str
+                )
+                continue
+            if mode == WorkDirExtraPathMode.SHARE and same_host:
+                symlink_pairs.append((str(source_path / rel_path_str), str(work_dir_path / rel_path_str)))
+            else:
+                rsync_paths.append(rel_path_str)
+
+        # Batch symlink creation: one command handles all symlinks.
+        # Errors are written directly to stderr (not accumulated in a variable)
+        # because POSIX $() strips trailing newlines, which would merge messages.
+        if symlink_pairs:
+            script_parts = ["had_errors=0"]
+            for source_str, target_str in symlink_pairs:
+                s = shlex.quote(source_str)
+                t = shlex.quote(target_str)
+                t_parent = shlex.quote(str(Path(target_str).parent))
+                script_parts.append(
+                    f"if [ -e {t} ] && [ ! -L {t} ]; then "
+                    f"printf 'CONFLICT: %s\\n' {t} >&2; had_errors=1; "
+                    f"elif [ ! -L {t} ] || "
+                    f'[ "$(readlink -f {t} 2>/dev/null)" != "$(readlink -f {s} 2>/dev/null)" ]; then '
+                    f"mkdir -p {t_parent} && ln -snf {s} {t} "
+                    f"|| {{ printf 'FAILED: %s\\n' {t} >&2; had_errors=1; }}; "
+                    f"fi"
+                )
+            script_parts.append('[ "$had_errors" = 0 ]')
+            result = self.execute_command("; ".join(script_parts))
+            if not result.success:
+                stderr_lines = result.stderr.strip().split("\n")
+                conflicts = [line.removeprefix("CONFLICT: ") for line in stderr_lines if line.startswith("CONFLICT: ")]
+                failures = [line.removeprefix("FAILED: ") for line in stderr_lines if line.startswith("FAILED: ")]
+                if conflicts:
+                    msg = "work_dir_extra_paths: target already exists and is not a symlink: " + ", ".join(conflicts)
+                    if failures:
+                        msg += "; also failed to create symlinks for: " + ", ".join(failures)
+                    raise UserInputError(msg)
+                raise MngError(f"work_dir_extra_paths: failed to create symlinks: {result.stderr}")
+
+        # Rsync all copy paths in a single batch
+        if rsync_paths:
+            with log_span("Copying work_dir_extra_paths", count=len(rsync_paths)):
+                self._rsync_paths(source_host, source_path, work_dir_path, rsync_paths)
 
     def copy_directory(
         self,
@@ -1688,25 +1806,46 @@ class Host(BaseHost, OnlineHostInterface):
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
             work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
 
-        # Worktree mode always requires a new branch (enforced at CLI)
-        if not options.git or not options.git.new_branch_name:
-            raise UserInputError("Worktree mode requires a new branch name in git options")
-        branch_name = options.git.new_branch_name
+        new_branch_name = options.git.new_branch_name if options.git else None
+        base_branch = options.git.base_branch if options.git else None
 
-        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_name):
-            cmd = f"mkdir -p {work_dir_path.parent} && git -C {shlex.quote(str(source_path))} worktree add {shlex.quote(str(work_dir_path))} -b {shlex.quote(branch_name)}"
+        if not new_branch_name and not base_branch:
+            raise UserInputError("Worktree mode requires a branch. Use --branch BRANCH or --branch BASE:NEW.")
 
-            if options.git and options.git.base_branch:
-                cmd += f" {shlex.quote(options.git.base_branch)}"
+        branch_label = new_branch_name or base_branch
+
+        with log_span("Creating git worktree", path=str(work_dir_path), branch=branch_label):
+            git_c = f"git -C {shlex.quote(str(source_path))}"
+            mkdir_cmd = f"mkdir -p {work_dir_path.parent}"
+
+            # git worktree add <path> [-b <new>] [<base>]
+            worktree_args = [mkdir_cmd, "&&", git_c, "worktree", "add", shlex.quote(str(work_dir_path))]
+            if new_branch_name:
+                worktree_args += ["-b", shlex.quote(new_branch_name)]
+            if base_branch:
+                worktree_args.append(shlex.quote(base_branch))
+            cmd = " ".join(worktree_args)
+            created_branch = new_branch_name
 
             result = self.execute_command(cmd)
             if not result.success:
-                raise MngError(f"Failed to create git worktree: {result.stderr}")
+                stderr = result.stderr or ""
+                if "already checked out" in stderr or "already used by worktree" in stderr:
+                    raise UserInputError(
+                        f"{stderr.strip()}\n"
+                        f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
+                        f"To work directly in the existing worktree, use --in-place from that directory"
+                    )
+                raise MngError(f"Failed to create git worktree: {stderr}")
 
             # Track generated work directories at the host level
             self._add_generated_work_dir(work_dir_path)
 
-            return CreateWorkDirResult(path=work_dir_path, created_branch_name=branch_name)
+            self._apply_work_dir_extra_paths(
+                host, source_path, work_dir_path, self.mng_ctx.config.work_dir_extra_paths
+            )
+
+            return CreateWorkDirResult(path=work_dir_path, created_branch_name=created_branch)
 
     def create_agent_state(
         self,
@@ -2058,6 +2197,12 @@ class Host(BaseHost, OnlineHostInterface):
         are safe to repeat.
         """
         with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+            # Prevent same-host name collisions (the tmux session name is derived
+            # from the agent name, so duplicates would share a session).
+            for existing_agent in self.get_agents():
+                if existing_agent.name == new_name and existing_agent.id != agent.id:
+                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+
             old_name = agent.name
             data_path = self._get_agent_state_dir(agent) / "data.json"
 

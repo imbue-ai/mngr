@@ -3,6 +3,7 @@ from pathlib import Path
 from click import ClickException
 
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import HostState
@@ -135,6 +136,17 @@ class SendMessageError(AgentError):
         self.agent_name = agent_name
         self.reason = reason
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
+
+
+class DuplicateAgentNameError(AgentError, MngError):
+    """An agent with this name already exists on the host."""
+
+    user_help_text = "Choose a different name. For 'mng create', you can also use --reuse to reuse the existing agent."
+
+    def __init__(self, agent_name: AgentName, existing_agent_id: AgentId) -> None:
+        self.agent_name = agent_name
+        self.existing_agent_id = existing_agent_id
+        super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
 
 
 class AgentStartError(AgentError):

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mng [message|msg] [AGENTS...] [--agent <AGENT>] [--all] [-m <MESSAGE>]
+mng [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>]
 ```
 
 Send a message to one or more agents.
@@ -38,7 +38,6 @@ mng message [OPTIONS] [AGENTS]...
 | `-a`, `--all`, `--all-agents` | boolean | Send message to all agents | `False` |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--stdin` | boolean | Read agent and host IDs or names from stdin (one per line) | `False` |
 | `--start`, `--no-start` | boolean | Automatically start offline hosts and stopped agents before sending | `False` |
 
 ## Message Content

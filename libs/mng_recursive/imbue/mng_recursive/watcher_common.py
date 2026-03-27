@@ -302,9 +302,7 @@ def mtime_poll_directories(
     return is_changed
 
 
-_NON_CHANGE_EVENT_TYPES: Final[frozenset[str]] = frozenset(
-    {"opened", "closed", "closed_no_write"}
-)
+_NON_CHANGE_EVENT_TYPES: Final[frozenset[str]] = frozenset({"opened", "closed", "closed_no_write"})
 
 
 class ChangeHandler(FileSystemEventHandler):

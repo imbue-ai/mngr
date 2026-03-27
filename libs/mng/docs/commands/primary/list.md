@@ -31,6 +31,8 @@ mng list [OPTIONS]
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
 | `--running` | boolean | Show only running agents (alias for --include 'state == "RUNNING"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
+| `--archived` | boolean | Show only stopped agents (alias for --include 'has(labels.archived_at)') | `False` |
+| `--active` | boolean | Show only stopped agents (anything not archived/destroyed/crashed/failed) | `False` |
 | `--local` | boolean | Show only local agents (alias for --include 'host.provider == "local"') | `False` |
 | `--remote` | boolean | Show only remote agents (alias for --exclude 'host.provider == "local"') | `False` |
 | `--provider` | text | Show only agents using specified provider (repeatable) | None |
@@ -43,6 +45,8 @@ mng list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--ids` | boolean | Print only agent IDs, one per line | `False` |
+| `--addrs` | boolean | Print only agent addresses (name@host.provider), one per line | `False` |
 | `--fields` | text | Which fields to include (comma-separated) | None |
 | `--header` | text | Override column header label (format: FIELD=LABEL, repeatable) | None |
 | `--sort` | text | Sort by CEL expression(s) with optional direction, e.g. 'name asc, create_time desc'; enables sorted (non-streaming) output [default: create_time] | `create_time` |
