@@ -11,7 +11,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mng.api.list import list_agents
 from imbue.mng.config.data_types import MngContext
@@ -292,7 +292,13 @@ def _build_hook_env(entry: AgentBoardEntry) -> dict[str, str]:
 
 def toggle_agent_mute(mng_ctx: MngContext, agent_name: AgentName) -> bool:
     """Toggle the mute state of an agent. Returns the new mute state."""
-    agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx)
+    agents_by_host, _ = discover_hosts_and_agents(
+        mng_ctx,
+        provider_names=None,
+        agent_identifiers=(str(agent_name),),
+        include_destroyed=False,
+        reset_caches=False,
+    )
     agent, _host = find_and_maybe_start_agent_by_name_or_id(
         str(agent_name),
         agents_by_host,
@@ -311,7 +317,13 @@ def _load_muted_agents(mng_ctx: MngContext) -> set[AgentName]:
     """Load the set of muted agent names from certified data."""
     muted: set[AgentName] = set()
     try:
-        agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx)
+        agents_by_host, _providers = discover_hosts_and_agents(
+            mng_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
         for _host_ref, agent_refs in agents_by_host.items():
             for agent_ref in agent_refs:
                 if _is_agent_muted(agent_ref.certified_data):

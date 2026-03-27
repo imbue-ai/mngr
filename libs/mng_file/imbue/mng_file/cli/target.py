@@ -8,7 +8,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.find import find_all_matching_agents
 from imbue.mng.api.find import find_all_matching_hosts
 from imbue.mng.api.providers import get_provider_instance
@@ -140,7 +140,13 @@ def resolve_file_target(
     falls back to volume access for paths under the host directory.
     """
     with log_span("Discovering hosts and agents"):
-        agents_by_host, _ = discover_all_hosts_and_agents(mng_ctx, include_destroyed=False)
+        agents_by_host, _ = discover_hosts_and_agents(
+            mng_ctx,
+            provider_names=None,
+            agent_identifiers=(target_identifier,),
+            include_destroyed=False,
+            reset_caches=False,
+        )
 
     all_hosts = list(agents_by_host.keys())
 

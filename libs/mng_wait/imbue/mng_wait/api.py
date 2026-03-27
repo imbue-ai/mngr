@@ -6,7 +6,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.find import resolve_agent_reference
 from imbue.mng.api.find import resolve_host_reference
 from imbue.mng.api.providers import get_provider_instance
@@ -48,7 +48,13 @@ def resolve_wait_target(
     Uses the existing find.py resolution functions for agent/host lookup.
     """
     with log_span("Discovering hosts and agents"):
-        agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx)
+        agents_by_host, _providers = discover_hosts_and_agents(
+            mng_ctx,
+            provider_names=None,
+            agent_identifiers=(identifier,),
+            include_destroyed=False,
+            reset_caches=False,
+        )
 
     all_hosts = list(agents_by_host.keys())
 

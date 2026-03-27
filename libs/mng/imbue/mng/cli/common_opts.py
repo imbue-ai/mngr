@@ -74,6 +74,13 @@ def add_common_options(command: TDecorated) -> TDecorated:
         help="Project context directory (for build context and loading project-specific config) [default: local .git root]",
     )(command)
     command = optgroup.option(
+        "--safe",
+        is_flag=True,
+        default=False,
+        help="Always query all providers during discovery (disable event-stream optimization). "
+        "Use this when interfacing with mng from multiple machines.",
+    )(command)
+    command = optgroup.option(
         "--headless",
         is_flag=True,
         default=False,
@@ -171,9 +178,10 @@ def setup_command_context(
             # Handle cases where stdout is uninitialized (e.g., xdist workers)
             is_interactive = False
 
-    # Update MngContext with the resolved is_interactive
+    # Update MngContext with the resolved is_interactive and safe mode
     mng_ctx = mng_ctx.model_copy_update(
         to_update(mng_ctx.field_ref().is_interactive, is_interactive),
+        to_update(mng_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
 
     # Apply config defaults to parameters that came from defaults (not user-specified)

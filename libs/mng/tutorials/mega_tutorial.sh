@@ -11,7 +11,8 @@ set -euo pipefail
 
 ## BASIC CREATION
 
-# running mng create is strictly better than running claude! It's less letters to type :-D
+# running mng create is strictly better than running claude!
+# (if you use the alias `mng c`, it's no more letters to type :-D)
 # running this command launches claude (Claude Code) immediately *in a new worktree*
 mng create
 # the defaults are the following: agent=claude, provider=local, project=current dir
@@ -23,7 +24,7 @@ mng create --in-place
 
 # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
 mng create my-task
-# that command give the agent a name of "my-task". If you don't specify a name, mng will generate a random one for you.
+# that command gives the agent a name of "my-task". If you don't specify a name, mng will generate a random one for you.
 
 # you can use a short form for most commands (like create) as well--the above command is the same as these:
 mng create my-task claude
@@ -31,7 +32,7 @@ mng c my-task
 
 # for the rest of this doc, we'll use the explicit form (specifying "create") just to be extra clear,
 # but you might want to use the short form in your day-to-day work for speed and convenience.
-# you can (and should) create aliases and templated as well (see TEMPLATES, ALIASES, AND SHORTCUTS below)
+# you can (and should) create aliases and templates as well (see TEMPLATES, ALIASES, AND SHORTCUTS below)
 
 # you can also specify a different agent (ex: codex)
 mng create my-task codex
@@ -50,7 +51,7 @@ mng create my-task --command python -- my_script.py
 # remember that the arguments to the "agent" (or command) come after the `--` separator
 
 # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
-# this make debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
+# this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
 mng create my-task --command python --idle-mode run --idle-timeout 60 -- my_long_running_script.py extra-args
 # see "RUNNING NON-AGENT PROCESSES" below for more details
 
@@ -87,8 +88,10 @@ mng create my-task --source-path /tmp/my_random_folder --command python -- scrip
 mng create my-task
 git branch | grep mng/my-task
 
-# --branch controls branch creation. the default is :mng/* which creates a new branch named mng/{agent_name}
-# you can change the pattern (the * is replaced by the agent name):
+# --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
+# omitting BASE (i.e. starting with ":") uses the current branch. The * in NEW is replaced by the agent name.
+# the default is ":mng/*", which creates a new branch named mng/{agent_name} off the current branch.
+# you can change the pattern:
 mng create my-task --branch ":feature/*"
 git branch | grep feature/my-task
 
@@ -187,7 +190,7 @@ mng create my-task --provider modal --no-start-on-boot
 mng create my-task --env DEBUG=true
 # (--env-file loads from a file, --pass-env forwards a variable from your current shell)
 
-# it is *strongly encouraged* to use either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
+# it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
 export API_KEY=abc123
 mng create my-task --pass-env API_KEY
 # that command passes the API_KEY environment variable from your current shell into the agent's environment, without you having to specify the value on the command line.
@@ -218,7 +221,7 @@ echo "alias mc='mng create --in-place'" >> ~/.bashrc && source ~/.bashrc
 
 # by default, mng aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
 mng create my-task --no-ensure-clean
-# this is particularly useful for starting agents when, eg, you are in the middle of a merge conflict and you just want the agent to finish it off, for example
+# this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
 # it should probably be avoided in general, because it makes it more difficult to merge work later.
 
 # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
@@ -318,7 +321,7 @@ mng list --limit 10
 # watch mode: refresh the list every 5 seconds
 watch -n5 mng list
 
-# output all objects as one bit json array when complete  (useful for scripting)
+# output all objects as one big JSON array when complete  (useful for scripting)
 mng list --format json
 
 # output each entry as a JSON object (useful for scripting)
@@ -631,7 +634,7 @@ mng gc --provider modal
 mng config set commands.destroy.gc false
 # then make sure you constantly run gc in the background (this runs it once every 60 seconds)
 watch -n60 mng gc
-# this would have the effect of making your calls to "mgn destroy" somewhat faster, at the cost of needing to have this background process running
+# this would have the effect of making your calls to "mng destroy" somewhat faster, at the cost of needing to have this background process running
 
 ##############################################################################
 # VIEWING EVENTS AND LOGS
@@ -768,7 +771,7 @@ mng conn fix-bug
 # 6. merge the resulting branch
 git merge mng/fix-bug
 # 7. When done, stop and clean up
-mng destroy fix-bug --f --remove-created-branch
+mng destroy fix-bug -f --remove-created-branch
 
 # TODO: LOTS more examples to add here!
 
@@ -849,11 +852,11 @@ mng exec my-task "git status --short"
 # see the agent's recent commits
 mng exec my-task "git log --oneline -5"
 
-# ask the agent commit its work
+# ask the agent to commit its work
 mng msg my-task -m "Please commit all your changes with a descriptive message"
 
 # or forcibly commit all of it yourself
-mng exec my-task 'git add . && git commit -am "Please commit all your changes with a descriptive message"'
+mng exec my-task 'git add . && git commit -m "WIP: save agent progress"'
 
 # check all agents' git status at once
 mng list --ids | mng exec - "git status --short"
@@ -876,7 +879,7 @@ mng destroy my-task --force --remove-created-branch
 ##############################################################################
 # LABELS AND FILTERING
 #   Tag agents with labels and either use CEL filter expressions to target
-#   specific agents, or just use jq. Filter agentse for destroy, cleanup, and other commands
+#   specific agents, or just use jq. Filter agents for destroy, cleanup, and other commands
 #   by piping in the names or ids from a call to mng list
 ##############################################################################
 
@@ -937,7 +940,7 @@ mng create my-task --template modal-big
 mng create my-task -t modal-big
 
 # stack multiple templates (later templates override earlier ones)
-mng create my-task -template modal-big -template with-tests
+mng create my-task --template modal-big --template with-tests
 
 ##############################################################################
 # CUSTOM AGENT TYPES
@@ -1102,7 +1105,7 @@ mng list --fields "name,state,host.name"
 mng stop agent-1
 # the host stays running as long as at least one agent is active.
 
-# TODO: many more examples of to add here of why this is useful!
+# TODO: many more examples to add here of why this is useful!
 
 ##############################################################################
 # RUNNING NON-AGENT PROCESSES
@@ -1140,7 +1143,7 @@ mng create my-task --headless --no-connect --message "Do the thing"
 mng config set headless true
 
 # idempotent creation: reuse an existing agent if it already exists
-mng create worker --reuse --provider modal --no-connect && mng message -m "Process the queue"
+mng create worker --reuse --provider modal --no-connect && mng message worker -m "Process the queue"
 
 # get JSON output for parsing in scripts
 AGENT_INFO=$(mng list --format json)
@@ -1156,7 +1159,7 @@ done
 
 ##############################################################################
 # SETTING-ONLY OPTIONS
-#   Some behavior can only be chnaged from the settings (not from the CLI)
+#   Some behavior can only be changed from the settings (not from the CLI)
 #   These options are typically less commonly used or more advanced
 ##############################################################################
 
@@ -1264,7 +1267,7 @@ mng gc
 ##############################################################################
 
 # use short forms for common commands to save typing
-# mng c = mng create, mng ls = mng list, mng s = mng stop, mng destroy = mng rm
+# mng c = mng create, mng ls = mng list, mng s = mng stop, mng rm = mng destroy
 # mng conn = mng connect, mng msg = mng message, mng exec = mng x
 
 # use --reuse to make create idempotent. This is handy, esp with remote scripts, so that you can detach, then hit up and enter

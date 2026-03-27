@@ -425,6 +425,85 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
     return last_full_offset
 
 
+def resolve_provider_names_for_identifiers(
+    config: MngConfig,
+    identifiers: Sequence[str],
+) -> tuple[str, ...] | None:
+    """Resolve agent identifiers to the provider names that own them using the event stream.
+
+    Reads the latest DISCOVERY_FULL snapshot and replays incremental events to build
+    agent_name -> set[provider_name] and agent_id -> provider_name mappings.
+
+    Returns the deduplicated union of provider names for all identifiers, or None if
+    any identifier cannot be resolved (meaning a full scan is needed).
+    """
+    events_path = get_discovery_events_path(config)
+    if not events_path.exists():
+        return None
+
+    # Find the latest full snapshot and replay from there
+    offset = find_latest_full_snapshot_offset(events_path)
+
+    # Maps for resolution
+    providers_by_agent_name: dict[str, set[str]] = {}
+    provider_by_agent_id: dict[str, str] = {}
+    destroyed_agent_ids: set[str] = set()
+
+    try:
+        with open(events_path) as f:
+            f.seek(offset)
+            for line in f:
+                event = parse_discovery_event_line(line)
+                if event is None:
+                    continue
+                if isinstance(event, FullDiscoverySnapshotEvent):
+                    # Reset maps -- this snapshot supersedes everything before it
+                    providers_by_agent_name.clear()
+                    provider_by_agent_id.clear()
+                    destroyed_agent_ids.clear()
+                    for agent in event.agents:
+                        name_str = str(agent.agent_name)
+                        id_str = str(agent.agent_id)
+                        prov = str(agent.provider_name)
+                        providers_by_agent_name.setdefault(name_str, set()).add(prov)
+                        provider_by_agent_id[id_str] = prov
+                elif isinstance(event, AgentDiscoveryEvent):
+                    agent = event.agent
+                    name_str = str(agent.agent_name)
+                    id_str = str(agent.agent_id)
+                    prov = str(agent.provider_name)
+                    providers_by_agent_name.setdefault(name_str, set()).add(prov)
+                    provider_by_agent_id[id_str] = prov
+                    destroyed_agent_ids.discard(id_str)
+                elif isinstance(event, AgentDestroyedEvent):
+                    destroyed_agent_ids.add(str(event.agent_id))
+                else:
+                    # Host events and other types are not relevant for provider resolution
+                    pass
+    except (OSError, ValueError) as e:
+        logger.trace("Failed to read discovery events for provider resolution: {}", e)
+        return None
+
+    # Remove destroyed agents from the id map
+    for destroyed_id in destroyed_agent_ids:
+        provider_by_agent_id.pop(destroyed_id, None)
+
+    # Resolve each identifier
+    resolved_providers: set[str] = set()
+    for identifier in identifiers:
+        # Try as agent ID first
+        if identifier in provider_by_agent_id:
+            resolved_providers.add(provider_by_agent_id[identifier])
+        # Then try as agent name
+        elif identifier in providers_by_agent_name:
+            resolved_providers.update(providers_by_agent_name[identifier])
+        else:
+            # Unknown identifier -- fall back to full scan
+            return None
+
+    return tuple(sorted(resolved_providers))
+
+
 def extract_agents_and_hosts_from_full_listing(
     agent_details_list: Sequence[AgentDetails],
 ) -> tuple[tuple[DiscoveredAgent, ...], tuple[DiscoveredHost, ...], tuple[tuple[HostId, SSHInfo], ...]]:

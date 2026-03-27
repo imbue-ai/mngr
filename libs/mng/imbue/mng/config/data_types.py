@@ -667,6 +667,10 @@ class MngContext(FrozenModel):
         default_factory=lambda: ConcurrencyGroup(name="default"),
         description="Top-level concurrency group for managing spawned processes",
     )
+    is_full_discovery: bool = Field(
+        default=False,
+        description="When True, always query all providers during discovery (skip event-stream optimization)",
+    )
     project_root: Path | None = Field(
         default=None,
         description="Project root directory (--context or git worktree root)",
@@ -740,6 +744,7 @@ class CommonCliOptions(FrozenModel):
     """
 
     headless: bool = False
+    safe: bool = False
     output_format: str
     quiet: bool
     verbose: int

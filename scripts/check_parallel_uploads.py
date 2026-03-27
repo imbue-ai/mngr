@@ -28,7 +28,7 @@ import pluggy
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mng.agents.agent_registry import load_agents_from_plugins
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.providers import get_provider_instance
 from imbue.mng.config.data_types import MngContext
 from imbue.mng.config.loader import load_config
@@ -46,7 +46,13 @@ PARALLEL_TIMEOUT_SECONDS = 30
 def get_host(mng_ctx: MngContext) -> OnlineHostInterface:
     """Find the 'spica' host and return it."""
     print("  Discovering hosts (modal only)...")
-    agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx, provider_names=("modal",))
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mng_ctx,
+        provider_names=("modal",),
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
     print(f"  Discovery complete. Found {len(agents_by_host)} host(s).")
 
     for host_ref in agents_by_host:

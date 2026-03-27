@@ -11,8 +11,10 @@ import pluggy
 import pytest
 from loguru import logger
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mng import hookimpl
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import _all_identifiers_found
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.discover import warn_on_duplicate_host_names
 from imbue.mng.api.discovery_events import get_discovery_events_path
 from imbue.mng.api.list import AgentErrorInfo
@@ -650,19 +652,91 @@ def test_list_agents_with_include_filter_excludes_non_matching(
 
 
 # =============================================================================
-# discover_all_hosts_and_agents Tests
+# discover_hosts_and_agents Tests
 # =============================================================================
 
 
-def test_discover_all_hosts_and_agents_returns_empty_for_no_agents(
+def test_discover_hosts_and_agents_returns_empty_for_no_agents(
     temp_mng_ctx: MngContext,
 ) -> None:
-    """discover_all_hosts_and_agents should return empty dict when no agents exist."""
-    agents_by_host, providers = discover_all_hosts_and_agents(temp_mng_ctx)
+    """discover_hosts_and_agents should return empty dict when no agents exist."""
+    agents_by_host, providers = discover_hosts_and_agents(
+        temp_mng_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
     assert isinstance(agents_by_host, dict)
     assert isinstance(providers, list)
     # At least the local provider should be present
     assert len(providers) > 0
+
+
+def test_discover_hosts_and_agents_full_discovery_skips_optimization(
+    temp_mng_ctx: MngContext,
+) -> None:
+    """is_full_discovery=True should do a full scan even when agent_identifiers is provided."""
+    safe_ctx = temp_mng_ctx.model_copy_update(
+        to_update(temp_mng_ctx.field_ref().is_full_discovery, True),
+    )
+    # With is_full_discovery=True, passing agent_identifiers should still
+    # query all providers (not attempt event-stream resolution).
+    # If it tried the optimization with a bogus identifier, it would either
+    # error or return filtered results -- but with full discovery it just
+    # does a normal scan and returns everything.
+    agents_by_host, providers = discover_hosts_and_agents(
+        safe_ctx,
+        provider_names=None,
+        agent_identifiers=("nonexistent-agent-xyz",),
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    # Should succeed (full scan) rather than fail trying to resolve the identifier
+    assert isinstance(agents_by_host, dict)
+    assert len(providers) > 0
+
+
+# =============================================================================
+# _all_identifiers_found Tests
+# =============================================================================
+
+
+def test_all_identifiers_found_by_name() -> None:
+    host = DiscoveredHost(
+        host_id=HostId.generate(), host_name=HostName("h"), provider_name=ProviderInstanceName("local")
+    )
+    agent = DiscoveredAgent(
+        host_id=host.host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("my-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    assert _all_identifiers_found(["my-agent"], {host: [agent]})
+
+
+def test_all_identifiers_found_by_id() -> None:
+    agent_id = AgentId.generate()
+    host = DiscoveredHost(
+        host_id=HostId.generate(), host_name=HostName("h"), provider_name=ProviderInstanceName("local")
+    )
+    agent = DiscoveredAgent(
+        host_id=host.host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("x"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    assert _all_identifiers_found([str(agent_id)], {host: [agent]})
+
+
+def test_all_identifiers_found_returns_false_when_missing() -> None:
+    assert not _all_identifiers_found(["missing"], {})
+
+
+def test_all_identifiers_found_returns_true_for_empty_identifiers() -> None:
+    assert _all_identifiers_found([], {})
 
 
 # =============================================================================
@@ -837,17 +911,17 @@ def test_no_field_generators_produces_empty_plugin(
 
 
 # =============================================================================
-# discover_all_hosts_and_agents Tests
+# discover_hosts_and_agents Tests
 # =============================================================================
 
 
 @pytest.mark.tmux
-def test_discover_all_hosts_and_agents_groups_agents_by_host(
+def test_discover_hosts_and_agents_groups_agents_by_host(
     temp_work_dir: Path,
     temp_mng_ctx: MngContext,
     local_host: Host,
 ) -> None:
-    """discover_all_hosts_and_agents should return agents grouped by their host reference."""
+    """discover_hosts_and_agents should return agents grouped by their host reference."""
     agent = local_host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(
@@ -857,7 +931,13 @@ def test_discover_all_hosts_and_agents_groups_agents_by_host(
         ),
     )
 
-    agents_by_host, providers = discover_all_hosts_and_agents(temp_mng_ctx)
+    agents_by_host, providers = discover_hosts_and_agents(
+        temp_mng_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
 
     local_host.destroy_agent(agent)
 

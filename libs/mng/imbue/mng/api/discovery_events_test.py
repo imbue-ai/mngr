@@ -29,10 +29,14 @@ from imbue.mng.api.discovery_events import make_agent_discovery_event
 from imbue.mng.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mng.api.discovery_events import make_host_discovery_event
 from imbue.mng.api.discovery_events import parse_discovery_event_line
+from imbue.mng.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mng.api.discovery_events import write_full_discovery_snapshot
 from imbue.mng.config.data_types import MngConfig
 from imbue.mng.interfaces.host import OnlineHostInterface
 from imbue.mng.primitives import AgentId
+from imbue.mng.primitives import AgentName
+from imbue.mng.primitives import DiscoveredAgent
+from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
 from imbue.mng.primitives import ProviderInstanceName
@@ -432,3 +436,206 @@ def test_parse_host_ssh_info_event_round_trips() -> None:
     assert parsed.ssh.host == "remote.example.com"
     assert parsed.ssh.port == 2222
     assert parsed.ssh.key_path == Path("/tmp/key")
+
+
+# === resolve_provider_names_for_identifiers Tests ===
+
+
+def test_resolve_provider_names_returns_none_when_no_file(temp_config: MngConfig) -> None:
+    """Should return None when the events file does not exist."""
+    result = resolve_provider_names_for_identifiers(temp_config, ["my-agent"])
+    assert result is None
+
+
+def test_resolve_provider_names_resolves_by_agent_name(temp_config: MngConfig) -> None:
+    """Should resolve an agent name to its provider from a full snapshot."""
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("my-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=agent.host_id,
+        host_name=HostName("docker-host"),
+        provider_name=ProviderInstanceName("docker"),
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [host])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["my-agent"])
+    assert result == ("docker",)
+
+
+def test_resolve_provider_names_resolves_by_agent_id(temp_config: MngConfig) -> None:
+    """Should resolve an agent ID to its provider from a full snapshot."""
+    agent_id = AgentId.generate()
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=agent_id,
+        agent_name=AgentName("some-agent"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, [str(agent_id)])
+    assert result == ("modal",)
+
+
+def test_resolve_provider_names_returns_none_for_unknown_identifier(temp_config: MngConfig) -> None:
+    """Should return None when any identifier cannot be resolved."""
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("known-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["unknown-agent"])
+    assert result is None
+
+
+def test_resolve_provider_names_returns_none_when_any_identifier_missing(temp_config: MngConfig) -> None:
+    """Should return None when even one identifier is unknown (partial match is not enough)."""
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("known-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["known-agent", "unknown-agent"])
+    assert result is None
+
+
+def test_resolve_provider_names_deduplicates_providers(temp_config: MngConfig) -> None:
+    """Should deduplicate provider names when multiple agents share a provider."""
+    agent1 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-a"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    agent2 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("agent-b"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent1, agent2], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["agent-a", "agent-b"])
+    assert result == ("docker",)
+
+
+def test_resolve_provider_names_unions_providers_for_multiple_agents(temp_config: MngConfig) -> None:
+    """Should return the union of providers when agents are on different providers."""
+    agent1 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("local-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    agent2 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("docker-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent1, agent2], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["local-agent", "docker-agent"])
+    assert result is not None
+    assert set(result) == {"local", "docker"}
+
+
+def test_resolve_provider_names_handles_same_name_on_multiple_providers(temp_config: MngConfig) -> None:
+    """When the same agent name exists on multiple providers, should return all of them."""
+    agent1 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("shared-name"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    agent2 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("shared-name"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent1, agent2], [])
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["shared-name"])
+    assert result is not None
+    assert set(result) == {"local", "docker"}
+
+
+def test_resolve_provider_names_replays_incremental_events(temp_config: MngConfig) -> None:
+    """Should pick up agents added via incremental events after the snapshot."""
+    # Start with a snapshot containing one agent
+    agent1 = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("old-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent1], [])
+
+    # Add a new agent via an incremental event
+    new_agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("new-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    emit_agent_discovered(temp_config, new_agent)
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["new-agent"])
+    assert result == ("docker",)
+
+
+def test_resolve_provider_names_respects_destroy_events(temp_config: MngConfig) -> None:
+    """Should not resolve destroyed agents by ID."""
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("destroyed-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [])
+    emit_agent_destroyed(temp_config, agent_id, host_id)
+
+    # By ID should fail (destroyed)
+    result = resolve_provider_names_for_identifiers(temp_config, [str(agent_id)])
+    assert result is None
+
+
+def test_resolve_provider_names_with_no_snapshot_only_incremental(temp_config: MngConfig) -> None:
+    """Should work with only incremental events (no full snapshot)."""
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("incremental-agent"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={},
+    )
+    emit_agent_discovered(temp_config, agent)
+
+    result = resolve_provider_names_for_identifiers(temp_config, ["incremental-agent"])
+    assert result == ("modal",)

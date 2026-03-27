@@ -67,6 +67,7 @@ from imbue.mng_claude.claude_config import build_readiness_hooks_config
 from imbue.mng_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mng_claude.claude_config import complete_onboarding
 from imbue.mng_claude.claude_config import dismiss_effort_callout
+from imbue.mng_claude.claude_config import encode_claude_project_dir_name
 from imbue.mng_claude.claude_config import ensure_claude_dialogs_dismissed
 from imbue.mng_claude.claude_config import find_project_config
 from imbue.mng_claude.claude_config import get_claude_config_path
@@ -95,7 +96,7 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
 
     Accepts either:
     - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
-    - A session ID string (searched in $CLAUDE_CONFIG_DIR/projects/ or ~/.claude/projects/)
+    - A session ID string (searched in both $CLAUDE_CONFIG_DIR/projects/ and ~/.claude/projects/)
 
     Returns (session_id, source_project_dir).
     """
@@ -105,16 +106,37 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
             raise UserInputError(f"Session file not found: {session_file}")
         return session_file.stem, session_file.parent
 
-    # Search by session ID
-    source_config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
-    source_projects_dir = source_config_dir / "projects"
-    if not source_projects_dir.exists():
-        raise UserInputError(f"No projects directory found at {source_projects_dir}. Cannot find session to adopt.")
+    # Search by session ID in $CLAUDE_CONFIG_DIR first, then fall back to ~/.claude/.
+    # We check both because when running inside an mng agent, CLAUDE_CONFIG_DIR
+    # points to the agent's isolated config dir, but the user's sessions are
+    # in ~/.claude/. In non-agent contexts, CLAUDE_CONFIG_DIR may point to a
+    # custom config dir that also has sessions.
+    default_config_dir = Path.home() / ".claude"
+    search_dirs: list[Path] = []
+    resolved_dirs: list[Path] = []
+    env_config_dir_str = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_config_dir_str:
+        env_projects_dir = Path(env_config_dir_str) / "projects"
+        search_dirs.append(env_projects_dir)
+        resolved_dirs.append(env_projects_dir.resolve())
+    default_projects_dir = default_config_dir / "projects"
+    if default_projects_dir.resolve() not in resolved_dirs:
+        search_dirs.append(default_projects_dir)
 
-    matches = list(source_projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
+    matches: list[Path] = []
+    searched: list[Path] = []
+    for projects_dir in search_dirs:
+        if projects_dir.exists():
+            searched.append(projects_dir)
+            matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
+
+    if not searched:
+        dirs_str = " or ".join(str(d) for d in search_dirs)
+        raise UserInputError(f"No projects directory found at {dirs_str}. Cannot find session to adopt.")
     if not matches:
+        dirs_str = " or ".join(str(d) for d in searched)
         raise UserInputError(
-            f"Session {adopt_session_arg} not found in {source_projects_dir}. "
+            f"Session {adopt_session_arg} not found in {dirs_str}. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
         )
     if len(matches) > 1:
@@ -1471,18 +1493,31 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
+        # Claude Code organizes sessions by encoded working directory path.
+        # Place adopted sessions under the project dir matching this agent's
+        # work_dir so that `claude --resume` can find them.
+        dest_project_name = encode_claude_project_dir_name(self.work_dir)
 
         for arg in adopt_session_args:
             session_id, source_project_dir = _resolve_adopt_session(arg)
             # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
-                dest_project_dir = config_dir / "projects" / source_project_dir.name
+                dest_project_dir = config_dir / "projects" / dest_project_name
                 with log_span("Adopting session {}", session_id):
                     host.copy_directory(host, source_project_dir, dest_project_dir)
                 copied_project_dirs.add(source_project_dir.name)
             last_session_id = session_id
 
         assert last_session_id is not None, "adopt_session_args was non-empty but no session ID was set"
+
+        # Remove the sessions-index.json copied from the source project dir.
+        # It contains stale entries pointing to the source paths and project,
+        # and its presence prevents Claude Code from discovering the adopted
+        # session files. Claude Code rebuilds the index on next startup.
+        dest_project_dir = config_dir / "projects" / dest_project_name
+        stale_index = dest_project_dir / "sessions-index.json"
+        host.execute_command(f"rm -f {shlex.quote(str(stale_index))}")
+
         host.write_text_file(self._get_agent_dir() / "claude_session_id", last_session_id)
         logger.info("Adopted {} session(s), active session: {}", len(adopt_session_args), last_session_id)
 

@@ -9,7 +9,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mng.api.discover import discover_all_hosts_and_agents
+from imbue.mng.api.discover import discover_hosts_and_agents
 from imbue.mng.api.find import AgentMatch
 from imbue.mng.api.find import ensure_host_started
 from imbue.mng.api.find import find_agents_by_identifiers_or_state
@@ -65,7 +65,13 @@ def exec_command_on_agent(
     Resolves the agent by name or ID, optionally starts it if stopped,
     then executes the command on its host (defaulting to the agent's work_dir).
     """
-    agents_by_host, _providers = discover_all_hosts_and_agents(mng_ctx)
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mng_ctx,
+        provider_names=None,
+        agent_identifiers=(agent_str,),
+        include_destroyed=False,
+        reset_caches=False,
+    )
 
     agent, host = find_and_maybe_start_agent_by_name_or_id(
         agent_str, agents_by_host, mng_ctx, "exec", is_start_desired=is_start_desired
