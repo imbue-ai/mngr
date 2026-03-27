@@ -43,7 +43,7 @@ step()  { echo -e "\n${BOLD}${CYAN}[$1/${TOTAL_STEPS}]${NC} ${BOLD}$2${NC}"; }
 skip()  { echo -e "  ${CYAN}skip${NC} $*"; }
 dry()   { echo -e "  ${CYAN}[dry-run] $*${NC}"; }
 
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 
 # ── Helper: perl rename script ───────────────────────────────────
 # Written to temp file to avoid zsh history expansion eating ! in lookaheads.
@@ -281,9 +281,42 @@ for repo_dir in "${EXTRA_DIRS[@]+"${EXTRA_DIRS[@]}"}"; do
     echo ""
 done
 
-# ── 4. Fix shell configs ────────────────────────────────────────
+# ── 4. Fix tmux session environment variables ─────────────────────
+# Running tmux sessions have env vars pointing to ~/.mng/. Update the
+# session-level environment so new panes get the right values.
+# (Existing panes keep their old env until restarted.)
 
-step 4 "Fixing shell configs..."
+step 4 "Fixing tmux session environment variables..."
+
+if command -v tmux &>/dev/null && tmux ls &>/dev/null 2>&1; then
+    tmux_fixed=0
+    while IFS= read -r session; do
+        session_name="${session%%:*}"
+        while IFS='=' read -r var val; do
+            [ -z "$var" ] && continue
+            new_val=$(echo "$val" | sed 's/\.mng/.mngr/g; s/MNG_/MNGR_/g')
+            if [ "$val" != "$new_val" ]; then
+                if [ "$DRY_RUN" = true ]; then
+                    dry "would update $var in session $session_name"
+                else
+                    tmux set-environment -t "$session_name" "$var" "$new_val"
+                fi
+                tmux_fixed=$((tmux_fixed + 1))
+            fi
+        done < <(tmux show-environment -t "$session_name" 2>/dev/null | grep '\.mng\|MNG_' | grep -v 'mngr\|MNGR_')
+    done < <(tmux ls 2>/dev/null)
+    if [ "$tmux_fixed" -gt 0 ]; then
+        ok "Updated $tmux_fixed tmux environment variables"
+    else
+        ok "No tmux environment variables need updating"
+    fi
+else
+    ok "No tmux sessions running"
+fi
+
+# ── 5. Fix shell configs ────────────────────────────────────────
+
+step 5 "Fixing shell configs..."
 
 fixed_any=false
 for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.config/fish/config.fish" "$HOME/.envrc"; do
@@ -299,7 +332,7 @@ fi
 
 # ── 5. Check current env vars for stale references ─────────────────
 
-step 5 "Checking environment variables..."
+step 6 "Checking environment variables..."
 
 stale_vars=$(env | grep -i '_mng_\|^mng_\|\.mng' | grep -iv 'mngr' || true)
 if [ -n "$stale_vars" ]; then
@@ -313,7 +346,7 @@ fi
 
 # ── 6. Fix agent data.json files ────────────────────────────────────
 
-step 6 "Fixing agent data.json files..."
+step 7 "Fixing agent data.json files..."
 
 agent_fixed=0
 for f in "$HOME/.mngr/agents"/*/data.json; do
@@ -353,7 +386,7 @@ fi
 
 # ── 7. Fix Claude data ─────────────────────────────────────────────
 
-step 7 "Fixing Claude data..."
+step 8 "Fixing Claude data..."
 
 fix_claude_json "$HOME/.claude.json"
 
@@ -411,7 +444,7 @@ fi
 
 # ── 8. Rename ~/.config/mng ────────────────────────────────────────
 
-step 8 "Renaming ~/.config/mng..."
+step 9 "Renaming ~/.config/mng..."
 
 if [ -d "$HOME/.config/mng" ] && [ ! -d "$HOME/.config/mngr" ]; then
     if [ "$DRY_RUN" = true ]; then
@@ -428,7 +461,7 @@ fi
 
 # ── 9. Sync packages ──────────────────────────────────────────────
 
-step 9 "Syncing packages..."
+step 10 "Syncing packages..."
 if [ "$DRY_RUN" = true ]; then
     dry "would run uv sync --all-packages"
 else
