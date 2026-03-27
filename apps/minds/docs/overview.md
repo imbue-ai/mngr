@@ -1,6 +1,6 @@
 # How it works
 
-Each mind is a collection of persistent `mng` agents that, together, form a single higher-level "agent" from the perspective of the end-user. A mind *must*:
+Each mind is a collection of persistent `mngr` agents that, together, form a single higher-level "agent" from the perspective of the end-user. A mind *must*:
 
 1. Serve a web interface (so that it is easy for users to interact with them)
 2. Support chat input/output (able to receive messages from the user and generate responses)

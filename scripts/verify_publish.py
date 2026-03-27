@@ -2,13 +2,13 @@
 
 Called from the publish workflow before building packages. Verifies:
 1. Displays all package versions
-2. If --expected-mng-version is given, checks mng version matches (for tag/dispatch checks)
+2. If --expected-mngr-version is given, checks mngr version matches (for tag/dispatch checks)
 3. The hard-coded package graph matches actual pyproject.toml declarations
 4. All internal dependency pins are consistent
 
 Usage:
     uv run scripts/verify_publish.py
-    uv run scripts/verify_publish.py --expected-mng-version 0.1.5
+    uv run scripts/verify_publish.py --expected-mngr-version 0.1.5
 """
 
 import argparse
@@ -22,8 +22,8 @@ from utils import verify_pin_consistency
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pre-publish verification.")
     parser.add_argument(
-        "--expected-mng-version",
-        help="If set, verify the mng package version matches this value",
+        "--expected-mngr-version",
+        help="If set, verify the mngr package version matches this value",
     )
     args = parser.parse_args()
 
@@ -33,16 +33,16 @@ def main() -> None:
     for name, version in versions.items():
         print(f"  {name}: {version}")
 
-    # Optionally verify mng version matches an expected value (tag or dispatch input)
-    if args.expected_mng_version is not None:
-        mng_version = versions["mng"]
-        if mng_version != args.expected_mng_version:
+    # Optionally verify mngr version matches an expected value (tag or dispatch input)
+    if args.expected_mngr_version is not None:
+        mngr_version = versions["imbue-mngr"]
+        if mngr_version != args.expected_mngr_version:
             print(
-                f"\nERROR: Expected mng version {args.expected_mng_version} but found {mng_version}",
+                f"\nERROR: Expected mngr version {args.expected_mngr_version} but found {mngr_version}",
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(f"\nmng version matches expected: {mng_version}")
+        print(f"\nmngr version matches expected: {mngr_version}")
 
     # Verify the hard-coded package graph matches actual pyproject.toml declarations
     print("\n=== Package graph validation ===")

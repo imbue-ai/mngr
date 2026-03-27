@@ -18,7 +18,7 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.testing import add_and_commit_git_repo
 from imbue.minds.testing import init_and_commit_git_repo
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 
 def test_extract_repo_name_from_https_url() -> None:
@@ -71,10 +71,10 @@ def test_load_creation_settings_returns_defaults_for_malformed_toml(tmp_path: Pa
 
 
 def test_load_creation_settings_reads_vendor_config(tmp_path: Path) -> None:
-    (tmp_path / "minds.toml").write_text('[[vendor]]\nname = "mng"\nurl = "https://github.com/imbue-ai/mng.git"\n')
+    (tmp_path / "minds.toml").write_text('[[vendor]]\nname = "mngr"\nurl = "https://github.com/imbue-ai/mngr.git"\n')
     settings = load_creation_settings(tmp_path)
     assert len(settings.vendor) == 1
-    assert settings.vendor[0].name == "mng"
+    assert settings.vendor[0].name == "mngr"
 
 
 # -- clone_git_repo tests --

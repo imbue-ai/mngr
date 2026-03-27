@@ -42,9 +42,9 @@ if PR_INFO=$(gh pr view "$CURRENT_BRANCH" --json number,state 2>/dev/null); then
 fi
 
 if [[ -z "$EXISTING_PR" ]]; then
-    if [[ "${MNG_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
-        log_info "MNG_SKIP_STOP_HOOK_PR_CREATION=1 and no existing PR, skipping PR creation"
-        _log_to_file "INFO" "Skipped PR creation (MNG_SKIP_STOP_HOOK_PR_CREATION=1, no existing PR)"
+    if [[ "${MNGR_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
+        log_info "MNGR_SKIP_STOP_HOOK_PR_CREATION=1 and no existing PR, skipping PR creation"
+        _log_to_file "INFO" "Skipped PR creation (MNGR_SKIP_STOP_HOOK_PR_CREATION=1, no existing PR)"
     else
         # No PR exists - create a new one
         log_info "Creating new PR..."
@@ -57,9 +57,9 @@ if [[ -z "$EXISTING_PR" ]]; then
         fi
     fi
 elif [[ "$PR_STATE" == "MERGED" ]]; then
-    if [[ "${MNG_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
-        log_info "MNG_SKIP_STOP_HOOK_PR_CREATION=1 and previous PR was merged, skipping new PR creation"
-        _log_to_file "INFO" "Skipped PR creation (MNG_SKIP_STOP_HOOK_PR_CREATION=1, previous PR merged)"
+    if [[ "${MNGR_SKIP_STOP_HOOK_PR_CREATION:-0}" == "1" ]]; then
+        log_info "MNGR_SKIP_STOP_HOOK_PR_CREATION=1 and previous PR was merged, skipping new PR creation"
+        _log_to_file "INFO" "Skipped PR creation (MNGR_SKIP_STOP_HOOK_PR_CREATION=1, previous PR merged)"
         EXISTING_PR=""
     else
         # PR was merged - need to create a new one (can't reopen merged PRs on GitHub)

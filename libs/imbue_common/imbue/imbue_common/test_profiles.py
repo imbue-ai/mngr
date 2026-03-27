@@ -7,7 +7,7 @@ profile's cov_packages.
 Profiles are defined in test_profiles.toml at the repository root.
 
 Environment variables:
-- MNG_TEST_PROFILE: Force a specific profile (overrides branch detection).
+- MNGR_TEST_PROFILE: Force a specific profile (overrides branch detection).
   Set to "all" to disable profile filtering entirely.
 """
 
@@ -96,14 +96,14 @@ def resolve_active_profile(repo_root: Path) -> ScopedProfile | None:
     """Determine which test profile (if any) should be active.
 
     Resolution order:
-    1. MNG_TEST_PROFILE env var (explicit override)
+    1. MNGR_TEST_PROFILE env var (explicit override)
        - "all" disables profile filtering
        - Any other value must match a profile name exactly
     2. Branch name matched against each profile's branch_prefixes (first match wins)
 
     Returns None if no profile is active (all tests run).
     """
-    override = os.environ.get("MNG_TEST_PROFILE", "")
+    override = os.environ.get("MNGR_TEST_PROFILE", "")
     if override == "all":
         return None
 
@@ -119,7 +119,7 @@ def resolve_active_profile(repo_root: Path) -> ScopedProfile | None:
                 return profile
         available = ", ".join(p.name for p in profiles)
         warnings.warn(
-            f"MNG_TEST_PROFILE='{override}' does not match any profile in {_CONFIG_FILENAME}. "
+            f"MNGR_TEST_PROFILE='{override}' does not match any profile in {_CONFIG_FILENAME}. "
             f"Available profiles: {available}. Running all tests.",
             stacklevel=1,
         )

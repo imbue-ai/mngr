@@ -9,7 +9,7 @@ import click
 
 
 def parse_all_agents_from_jsonl(jsonl_output: str) -> dict[str, str]:
-    """Parse JSONL output from mng list to extract all agents and their states.
+    """Parse JSONL output from mngr list to extract all agents and their states.
 
     Returns a mapping from agent name to state string.
     """
@@ -32,19 +32,19 @@ def parse_all_agents_from_jsonl(jsonl_output: str) -> dict[str, str]:
 
 
 def fetch_modal_agent_states() -> dict[str, str] | None:
-    """Fetch current states of all modal agents by running mng list.
+    """Fetch current states of all modal agents by running mngr list.
 
     Returns a mapping from agent name to state, or None if the command fails.
     """
     result = subprocess.run(
-        ["uv", "run", "mng", "list", "--provider", "modal", "--format", "jsonl"],
+        ["uv", "run", "mngr", "list", "--provider", "modal", "--format", "jsonl"],
         capture_output=True,
         text=True,
     )
 
     if result.returncode != 0:
         click.echo(
-            f"Warning: mng list failed (exit code {result.returncode}): {result.stderr.strip()}",
+            f"Warning: mngr list failed (exit code {result.returncode}): {result.stderr.strip()}",
             err=True,
         )
         return None

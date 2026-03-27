@@ -7,7 +7,7 @@ from imbue.minds.forwarding_server.proxy import rewrite_absolute_paths_in_html
 from imbue.minds.forwarding_server.proxy import rewrite_cookie_path
 from imbue.minds.forwarding_server.proxy import rewrite_proxied_html
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 _TEST_AGENT: AgentId = AgentId("agent-00000000000000000000000000000001")
 _TEST_AGENT_2: AgentId = AgentId("agent-00000000000000000000000000000002")

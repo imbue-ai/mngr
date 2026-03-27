@@ -19,7 +19,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import make_jsonl_file_sink
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.logging import trace_span
-from imbue.mng.errors import BaseMngError
+from imbue.mngr.errors import BaseMngrError
 
 
 class LogCapture:
@@ -165,8 +165,8 @@ def test_log_span_logs_timing_even_on_exception() -> None:
     try:
         try:
             with log_span("risky operation"):
-                raise BaseMngError("test error")
-        except BaseMngError:
+                raise BaseMngrError("test error")
+        except BaseMngrError:
             pass
 
         assert len(captured_messages) == 2
@@ -231,7 +231,7 @@ def test_build_flat_log_dict_produces_envelope_and_loguru_fields() -> None:
     captured_dicts: list[dict[str, Any]] = []
 
     def sink(message: Any) -> None:
-        captured_dicts.append(_build_flat_log_dict(message.record, "mng", "mng", "create"))
+        captured_dicts.append(_build_flat_log_dict(message.record, "mngr", "mngr", "create"))
 
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
@@ -242,8 +242,8 @@ def test_build_flat_log_dict_produces_envelope_and_loguru_fields() -> None:
     parsed = captured_dicts[0]
 
     # Envelope fields at top level
-    assert parsed["type"] == "mng"
-    assert parsed["source"] == "mng"
+    assert parsed["type"] == "mngr"
+    assert parsed["source"] == "mngr"
     assert parsed["command"] == "create"
     assert parsed["event_id"].startswith("evt-")
     assert "timestamp" in parsed
@@ -291,7 +291,7 @@ def test_build_flat_log_dict_includes_extra_context() -> None:
     captured_dicts: list[dict[str, Any]] = []
 
     def sink(message: Any) -> None:
-        captured_dicts.append(_build_flat_log_dict(message.record, "mng", "mng", "list"))
+        captured_dicts.append(_build_flat_log_dict(message.record, "mngr", "mngr", "list"))
 
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
@@ -308,7 +308,7 @@ def test_build_flat_log_dict_handles_special_chars() -> None:
     captured_dicts: list[dict[str, Any]] = []
 
     def sink(message: Any) -> None:
-        captured_dicts.append(_build_flat_log_dict(message.record, "mng", "mng", None))
+        captured_dicts.append(_build_flat_log_dict(message.record, "mngr", "mngr", None))
 
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:
@@ -404,8 +404,8 @@ def test_trace_span_logs_on_exception() -> None:
     with capture_logs() as cap:
         try:
             with trace_span("risky"):
-                raise BaseMngError("boom")
-        except BaseMngError:
+                raise BaseMngrError("boom")
+        except BaseMngrError:
             pass
 
         assert len(cap.messages) == 2
@@ -422,7 +422,7 @@ def test_make_jsonl_file_sink_writes_json_lines(tmp_path: Path) -> None:
     log_file = tmp_path / "test.jsonl"
     sink = make_jsonl_file_sink(
         file_path=str(log_file),
-        event_type="mng",
+        event_type="mngr",
         event_source="test",
         command="create",
         max_size_bytes=1_000_000,
@@ -437,7 +437,7 @@ def test_make_jsonl_file_sink_writes_json_lines(tmp_path: Path) -> None:
     assert log_file.exists()
     content = log_file.read_text()
     parsed = json.loads(content.strip())
-    assert parsed["type"] == "mng"
+    assert parsed["type"] == "mngr"
     assert parsed["source"] == "test"
     assert parsed["command"] == "create"
     assert parsed["message"] == "test message"
@@ -448,7 +448,7 @@ def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
     log_file = tmp_path / "test.jsonl"
     sink = make_jsonl_file_sink(
         file_path=str(log_file),
-        event_type="mng",
+        event_type="mngr",
         event_source="test",
         command=None,
         max_size_bytes=100,
@@ -476,7 +476,7 @@ def test_build_flat_log_dict_includes_exception_info() -> None:
     captured_dicts: list[dict[str, Any]] = []
 
     def sink(message: Any) -> None:
-        captured_dicts.append(_build_flat_log_dict(message.record, "mng", "mng", None))
+        captured_dicts.append(_build_flat_log_dict(message.record, "mngr", "mngr", None))
 
     handler_id = logger.add(sink, level="TRACE", format="{message}")
     try:

@@ -31,7 +31,7 @@ Run the export transcript script to discover session file paths:
 bash ./scripts/export_transcript_paths.sh
 ```
 
-The script outputs lines in the format `source\tpath`, where source is one of: `mng_tracked`, `current`, `mng_agent_dir`, or a subagent variant like `mng_tracked:subagent`, `current:subagent`, etc. Parse each line to collect the files grouped by source.
+The script outputs lines in the format `source\tpath`, where source is one of: `mngr_tracked`, `current`, `mngr_agent_dir`, or a subagent variant like `mngr_tracked:subagent`, `current:subagent`, etc. Parse each line to collect the files grouped by source.
 
 If this outputs nothing (no sessions found), skip to Step 5 and write an empty marker file.
 
@@ -71,9 +71,9 @@ Spawn a `review-conversation` Agent and tell it to:
 Also provide the agent with:
 
 4. The list of session file paths to read, grouped by provenance:
-   - `mng_tracked` files: label as "The sequence of tracked session files for this task"
+   - `mngr_tracked` files: label as "The sequence of tracked session files for this task"
    - `current` files: label as "The current session"
-   - `mng_agent_dir` files: label as "All sessions found in this agent's directory"
+   - `mngr_agent_dir` files: label as "All sessions found in this agent's directory"
    - Any source ending in `:subagent`: label as "Subagent transcripts" (grouped under their parent source)
 5. The output file path: `.reviewer/outputs/conversation/{hash}.json`
 

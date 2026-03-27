@@ -14,7 +14,7 @@ from imbue.minds.forwarding_server.parent_tracking import get_current_commit_has
 from imbue.minds.forwarding_server.parent_tracking import read_parent_info
 from imbue.minds.forwarding_server.parent_tracking import setup_mind_branch_and_parent
 from imbue.minds.forwarding_server.parent_tracking import write_parent_info
-from imbue.minds.forwarding_server.vendor_mng import run_git
+from imbue.minds.forwarding_server.vendor_mngr import run_git
 from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitCommitHash

@@ -26,11 +26,11 @@ fi
 # Use the latest session ID from the tracking file if available. Claude Code can
 # replace its session (e.g., exit plan mode, /clear, compaction), creating a new
 # session with a different UUID. The SessionStart hook writes the current session
-# ID to $MNG_AGENT_STATE_DIR/claude_session_id so we can track it here.
-if [ -n "${MNG_AGENT_STATE_DIR:-}" ] && [ -f "$MNG_AGENT_STATE_DIR/claude_session_id" ]; then
-    _MNG_READ_SID=$(cat "$MNG_AGENT_STATE_DIR/claude_session_id")
-    if [ -n "$_MNG_READ_SID" ]; then
-        MAIN_CLAUDE_SESSION_ID="$_MNG_READ_SID"
+# ID to $MNGR_AGENT_STATE_DIR/claude_session_id so we can track it here.
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -f "$MNGR_AGENT_STATE_DIR/claude_session_id" ]; then
+    _MNGR_READ_SID=$(cat "$MNGR_AGENT_STATE_DIR/claude_session_id")
+    if [ -n "$_MNGR_READ_SID" ]; then
+        MAIN_CLAUDE_SESSION_ID="$_MNGR_READ_SID"
     fi
 fi
 
@@ -54,9 +54,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Set up file logging before sourcing common
-if [[ -n "${MNG_AGENT_STATE_DIR:-}" ]]; then
-    mkdir -p "$MNG_AGENT_STATE_DIR/events/logs/stop_hook" 2>/dev/null || true
-    export STOP_HOOK_LOG="$MNG_AGENT_STATE_DIR/events/logs/stop_hook/events.jsonl"
+if [[ -n "${MNGR_AGENT_STATE_DIR:-}" ]]; then
+    mkdir -p "$MNGR_AGENT_STATE_DIR/events/logs/stop_hook" 2>/dev/null || true
+    export STOP_HOOK_LOG="$MNGR_AGENT_STATE_DIR/events/logs/stop_hook/events.jsonl"
 fi
 export STOP_HOOK_SCRIPT_NAME="main_stop_hook"
 
@@ -189,7 +189,7 @@ if [[ "$IS_INFORMATIONAL_ONLY" == "true" ]]; then
     log_info "No code changes detected compared to $BASE_BRANCH - this is an informational session. Exiting cleanly."
     _log_to_file "INFO" "Informational-only session, exiting cleanly (exit 0)"
     notify_user || echo "No notify_user function defined, skipping."
-    rm -f "$MNG_AGENT_STATE_DIR/active"
+    rm -f "$MNGR_AGENT_STATE_DIR/active"
     exit 0
 fi
 
@@ -322,7 +322,7 @@ _upload_autofix_issues() {
 _upload_autofix_issues
 
 _log_to_file "INFO" "main_stop_hook completed successfully (exit 0)"
-rm -f "$MNG_AGENT_STATE_DIR/active"
+rm -f "$MNGR_AGENT_STATE_DIR/active"
 notify_user || echo "No notify_user function defined, skipping."
 
 exit 0

@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
-from imbue.minds.forwarding_server.backend_resolver import MngCliBackendResolver
-from imbue.minds.forwarding_server.backend_resolver import MngStreamManager
+from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
+from imbue.minds.forwarding_server.backend_resolver import MngrStreamManager
 from imbue.minds.forwarding_server.backend_resolver import ParsedAgentsResult
 from imbue.minds.forwarding_server.backend_resolver import ServerLogParseError
 from imbue.minds.forwarding_server.backend_resolver import StaticBackendResolver
@@ -17,7 +17,7 @@ from imbue.minds.forwarding_server.conftest import make_agents_json
 from imbue.minds.forwarding_server.conftest import make_resolver_with_data
 from imbue.minds.forwarding_server.conftest import make_server_log
 from imbue.minds.primitives import ServerName
-from imbue.mng.primitives import AgentId
+from imbue.mngr.primitives import AgentId
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -163,10 +163,10 @@ def test_parse_agent_ids_from_json_returns_empty_for_invalid_json() -> None:
     assert parse_agent_ids_from_json("not json") == ()
 
 
-# -- MngCliBackendResolver tests (using direct state updates) --
+# -- MngrCliBackendResolver tests (using direct state updates) --
 
 
-def test_mng_cli_resolver_returns_url_for_specific_server() -> None:
+def test_mngr_cli_resolver_returns_url_for_specific_server() -> None:
     resolver = make_resolver_with_data(
         server_logs={str(_AGENT_A): make_server_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
@@ -174,7 +174,7 @@ def test_mng_cli_resolver_returns_url_for_specific_server() -> None:
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
 
 
-def test_mng_cli_resolver_returns_none_for_unknown_server_name() -> None:
+def test_mngr_cli_resolver_returns_none_for_unknown_server_name() -> None:
     resolver = make_resolver_with_data(
         server_logs={str(_AGENT_A): make_server_log("web", "http://127.0.0.1:9100")},
         agents_json=make_agents_json(_AGENT_A),
@@ -182,12 +182,12 @@ def test_mng_cli_resolver_returns_none_for_unknown_server_name() -> None:
     assert resolver.get_backend_url(_AGENT_A, _SERVER_API) is None
 
 
-def test_mng_cli_resolver_returns_none_for_unknown_agent() -> None:
+def test_mngr_cli_resolver_returns_none_for_unknown_agent() -> None:
     resolver = make_resolver_with_data(server_logs={}, agents_json=make_agents_json())
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
 
 
-def test_mng_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
+def test_mngr_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
     log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         server_logs={str(_AGENT_A): log_content},
@@ -197,7 +197,7 @@ def test_mng_cli_resolver_handles_multiple_servers_for_one_agent() -> None:
     assert resolver.get_backend_url(_AGENT_A, _SERVER_API) == "http://127.0.0.1:9200"
 
 
-def test_mng_cli_resolver_later_entry_overrides_earlier_for_same_server() -> None:
+def test_mngr_cli_resolver_later_entry_overrides_earlier_for_same_server() -> None:
     log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("web", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         server_logs={str(_AGENT_A): log_content},
@@ -206,7 +206,7 @@ def test_mng_cli_resolver_later_entry_overrides_earlier_for_same_server() -> Non
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9200"
 
 
-def test_mng_cli_resolver_lists_servers_for_agent() -> None:
+def test_mngr_cli_resolver_lists_servers_for_agent() -> None:
     log_content = make_server_log("web", "http://127.0.0.1:9100") + make_server_log("api", "http://127.0.0.1:9200")
     resolver = make_resolver_with_data(
         server_logs={str(_AGENT_A): log_content},
@@ -216,7 +216,7 @@ def test_mng_cli_resolver_lists_servers_for_agent() -> None:
     assert servers == (_SERVER_API, _SERVER_WEB)
 
 
-def test_mng_cli_resolver_lists_known_agents() -> None:
+def test_mngr_cli_resolver_lists_known_agents() -> None:
     resolver = make_resolver_with_data(
         server_logs={},
         agents_json=make_agents_json(_AGENT_A, _AGENT_B),
@@ -226,19 +226,19 @@ def test_mng_cli_resolver_lists_known_agents() -> None:
     assert _AGENT_B in ids
 
 
-def test_mng_cli_resolver_returns_empty_when_no_agents() -> None:
+def test_mngr_cli_resolver_returns_empty_when_no_agents() -> None:
     resolver = make_resolver_with_data(server_logs={}, agents_json=make_agents_json())
     assert resolver.list_known_agent_ids() == ()
 
 
-def test_mng_cli_resolver_returns_empty_when_no_data() -> None:
-    resolver = MngCliBackendResolver()
+def test_mngr_cli_resolver_returns_empty_when_no_data() -> None:
+    resolver = MngrCliBackendResolver()
     assert resolver.list_known_agent_ids() == ()
 
 
-def test_mng_cli_resolver_update_agents_replaces_state() -> None:
+def test_mngr_cli_resolver_update_agents_replaces_state() -> None:
     """Calling update_agents replaces the agent list and SSH info."""
-    resolver = MngCliBackendResolver()
+    resolver = MngrCliBackendResolver()
 
     resolver.update_agents(
         ParsedAgentsResult(agent_ids=(_AGENT_A, _AGENT_B)),
@@ -251,9 +251,9 @@ def test_mng_cli_resolver_update_agents_replaces_state() -> None:
     assert resolver.list_known_agent_ids() == (_AGENT_A,)
 
 
-def test_mng_cli_resolver_update_servers_replaces_state() -> None:
+def test_mngr_cli_resolver_update_servers_replaces_state() -> None:
     """Calling update_servers replaces the server map for that agent."""
-    resolver = MngCliBackendResolver()
+    resolver = MngrCliBackendResolver()
 
     resolver.update_servers(_AGENT_A, {"web": "http://127.0.0.1:9100"})
     assert resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
@@ -266,7 +266,7 @@ def test_mng_cli_resolver_update_servers_replaces_state() -> None:
 
 
 def _make_agents_json_with_ssh(*agents: tuple[str, Mapping[str, object] | None]) -> str:
-    """Build mng list --format json output with optional SSH info per agent."""
+    """Build mngr list --format json output with optional SSH info per agent."""
     agent_list = []
     for agent_id, ssh in agents:
         agent: dict[str, object] = {"id": agent_id}
@@ -293,7 +293,7 @@ def test_parse_agents_from_json_extracts_ssh_info() -> None:
         "user": "root",
         "host": "remote.example.com",
         "port": 12345,
-        "key_path": "/home/user/.mng/providers/modal/modal_ssh_key",
+        "key_path": "/home/user/.mngr/providers/modal/modal_ssh_key",
     }
     json_str = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
     result = parse_agents_from_json(json_str)
@@ -303,7 +303,7 @@ def test_parse_agents_from_json_extracts_ssh_info() -> None:
     assert ssh_info.user == "root"
     assert ssh_info.host == "remote.example.com"
     assert ssh_info.port == 12345
-    assert ssh_info.key_path == Path("/home/user/.mng/providers/modal/modal_ssh_key")
+    assert ssh_info.key_path == Path("/home/user/.mngr/providers/modal/modal_ssh_key")
 
 
 def test_parse_agents_from_json_returns_none_ssh_for_local_agents() -> None:
@@ -358,10 +358,10 @@ def test_parse_agents_from_json_skips_agents_with_invalid_ssh() -> None:
     assert str(_AGENT_A) not in result.ssh_info_by_agent_id
 
 
-# -- MngCliBackendResolver.get_ssh_info tests --
+# -- MngrCliBackendResolver.get_ssh_info tests --
 
 
-def test_mng_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
+def test_mngr_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
     ssh_data = {
         "user": "root",
         "host": "remote.example.com",
@@ -377,14 +377,14 @@ def test_mng_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
     assert ssh_info.port == 12345
 
 
-def test_mng_cli_resolver_get_ssh_info_returns_none_for_local_agent() -> None:
+def test_mngr_cli_resolver_get_ssh_info_returns_none_for_local_agent() -> None:
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), None))
     resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)
 
     assert resolver.get_ssh_info(_AGENT_A) is None
 
 
-def test_mng_cli_resolver_get_ssh_info_returns_none_for_unknown_agent() -> None:
+def test_mngr_cli_resolver_get_ssh_info_returns_none_for_unknown_agent() -> None:
     agents_json = _make_agents_json_with_ssh((str(_AGENT_A), None))
     resolver = make_resolver_with_data(server_logs={}, agents_json=agents_json)
 
@@ -411,13 +411,13 @@ def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
     assert resolver.get_ssh_info(_AGENT_A) is None
 
 
-# -- MngStreamManager tests (calling methods directly, no subprocesses) --
+# -- MngrStreamManager tests (calling methods directly, no subprocesses) --
 
 
-def _make_stream_manager() -> MngStreamManager:
-    """Create a MngStreamManager with a fresh resolver, without starting subprocesses."""
-    resolver = MngCliBackendResolver()
-    return MngStreamManager(resolver=resolver)
+def _make_stream_manager() -> MngrStreamManager:
+    """Create a MngrStreamManager with a fresh resolver, without starting subprocesses."""
+    resolver = MngrCliBackendResolver()
+    return MngrStreamManager(resolver=resolver)
 
 
 def test_stream_manager_on_list_stream_output_ignores_stderr() -> None:
@@ -442,7 +442,7 @@ def test_stream_manager_on_list_stream_output_ignores_non_full_events() -> None:
             "type": "SOME_OTHER_EVENT",
             "timestamp": "2026-01-01T00:00:00Z",
             "event_id": "evt-test-001",
-            "source": "mng/discovery",
+            "source": "mngr/discovery",
         }
     )
     manager._on_list_stream_output(line, is_stdout=True)
@@ -524,7 +524,7 @@ def _make_discovery_full_line(
             "type": "DISCOVERY_FULL",
             "timestamp": "2026-01-01T00:00:00Z",
             "event_id": "evt-test-full-001",
-            "source": "mng/discovery",
+            "source": "mngr/discovery",
             "agents": [
                 {
                     "host_id": host_id,
@@ -554,7 +554,7 @@ def _make_host_ssh_info_line(host_id: str, ssh_data: Mapping[str, object]) -> st
             "type": "HOST_SSH_INFO",
             "timestamp": "2026-01-01T00:00:01Z",
             "event_id": "evt-test-ssh-001",
-            "source": "mng/discovery",
+            "source": "mngr/discovery",
             "host_id": host_id,
             "ssh": ssh_data,
         }

@@ -7,7 +7,7 @@ from loguru import logger
 from imbue.imbue_common.enums import UpperCaseStrEnum
 
 # ANSI color codes that work well on both light and dark backgrounds.
-# Uses 256-color palette codes (matching mng's approach).
+# Uses 256-color palette codes (matching mngr's approach).
 _WARNING_COLOR = "\x1b[1;38;5;178m"
 _ERROR_COLOR = "\x1b[1;38;5;196m"
 _DEBUG_COLOR = "\x1b[38;5;33m"
@@ -55,7 +55,7 @@ def setup_logging(console_level: ConsoleLogLevel) -> None:
     """Configure loguru logging for minds CLI.
 
     Sets up a single console handler on stderr with user-friendly formatting.
-    No file logging is configured (unlike mng, minds does not need
+    No file logging is configured (unlike mngr, minds does not need
     persistent log files).
     """
     logger.remove()

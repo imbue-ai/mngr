@@ -1,252 +1,252 @@
-# mng: build your team of AI engineering agents
+# mngr: build your team of AI engineering agents
 
 **installation:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imbue-ai/mng/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
 
-**mng is *very* simple to use:**
+**mngr is *very* simple to use:**
 
 ```bash
-mng create           # launch claude locally (defaults: agent=claude, provider=local, project=current dir)
-mng create @.modal          # launch claude on Modal (new host with auto-generated name)
-mng create my-task          # launch claude with a name
-mng create my-task codex    # launch codex instead of claude
-mng create -- --model opus  # pass any arguments through to the underlying agent
+mngr create           # launch claude locally (defaults: agent=claude, provider=local, project=current dir)
+mngr create @.modal          # launch claude on Modal (new host with auto-generated name)
+mngr create my-task          # launch claude with a name
+mngr create my-task codex    # launch codex instead of claude
+mngr create -- --model opus  # pass any arguments through to the underlying agent
 
 # send an initial message so you don't have to wait around:
-mng create --no-connect --message "Speed up one of my tests and make a PR on github"
+mngr create --no-connect --message "Speed up one of my tests and make a PR on github"
 
 # or, be super explicit about all of the arguments:
-mng create my-task@.modal --type claude
+mngr create my-task@.modal --type claude
 
 # tons more arguments for anything you could want! Learn more via --help
-mng create --help
+mngr create --help
 
 # or see the other commands--list, destroy, message, connect, push, pull, clone, and more!
-mng --help
+mngr --help
 ```
 
-**mng is fast:**
+**mngr is fast:**
 ```bash
-> time mng create local-hello  --message "Just say hello" --no-connect
+> time mngr create local-hello  --message "Just say hello" --no-connect
 Done.
 
 real    0m1.472s
 user    0m1.181s
 sys     0m0.227s
 
-> time mng list
+> time mngr list
 NAME           STATE       HOST        PROVIDER    HOST STATE  PROJECT
-local-hello    RUNNING     @local      local       RUNNING     mng
+local-hello    RUNNING     @local      local       RUNNING     mngr
 
 real    0m1.773s
 user    0m0.955s
 sys     0m0.166s
 ```
 
-**mng itself is free, *and* the cheapest way to run remote agents (they shut down when idle):**
+**mngr itself is free, *and* the cheapest way to run remote agents (they shut down when idle):**
 
 ```bash
-mng create @.modal --no-connect --message "just say 'hello'" --idle-timeout 60 -- --model sonnet
+mngr create @.modal --no-connect --message "just say 'hello'" --idle-timeout 60 -- --model sonnet
 # costs $0.0387443 for inference (using sonnet)
 # costs $0.0013188 for compute because it shuts down 60 seconds after the agent completes
 ```
 
-**mng takes security and privacy seriously:**
+**mngr takes security and privacy seriously:**
 
 ```bash
 # by default, cannot be accessed by anyone except your modal account (uses a local unique SSH key)
-mng create example-task@.modal
+mngr create example-task@.modal
 
 # you (or your agent) can do whatever bad ideas you want in that container without fear
-mng exec example-task "rm -rf /"
+mngr exec example-task "rm -rf /"
 
 # you can block all outgoing internet access
-mng create @.modal -b offline
+mngr create @.modal -b offline
 
 # or restrict outgoing traffic to certain IPs
-mng create @.modal -b cidr-allowlist=203.0.113.0/24
+mngr create @.modal -b cidr-allowlist=203.0.113.0/24
 ```
 
-**mng is powerful and composable:**
+**mngr is powerful and composable:**
 
 ```bash
 # start multiple agents on the same host to save money and share data
-mng create agent-1@shared-host.modal --new-host
-mng create agent-2@shared-host
+mngr create agent-1@shared-host.modal --new-host
+mngr create agent-2@shared-host
 
 # run commands directly on an agent's host
-mng exec agent-1 "git log --oneline -5"
+mngr exec agent-1 "git log --oneline -5"
 
 # never lose any work: snapshot and fork the entire agent states
-mng create doomed-agent@.modal
-SNAPSHOT=$(mng snapshot create doomed-agent --format "{id}")
-mng message doomed-agent "try running 'rm -rf /' and see what happens"
-mng create new-agent --snapshot $SNAPSHOT
+mngr create doomed-agent@.modal
+SNAPSHOT=$(mngr snapshot create doomed-agent --format "{id}")
+mngr message doomed-agent "try running 'rm -rf /' and see what happens"
+mngr create new-agent --snapshot $SNAPSHOT
 ```
 
-**mng makes it easy to see what your agents are doing:**
+**mngr makes it easy to see what your agents are doing:**
 
 ```bash
 # programmatically send messages to your agents and see their chat histories
-mng message agent-1 "Tell me a joke"
-mng transcript agent-1
+mngr message agent-1 "Tell me a joke"
+mngr transcript agent-1
 ```
 
 <!--
 # [future] schedule agents to run periodically
-mng schedule --template my-daily-hook "look at any flaky tests over the past day and try to fix one of them" --cron "0 * * * *"
+mngr schedule --template my-daily-hook "look at any flaky tests over the past day and try to fix one of them" --cron "0 * * * *"
 -->
 
-**mng makes it easy to work with remote agents**
+**mngr makes it easy to work with remote agents**
 
 ```bash
-mng connect my-agent       # directly connect to remote agents via SSH for debugging
-mng pull my-agent          # pull changes from an agent to your local machine
-mng push my-agent          # push your changes to an agent
-mng pair my-agent          # or sync changes continuously!
+mngr connect my-agent       # directly connect to remote agents via SSH for debugging
+mngr pull my-agent          # pull changes from an agent to your local machine
+mngr push my-agent          # push your changes to an agent
+mngr pair my-agent          # or sync changes continuously!
 ```
 
-**mng is easy to learn:**
+**mngr is easy to learn:**
 
 ```text
-> mng ask "How do I create a container on modal with custom packages installed by default?"
+> mngr ask "How do I create a container on modal with custom packages installed by default?"
 
 Simply run:
-    mng create @.modal -b "--file path/to/Dockerfile"
+    mngr create @.modal -b "--file path/to/Dockerfile"
 ```
 
 <!--
 If you don't have a Dockerfile for your project, run:
-    mng bootstrap   # [future]
+    mngr bootstrap   # [future]
 
 From the repo where you would like a Dockerfile created.
 -->
 
 ## Overview
 
-`mng` makes it easy to create and use any AI agent (ex: Claude Code, Codex), whether you want to run locally or remotely.
+`mngr` makes it easy to create and use any AI agent (ex: Claude Code, Codex), whether you want to run locally or remotely.
 
-`mng` is built on open-source tools and standards (SSH, git, tmux, docker, etc.), and is extensible via [plugins](libs/mng/docs/concepts/plugins.md) to enable the latest AI coding workflows.
+`mngr` is built on open-source tools and standards (SSH, git, tmux, docker, etc.), and is extensible via [plugins](libs/mngr/docs/concepts/plugins.md) to enable the latest AI coding workflows.
 
 ## Installation
 
-**Quick install** (installs system dependencies + mng automatically):
+**Quick install** (installs system dependencies + mngr automatically):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imbue-ai/mng/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
 
 **Manual install** (requires [uv](https://docs.astral.sh/uv/) and system deps: `git`, `tmux`, `jq`, `rsync`, `unison`):
 ```bash
-uv tool install mng
+uv tool install imbue-mngr
 
 # or run without installing
-uvx mng
+uvx --from imbue-mngr mngr
 ```
 
 **Upgrade:**
 ```bash
-uv tool upgrade mng
+uv tool upgrade imbue-mngr
 ```
 
 **For development:**
 ```bash
-git clone git@github.com:imbue-ai/mng.git && cd mng && uv sync --all-packages && uv tool install -e libs/mng
+git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages && uv tool install -e libs/mngr
 ```
 
 ## Shell Completion
 
-`mng` supports tab completion for commands, options, and agent names in bash and zsh.
+`mngr` supports tab completion for commands, options, and agent names in bash and zsh.
 Shell completion is configured automatically by the install script (`scripts/install.sh`).
 
 To set up manually, generate the completion script and append it to your shell rc file:
 
 **Zsh** (run once):
 ```bash
-uv tool run --from mng python3 -m imbue.mng.cli.complete --script zsh >> ~/.zshrc
+uv tool run --from imbue-mngr python3 -m imbue.mngr.cli.complete --script zsh >> ~/.zshrc
 ```
 
 **Bash** (run once):
 ```bash
-uv tool run --from mng python3 -m imbue.mng.cli.complete --script bash >> ~/.bashrc
+uv tool run --from imbue-mngr python3 -m imbue.mngr.cli.complete --script bash >> ~/.bashrc
 ```
 
-Note: `mng` must be installed on your PATH for completion to work (not invoked via `uv run`).
+Note: `mngr` must be installed on your PATH for completion to work (not invoked via `uv run`).
 
 ## Commands
 
 ```bash
 # without installing:
-uvx mng <command> [options]
+uvx --from imbue-mngr mngr <command> [options]
 
 # if installed:
-mng <command> [options]
+mngr <command> [options]
 ```
 
 ### For managing agents:
 
-- **[`create`](libs/mng/docs/commands/primary/create.md)**: Create and run an agent in a host
-- [`destroy`](libs/mng/docs/commands/primary/destroy.md): Stop an agent (and clean up any associated resources)
-- [`connect`](libs/mng/docs/commands/primary/connect.md): Attach to an agent
-<!-- - [`open`](libs/mng/docs/commands/primary/open.md) [future]: Open a URL from an agent in your browser -->
-- [`list`](libs/mng/docs/commands/primary/list.md): List active agents
-- [`stop`](libs/mng/docs/commands/primary/stop.md): Stop an agent
-- [`start`](libs/mng/docs/commands/primary/start.md): Start a stopped agent
-- [`snapshot`](libs/mng/docs/commands/secondary/snapshot.md) [experimental]: Create a snapshot of a host's state
-- [`exec`](libs/mng/docs/commands/primary/exec.md): Execute a shell command on an agent's host
-- [`rename`](libs/mng/docs/commands/primary/rename.md): Rename an agent
-- [`clone`](libs/mng/docs/commands/aliases/clone.md): Create a copy of an existing agent
-- [`migrate`](libs/mng/docs/commands/aliases/migrate.md): Move an agent to a different host
-- [`limit`](libs/mng/docs/commands/secondary/limit.md): Configure limits for agents and hosts
+- **[`create`](libs/mngr/docs/commands/primary/create.md)**: Create and run an agent in a host
+- [`destroy`](libs/mngr/docs/commands/primary/destroy.md): Stop an agent (and clean up any associated resources)
+- [`connect`](libs/mngr/docs/commands/primary/connect.md): Attach to an agent
+<!-- - [`open`](libs/mngr/docs/commands/primary/open.md) [future]: Open a URL from an agent in your browser -->
+- [`list`](libs/mngr/docs/commands/primary/list.md): List active agents
+- [`stop`](libs/mngr/docs/commands/primary/stop.md): Stop an agent
+- [`start`](libs/mngr/docs/commands/primary/start.md): Start a stopped agent
+- [`snapshot`](libs/mngr/docs/commands/secondary/snapshot.md) [experimental]: Create a snapshot of a host's state
+- [`exec`](libs/mngr/docs/commands/primary/exec.md): Execute a shell command on an agent's host
+- [`rename`](libs/mngr/docs/commands/primary/rename.md): Rename an agent
+- [`clone`](libs/mngr/docs/commands/aliases/clone.md): Create a copy of an existing agent
+- [`migrate`](libs/mngr/docs/commands/aliases/migrate.md): Move an agent to a different host
+- [`limit`](libs/mngr/docs/commands/secondary/limit.md): Configure limits for agents and hosts
 
 ### For moving data in and out:
 
-- [`pull`](libs/mng/docs/commands/primary/pull.md): Pull data from agent
-- [`push`](libs/mng/docs/commands/primary/push.md): Push data to agent
-- [`pair`](libs/mng/docs/commands/primary/pair.md): Continually sync data with an agent
-- [`message`](libs/mng/docs/commands/secondary/message.md): Send a message to an agent
-- [`transcript`](libs/mng/docs/commands/secondary/transcript.md): View the message transcript for an agent
-- [`provision`](libs/mng/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
+- [`pull`](libs/mngr/docs/commands/primary/pull.md): Pull data from agent
+- [`push`](libs/mngr/docs/commands/primary/push.md): Push data to agent
+- [`pair`](libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
+- [`message`](libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
+- [`transcript`](libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent
+- [`provision`](libs/mngr/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
 
 ### For maintenance:
 
-- [`cleanup`](libs/mng/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
-- [`events`](libs/mng/docs/commands/secondary/events.md): View agent and host event files
-- [`gc`](libs/mng/docs/commands/secondary/gc.md): Garbage collect unused resources
+- [`cleanup`](libs/mngr/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
+- [`events`](libs/mngr/docs/commands/secondary/events.md): View agent and host event files
+- [`gc`](libs/mngr/docs/commands/secondary/gc.md): Garbage collect unused resources
 
-### For managing mng itself:
+### For managing mngr itself:
 
-- [`ask`](libs/mng/docs/commands/secondary/ask.md): Chat with mng for help
-- [`plugin`](libs/mng/docs/commands/secondary/plugin.md) [experimental]: Manage mng plugins
-- [`config`](libs/mng/docs/commands/secondary/config.md): View and edit mng configuration
+- [`ask`](libs/mngr/docs/commands/secondary/ask.md): Chat with mngr for help
+- [`plugin`](libs/mngr/docs/commands/secondary/plugin.md) [experimental]: Manage mngr plugins
+- [`config`](libs/mngr/docs/commands/secondary/config.md): View and edit mngr configuration
 
 ## How it works
 
-You can interact with `mng` via the terminal (run `mng --help` to learn more).
+You can interact with `mngr` via the terminal (run `mngr --help` to learn more).
 <!-- You can also interact via one of many [web interfaces](web_interfaces.md) [future] (ex: [TheEye](http://ididntmakethisyet.com)) -->
 
-`mng` uses robust open source tools like SSH, git, and tmux to run and manage your agents:
+`mngr` uses robust open source tools like SSH, git, and tmux to run and manage your agents:
 
-- **[agents](libs/mng/docs/concepts/agents.md)** are simply processes that run in [tmux](https://github.com/tmux/tmux/wiki) sessions, each with their own `work_dir` (working folder) and configuration (ex: secrets, environment variables, etc)
-- [agents](libs/mng/docs/concepts/agents.md) run on **[hosts](libs/mng/docs/concepts/hosts.md)**--either locally (by default), or special environments like [Modal](https://modal.com) [Sandboxes](https://modal.com/docs/guide/sandboxes) (`--provider modal`) or [Docker](https://www.docker.com) [containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/) (`--provider docker`).  Use the `agent@host` address syntax to target an existing host.
-- multiple [agents](libs/mng/docs/concepts/agents.md) can share a single [host](libs/mng/docs/concepts/hosts.md).
-- [hosts](libs/mng/docs/concepts/hosts.md) come from **[providers](libs/mng/docs/concepts/providers.md)** (ex: Modal, AWS, docker, etc)
-- [hosts](libs/mng/docs/concepts/hosts.md) help save money by automatically "pausing" when all of their [agents](libs/mng/docs/concepts/agents.md) are "idle". See [idle detection](libs/mng/docs/concepts/idle_detection.md) for more details.
-- [hosts](libs/mng/docs/concepts/hosts.md) automatically "stop" when all of their [agents](libs/mng/docs/concepts/agents.md) are "stopped"
-- `mng` is extensible via **[plugins](libs/mng/docs/concepts/plugins.md)**--you can add new agent types, provider backends, CLI commands, and lifecycle hooks
-<!-- - `mng` is absurdly extensible--there are existing **[plugins](libs/mng/docs/concepts/plugins.md)** for almost everything, and `mng` can even [dynamically generate new plugins](libs/mng/docs/commands/secondary/plugin.md#mng-plugin-generate) [future] -->
+- **[agents](libs/mngr/docs/concepts/agents.md)** are simply processes that run in [tmux](https://github.com/tmux/tmux/wiki) sessions, each with their own `work_dir` (working folder) and configuration (ex: secrets, environment variables, etc)
+- [agents](libs/mngr/docs/concepts/agents.md) run on **[hosts](libs/mngr/docs/concepts/hosts.md)**--either locally (by default), or special environments like [Modal](https://modal.com) [Sandboxes](https://modal.com/docs/guide/sandboxes) (`--provider modal`) or [Docker](https://www.docker.com) [containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/) (`--provider docker`).  Use the `agent@host` address syntax to target an existing host.
+- multiple [agents](libs/mngr/docs/concepts/agents.md) can share a single [host](libs/mngr/docs/concepts/hosts.md).
+- [hosts](libs/mngr/docs/concepts/hosts.md) come from **[providers](libs/mngr/docs/concepts/providers.md)** (ex: Modal, AWS, docker, etc)
+- [hosts](libs/mngr/docs/concepts/hosts.md) help save money by automatically "pausing" when all of their [agents](libs/mngr/docs/concepts/agents.md) are "idle". See [idle detection](libs/mngr/docs/concepts/idle_detection.md) for more details.
+- [hosts](libs/mngr/docs/concepts/hosts.md) automatically "stop" when all of their [agents](libs/mngr/docs/concepts/agents.md) are "stopped"
+- `mngr` is extensible via **[plugins](libs/mngr/docs/concepts/plugins.md)**--you can add new agent types, provider backends, CLI commands, and lifecycle hooks
+<!-- - `mngr` is absurdly extensible--there are existing **[plugins](libs/mngr/docs/concepts/plugins.md)** for almost everything, and `mngr` can even [dynamically generate new plugins](libs/mngr/docs/commands/secondary/plugin.md#mngr-plugin-generate) [future] -->
 
 ### Architecture
 
-`mng` stores very little state (beyond configuration and local caches for performance), and instead relies on conventions:
+`mngr` stores very little state (beyond configuration and local caches for performance), and instead relies on conventions:
 
-- any process running in window 0 of a `mng-` prefixed tmux sessions is considered an agent
-- agents store their status and logs in a standard location (default: `$MNG_HOST_DIR/agents/<agent_id>/`)
+- any process running in window 0 of a `mngr-` prefixed tmux sessions is considered an agent
+- agents store their status and logs in a standard location (default: `$MNGR_HOST_DIR/agents/<agent_id>/`)
 - all hosts are accessed via SSH--if you can SSH into it, it can be a host
-- ...[and more](libs/mng/docs/conventions.md)
+- ...[and more](libs/mngr/docs/conventions.md)
 
-See [`architecture.md`](libs/mng/docs/architecture.md) for an in-depth overview of the `mng` architecture and design principles.
+See [`architecture.md`](libs/mngr/docs/architecture.md) for an in-depth overview of the `mngr` architecture and design principles.
 
 ## Security
 
@@ -255,7 +255,7 @@ See [`architecture.md`](libs/mng/docs/architecture.md) for an in-depth overview 
 2. Follow the "principle of least privilege": only expose the minimal set of API tokens and secrets for each agent, and restrict their access (eg to the network) as much as possible.
 3. Avoid storing sensitive data in agents' filesystems (or encrypt it if necessary).
 
-See our [security model](libs/mng/docs/security_model.md) for more details.
+See our [security model](libs/mngr/docs/security_model.md) for more details.
 
 <!--
 ## Learning more
@@ -265,16 +265,16 @@ TODO: put a ton of examples and references here!
 
 ## Sub-projects
 
-This is a monorepo that contains the code for `mng` here:
+This is a monorepo that contains the code for `mngr` here:
 
-- [libs/mng/](libs/mng/README.md)
+- [libs/mngr/](libs/mngr/README.md)
 
 As well as the code for some plugins that we maintain, including:
 
-- [libs/mng_modal/](libs/mng_modal/README.md)
-- [libs/mng_claude/](libs/mng_claude/README.md)
-- [libs/mng_pair/](libs/mng_pair/README.md)
-- [libs/mng_opencode/](libs/mng_opencode/README.md)
+- [libs/mngr_modal/](libs/mngr_modal/README.md)
+- [libs/mngr_claude/](libs/mngr_claude/README.md)
+- [libs/mngr_pair/](libs/mngr_pair/README.md)
+- [libs/mngr_opencode/](libs/mngr_opencode/README.md)
 
 The repo also contains code for some dependencies and related projects, including:
 

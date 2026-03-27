@@ -13,11 +13,11 @@ The backlog file contains entries in this format:
 
 ```
 do the whole "schema.json" thing for the events
-make claude skill for mng
+make claude skill for mngr
     oooh, what happens to those in the namespace
     esp useful for modal
     could power a slack bot
-create a mng_pi_mind plugin
+create a mngr_pi_mind plugin
 ```
 
 - Each **unindented** line is a distinct task/idea.

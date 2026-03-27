@@ -36,11 +36,11 @@ The goal of this project is to package Minds as a standalone desktop app that a 
 |                                                  |
 |  FastAPI forwarding server                       |
 |  Auth (one-time code, signed cookies)            |
-|  Agent discovery (mng list, mng events)          |
+|  Agent discovery (mngr list, mngr events)          |
 |  HTTP/WebSocket proxying to agents               |
 +--------------------------------------------------+
         |
-        | subprocess: mng list, mng events, mng create, git clone, ...
+        | subprocess: mngr list, mngr events, mngr create, git clone, ...
         v
 +--------------------------------------------------+
 |  Bundled Binaries                                |
@@ -83,7 +83,7 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 
 **Python packages are not bundled.** The app ships a `pyproject.toml` + lockfile that declares `imbue-minds` as a dependency. On first launch, `uv sync` installs Python and all packages from PyPI. This means:
 
-- `imbue-minds` must be published to PyPI (it transitively depends on `mng`, which is already published)
+- `imbue-minds` must be published to PyPI (it transitively depends on `mngr`, which is already published)
 - The lockfile pins exact versions, so every user gets the same environment
 - Updating the Electron app (via ToDesktop) delivers a new lockfile, and the next `uv sync` picks up the new versions
 
@@ -260,9 +260,9 @@ Add a `--log-format` option to the `forward` command:
 )
 ```
 
-When `jsonl` is selected, `setup_logging()` is called with a format parameter that switches the stderr sink to emit structured JSONL lines instead of human-readable text. This follows the same pattern as mng's file-based JSONL logging (via `make_jsonl_file_sink` from `imbue_common`), but directed to stderr instead of a file.
+When `jsonl` is selected, `setup_logging()` is called with a format parameter that switches the stderr sink to emit structured JSONL lines instead of human-readable text. This follows the same pattern as mngr's file-based JSONL logging (via `make_jsonl_file_sink` from `imbue_common`), but directed to stderr instead of a file.
 
-The JSONL events use the same envelope structure as mng's file logs: `timestamp`, `type`, `level`, `message`, plus any `extra` context. This allows Electron to parse specific event types from the stream.
+The JSONL events use the same envelope structure as mngr's file logs: `timestamp`, `type`, `level`, `message`, plus any `extra` context. This allows Electron to parse specific event types from the stream.
 
 ### forwarding_server/runner.py -- Electron Mode
 
@@ -314,7 +314,7 @@ This is a small addition -- the JSONL serialization logic already exists in `imb
 
 The venv at `~/.minds/.venv/` is managed entirely by `uv sync`. It should not be manually modified. If corrupted, deleting it and relaunching the app will recreate it.
 
-Log rotation should follow the same conventions as mng's file logging. The log file is the primary debugging tool when the app misbehaves -- it is accessible via the app menu ("View Logs") and shown in the error screen.
+Log rotation should follow the same conventions as mngr's file logging. The log file is the primary debugging tool when the app misbehaves -- it is accessible via the app menu ("View Logs") and shown in the error screen.
 
 ## Port Selection
 
@@ -421,7 +421,7 @@ dependencies = [
 ]
 ```
 
-This is intentionally minimal. `imbue-minds` transitively pulls in `mng`, `mng-claude-mind`, and all other Python dependencies. The lockfile (`uv.lock`) pins everything.
+This is intentionally minimal. `imbue-minds` transitively pulls in `mngr`, `mngr-claude-mind`, and all other Python dependencies. The lockfile (`uv.lock`) pins everything.
 
 When cutting a new release, the developer updates the version pin (e.g., `imbue-minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
 
