@@ -153,9 +153,13 @@ for my $file (@ARGV) {
     $content =~ s/Build (?<!imbue-)mngr/Build imbue-mngr/g;
     # PyPI URL slugs
     $content =~ s|pypi/mngr/|pypi/imbue-mngr/|g;
-    # uv tool install/run (but not already imbue-mngr)
-    $content =~ s/uv tool install mngr$/uv tool install imbue-mngr/mg;
-    $content =~ s/uv tool run --from mngr /uv tool run --from imbue-mngr /g;
+    # uv tool commands (but not already imbue-mngr)
+    $content =~ s/uv tool install (?<!imbue-)mngr/uv tool install imbue-mngr/g;
+    $content =~ s/uv tool uninstall (?<!imbue-)mngr/uv tool uninstall imbue-mngr/g;
+    $content =~ s/uv tool upgrade (?<!imbue-)mngr/uv tool upgrade imbue-mngr/g;
+    $content =~ s/uv tool run --from (?<!imbue-)mngr /uv tool run --from imbue-mngr /g;
+    # uvx mngr -> uvx --from imbue-mngr mngr (the binary name stays mngr)
+    $content =~ s/uvx (?<!imbue-)mngr\b/uvx --from imbue-mngr mngr/g;
     # Fix false positives: dir_name must stay as "mngr", not "imbue-mngr"
     $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
     # CLI binary entry point must stay "mngr", not "imbue-mngr"
@@ -424,15 +428,20 @@ perl "$RENAME_PL" "${content_files[@]+"${content_files[@]}"}"
 
 step "8/9" "Adding imbue- prefix to PyPI package names..."
 
-# Collect all files that may need imbue- prefix fixes
+# Run on all tracked non-binary files (same set as step 7, minus exclusions)
 mapfile -t pypi_files < <(
-    for f in libs/*/pyproject.toml apps/*/pyproject.toml; do [ -f "$f" ] && echo "$f"; done
-    for f in scripts/release.py scripts/verify_publish.py scripts/utils.py scripts/install.sh; do [ -f "$f" ] && echo "$f"; done
-    grep -rl 'distribution("mngr' libs/ apps/ 2>/dev/null || true
-    for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py README.md libs/mngr/README.md .github/workflows/publish.yml; do [ -f "$f" ] && echo "$f"; done
+    git ls-files -z | while IFS= read -r -d '' file; do
+        case "$file" in
+            scripts/migrate_*|test_meta_ratchets.py) continue ;;
+        esac
+        [ -L "$file" ] && continue
+        mime=$(file --brief --mime-encoding "$file" 2>/dev/null || echo "unknown")
+        case "$mime" in
+            binary|unknown) continue ;;
+        esac
+        echo "$file"
+    done
 )
-# Deduplicate
-mapfile -t pypi_files < <(printf '%s\n' "${pypi_files[@]}" | sort -u)
 perl "$PYPI_PL" "${pypi_files[@]+"${pypi_files[@]}"}"
 
 # ── 9. Regenerate uv.lock ────────────────────────────────────────
