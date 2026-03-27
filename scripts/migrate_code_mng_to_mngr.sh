@@ -99,6 +99,7 @@ cat > "$RENAME_PL" << 'PERL_SCRIPT'
 use strict;
 use warnings;
 my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
+my $count = 0;
 for my $file (@ARGV) {
     open my $fh, '<', $file or next;
     my $content = do { local $/; <$fh> };
@@ -108,14 +109,17 @@ for my $file (@ARGV) {
     $content =~ s/Mng(?!r)/Mngr/g;
     $content =~ s/mng(?!r)/mngr/g;
     if ($content ne $orig) {
-        if ($dry_run) {
-            print "  \033[0;36m[dry-run] would modify: $file\033[0m\n";
-        } else {
+        $count++;
+        unless ($dry_run) {
             open my $out, '>', $file or next;
             print $out $content;
             close $out;
         }
     }
+}
+if ($count > 0) {
+    my $prefix = $dry_run ? "  \033[0;36m[dry-run] would modify" : "  \033[0;32mOK\033[0m Modified";
+    print "${prefix} $count files\033[0m\n";
 }
 PERL_SCRIPT
 
@@ -129,6 +133,7 @@ cat > "$PYPI_PL" << 'PERL_SCRIPT'
 use strict;
 use warnings;
 my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
+my $count = 0;
 for my $file (@ARGV) {
     open my $fh, '<', $file or next;
     my $content = do { local $/; <$fh> };
@@ -157,14 +162,17 @@ for my $file (@ARGV) {
     # CLI binary entry point must stay "mngr", not "imbue-mngr"
     $content =~ s/^imbue-mngr = "imbue\.mngr\./mngr = "imbue.mngr./mg;
     if ($content ne $orig) {
-        if ($dry_run) {
-            print "  \033[0;36m[dry-run] would modify: $file\033[0m\n";
-        } else {
+        $count++;
+        unless ($dry_run) {
             open my $out, '>', $file or next;
             print $out $content;
             close $out;
         }
     }
+}
+if ($count > 0) {
+    my $prefix = $dry_run ? "  \033[0;36m[dry-run] would modify" : "  \033[0;32mOK\033[0m Modified";
+    print "${prefix} $count files (imbue- prefix)\033[0m\n";
 }
 PERL_SCRIPT
 
@@ -186,19 +194,20 @@ for old_root in libs/mng/imbue/mng libs/mng_*/imbue/mng_*; do
     new_root="${old_root//mng_/mngr_}"
     new_root="${new_root//\/mng\//\/mngr\/}"
     new_root="${new_root//libs\/mng\//libs\/mngr\/}"
-    find "$old_root" -type f | while IFS= read -r f; do
-        rel="${f#"$old_root"/}"
-        newf="$new_root/$rel"
-        if [ "$DRY_RUN" = true ]; then
-            dry "would move: $f -> $newf"
-        else
+    count=$(find "$old_root" -type f | wc -l | tr -d ' ')
+    if [ "$DRY_RUN" = true ]; then
+        dry "would move $count files from $old_root -> $new_root"
+    else
+        find "$old_root" -type f | while IFS= read -r f; do
+            rel="${f#"$old_root"/}"
+            newf="$new_root/$rel"
             mkdir -p "$(dirname "$newf")"
             mv "$f" "$newf"
             git add "$newf" 2>/dev/null || true
             git rm --cached "$f" 2>/dev/null || true
-        fi
-        moved=$((moved + 1))
-    done
+        done
+    fi
+    moved=$((moved + count))
 done
 # Clean up empty old directories
 if [ "$DRY_RUN" = false ]; then
@@ -381,58 +390,37 @@ done
 
 step "7/9" "Replacing mng -> mngr in file contents..."
 
-modified=0
-while IFS= read -r -d '' file; do
-    case "$file" in
-        scripts/migrate_*|test_meta_ratchets.py) continue ;;
-    esac
-    [ -L "$file" ] && continue
-    mime=$(file --brief --mime-encoding "$file" 2>/dev/null || echo "unknown")
-    case "$mime" in
-        binary|unknown) continue ;;
-    esac
-    perl "$RENAME_PL" "$file" && modified=$((modified + 1))
-done < <(git ls-files -z)
-
-if [ "$DRY_RUN" = false ]; then
-    ok "Processed $modified files"
-fi
+# Collect eligible files, then pass them all to perl in one call
+# so it can count and summarize.
+mapfile -t content_files < <(
+    git ls-files -z | while IFS= read -r -d '' file; do
+        case "$file" in
+            scripts/migrate_*|test_meta_ratchets.py) continue ;;
+        esac
+        [ -L "$file" ] && continue
+        mime=$(file --brief --mime-encoding "$file" 2>/dev/null || echo "unknown")
+        case "$mime" in
+            binary|unknown) continue ;;
+        esac
+        echo "$file"
+    done
+)
+perl "$RENAME_PL" "${content_files[@]+"${content_files[@]}"}"
 
 # ── 8. Add imbue- prefix to all PyPI package names ────────────────
 
 step "8/9" "Adding imbue- prefix to PyPI package names..."
 
-# pyproject.toml files
-for f in libs/*/pyproject.toml apps/*/pyproject.toml; do
-    [ -f "$f" ] || continue
-    perl "$PYPI_PL" "$f"
-done
-
-# Release scripts
-for f in scripts/release.py scripts/verify_publish.py scripts/utils.py; do
-    [ -f "$f" ] || continue
-    perl "$PYPI_PL" "$f"
-done
-
-# install.sh
-[ -f "scripts/install.sh" ] && perl "$PYPI_PL" scripts/install.sh
-
-# Python source files with importlib.metadata or package name checks
-for f in $(grep -rl 'distribution("mngr' libs/ apps/ 2>/dev/null || true); do
-    perl "$PYPI_PL" "$f"
-done
-for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py; do
-    [ -f "$f" ] && perl "$PYPI_PL" "$f"
-done
-
-# README docs
-for f in README.md libs/mngr/README.md; do
-    [ -f "$f" ] && perl "$PYPI_PL" "$f"
-done
-
-if [ "$DRY_RUN" = false ]; then
-    ok "PyPI names updated"
-fi
+# Collect all files that may need imbue- prefix fixes
+mapfile -t pypi_files < <(
+    for f in libs/*/pyproject.toml apps/*/pyproject.toml; do [ -f "$f" ] && echo "$f"; done
+    for f in scripts/release.py scripts/verify_publish.py scripts/utils.py scripts/install.sh; do [ -f "$f" ] && echo "$f"; done
+    grep -rl 'distribution("mngr' libs/ apps/ 2>/dev/null || true
+    for f in libs/mngr_recursive/imbue/mngr_recursive/provisioning.py libs/mngr/imbue/mngr/uv_tool.py README.md libs/mngr/README.md; do [ -f "$f" ] && echo "$f"; done
+)
+# Deduplicate
+mapfile -t pypi_files < <(printf '%s\n' "${pypi_files[@]}" | sort -u)
+perl "$PYPI_PL" "${pypi_files[@]+"${pypi_files[@]}"}"
 
 # ── 9. Regenerate uv.lock ────────────────────────────────────────
 
