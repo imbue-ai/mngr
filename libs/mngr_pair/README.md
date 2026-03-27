@@ -1,4 +1,4 @@
-# mngr-pair
+# imbue-mngr-pair
 
 Continuous file synchronization between an agent and your local directory.
 

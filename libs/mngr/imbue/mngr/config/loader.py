@@ -343,7 +343,7 @@ def _parse_providers(
                     f" The plugin package that provides the"
                     f" '{backend}' backend may not be installed. If you installed mngr"
                     f" as a tool, try reinstalling with the plugin package"
-                    f" (e.g. --with 'mngr-{backend}')."
+                    f" (e.g. --with 'imbue-mngr-{backend}')."
                 )
             if strict:
                 raise ConfigParseError(msg) from e

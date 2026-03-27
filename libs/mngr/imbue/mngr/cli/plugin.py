@@ -231,8 +231,8 @@ def _parse_fields(fields_str: str | None) -> tuple[str, ...]:
 def _parse_pypi_package_name(specifier: str) -> str | None:
     """Extract the canonical package name from a PyPI requirement string.
 
-    Parses specifiers like 'mngr-opencode>=1.0' and returns just the name
-    ('mngr-opencode'). Returns None if the specifier is not a valid PyPI
+    Parses specifiers like 'imbue-mngr-opencode>=1.0' and returns just the name
+    ('imbue-mngr-opencode'). Returns None if the specifier is not a valid PyPI
     requirement.
     """
     try:
@@ -423,7 +423,7 @@ def plugin_remove(ctx: click.Context, **kwargs: Any) -> None:
 class _PypiSource(FrozenModel):
     """Plugin source: a PyPI package name (possibly with version constraint)."""
 
-    name: str = Field(description="PyPI package specifier (e.g. 'mngr-opencode>=1.0')")
+    name: str = Field(description="PyPI package specifier (e.g. 'imbue-mngr-opencode>=1.0')")
 
 
 class _PathSource(FrozenModel):
@@ -764,10 +764,10 @@ Plugins provide agent types, provider backends, CLI commands, and lifecycle hook
         ("List only active plugins", "mngr plugin list --active"),
         ("List plugins as JSON", "mngr plugin list --format json"),
         ("Show specific fields", "mngr plugin list --fields name,enabled"),
-        ("Install a plugin from PyPI", "mngr plugin add mngr-pair"),
+        ("Install a plugin from PyPI", "mngr plugin add imbue-mngr-pair"),
         ("Install a local plugin", "mngr plugin add --path ./my-plugin"),
         ("Install multiple plugins at once", "mngr plugin add pkg-a --path ./local-b --git https://example.com/c.git"),
-        ("Remove a plugin", "mngr plugin remove mngr-pair"),
+        ("Remove a plugin", "mngr plugin remove imbue-mngr-pair"),
         ("Enable a plugin", "mngr plugin enable modal"),
         ("Disable a plugin", "mngr plugin disable modal --scope user"),
     ),
@@ -806,13 +806,13 @@ CommandHelpMetadata(
     one_line_description="Install a plugin package",
     synopsis="mngr plugin add [NAME...] [OPTIONS]",
     description="""All source types are repeatable and can be freely mixed in one command.
-NAME is a PyPI package specifier (e.g., 'mngr-pair' or 'mngr-pair>=1.0').
+NAME is a PyPI package specifier (e.g., 'imbue-mngr-pair' or 'imbue-mngr-pair>=1.0').
 --path installs from a local directory in editable mode.
 --git installs from a git URL.
 All plugins are installed in a single operation for speed.""",
     examples=(
-        ("Install from PyPI", "mngr plugin add mngr-pair"),
-        ("Install with version constraint", "mngr plugin add mngr-pair>=1.0"),
+        ("Install from PyPI", "mngr plugin add imbue-mngr-pair"),
+        ("Install with version constraint", "mngr plugin add imbue-mngr-pair>=1.0"),
         ("Install from a local path", "mngr plugin add --path ./my-plugin"),
         ("Install multiple local plugins", "mngr plugin add --path ./plugin-a --path ./plugin-b"),
         ("Install from a git URL", "mngr plugin add --git https://github.com/user/mngr-plugin.git"),
@@ -833,10 +833,10 @@ CommandHelpMetadata(
 For local paths, the package name is read from pyproject.toml.
 All plugins are removed in a single operation.""",
     examples=(
-        ("Remove by name", "mngr plugin remove mngr-pair"),
-        ("Remove multiple by name", "mngr plugin remove mngr-pair mngr-opencode"),
+        ("Remove by name", "mngr plugin remove imbue-mngr-pair"),
+        ("Remove multiple by name", "mngr plugin remove imbue-mngr-pair imbue-mngr-opencode"),
         ("Remove by local path", "mngr plugin remove --path ./my-plugin"),
-        ("Mix names and paths", "mngr plugin remove mngr-pair --path ./my-plugin"),
+        ("Mix names and paths", "mngr plugin remove imbue-mngr-pair --path ./my-plugin"),
     ),
     see_also=(
         ("plugin add", "Install a plugin package"),

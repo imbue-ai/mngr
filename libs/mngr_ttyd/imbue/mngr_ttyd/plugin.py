@@ -108,13 +108,13 @@ def _ensure_ttyd_installed(host: OnlineHostInterface) -> None:
 
     Downloads the ttyd binary from GitHub releases for the host's architecture.
     """
-    check_result = host.execute_command("command -v ttyd >/dev/null 2>&1", timeout_seconds=10.0)
+    check_result = host.execute_idempotent_command("command -v ttyd >/dev/null 2>&1", timeout_seconds=10.0)
     if check_result.success:
         logger.debug("ttyd is already installed on the host")
         return
 
     logger.info("ttyd is not installed on the host, installing...")
-    install_result = host.execute_command(
+    install_result = host.execute_idempotent_command(
         TTYD_INSTALL_COMMAND,
         timeout_seconds=120.0,
     )
@@ -141,7 +141,7 @@ def on_after_provisioning(
     agent_dir = host.host_dir / "agents" / str(agent.id)
     ttyd_dir = agent_dir / "commands" / "ttyd"
 
-    host.execute_command(f"mkdir -p {shlex.quote(str(ttyd_dir))}", timeout_seconds=10.0)
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(ttyd_dir))}", timeout_seconds=10.0)
 
     script_content = _load_ttyd_resource("ttyd_agent.sh")
     script_path = ttyd_dir / "agent.sh"

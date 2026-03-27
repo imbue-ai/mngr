@@ -38,7 +38,7 @@ def test_create_host_creates_sandbox_with_ssh(real_modal_provider: ModalProvider
         assert host.connector.connector_cls_name == "SSHConnector"
 
         # Verify we can execute commands via SSH
-        result = host.execute_command("echo 'hello from modal'")
+        result = host.execute_idempotent_command("echo 'hello from modal'")
         assert result.success
         assert "hello from modal" in result.stdout
 
@@ -70,12 +70,12 @@ def test_persistent_host_creates_shutdown_script(
         assert host.id is not None
 
         # Check that the shutdown script exists on the host
-        result = host.execute_command("test -f /mngr/commands/shutdown.sh && echo 'exists'")
+        result = host.execute_idempotent_command("test -f /mngr/commands/shutdown.sh && echo 'exists'")
         assert result.success
         assert "exists" in result.stdout
 
         # Verify the script content contains expected values
-        result = host.execute_command("cat /mngr/commands/shutdown.sh")
+        result = host.execute_idempotent_command("cat /mngr/commands/shutdown.sh")
         assert result.success
         script_content = result.stdout
 
@@ -86,7 +86,7 @@ def test_persistent_host_creates_shutdown_script(
         assert str(host.id) in script_content
 
         # Verify the script is executable
-        result = host.execute_command("test -x /mngr/commands/shutdown.sh && echo 'executable'")
+        result = host.execute_idempotent_command("test -x /mngr/commands/shutdown.sh && echo 'executable'")
         assert result.success
         assert "executable" in result.stdout
 
@@ -324,7 +324,7 @@ def test_start_host_restores_from_snapshot(real_modal_provider: ModalProviderIns
         host_id = host.id
 
         # Write a marker file to verify restoration
-        result = host.execute_command("echo 'snapshot-marker' > /tmp/marker.txt")
+        result = host.execute_idempotent_command("echo 'snapshot-marker' > /tmp/marker.txt")
         assert result.success
 
         # Create a snapshot
@@ -345,7 +345,7 @@ def test_start_host_restores_from_snapshot(real_modal_provider: ModalProviderIns
         assert restored_host.id == host_id
 
         # Verify the marker file exists (proving we restored from snapshot)
-        result = restored_host.execute_command("cat /tmp/marker.txt")
+        result = restored_host.execute_idempotent_command("cat /tmp/marker.txt")
         assert result.success
         assert "snapshot-marker" in result.stdout
 
@@ -408,7 +408,7 @@ def test_start_host_on_stopped_host_uses_initial_snapshot(initial_snapshot_provi
         assert restarted_host.id == host_id
 
         # Verify we can execute commands on the restarted host
-        result = restarted_host.execute_command("echo 'restarted successfully'")
+        result = restarted_host.execute_idempotent_command("echo 'restarted successfully'")
         assert result.success
         assert "restarted successfully" in result.stdout
 
@@ -478,7 +478,7 @@ def test_restart_after_hard_kill_with_initial_snapshot(initial_snapshot_provider
         assert restarted_host.id == host_id
 
         # Verify the host is functional
-        result = restarted_host.execute_command("echo 'restarted after hard kill'")
+        result = restarted_host.execute_idempotent_command("echo 'restarted after hard kill'")
         assert result.success
         assert "restarted after hard kill" in result.stdout
 
@@ -513,7 +513,7 @@ def test_restart_after_graceful_stop_without_initial_snapshot(
         assert len(snapshots) == 0
 
         # Write a marker file to verify snapshot state
-        result = host.execute_command("echo 'before-stop' > /tmp/marker.txt")
+        result = host.execute_idempotent_command("echo 'before-stop' > /tmp/marker.txt")
         assert result.success
 
         # Graceful stop - should create a snapshot
@@ -529,7 +529,7 @@ def test_restart_after_graceful_stop_without_initial_snapshot(
         assert restarted_host.id == host_id
 
         # Verify the marker file exists (state was preserved)
-        result = restarted_host.execute_command("cat /tmp/marker.txt")
+        result = restarted_host.execute_idempotent_command("cat /tmp/marker.txt")
         assert result.success
         assert "before-stop" in result.stdout
 
@@ -621,7 +621,7 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
         )
 
         # curl to a public IP should fail because it's outside the allowlist
-        result = host.execute_command(
+        result = host.execute_idempotent_command(
             "curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://example.com || echo 'blocked'"
         )
         assert result.success
@@ -648,7 +648,7 @@ def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalPr
         )
 
         # curl to a public IP should succeed because 0.0.0.0/0 allows everything
-        result = host.execute_command("curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com")
+        result = host.execute_idempotent_command("curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com")
         assert result.success
         assert "200" in result.stdout
 
@@ -677,7 +677,7 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
         )
 
         # curl to a public IP should fail because all outbound traffic is blocked
-        result = host.execute_command(
+        result = host.execute_idempotent_command(
             "curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://example.com || echo 'blocked'"
         )
         assert result.success
@@ -702,17 +702,17 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         host = real_modal_provider.create_host(HostName("test-host-vol"))
 
         # Verify /mngr is a symlink to /host_volume
-        result = host.execute_command("readlink /mngr")
+        result = host.execute_idempotent_command("readlink /mngr")
         assert result.success
         assert "/host_volume" in result.stdout.strip()
 
         # Verify data written to /mngr lands on the volume
-        result = host.execute_command("echo 'test data' > /mngr/test_file.txt && cat /host_volume/test_file.txt")
+        result = host.execute_idempotent_command("echo 'test data' > /mngr/test_file.txt && cat /host_volume/test_file.txt")
         assert result.success
         assert "test data" in result.stdout
 
         # Verify the volume sync script is running
-        result = host.execute_command("test -f /mngr/commands/volume_sync.sh && echo 'exists'")
+        result = host.execute_idempotent_command("test -f /mngr/commands/volume_sync.sh && echo 'exists'")
         assert result.success
         assert "exists" in result.stdout
 
@@ -738,7 +738,7 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
         host = real_modal_provider.create_host(HostName("test-vol-read"))
 
         # Write a known file and explicitly sync the volume
-        host.execute_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
+        host.execute_idempotent_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
 
         host_volume = real_modal_provider.get_volume_for_host(host)
         assert host_volume is not None

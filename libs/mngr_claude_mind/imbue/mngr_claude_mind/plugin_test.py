@@ -194,11 +194,15 @@ def test_observer_command_is_parseable_as_named_command() -> None:
 
 
 def _make_host_stub() -> Any:
-    """Create a host stub that supports execute_command for settings loading."""
-    # execute_command is called by load_from_host to check for minds.toml
+    """Create a host stub that supports execute_idempotent_command for settings loading."""
+
+    def _result(cmd: str, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(success=False, stdout="", stderr="")
+
     stub = SimpleNamespace(
         host_dir=Path("/home/user/.mngr"),
-        execute_command=lambda cmd, **kwargs: SimpleNamespace(success=False, stdout="", stderr=""),
+        execute_idempotent_command=_result,
+        execute_stateful_command=_result,
     )
     return stub
 

@@ -81,7 +81,7 @@ def exec_command_on_agent(
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
 
     logger.debug("Executing command on agent {}: {}", agent.name, command)
-    result = host.execute_command(
+    result = host.execute_stateful_command(
         command,
         user=user,
         cwd=effective_cwd,
@@ -193,7 +193,7 @@ def _execute_on_single_agent(
             )
 
         with log_span("Executing command on agent {}", match.agent_name):
-            cmd_result = online_host.execute_command(
+            cmd_result = online_host.execute_stateful_command(
                 command,
                 user=user,
                 cwd=effective_cwd,

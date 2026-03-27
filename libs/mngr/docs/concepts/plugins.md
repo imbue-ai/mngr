@@ -8,10 +8,10 @@ Only install plugins from sources you trust. Built-in plugins are maintained as 
 
 ```bash
 mngr plugin list                           # Show installed plugins
-mngr plugin add mngr-opencode              # Install from PyPI
+mngr plugin add imbue-mngr-opencode              # Install from PyPI
 mngr plugin add --path ./my-plugin         # Install from local path
 mngr plugin add --git https://github.com/user/repo.git  # Install from git
-mngr plugin remove mngr-opencode           # Uninstall by name
+mngr plugin remove imbue-mngr-opencode           # Uninstall by name
 mngr plugin remove --path ./my-plugin      # Uninstall by local path
 ```
 

@@ -32,7 +32,7 @@ def load_from_host(host: OnlineHostInterface, work_dir: Path, settings_class: ty
     settings_path = work_dir / SETTINGS_FILENAME
     quoted_path = shlex.quote(str(settings_path))
 
-    check = host.execute_command(f"test -f {quoted_path}", timeout_seconds=15.0)
+    check = host.execute_idempotent_command(f"test -f {quoted_path}", timeout_seconds=15.0)
     if not check.success:
         logger.debug("No settings file at {}, using defaults", settings_path)
         return settings_class()

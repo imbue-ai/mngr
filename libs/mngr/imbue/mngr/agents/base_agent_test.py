@@ -116,7 +116,7 @@ def _create_running_agent(
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
 
     # Create a tmux session and run the expected command
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'sleep {sleep_duration}'",
         timeout_seconds=5.0,
     )
@@ -173,7 +173,7 @@ def test_lifecycle_state_replaced_when_different_process_exists(
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
 
     # Create a tmux session with a different command (cat waits for input indefinitely)
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'cat'",
         timeout_seconds=5.0,
     )
@@ -200,7 +200,7 @@ def test_lifecycle_state_done_when_no_process_in_pane(
 
     # Create a tmux session, then manually stop the process inside it
     # First create it with a long-running command
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}'",
         timeout_seconds=5.0,
     )
@@ -226,7 +226,7 @@ def test_lifecycle_state_waiting_when_no_active_file(
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
 
     # Create a tmux session and run the expected command
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
@@ -253,7 +253,7 @@ def test_lifecycle_state_running_when_active_file_created(
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
 
     # Create a tmux session and run the expected command
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
@@ -419,7 +419,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
     wait_channel = f"mngr-submit-{session_name}"
 
     # Create a tmux session
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'bash'",
         timeout_seconds=5.0,
     )
@@ -427,7 +427,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
     try:
         # Signal the channel from a background process after a short delay
         # This simulates what the UserPromptSubmit hook does
-        test_agent.host.execute_command(
+        test_agent.host.execute_idempotent_command(
             f"( sleep 0.1 && tmux wait-for -S '{wait_channel}' ) &",
             timeout_seconds=1.0,
         )
@@ -436,7 +436,7 @@ def test_send_enter_and_wait_for_signal_returns_true_when_signal_received(
         result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
         assert result is True
     finally:
-        test_agent.host.execute_command(
+        test_agent.host.execute_idempotent_command(
             f"tmux kill-session -t '{session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
@@ -455,7 +455,7 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
     wait_channel = f"mngr-submit-never-signaled-{session_name}"
 
     # Create a tmux session
-    test_agent.host.execute_command(
+    test_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'bash'",
         timeout_seconds=5.0,
     )
@@ -465,7 +465,7 @@ def test_send_enter_and_wait_for_signal_returns_false_on_timeout(
         result = test_agent._send_enter_and_wait_for_signal(tmux_target, wait_channel)
         assert result is False
     finally:
-        test_agent.host.execute_command(
+        test_agent.host.execute_idempotent_command(
             f"tmux kill-session -t '{session_name}' 2>/dev/null",
             timeout_seconds=5.0,
         )
@@ -998,11 +998,17 @@ class _StubHost:
         self.executed_commands: list[str] = []
         self.written_files: list[tuple[Path, str]] = []
 
-    def execute_command(self, command: str, **kwargs: object) -> CommandResult:
+    def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
         if self._command_results:
             return self._command_results.pop(0)
         return self._default_result
+
+    def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
+        return self._execute_command(command, **kwargs)
+
+    def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
+        return self._execute_command(command, **kwargs)
 
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))

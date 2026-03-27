@@ -836,7 +836,7 @@ def _get_source_remote_url(source_location: HostLocation) -> str | None:
     GitHub PAT in an HTTPS URL). This is intentional -- stripping credentials
     would break gh CLI auth for repos that rely on PAT-based HTTPS remotes.
     """
-    result = source_location.host.execute_command("git remote get-url origin", cwd=source_location.path)
+    result = source_location.host.execute_idempotent_command("git remote get-url origin", cwd=source_location.path)
     if result.success and result.stdout.strip():
         return result.stdout.strip()
     return None
@@ -1487,7 +1487,7 @@ def _apply_host_labels(host: OnlineHostInterface, label_strings: tuple[str, ...]
 
 def _ensure_clean_work_dir(location: HostLocation) -> None:
     """Verify the source work_dir has no uncommitted changes."""
-    result = location.host.execute_command("git status --porcelain", cwd=location.path)
+    result = location.host.execute_idempotent_command("git status --porcelain", cwd=location.path)
     if not result.success:
         # Not a git repo or git command failed, skip the check
         logger.debug("Failed to check git status: {}", result.stderr)

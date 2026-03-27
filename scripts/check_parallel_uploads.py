@@ -178,7 +178,7 @@ def main() -> None:
         print("\n--- Cleanup ---")
         for i in list(range(NUM_FILES)) + [999]:
             path = Path(f"/tmp/parallel_upload_test_{i}.bin")
-            host.execute_command(f"rm -f {path}")
+            host.execute_idempotent_command(f"rm -f {path}")
         print("Done.")
 
 

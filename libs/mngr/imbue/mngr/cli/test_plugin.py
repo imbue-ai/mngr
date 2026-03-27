@@ -387,7 +387,7 @@ _MNGR_OPENCODE_DIR = Path(__file__).resolve().parents[5] / "libs" / "mngr_openco
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_plugin_add_path_and_remove_lifecycle() -> None:
-    """Test ``mngr plugin add --path`` and ``mngr plugin remove`` using the real mngr-opencode plugin.
+    """Test ``mngr plugin add --path`` and ``mngr plugin remove`` using the real imbue-mngr-opencode plugin.
 
     This is an acceptance test that operates on the real ``uv tool`` installation.
     Plugin add/remove uses ``uv tool install --with`` under the hood, which always
@@ -418,7 +418,7 @@ def test_plugin_add_path_and_remove_lifecycle() -> None:
     # -- Install via mngr plugin add --path --
     add_result = run_mngr("plugin", "add", "--path", str(_MNGR_OPENCODE_DIR), "--format", "json")
     add_output = json.loads(add_result.stdout)
-    assert add_output["package"] == "mngr-opencode"
+    assert add_output["package"] == "imbue-mngr-opencode"
 
     try:
         # -- Verify it shows up --
@@ -427,11 +427,11 @@ def test_plugin_add_path_and_remove_lifecycle() -> None:
         assert "opencode" in plugin_names_after_add
     finally:
         # -- Always clean up: remove via mngr plugin remove --
-        remove_result = run_mngr("plugin", "remove", "mngr-opencode", "--format", "json")
+        remove_result = run_mngr("plugin", "remove", "imbue-mngr-opencode", "--format", "json")
 
     # -- Verify the remove succeeded --
     remove_output = json.loads(remove_result.stdout)
-    assert remove_output["package"] == "mngr-opencode"
+    assert remove_output["package"] == "imbue-mngr-opencode"
 
     list_after_remove = run_mngr("plugin", "list", "--format", "json")
     plugin_names_after_remove = [p["name"] for p in json.loads(list_after_remove.stdout)["plugins"]]

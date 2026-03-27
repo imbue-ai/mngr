@@ -1,4 +1,4 @@
-# mngr-claude
+# imbue-mngr-claude
 
 Claude agent type plugin for [mngr](../../README.md).
 

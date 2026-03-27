@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import click
 import pluggy
@@ -24,6 +25,7 @@ _DEFAULT_OPTS = MessageCliOptions(
     include=(),
     exclude=(),
     message_content=None,
+    message_file=None,
     on_error="continue",
     start=False,
     provider=(),
@@ -49,6 +51,7 @@ def test_message_cli_options_has_expected_fields() -> None:
         include=("name == 'test'",),
         exclude=(),
         message_content="Hello",
+        message_file=None,
         on_error="continue",
         start=False,
         provider=(),
@@ -67,6 +70,7 @@ def test_message_cli_options_has_expected_fields() -> None:
     assert opts.agent_list == ("agent3",)
     assert opts.all_agents is False
     assert opts.message_content == "Hello"
+    assert opts.message_file is None
 
 
 def test_get_message_content_returns_option_when_provided() -> None:
@@ -334,3 +338,65 @@ def test_message_all_jsonl_format_no_agents(
     )
     assert result.exit_code == 0
     assert result.output.strip() == ""
+
+
+# =============================================================================
+# Tests for --message-file
+# =============================================================================
+
+
+def test_message_file_reads_content_from_file(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+) -> None:
+    """Test that --message-file reads message content from a file and sends it."""
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("Hello from file")
+
+    result = cli_runner.invoke(
+        message,
+        ["--all", "--message-file", str(message_file)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "No agents found" in result.output
+
+
+def test_message_and_message_file_both_provided_raises_error(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+) -> None:
+    """Test that providing both --message and --message-file raises an error."""
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("Hello from file")
+
+    result = cli_runner.invoke(
+        message,
+        ["--all", "-m", "Hello from flag", "--message-file", str(message_file)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot provide both --message and --message-file" in result.output
+
+
+def test_message_file_nonexistent_file_raises_error(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    tmp_path: Path,
+) -> None:
+    """Test that --message-file with a nonexistent file raises an error."""
+    nonexistent_file = tmp_path / "does_not_exist.txt"
+
+    result = cli_runner.invoke(
+        message,
+        ["--all", "--message-file", str(nonexistent_file)],
+        obj=plugin_manager,
+    )
+
+    # click.Path(exists=True) validates the file exists before the command runs
+    assert result.exit_code != 0

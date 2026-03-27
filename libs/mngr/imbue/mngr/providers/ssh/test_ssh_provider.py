@@ -80,7 +80,7 @@ def test_ssh_provider_discover_hosts(ssh_provider: SSHProviderInstance) -> None:
 def test_ssh_provider_execute_command(ssh_provider: SSHProviderInstance) -> None:
     """Test executing a command on an SSH host."""
     host = ssh_provider.get_host(HostName("localhost"))
-    result = host.execute_command("echo hello")
+    result = host.execute_idempotent_command("echo hello")
     assert result.success
     assert "hello" in result.stdout
 

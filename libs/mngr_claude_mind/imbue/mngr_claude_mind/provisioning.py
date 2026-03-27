@@ -26,7 +26,8 @@ _CLAUDE_SETTINGS_JSON: Final[str] = (
                     "Bash(command:mngr *)",
                     "Bash(command:$MNGR_HOST_DIR/commands/*)",
                 ]
-            }
+            },
+            "fastMode": True
         },
         indent=2,
     )

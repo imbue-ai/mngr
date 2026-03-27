@@ -100,7 +100,7 @@ class StubHost:
         self._text_file_contents = text_file_contents or {}
         self._execute_mkdir = execute_mkdir
 
-    def execute_command(self, command: str, **kwargs: Any) -> StubCommandResult:
+    def _execute_command(self, command: str, **kwargs: Any) -> StubCommandResult:
         self.executed_commands.append(command)
         if self._execute_mkdir and "mkdir -p" in command:
             path = command.split("mkdir -p ")[1].strip("'\"")
@@ -112,6 +112,12 @@ class StubHost:
             path = command.split("cd ")[1].split(" &&")[0].strip("'\"")
             return StubCommandResult(stdout=path + "\n")
         return StubCommandResult()
+
+    def execute_idempotent_command(self, command: str, **kwargs: Any) -> StubCommandResult:
+        return self._execute_command(command, **kwargs)
+
+    def execute_stateful_command(self, command: str, **kwargs: Any) -> StubCommandResult:
+        return self._execute_command(command, **kwargs)
 
     def read_text_file(self, path: Path) -> str:
         for pattern, content in self._text_file_contents.items():

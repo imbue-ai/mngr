@@ -2658,11 +2658,11 @@ log "=== Shutdown script completed ==="
         script = _build_listing_collection_script(host_dir, prefix)
 
         with log_span("Collecting listing data via single SSH command", host_id=str(host.id)):
-            result = host.execute_command(script, timeout_seconds=30.0)
+            result = host.execute_idempotent_command(script, timeout_seconds=30.0)
 
         if not result.success:
             try:
-                test_result = host.execute_command("echo hello", timeout_seconds=30.0)
+                test_result = host.execute_idempotent_command("echo hello", timeout_seconds=30.0)
             except HostConnectionError as e:
                 self.on_connection_error(host.id)
                 logger.debug(

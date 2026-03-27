@@ -35,7 +35,7 @@ class _StubHost(FakeHost):
     command_results: dict[str, CommandResult] = {}
     env_vars: dict[str, str] = {}
 
-    def execute_command(
+    def _execute_command(
         self,
         command: str,
         user: str | None = None,
@@ -46,7 +46,7 @@ class _StubHost(FakeHost):
         for pattern, result in self.command_results.items():
             if pattern in command:
                 return result
-        return super().execute_command(command, user, cwd, env, timeout_seconds)
+        return super()._execute_command(command, user, cwd, env, timeout_seconds)
 
     def get_env_var(self, key: str) -> str | None:
         return self.env_vars.get(key)

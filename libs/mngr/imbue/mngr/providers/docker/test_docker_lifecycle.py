@@ -32,7 +32,7 @@ def docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInsta
 def test_create_host_creates_container_with_ssh(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-ssh"))
     assert isinstance(host, Host)
-    result = host.execute_command("echo hello")
+    result = host.execute_idempotent_command("echo hello")
     assert result.success
     assert "hello" in result.stdout
 
@@ -55,7 +55,7 @@ def test_create_host_with_custom_image(docker_provider: DockerProviderInstance) 
         image=ImageReference("python:3.11-slim"),
     )
     assert isinstance(host, Host)
-    result = host.execute_command("python3 --version")
+    result = host.execute_idempotent_command("python3 --version")
     assert result.success
     assert "Python" in result.stdout
 
@@ -68,7 +68,7 @@ def test_create_host_with_resource_limits(docker_provider: DockerProviderInstanc
         start_args=["--cpus=2", "--memory=2g"],
     )
     assert isinstance(host, Host)
-    result = host.execute_command("echo ok")
+    result = host.execute_idempotent_command("echo ok")
     assert result.success
 
 
@@ -98,12 +98,12 @@ def test_stop_host_with_snapshot(docker_provider: DockerProviderInstance) -> Non
 @pytest.mark.docker_sdk
 def test_start_host_restarts_stopped_container(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-restart"))
-    host.execute_command("touch /mngr/marker.txt")
+    host.execute_idempotent_command("touch /mngr/marker.txt")
     docker_provider.stop_host(host, create_snapshot=False)
 
     restarted = docker_provider.start_host(host.id)
     assert isinstance(restarted, Host)
-    result = restarted.execute_command("cat /mngr/marker.txt")
+    result = restarted.execute_idempotent_command("cat /mngr/marker.txt")
     assert result.success
 
 
@@ -111,11 +111,11 @@ def test_start_host_restarts_stopped_container(docker_provider: DockerProviderIn
 @pytest.mark.docker_sdk
 def test_start_host_filesystem_preserved_across_stop_start(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-fs-preserve"))
-    host.execute_command("echo 'test content' > /tmp/myfile.txt")
+    host.execute_idempotent_command("echo 'test content' > /tmp/myfile.txt")
     docker_provider.stop_host(host, create_snapshot=False)
 
     restarted = docker_provider.start_host(host.id)
-    result = restarted.execute_command("cat /tmp/myfile.txt")
+    result = restarted.execute_idempotent_command("cat /tmp/myfile.txt")
     assert result.success
     assert "test content" in result.stdout
 
@@ -255,7 +255,7 @@ def test_on_connection_error_clears_caches(docker_provider: DockerProviderInstan
 def test_ssh_service_running_after_create(docker_provider: DockerProviderInstance) -> None:
     """Verify that sshd is running inside the container after create_host."""
     host = docker_provider.create_host(HostName("test-sshd"))
-    result = host.execute_command("pgrep -x sshd")
+    result = host.execute_idempotent_command("pgrep -x sshd")
     assert result.success, f"sshd not running: {result.stderr}"
 
 
@@ -264,7 +264,7 @@ def test_ssh_service_running_after_create(docker_provider: DockerProviderInstanc
 def test_ssh_packages_installed_after_create(docker_provider: DockerProviderInstance) -> None:
     """Verify required packages are installed in the container after create_host."""
     host = docker_provider.create_host(HostName("test-pkgs"))
-    result = host.execute_command("dpkg -l openssh-server")
+    result = host.execute_idempotent_command("dpkg -l openssh-server")
     assert result.success, f"openssh-server not installed: {result.stderr}"
 
 
@@ -278,13 +278,13 @@ def test_ssh_packages_installed_after_create(docker_provider: DockerProviderInst
 def test_stop_with_snapshot_then_start_preserves_data(docker_provider: DockerProviderInstance) -> None:
     """Core snapshot workflow: write data, stop with snapshot, start, verify data."""
     host = docker_provider.create_host(HostName("test-snap-restore"))
-    host.execute_command("echo 'snapshot-payload-xyz' > /tmp/snapshot-data.txt")
+    host.execute_idempotent_command("echo 'snapshot-payload-xyz' > /tmp/snapshot-data.txt")
 
     docker_provider.stop_host(host, create_snapshot=True)
 
     restarted = docker_provider.start_host(host.id)
     assert isinstance(restarted, Host)
-    result = restarted.execute_command("cat /tmp/snapshot-data.txt")
+    result = restarted.execute_idempotent_command("cat /tmp/snapshot-data.txt")
     assert result.success
     assert "snapshot-payload-xyz" in result.stdout
 
@@ -310,7 +310,7 @@ def test_create_host_with_dockerfile(docker_provider: DockerProviderInstance, tm
         build_args=[f"--file={dockerfile}", str(tmp_path)],
     )
     assert isinstance(host, Host)
-    result = host.execute_command("cat /dockerfile-marker.txt")
+    result = host.execute_idempotent_command("cat /dockerfile-marker.txt")
     assert result.success
     assert "dockerfile-marker-content" in result.stdout
 
@@ -467,11 +467,11 @@ def test_multiple_hosts_isolated(
     host_a = docker_provider.create_host(HostName("test-iso-a"))
     host_b = docker_provider.create_host(HostName("test-iso-b"))
 
-    host_a.execute_command("echo 'from-a' > /tmp/identity.txt")
-    host_b.execute_command("echo 'from-b' > /tmp/identity.txt")
+    host_a.execute_idempotent_command("echo 'from-a' > /tmp/identity.txt")
+    host_b.execute_idempotent_command("echo 'from-b' > /tmp/identity.txt")
 
-    result_a = host_a.execute_command("cat /tmp/identity.txt")
-    result_b = host_b.execute_command("cat /tmp/identity.txt")
+    result_a = host_a.execute_idempotent_command("cat /tmp/identity.txt")
+    result_b = host_b.execute_idempotent_command("cat /tmp/identity.txt")
 
     assert "from-a" in result_a.stdout
     assert "from-b" in result_b.stdout

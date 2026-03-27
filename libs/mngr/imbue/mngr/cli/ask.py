@@ -261,7 +261,7 @@ def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
 
 def _create_work_dir_on_host(host: OnlineHostInterface) -> Path:
     """Create a temporary work directory on the host and return its path."""
-    result = host.execute_command("mktemp -d /tmp/mngr-ask-XXXXXXXXXX")
+    result = host.execute_stateful_command("mktemp -d /tmp/mngr-ask-XXXXXXXXXX")
     if not result.success:
         raise MngrError(f"Failed to create temp directory on host: {result.stderr}")
     return Path(result.stdout.strip())
@@ -270,7 +270,7 @@ def _create_work_dir_on_host(host: OnlineHostInterface) -> Path:
 def _remove_work_dir_on_host(host: OnlineHostInterface, work_path: Path) -> None:
     """Remove a work directory on the host, suppressing errors."""
     try:
-        host.execute_command(f"rm -rf '{work_path}'")
+        host.execute_idempotent_command(f"rm -rf '{work_path}'")
     except (OSError, BaseMngrError):
         logger.debug("Failed to remove ask work dir {}", work_path)
 
@@ -288,7 +288,7 @@ def _check_headless_claude_available() -> None:
             "The 'headless_claude' agent type is not available. "
             "The mngr_claude plugin may not be installed.\n"
             "Install it with:\n"
-            "  mngr plugin add mngr-claude"
+            "  mngr plugin add imbue-mngr-claude"
         )
 
 

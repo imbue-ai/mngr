@@ -260,7 +260,7 @@ def list_conversations_on_agent(
         f" {shlex.quote(str(messages_path))}"
     )
 
-    result = host.execute_command(
+    result = host.execute_idempotent_command(
         command,
         cwd=agent.work_dir,
     )

@@ -199,7 +199,7 @@ def detect_mngr_install_mode() -> MngrInstallMode:
 
 def resolve_mngr_install_mode(mode: MngrInstallMode) -> MngrInstallMode:
     """Resolve AUTO mode to a concrete install mode, or pass through others."""
-    return _shared_resolve_mngr_install_mode(mode, "mngr-schedule")
+    return _shared_resolve_mngr_install_mode(mode, "imbue-mngr-schedule")
 
 
 def _get_mngr_schedule_source_dir() -> Path:
