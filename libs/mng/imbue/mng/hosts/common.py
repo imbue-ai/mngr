@@ -138,11 +138,12 @@ def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, st
     return children_by_ppid, comm_by_pid
 
 
-@pure
-def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
-    """Get names of all descendant processes from ps output."""
-    children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
-
+def _collect_descendant_names(
+    root_pid: str,
+    children_by_ppid: dict[str, list[str]],
+    comm_by_pid: dict[str, str],
+) -> list[str]:
+    """Collect comm names of all descendant processes via BFS."""
     descendant_names: list[str] = []
     queue = list(children_by_ppid.get(root_pid, []))
     while queue:
@@ -150,15 +151,14 @@ def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
         if pid in comm_by_pid:
             descendant_names.append(comm_by_pid[pid])
         queue.extend(children_by_ppid.get(pid, []))
-
     return descendant_names
 
 
 @pure
-def get_pid_comm(pid: str, ps_output: str) -> str | None:
-    """Look up a process's comm (name) from ps output by PID."""
-    _children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
-    return comm_by_pid.get(pid)
+def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
+    """Get names of all descendant processes from ps output."""
+    children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
+    return _collect_descendant_names(root_pid, children_by_ppid, comm_by_pid)
 
 
 @pure
@@ -198,13 +198,7 @@ def determine_lifecycle_state(
         return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
 
     # Check descendant processes via ps (authoritative for modified titles)
-    descendant_names: list[str] = []
-    queue = list(children_by_ppid.get(pane_pid, []))
-    while queue:
-        pid = queue.pop(0)
-        if pid in comm_by_pid:
-            descendant_names.append(comm_by_pid[pid])
-        queue.extend(children_by_ppid.get(pid, []))
+    descendant_names = _collect_descendant_names(pane_pid, children_by_ppid, comm_by_pid)
 
     if expected_process_name in descendant_names:
         return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING

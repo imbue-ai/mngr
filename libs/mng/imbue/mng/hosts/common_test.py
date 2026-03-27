@@ -12,7 +12,6 @@ from imbue.mng.hosts.common import add_safe_directory_on_remote
 from imbue.mng.hosts.common import compute_idle_seconds
 from imbue.mng.hosts.common import determine_lifecycle_state
 from imbue.mng.hosts.common import get_descendant_process_names
-from imbue.mng.hosts.common import get_pid_comm
 from imbue.mng.hosts.common import resolve_expected_process_name
 from imbue.mng.hosts.common import timestamp_to_datetime
 from imbue.mng.interfaces.host import OnlineHostInterface
@@ -132,21 +131,6 @@ def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> 
     """WAITING when tmux reports version string but claude is running as descendant."""
     ps_output = "123 1 bash\n456 123 claude\n"
     assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.WAITING
-
-
-# =========================================================================
-# get_pid_comm tests
-# =========================================================================
-
-
-def test_get_pid_comm_returns_comm_for_known_pid() -> None:
-    ps_output = "100 1 init\n200 100 bash\n300 200 claude\n"
-    assert get_pid_comm("200", ps_output) == "bash"
-
-
-def test_get_pid_comm_returns_none_for_unknown_pid() -> None:
-    ps_output = "100 1 init\n200 100 bash\n"
-    assert get_pid_comm("999", ps_output) is None
 
 
 # =========================================================================
