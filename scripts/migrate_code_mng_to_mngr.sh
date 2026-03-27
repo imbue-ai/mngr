@@ -309,13 +309,14 @@ for dir in libs/mng libs/mng_*; do
         renamed_libs=$((renamed_libs + 1))
     elif [ -d "$dir" ] && [ -d "$newdir" ]; then
         # Both exist (after merging main reintroduces old paths).
-        # The new dir has the correct content; remove the old one.
+        # Copy untracked files to new dir first, then remove old.
         if [ "$DRY_RUN" = true ]; then
-            dry "would remove reintroduced $dir (already have $newdir)"
+            dry "would merge $dir into $newdir and remove $dir"
         else
+            cp -a -n "$dir"/. "$newdir"/ 2>/dev/null || true
             git rm -rf "$dir" 2>/dev/null || true
             rm -rf "$dir"
-            ok "Removed reintroduced $dir"
+            ok "Merged $dir into $newdir and removed"
         fi
         renamed_libs=$((renamed_libs + 1))
     fi
