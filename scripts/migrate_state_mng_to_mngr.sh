@@ -45,15 +45,77 @@ dry()   { echo -e "  ${CYAN}[dry-run] $*${NC}"; }
 
 TOTAL_STEPS=9
 
+# ── Helper: perl rename script ───────────────────────────────────
+# Written to temp file to avoid zsh history expansion eating ! in lookaheads.
+
+RENAME_PL=$(mktemp)
+trap 'rm -f "$RENAME_PL"' EXIT
+cat > "$RENAME_PL" << 'PERL_SCRIPT'
+use strict;
+use warnings;
+for my $file (@ARGV) {
+    open my $fh, '<', $file or next;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    my $orig = $content;
+    $content =~ s/MNG(?!R)/MNGR/g;
+    $content =~ s/Mng(?!r)/Mngr/g;
+    $content =~ s/mng(?!r)/mngr/g;
+    if ($content ne $orig) {
+        open my $out, '>', $file or next;
+        print $out $content;
+        close $out;
+        print "  \033[0;32mOK\033[0m Fixed mng -> mngr in $file\n";
+    }
+}
+PERL_SCRIPT
+
+# Fix a file in-place with backup: rename mng -> mngr.
+# Creates a .bak backup before modifying. Resolves symlinks.
+fix_file() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    # Resolve symlinks so we edit the real file
+    local real_file
+    real_file=$(perl -e 'use Cwd "abs_path"; print abs_path($ARGV[0])' "$file")
+    if [ "$DRY_RUN" = true ]; then
+        if perl -ne 'exit 0 if /mng(?!r)/i' "$real_file" 2>/dev/null; then
+            dry "would fix mng -> mngr in $file (backup: ${real_file}.bak)"
+        fi
+    else
+        if perl -ne 'exit 0 if /mng(?!r)/i' "$real_file" 2>/dev/null; then
+            cp "$real_file" "${real_file}.bak"
+            perl "$RENAME_PL" "$real_file"
+        fi
+    fi
+}
+
+# Fix a file in-place with backup: specific Claude data replacements.
+fix_claude_json() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    local real_file
+    real_file=$(perl -e 'use Cwd "abs_path"; print abs_path($ARGV[0])' "$file")
+    if [ "$DRY_RUN" = true ]; then
+        local hits
+        hits=$(grep -cE '\.mng|_mngCreated|_mngSourcePath' "$real_file" 2>/dev/null || true)
+        if [ "$hits" -gt 0 ]; then
+            dry "would fix ~$hits stale references in $file (backup: ${real_file}.bak)"
+        fi
+    else
+        cp "$real_file" "${real_file}.bak"
+        perl -pi -e 's/\.mng(?!r)/.mngr/g; s/_mngCreated/_mngrCreated/g; s/_mngSourcePath/_mngrSourcePath/g' "$real_file"
+        ok "Fixed stale references in $file (backup: ${real_file}.bak)"
+    fi
+}
+
 copy_missing_files() {
     local src="$1"
     local dst="$2"
-    # Copy everything from src to dst that doesn't already exist in dst.
-    # Uses cp -a to preserve permissions/symlinks and -n to skip existing.
-    # macOS cp returns exit code 1 when -n skips files, so we ignore it.
     if [ "$DRY_RUN" = true ]; then
         dry "would copy missing files from $src to $dst"
     else
+        # macOS cp returns exit code 1 when -n skips files, so we ignore it.
         cp -a -n "$src"/. "$dst"/ 2>/dev/null || true
     fi
 }
@@ -163,7 +225,7 @@ fi
 
 echo ""
 
-# ── 3. Migrate ~/.mng/ -> ~/.mngr/ ─────────────────────────────────
+# ── 3. Migrate data directories ─────────────────────────────────
 
 step 3 "Migrating data directories..."
 migrate_dir "$HOME" "~"
@@ -195,33 +257,24 @@ for repo_dir in "${EXTRA_DIRS[@]+"${EXTRA_DIRS[@]}"}"; do
         done
     fi
 
-    if [ -f "$repo_dir/.envrc" ] && grep -qi 'mng' "$repo_dir/.envrc" 2>/dev/null; then
-        echo ""
-        echo -e "${RED}Found 'mng' references in $repo_dir/.envrc:${NC}"
-        grep -ni 'mng' "$repo_dir/.envrc" | grep -vi 'mngr' | sed 's/^/  /'
-        echo -e "  To fix: ${CYAN}perl -pi -e 's/MNG(?!R)/MNGR/g; s/\\.mng(?!r)/.mngr/g; s/\\/mng(?!r)/\\/mngr/g' $repo_dir/.envrc${NC}"
-    fi
+    [ -f "$repo_dir/.envrc" ] && fix_file "$repo_dir/.envrc"
 
     echo ""
 done
 
-# ── 4. Check shell configs for stale references ────────────────────
+# ── 4. Fix shell configs ────────────────────────────────────────
 
-step 4 "Checking shell configs for stale references..."
+step 4 "Fixing shell configs..."
 
-found_any=false
+fixed_any=false
 for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.config/fish/config.fish" "$HOME/.envrc"; do
-    if [ -f "$rc" ] && grep -qi 'mng' "$rc" 2>/dev/null && grep -qiv 'mngr' "$rc" 2>/dev/null; then
-        if [ "$found_any" = false ]; then
-            found_any=true
-        fi
-        echo -e "${RED}Found 'mng' references in $rc:${NC}"
-        grep -ni 'mng' "$rc" | grep -vi 'mngr' | sed 's/^/  /'
-        echo -e "  To fix: ${CYAN}perl -pi -e 's/MNG(?!R)/MNGR/g; s/\\.mng(?!r)/.mngr/g; s/\\/mng(?!r)/\\/mngr/g' $rc${NC}"
-        echo ""
+    [ -f "$rc" ] || continue
+    if perl -ne 'exit 0 if /mng(?!r)/i' "$rc" 2>/dev/null; then
+        fix_file "$rc"
+        fixed_any=true
     fi
 done
-if [ "$found_any" = false ]; then
+if [ "$fixed_any" = false ]; then
     ok "No stale references found in shell configs."
 fi
 
@@ -233,6 +286,7 @@ stale_vars=$(env | grep -i '_mng_\|^mng_\|\.mng' | grep -iv 'mngr' || true)
 if [ -n "$stale_vars" ]; then
     warn "Found environment variables containing 'mng' (not 'mngr'):"
     echo "$stale_vars" | sed 's/^/  /'
+    info "These will be correct after restarting your shell / agents."
     echo ""
 else
     ok "No stale environment variables found."
@@ -242,11 +296,10 @@ fi
 
 step 6 "Fixing agent data.json files..."
 
-# Agent connect commands have baked-in MNG_ env var names and .mng paths
 agent_fixed=0
 for f in "$HOME/.mngr/agents"/*/data.json; do
     [ -f "$f" ] || continue
-    if grep -qP 'MNG(?!R)_|\.mng(?!r)' "$f" 2>/dev/null; then
+    if perl -ne 'exit 0 if /MNG(?!R)_|\.mng(?!r)/' "$f" 2>/dev/null; then
         if [ "$DRY_RUN" = true ]; then
             dry "would fix stale references in $f"
         else
@@ -256,16 +309,16 @@ for f in "$HOME/.mngr/agents"/*/data.json; do
     fi
 done
 if [ "$agent_fixed" -gt 0 ]; then
-    ok "Fixed $agent_fixed agent data.json files (MNG_ env vars and .mng paths)"
+    ok "Fixed $agent_fixed agent data.json files"
 else
     ok "No agent data.json files need fixing."
 fi
 
-# Host data.json has .mng worktree paths and MNG_ env vars
+# Host data.json
 host_fixed=0
 for f in "$HOME/.mngr/data.json" "$HOME/.mngr/hosts"/*/data.json; do
     [ -f "$f" ] || continue
-    if grep -qP '\.mng(?!r)|MNG(?!R)_' "$f" 2>/dev/null; then
+    if perl -ne 'exit 0 if /\.mng(?!r)|MNG(?!R)_/' "$f" 2>/dev/null; then
         if [ "$DRY_RUN" = true ]; then
             dry "would fix stale references in $f"
         else
@@ -281,26 +334,15 @@ fi
 
 # ── 7. Fix Claude data ─────────────────────────────────────────────
 
-step 7 "Checking Claude data for stale mng references..."
+step 7 "Fixing Claude data..."
 
-real_hits=0
-# ~/.claude.json: contains .mng/ paths as project keys, _mngCreated/_mngSourcePath properties
-if [ -f "$HOME/.claude.json" ]; then
-    real_hits=$(grep -cE '\.mng|_mngCreated|_mngSourcePath' "$HOME/.claude.json" 2>/dev/null || true)
-    if [ "$real_hits" -gt 0 ]; then
-        echo -e "${YELLOW}Found ~$real_hits stale 'mng' references in ~/.claude.json${NC}"
-        echo -e "  (paths like .mng/, properties like _mngCreated, _mngSourcePath)"
-        echo -e "  To fix: ${CYAN}perl -pi -e 's/\\.mng(?!r)/.mngr/g; s/_mngCreated/_mngrCreated/g; s/_mngSourcePath/_mngrSourcePath/g' ~/.claude.json${NC}"
-        echo ""
-    fi
-fi
+fix_claude_json "$HOME/.claude.json"
 
 # ~/.claude/projects/: rename dirs that encode .mng/ paths
 renamed_count=0
 if [ -d "$HOME/.claude/projects" ]; then
     for dir in "$HOME/.claude/projects"/*mng*; do
         [ -d "$dir" ] || continue
-        # Only rename dirs containing mng but not mngr
         case "$(basename "$dir")" in
             *mngr*) continue ;;
         esac
@@ -317,10 +359,8 @@ if [ -d "$HOME/.claude/projects" ]; then
 fi
 if [ "$renamed_count" -gt 0 ]; then
     ok "Renamed $renamed_count Claude project dirs (.mng -> .mngr)"
-fi
-
-if [ "$real_hits" -eq 0 ] && [ "$renamed_count" -eq 0 ]; then
-    ok "No stale mng references found in Claude data."
+else
+    ok "No Claude project dirs need renaming."
 fi
 
 # ── 8. Rename ~/.config/mng ────────────────────────────────────────
@@ -340,21 +380,23 @@ else
     ok "No ~/.config/mng found."
 fi
 
-# ── 9. Clean uv cache ──────────────────────────────────────────────
+# ── 9. Sync packages ──────────────────────────────────────────────
 
-step 9 "Cleaning uv cache..."
+step 9 "Syncing packages..."
 if [ "$DRY_RUN" = true ]; then
-    dry "would clean uv cache"
+    dry "would run uv sync --all-packages"
 else
-    uv cache clean 2>/dev/null && ok "uv cache cleaned" || true
+    if command -v uv &>/dev/null; then
+        uv sync --all-packages
+        ok "Packages synced"
+    else
+        skip "uv not found"
+    fi
 fi
 
 echo ""
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}This was a dry run. No changes were made.${NC}"
 else
-    echo -e "${CYAN}Note: References to the GitHub repo URL will need updating"
-    echo -e "separately if/when the repo is renamed.${NC}"
-    echo ""
-    echo -e "${GREEN}Done.${NC} Run ${BOLD}uv sync --all-packages${NC} in your checkout."
+    echo -e "${GREEN}Done.${NC}"
 fi
