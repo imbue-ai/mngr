@@ -120,13 +120,13 @@ if ($count > 0) {
 }
 PERL_SCRIPT
 
-# ── Helper: perl script for imbue- prefix on PyPI names ──────────
-# Idempotent: won't double-prefix imbue-mngr -> imbue-imbue-mngr.
-# Respects MIGRATE_DRY_RUN env var.
+# ── Helper: perl script for imbue- prefix (TOML/config files only) ──
+# These patterns match broadly on quoted "mngr" strings, so they're
+# only safe for pyproject.toml, CI workflows, and config files.
 
-PYPI_PL=$(mktemp)
-trap 'rm -f "$RENAME_PL" "$PYPI_PL"' EXIT
-cat > "$PYPI_PL" << 'PERL_SCRIPT'
+PYPI_TOML_PL=$(mktemp)
+trap 'rm -f "$RENAME_PL" "$PYPI_TOML_PL" "$PYPI_CODE_PL"' EXIT
+cat > "$PYPI_TOML_PL" << 'PERL_SCRIPT'
 use strict;
 use warnings;
 my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
@@ -136,33 +136,18 @@ for my $file (@ARGV) {
     my $content = do { local $/; <$fh> };
     close $fh;
     my $orig = $content;
-    # "mngr==" or "mngr-X==" in dep strings (but not already "imbue-mngr")
-    $content =~ s/(?<!imbue-)"mngr(?=[-=])/"imbue-mngr/g;
-    # "mngr" as a standalone quoted name (but not already "imbue-mngr")
-    $content =~ s/(?<!imbue-)"mngr"/"imbue-mngr"/g;
-    # uv sources keys at start of line: mngr = {, mngr-X = {
+    # Version specifiers: "mngr==", "mngr>=", etc
+    $content =~ s/(?<!imbue-)"mngr(?=[=><~!])/"imbue-mngr/g;
+    # Plugin dep names: "mngr-claude==", "mngr-modal", etc
+    $content =~ s/(?<!imbue-)"mngr-(?=\w+)/"imbue-mngr-/g;
+    # TOML name field: name = "mngr"
+    $content =~ s/^(name\s*=\s*)"mngr"/$1"imbue-mngr"/mg;
+    # uv sources keys at start of line
     $content =~ s/^mngr(?=-| = \{)/imbue-mngr/mg;
-    # importlib.metadata.distribution("mngr...") lookups
-    $content =~ s/distribution\("mngr/distribution("imbue-mngr/g;
-    # Package metadata name comparisons
-    $content =~ s/name == "mngr"/name == "imbue-mngr"/g;
-    $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
-    $content =~ s/name="mngr"/name="imbue-mngr"/g;
-    $content =~ s/startswith\("mngr-"\)/startswith("imbue-mngr-")/g;
-    # CI workflow step names: "Build mngr-X" -> "Build imbue-mngr-X"
+    # CI step names: Build mngr -> Build imbue-mngr
     $content =~ s/Build (?<!imbue-)mngr/Build imbue-mngr/g;
-    # PyPI URL slugs
-    $content =~ s|pypi/mngr/|pypi/imbue-mngr/|g;
-    # uv tool commands (but not already imbue-mngr)
-    $content =~ s/uv tool install (?<!imbue-)mngr/uv tool install imbue-mngr/g;
-    $content =~ s/uv tool uninstall (?<!imbue-)mngr/uv tool uninstall imbue-mngr/g;
-    $content =~ s/uv tool upgrade (?<!imbue-)mngr/uv tool upgrade imbue-mngr/g;
-    $content =~ s/uv tool run --from (?<!imbue-)mngr /uv tool run --from imbue-mngr /g;
-    # uvx mngr -> uvx --from imbue-mngr mngr (the binary name stays mngr)
-    $content =~ s/uvx (?<!imbue-)mngr\b/uvx --from imbue-mngr mngr/g;
-    # Fix false positives: dir_name must stay as "mngr", not "imbue-mngr"
+    # Fix false positives
     $content =~ s/dir_name="imbue-mngr"/dir_name="mngr"/g;
-    # CLI binary entry point must stay "mngr", not "imbue-mngr"
     $content =~ s/^imbue-mngr = "imbue\.mngr\./mngr = "imbue.mngr./mg;
     if ($content ne $orig) {
         $count++;
@@ -175,7 +160,52 @@ for my $file (@ARGV) {
 }
 if ($count > 0) {
     my $prefix = $dry_run ? "  \033[0;36m[dry-run] would modify" : "  \033[0;32mOK\033[0m Modified";
-    print "${prefix} $count files (imbue- prefix)\033[0m\n";
+    print "${prefix} $count config files (imbue- prefix)\033[0m\n";
+}
+PERL_SCRIPT
+
+# ── Helper: perl script for imbue- prefix (all source files) ─────
+# These patterns are specific enough to be safe on any file.
+
+PYPI_CODE_PL=$(mktemp)
+cat > "$PYPI_CODE_PL" << 'PERL_SCRIPT'
+use strict;
+use warnings;
+my $dry_run = $ENV{MIGRATE_DRY_RUN} // 0;
+my $count = 0;
+for my $file (@ARGV) {
+    open my $fh, '<', $file or next;
+    my $content = do { local $/; <$fh> };
+    close $fh;
+    my $orig = $content;
+    # importlib.metadata.distribution("mngr...") lookups
+    $content =~ s/distribution\("mngr/distribution("imbue-mngr/g;
+    # Package metadata name comparisons (keyword argument or equality)
+    $content =~ s/name == "mngr"/name == "imbue-mngr"/g;
+    $content =~ s/name != "mngr"/name != "imbue-mngr"/g;
+    $content =~ s/name="mngr"/name="imbue-mngr"/g;
+    $content =~ s/startswith\("mngr-"\)/startswith("imbue-mngr-")/g;
+    # PyPI URL slugs
+    $content =~ s|pypi/mngr/|pypi/imbue-mngr/|g;
+    # uv tool commands
+    $content =~ s/uv tool install (?<!imbue-)mngr/uv tool install imbue-mngr/g;
+    $content =~ s/uv tool uninstall (?<!imbue-)mngr/uv tool uninstall imbue-mngr/g;
+    $content =~ s/uv tool upgrade (?<!imbue-)mngr/uv tool upgrade imbue-mngr/g;
+    $content =~ s/uv tool run --from (?<!imbue-)mngr /uv tool run --from imbue-mngr /g;
+    # uvx mngr -> uvx --from imbue-mngr mngr
+    $content =~ s/uvx (?<!imbue-)mngr\b/uvx --from imbue-mngr mngr/g;
+    if ($content ne $orig) {
+        $count++;
+        unless ($dry_run) {
+            open my $out, '>', $file or next;
+            print $out $content;
+            close $out;
+        }
+    }
+}
+if ($count > 0) {
+    my $prefix = $dry_run ? "  \033[0;36m[dry-run] would modify" : "  \033[0;32mOK\033[0m Modified";
+    print "${prefix} $count source files (imbue- prefix)\033[0m\n";
 }
 PERL_SCRIPT
 
@@ -428,8 +458,16 @@ perl "$RENAME_PL" "${content_files[@]+"${content_files[@]}"}"
 
 step "8/9" "Adding imbue- prefix to PyPI package names..."
 
-# Run on all tracked non-binary files (same set as step 7, minus exclusions)
-mapfile -t pypi_files < <(
+# TOML/config patterns (broad "mngr" matching, only safe for config files)
+mapfile -t toml_files < <(
+    for f in libs/*/pyproject.toml apps/*/pyproject.toml; do [ -f "$f" ] && echo "$f"; done
+    for f in scripts/utils.py .github/workflows/*.yml; do [ -f "$f" ] && echo "$f"; done
+)
+mapfile -t toml_files < <(printf '%s\n' "${toml_files[@]}" | sort -u)
+perl "$PYPI_TOML_PL" "${toml_files[@]+"${toml_files[@]}"}"
+
+# Code patterns (specific enough for all source files)
+mapfile -t code_files < <(
     git ls-files -z | while IFS= read -r -d '' file; do
         case "$file" in
             scripts/migrate_*|test_meta_ratchets.py) continue ;;
@@ -442,7 +480,7 @@ mapfile -t pypi_files < <(
         echo "$file"
     done
 )
-perl "$PYPI_PL" "${pypi_files[@]+"${pypi_files[@]}"}"
+perl "$PYPI_CODE_PL" "${code_files[@]+"${code_files[@]}"}"
 
 # ── 9. Regenerate uv.lock ────────────────────────────────────────
 
