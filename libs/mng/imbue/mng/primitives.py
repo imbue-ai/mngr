@@ -238,9 +238,6 @@ class InvalidName(ValueError):
     pass
 
 
-# Also exported under the old name for backwards compatibility at call sites
-InvalidAgentName = InvalidName
-
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
 
 

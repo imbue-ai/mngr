@@ -16,7 +16,7 @@ from imbue.mng.primitives import AgentName
 from imbue.mng.primitives import DiscoveredAgent
 from imbue.mng.primitives import DiscoveredHost
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import InvalidAgentName
+from imbue.mng.primitives import InvalidName
 from imbue.mng.primitives import ProviderInstanceName
 
 
@@ -66,13 +66,13 @@ def parse_agent_address(address_str: str) -> AgentAddress:
         # Simple agent name with no host component
         try:
             return AgentAddress(agent_name=AgentName(address_str))
-        except InvalidAgentName as e:
+        except InvalidName as e:
             raise UserInputError(str(e)) from e
 
     agent_part, host_part = address_str.split("@", 1)
     try:
         agent_name = AgentName(agent_part) if agent_part else None
-    except InvalidAgentName as e:
+    except InvalidName as e:
         raise UserInputError(str(e)) from e
 
     if not host_part:
@@ -108,7 +108,7 @@ def parse_identifier_as_address(raw: str) -> tuple[str, AgentAddress]:
     if "@" not in raw:
         try:
             return raw, AgentAddress(agent_name=AgentName(raw))
-        except InvalidAgentName as e:
+        except InvalidName as e:
             raise UserInputError(str(e)) from e
 
     address = parse_agent_address(raw)

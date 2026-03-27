@@ -25,7 +25,7 @@ from imbue.mng.primitives import AgentTypeName
 from imbue.mng.primitives import CommandString
 from imbue.mng.primitives import HostId
 from imbue.mng.primitives import HostName
-from imbue.mng.primitives import InvalidAgentName
+from imbue.mng.primitives import InvalidName
 from imbue.mng.primitives import Permission
 from imbue.mng.providers.local.instance import LocalProviderInstance
 from imbue.mng.utils.polling import wait_for
@@ -1132,7 +1132,7 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
 
 def test_agent_name_rejects_slash() -> None:
     """AgentName must reject names containing '/' to prevent path issues."""
-    with pytest.raises(InvalidAgentName):
+    with pytest.raises(InvalidName):
         AgentName("foo/bar")
 
 
