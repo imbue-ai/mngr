@@ -41,6 +41,11 @@ def get_agent_class(agent_type: str) -> type:
     raise MngrError(f"Unknown agent type '{agent_type}' and no default agent class set.")
 
 
+def is_agent_class_registered(agent_type: str) -> bool:
+    """Check if an agent class is registered for the given type (not counting the default fallback)."""
+    return AgentTypeName(agent_type) in _agent_class_registry
+
+
 def list_registered_agent_class_types() -> list[str]:
     """List all agent type names with registered classes."""
     return sorted(str(k) for k in _agent_class_registry.keys())

@@ -68,7 +68,7 @@ CommandHelpMetadata(
     one_line_description="TUI board showing agents grouped by lifecycle state with PR status",
     synopsis="mngr kanpan [OPTIONS]",
     description="""Launches a terminal UI that displays all mngr agents organized by their
-lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED).
+lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE).
 
 Each agent shows its name, current state, and associated GitHub PR information
 including PR number, state (open/closed/merged), and CI check status.

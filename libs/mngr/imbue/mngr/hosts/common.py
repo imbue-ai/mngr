@@ -10,6 +10,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
@@ -92,6 +93,24 @@ def resolve_expected_process_name(
     return command.split()[0].split("/")[-1] if command else ""
 
 
+@pure
+def check_agent_type_known(
+    agent_type: str,
+    config: MngrConfig,
+) -> bool:
+    """Check whether an agent type is recognized (has a registered agent class).
+
+    Resolves through parent_type in config so that custom types inheriting
+    from a known type (e.g., my-claude -> claude) are also considered known.
+    """
+    effective_type = agent_type
+    type_config = config.agent_types.get(AgentTypeName(agent_type))
+    if type_config is not None and type_config.parent_type is not None:
+        effective_type = str(type_config.parent_type)
+
+    return is_agent_class_registered(effective_type)
+
+
 def compute_idle_seconds(
     user_activity: datetime | None,
     agent_activity: datetime | None,
@@ -168,12 +187,18 @@ def determine_lifecycle_state(
     is_active: bool,
     expected_process_name: str,
     ps_output: str,
+    is_agent_type_known: bool = True,
 ) -> AgentLifecycleState:
     """Determine agent lifecycle state from tmux info and ps output.
 
     This is a pure function that replicates the logic from
     BaseAgent.get_lifecycle_state() using pre-collected data instead of
     making SSH calls.
+
+    When is_agent_type_known is False, the expected_process_name cannot be
+    trusted (because we don't know what binary the agent type runs). In that
+    case, states that would otherwise be REPLACED are reported as
+    RUNNING_UNKNOWN_AGENT_TYPE instead.
     """
     if not tmux_info:
         return AgentLifecycleState.STOPPED
@@ -204,10 +229,17 @@ def determine_lifecycle_state(
     if expected_process_name in descendant_names:
         return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
 
+    # When the agent type is unknown, we cannot distinguish between
+    # "replaced by a different program" and "running the correct program
+    # under a name we don't recognize". Use a distinct state for this.
+    replaced_state = (
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE if not is_agent_type_known else AgentLifecycleState.REPLACED
+    )
+
     # Check for non-shell descendant processes
     non_shell_processes = [p for p in descendant_names if p not in SHELL_COMMANDS]
     if non_shell_processes:
-        return AgentLifecycleState.REPLACED
+        return replaced_state
 
     # Agent is not running. Determine DONE vs REPLACED by checking whether
     # the pane process is a shell (agent exited normally) or something else
@@ -217,4 +249,4 @@ def determine_lifecycle_state(
     if current_command in SHELL_COMMANDS or (pane_comm is not None and pane_comm in SHELL_COMMANDS):
         return AgentLifecycleState.DONE
 
-    return AgentLifecycleState.REPLACED
+    return replaced_state
