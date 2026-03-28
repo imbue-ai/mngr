@@ -1,4 +1,3 @@
-import json
 import re
 import shutil
 import string
@@ -23,7 +22,6 @@ from tabulate import tabulate
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
-from imbue.mngr.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import agent_details_to_cel_context
@@ -139,7 +137,6 @@ class ListCliOptions(CommonCliOptions):
     ids: bool
     addrs: bool
     on_error: str
-    stream: bool
 
 
 @click.command(name="list")
@@ -239,19 +236,13 @@ class ListCliOptions(CommonCliOptions):
     type=int,
     help="Limit number of results (applied after fetching from all providers)",
 )
-@optgroup.group("Watch / Stream Mode")
+@optgroup.group("Watch Mode")
 # FIXME: remove the watch option, it's pointless
 @optgroup.option(
     "-w",
     "--watch",
     type=int,
     help="Continuously watch and update status at specified interval (seconds)",
-)
-@optgroup.option(
-    "--stream",
-    is_flag=True,
-    help="Stream discovery events as JSONL. Outputs a full snapshot, then tails the event file for updates. "
-    "Periodically re-polls to catch any missed changes.",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
@@ -306,8 +297,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         shorthand_name = "--ids" if opts.ids else "--addrs"
         if opts.ids and opts.addrs:
             raise click.UsageError("--ids and --addrs are mutually exclusive")
-        if opts.stream:
-            raise click.UsageError(f"{shorthand_name} cannot be combined with --stream")
         format_source = ctx.get_parameter_source("output_format")
         is_format_explicit = format_source is not None and format_source != click.core.ParameterSource.DEFAULT
         if is_format_explicit:
@@ -424,24 +413,6 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     provider_names = opts.provider if opts.provider else None
 
     # Dispatch to the appropriate output path
-    if opts.stream:
-        # Stream mode emits unfiltered snapshots for state reconstruction,
-        # so filtering and sorting options are not supported
-        is_any_filter_set = bool(include_filters_tuple or exclude_filters_tuple or provider_names or limit)
-        if is_any_filter_set:
-            raise click.UsageError(
-                "--stream emits unfiltered snapshots and cannot be combined with "
-                "--include, --exclude, --running, --stopped, --local, --remote, "
-                "--provider, --project, --label, --host-label, or --limit"
-            )
-        if opts.watch:
-            raise click.UsageError("--stream and --watch cannot be used together")
-        _list_stream(
-            mngr_ctx=mngr_ctx,
-            error_behavior=error_behavior,
-        )
-        return
-
     if output_opts.output_format == OutputFormat.JSONL:
         _list_jsonl(
             ctx,
@@ -1441,163 +1412,3 @@ def _run_event_driven_watch(
             break
 
         on_refresh()
-
-
-# === Stream Mode ===
-
-_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
-
-
-def _stream_emit_line(
-    line: str,
-    emitted_event_ids: set[str],
-    emit_lock: Lock,
-) -> None:
-    """Parse and emit a single JSONL line to stdout, deduplicating by event_id."""
-    stripped = line.strip()
-    if not stripped:
-        return
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        logger.trace("Skipped malformed JSONL line in discovery event stream")
-        return
-    event_id = data.get("event_id")
-    with emit_lock:
-        if event_id and event_id in emitted_event_ids:
-            return
-        if event_id:
-            emitted_event_ids.add(event_id)
-        sys.stdout.write(stripped + "\n")
-        sys.stdout.flush()
-
-
-def _stream_tail_events_file(
-    events_path: Path,
-    initial_offset: int,
-    stop_event: threading.Event,
-    emitted_event_ids: set[str],
-    emit_lock: Lock,
-) -> None:
-    """Poll the events file for new content written by other mngr processes."""
-    current_offset = initial_offset
-    while not stop_event.is_set():
-        try:
-            if events_path.exists():
-                file_size = events_path.stat().st_size
-                # Handle file truncation (reset to start)
-                if file_size < current_offset:
-                    current_offset = 0
-                if file_size > current_offset:
-                    with open(events_path) as f:
-                        f.seek(current_offset)
-                        new_content = f.read()
-                        current_offset = f.tell()
-                    for line in new_content.splitlines():
-                        if stop_event.is_set():
-                            break
-                        _stream_emit_line(line, emitted_event_ids, emit_lock)
-        except OSError as e:
-            logger.trace("OSError while tailing discovery events file: {}", e)
-        stop_event.wait(timeout=1.0)
-
-
-def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
-    """Run an unfiltered list to trigger a full discovery snapshot event.
-
-    The snapshot is written as a side effect of api_list_agents when the listing is
-    unfiltered and error-free. This function exists to trigger that side effect
-    explicitly (e.g. for stream mode's periodic re-polls).
-    """
-    api_list_agents(
-        mngr_ctx=mngr_ctx,
-        is_streaming=False,
-        error_behavior=error_behavior,
-        reset_caches=True,
-    )
-
-
-def _list_stream(
-    mngr_ctx: MngrContext,
-    error_behavior: ErrorBehavior,
-) -> None:
-    """Stream discovery events to stdout as JSONL.
-
-    Snapshots are always unfiltered so they can be used for state reconstruction.
-
-    1. Emit from the latest cached snapshot on disk (instant, if available)
-    2. Run a full sync in the background to update the event stream
-    3. Tail the events file for new events written by the background sync or other processes
-    4. Periodically re-poll (unfiltered) and write new full snapshots
-    """
-    events_path = get_discovery_events_path(mngr_ctx.config)
-    emitted_event_ids: set[str] = set()
-    emit_lock = Lock()
-
-    # Phase 1: emit from the latest cached snapshot on disk (fast path)
-    has_cached_snapshot = False
-    if events_path.exists():
-        snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        if snapshot_offset > 0:
-            has_cached_snapshot = True
-            with open(events_path) as f:
-                f.seek(snapshot_offset)
-                for line in f:
-                    _stream_emit_line(line, emitted_event_ids, emit_lock)
-
-    # Record the current file position for tailing
-    initial_offset = events_path.stat().st_size if events_path.exists() else 0
-
-    # Phase 2: start tailing the events file for new events
-    stop_event = threading.Event()
-    tail = threading.Thread(
-        target=_stream_tail_events_file,
-        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock),
-        daemon=True,
-    )
-    tail.start()
-
-    # Phase 3: run the initial full sync
-    # If we had a cached snapshot, run this in the background so the user sees results immediately.
-    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
-    if has_cached_snapshot:
-        initial_sync = threading.Thread(
-            target=_write_unfiltered_full_snapshot_logged,
-            args=(mngr_ctx, error_behavior),
-            daemon=True,
-        )
-        initial_sync.start()
-    else:
-        _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
-        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
-        if events_path.exists():
-            snapshot_offset = find_latest_full_snapshot_offset(events_path)
-            with open(events_path) as f:
-                f.seek(snapshot_offset)
-                for line in f:
-                    _stream_emit_line(line, emitted_event_ids, emit_lock)
-
-    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
-    try:
-        while not stop_event.is_set():
-            stop_event.wait(timeout=_STREAM_POLL_INTERVAL_SECONDS)
-            if stop_event.is_set():
-                break
-            try:
-                _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-                # The tail thread will pick up the new snapshot and emit it
-            except (MngrError, OSError) as e:
-                logger.warning("Stream poll failed (continuing): {}", e)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        tail.join(timeout=5.0)
-
-
-def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
-    """Run an unfiltered full snapshot, logging any errors instead of raising."""
-    try:
-        _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-    except (MngrError, OSError) as e:
-        logger.warning("Failed to write discovery snapshot: {}", e)

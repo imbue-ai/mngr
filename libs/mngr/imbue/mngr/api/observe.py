@@ -1,7 +1,6 @@
 import fcntl
 import json
 import os
-import pdb
 import queue
 import threading
 from collections.abc import Sequence
@@ -330,7 +329,7 @@ class _KnownHost(FrozenModel):
 class AgentObserver(MutableModel):
     """Observes agent state changes across all hosts.
 
-    Uses 'mngr list --stream' to track hosts and 'mngr events' to stream
+    Uses 'mngr observe --discovery-only' to track hosts and 'mngr events' to stream
     activity events from each online host. When activity is detected,
     fetches agent state and emits events to local JSONL files:
 
@@ -404,14 +403,14 @@ class AgentObserver(MutableModel):
         self._stop_event.set()
 
     def _start_list_stream(self) -> None:
-        """Start the 'mngr list --stream' subprocess for host discovery."""
+        """Start the 'mngr observe --discovery-only' subprocess for host discovery."""
         self._list_stream_process = self._concurrency_group.run_process_in_background(
-            command=[self.mngr_binary, "list", "--stream", "--quiet"],
+            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_list_stream_output,
         )
 
     def _on_list_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from 'mngr list --stream'."""
+        """Handle a line of output from 'mngr observe --discovery-only'."""
         if not is_stdout:
             return
         stripped = line.strip()
@@ -504,7 +503,7 @@ class AgentObserver(MutableModel):
             # make sure that none of our processes crashed
             with self._lock:
                 self._list_stream_process.check()
-                for host_id_str, event_process in self._events_processes.items():
+                for _host_id_str, event_process in self._events_processes.items():
                     event_process.check()
 
             # see if there are any activity events

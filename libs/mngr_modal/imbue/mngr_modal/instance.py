@@ -1642,7 +1642,7 @@ log "=== Shutdown script completed ==="
     def reset_caches(self) -> None:
         """Reset all caches on this instance.
 
-        This is primarily used for "list --stream", where we need to actually see new data, and for
+        This is primarily used for discovery streaming, where we need to actually see new data, and for
         test isolation to ensure a clean state between tests
         """
         self._sandbox_cache_by_id.clear()

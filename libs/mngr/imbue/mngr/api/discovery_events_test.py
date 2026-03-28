@@ -1,7 +1,12 @@
 import json
+import sys
+import threading
+from io import StringIO
 from pathlib import Path
+from threading import Lock
 from typing import cast
 
+import pytest
 from imbue.imbue_common.event_envelope import EventType
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -12,6 +17,8 @@ from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import _build_ssh_info_from_host
+from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
+from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import append_discovery_event
 from imbue.mngr.api.discovery_events import discovered_agent_from_agent_details
@@ -32,6 +39,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -639,3 +647,113 @@ def test_resolve_provider_names_with_no_snapshot_only_incremental(temp_config: M
 
     result = resolve_provider_names_for_identifiers(temp_config, ["incremental-agent"])
     assert result == ("modal",)
+
+
+# === Discovery Stream Tests ===
+
+
+def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    line = json.dumps(event.model_dump(mode="json"))
+
+    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+
+    captured = capsys.readouterr()
+    assert captured.out.strip()
+    parsed = json.loads(captured.out.strip())
+    assert parsed["type"] == DiscoveryEventType.AGENT_DISCOVERED
+
+
+def test_discovery_stream_emit_line_deduplicates_by_event_id(capsys: pytest.CaptureFixture[str]) -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    line = json.dumps(event.model_dump(mode="json"))
+
+    # Emit the same event twice
+    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+    _discovery_stream_emit_line(line, emitted_ids, lock, None)
+
+    captured = capsys.readouterr()
+    # Only one line should be emitted
+    output_lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert len(output_lines) == 1
+
+
+def test_discovery_stream_emit_line_skips_empty_lines(capsys: pytest.CaptureFixture[str]) -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+
+    _discovery_stream_emit_line("", emitted_ids, lock, None)
+    _discovery_stream_emit_line("   ", emitted_ids, lock, None)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_discovery_stream_emit_line_skips_invalid_json(capsys: pytest.CaptureFixture[str]) -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+
+    _discovery_stream_emit_line("{invalid json}", emitted_ids, lock, None)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_discovery_stream_emit_line_uses_callback_when_provided() -> None:
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    line = json.dumps(event.model_dump(mode="json"))
+    received_lines: list[str] = []
+
+    _discovery_stream_emit_line(line, emitted_ids, lock, received_lines.append)
+
+    assert len(received_lines) == 1
+    parsed = json.loads(received_lines[0])
+    assert parsed["type"] == DiscoveryEventType.AGENT_DISCOVERED
+
+
+def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> None:
+    events_path = get_discovery_events_path(temp_config)
+
+    # Write an initial event
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
+    initial_offset = events_path.stat().st_size
+
+    emitted_ids: set[str] = set()
+    lock = Lock()
+    stop_event = threading.Event()
+
+    # Capture output by replacing stdout temporarily
+    original_stdout = sys.stdout
+    captured_output = StringIO()
+    sys.stdout = captured_output
+
+    try:
+        # Start tail thread
+        tail = threading.Thread(
+            target=_discovery_stream_tail_events_file,
+            args=(events_path, initial_offset, stop_event, emitted_ids, lock, None),
+            daemon=True,
+        )
+        tail.start()
+
+        # Write a new event while the tail is running
+        emit_agent_discovered(temp_config, make_test_discovered_agent())
+
+        # Poll until the tail thread picks up the new event
+        poll_until(lambda: len(captured_output.getvalue().strip().splitlines()) >= 1, timeout=5.0)
+
+        stop_event.set()
+        tail.join(timeout=5.0)
+    finally:
+        sys.stdout = original_stdout
+
+    # The tail should have picked up the new event
+    output = captured_output.getvalue()
+    output_lines = [ln for ln in output.splitlines() if ln.strip()]
+    assert len(output_lines) == 1
