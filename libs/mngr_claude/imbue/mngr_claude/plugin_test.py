@@ -2622,7 +2622,7 @@ def test_apply_settings_json_overrides_noop_when_no_overrides(tmp_path: Path) ->
     original = json.dumps({"existing": True})
     settings_path.write_text(original)
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False)
     _apply_settings_json_overrides(host, config_dir, config)
 
@@ -2635,7 +2635,7 @@ def test_apply_settings_json_overrides_creates_file_with_model(tmp_path: Path) -
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
     _apply_settings_json_overrides(host, config_dir, config)
 
@@ -2649,7 +2649,7 @@ def test_apply_settings_json_overrides_creates_file_with_fast_mode(tmp_path: Pat
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False, fast_mode=True)
     _apply_settings_json_overrides(host, config_dir, config)
 
@@ -2665,7 +2665,7 @@ def test_apply_settings_json_overrides_merges_with_existing(tmp_path: Path) -> N
     settings_path = config_dir / "settings.json"
     settings_path.write_text(json.dumps({"existing": "value", "skipDangerousModePermissionPrompt": True}))
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False, model="sonnet", fast_mode=True)
     _apply_settings_json_overrides(host, config_dir, config)
 
@@ -2686,7 +2686,7 @@ def test_apply_settings_json_overrides_replaces_symlink(tmp_path: Path) -> None:
     settings_path = config_dir / "settings.json"
     settings_path.symlink_to(global_settings)
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
     _apply_settings_json_overrides(host, config_dir, config)
 
@@ -2694,7 +2694,8 @@ def test_apply_settings_json_overrides_replaces_symlink(tmp_path: Path) -> None:
     assert not settings_path.is_symlink()
     data = json.loads(settings_path.read_text())
     assert data["model"] == "opus[1m]"
-    assert data["global"] is True  # existing content is preserved
+    # Existing content from the symlink target is preserved
+    assert data["global"] is True
     # Global file should be unmodified
     assert json.loads(global_settings.read_text()) == {"global": True}
 
@@ -2706,7 +2707,7 @@ def test_apply_settings_json_overrides_replaces_corrupt_json(tmp_path: Path) -> 
     settings_path = config_dir / "settings.json"
     settings_path.write_text("not valid json{{{")
 
-    host = FakeHost()
+    host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
     _apply_settings_json_overrides(host, config_dir, config)
 
