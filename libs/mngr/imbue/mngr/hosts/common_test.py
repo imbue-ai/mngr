@@ -7,6 +7,7 @@ from typing import cast
 
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
@@ -234,9 +235,12 @@ def test_resolve_expected_process_name_for_bare_command() -> None:
 
 
 def test_check_agent_type_known_for_registered_type() -> None:
-    register_agent_class("claude", type("FakeClaudeAgent", (), {}))
-    config = MngrConfig.model_construct(agent_types={})
-    assert check_agent_type_known("claude", config) is True
+    try:
+        register_agent_class("claude", type("FakeClaudeAgent", (), {}))
+        config = MngrConfig.model_construct(agent_types={})
+        assert check_agent_type_known("claude", config) is True
+    finally:
+        reset_agent_class_registry()
 
 
 def test_check_agent_type_known_for_unregistered_type() -> None:
@@ -245,10 +249,13 @@ def test_check_agent_type_known_for_unregistered_type() -> None:
 
 
 def test_check_agent_type_known_for_custom_type_with_registered_parent() -> None:
-    register_agent_class("claude", type("FakeClaudeAgent", (), {}))
-    custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("claude"))
-    config = MngrConfig.model_construct(agent_types={AgentTypeName("my-claude"): custom_config})
-    assert check_agent_type_known("my-claude", config) is True
+    try:
+        register_agent_class("claude", type("FakeClaudeAgent", (), {}))
+        custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("claude"))
+        config = MngrConfig.model_construct(agent_types={AgentTypeName("my-claude"): custom_config})
+        assert check_agent_type_known("my-claude", config) is True
+    finally:
+        reset_agent_class_registry()
 
 
 def test_check_agent_type_known_for_custom_type_with_unregistered_parent() -> None:
