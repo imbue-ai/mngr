@@ -70,6 +70,19 @@ SHELL_COMMANDS: Final[frozenset[str]] = frozenset({"bash", "sh", "zsh", "fish", 
 
 
 @pure
+def _resolve_effective_agent_type(agent_type: str, config: MngrConfig) -> str:
+    """Resolve through parent_type so custom types inherit their parent's identity.
+
+    For example, a custom type "my-claude" with parent_type "claude" resolves
+    to "claude". Types without a parent_type resolve to themselves.
+    """
+    type_config = config.agent_types.get(AgentTypeName(agent_type))
+    if type_config is not None and type_config.parent_type is not None:
+        return str(type_config.parent_type)
+    return agent_type
+
+
+@pure
 def resolve_expected_process_name(
     agent_type: str,
     command: CommandString,
@@ -81,11 +94,7 @@ def resolve_expected_process_name(
     known process name. For custom types with a parent_type, resolves through
     the parent. Otherwise extracts the basename from the command.
     """
-    # Resolve parent type for custom agent types
-    effective_type = agent_type
-    type_config = config.agent_types.get(AgentTypeName(agent_type))
-    if type_config is not None and type_config.parent_type is not None:
-        effective_type = str(type_config.parent_type)
+    effective_type = _resolve_effective_agent_type(agent_type, config)
 
     if effective_type in _EXPECTED_PROCESS_NAME_BY_AGENT_TYPE:
         return _EXPECTED_PROCESS_NAME_BY_AGENT_TYPE[effective_type]
@@ -103,11 +112,7 @@ def check_agent_type_known(
     Resolves through parent_type in config so that custom types inheriting
     from a known type (e.g., my-claude -> claude) are also considered known.
     """
-    effective_type = agent_type
-    type_config = config.agent_types.get(AgentTypeName(agent_type))
-    if type_config is not None and type_config.parent_type is not None:
-        effective_type = str(type_config.parent_type)
-
+    effective_type = _resolve_effective_agent_type(agent_type, config)
     return is_agent_class_registered(effective_type)
 
 
