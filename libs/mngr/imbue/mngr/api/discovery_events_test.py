@@ -1,7 +1,5 @@
 import json
-import sys
 import threading
-from io import StringIO
 from pathlib import Path
 from threading import Lock
 from typing import cast
@@ -728,33 +726,24 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
     emitted_ids: set[str] = set()
     lock = Lock()
     stop_event = threading.Event()
+    captured_lines: list[str] = []
 
-    # Capture output by replacing stdout temporarily
-    original_stdout = sys.stdout
-    captured_output = StringIO()
-    sys.stdout = captured_output
+    # Start tail thread with on_line callback instead of manipulating sys.stdout
+    tail = threading.Thread(
+        target=_discovery_stream_tail_events_file,
+        args=(events_path, initial_offset, stop_event, emitted_ids, lock, captured_lines.append),
+        daemon=True,
+    )
+    tail.start()
 
-    try:
-        # Start tail thread
-        tail = threading.Thread(
-            target=_discovery_stream_tail_events_file,
-            args=(events_path, initial_offset, stop_event, emitted_ids, lock, None),
-            daemon=True,
-        )
-        tail.start()
+    # Write a new event while the tail is running
+    emit_agent_discovered(temp_config, make_test_discovered_agent())
 
-        # Write a new event while the tail is running
-        emit_agent_discovered(temp_config, make_test_discovered_agent())
+    # Poll until the tail thread picks up the new event
+    poll_until(lambda: len(captured_lines) >= 1, timeout=5.0)
 
-        # Poll until the tail thread picks up the new event
-        poll_until(lambda: len(captured_output.getvalue().strip().splitlines()) >= 1, timeout=5.0)
-
-        stop_event.set()
-        tail.join(timeout=5.0)
-    finally:
-        sys.stdout = original_stdout
+    stop_event.set()
+    tail.join(timeout=5.0)
 
     # The tail should have picked up the new event
-    output = captured_output.getvalue()
-    output_lines = [ln for ln in output.splitlines() if ln.strip()]
-    assert len(output_lines) == 1
+    assert len(captured_lines) == 1
