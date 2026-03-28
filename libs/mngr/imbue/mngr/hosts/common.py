@@ -102,7 +102,6 @@ def resolve_expected_process_name(
     return command.split()[0].split("/")[-1] if command else ""
 
 
-@pure
 def check_agent_type_known(
     agent_type: str,
     config: MngrConfig,
@@ -111,6 +110,8 @@ def check_agent_type_known(
 
     Resolves through parent_type in config so that custom types inheriting
     from a known type (e.g., my-claude -> claude) are also considered known.
+
+    Not marked @pure because it reads from the global agent class registry.
     """
     effective_type = _resolve_effective_agent_type(agent_type, config)
     return is_agent_class_registered(effective_type)
