@@ -420,20 +420,20 @@ def _make_stream_manager() -> MngrStreamManager:
     return MngrStreamManager(resolver=resolver)
 
 
-def test_stream_manager_on_list_stream_output_ignores_stderr() -> None:
+def test_stream_manager_on_discovery_stream_output_ignores_stderr() -> None:
     manager = _make_stream_manager()
-    manager._on_list_stream_output("some stderr line", is_stdout=False)
+    manager._on_discovery_stream_output("some stderr line", is_stdout=False)
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_list_stream_output_ignores_empty_lines() -> None:
+def test_stream_manager_on_discovery_stream_output_ignores_empty_lines() -> None:
     manager = _make_stream_manager()
-    manager._on_list_stream_output("", is_stdout=True)
-    manager._on_list_stream_output("  \n", is_stdout=True)
+    manager._on_discovery_stream_output("", is_stdout=True)
+    manager._on_discovery_stream_output("  \n", is_stdout=True)
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_list_stream_output_ignores_non_full_events() -> None:
+def test_stream_manager_on_discovery_stream_output_ignores_non_full_events() -> None:
     """Non-DISCOVERY_FULL events are ignored and do not update the resolver."""
     manager = _make_stream_manager()
     # Use an unrecognized event type so parse_discovery_event_line returns None
@@ -445,7 +445,7 @@ def test_stream_manager_on_list_stream_output_ignores_non_full_events() -> None:
             "source": "mngr/discovery",
         }
     )
-    manager._on_list_stream_output(line, is_stdout=True)
+    manager._on_discovery_stream_output(line, is_stdout=True)
     assert manager.resolver.list_known_agent_ids() == ()
 
 

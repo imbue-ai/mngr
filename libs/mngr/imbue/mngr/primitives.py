@@ -209,6 +209,7 @@ class AgentLifecycleState(UpperCaseStrEnum):
     RUNNING = auto()
     WAITING = auto()
     REPLACED = auto()
+    RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
 
 

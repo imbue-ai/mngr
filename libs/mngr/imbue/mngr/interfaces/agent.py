@@ -135,7 +135,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
 
     @abstractmethod
     def get_lifecycle_state(self) -> AgentLifecycleState:
-        """Return the lifecycle state of this agent (stopped, running, waiting, replaced, or done)."""
+        """Return the lifecycle state of this agent."""
         ...
 
     @abstractmethod

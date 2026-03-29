@@ -358,7 +358,12 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     """
     # Check if the agent's tmux session exists and start it if needed
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state not in (AgentLifecycleState.RUNNING, AgentLifecycleState.REPLACED, AgentLifecycleState.WAITING):
+    if lifecycle_state not in (
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        AgentLifecycleState.WAITING,
+    ):
         if is_start_desired:
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(

@@ -24,6 +24,7 @@ TERMINAL_AGENT_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
         AgentLifecycleState.STOPPED,
         AgentLifecycleState.WAITING,
         AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
         AgentLifecycleState.DONE,
     }
 )

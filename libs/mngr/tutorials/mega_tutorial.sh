@@ -327,10 +327,10 @@ mngr list --format json
 # output each entry as a JSON object (useful for scripting)
 mngr list --format jsonl
 
-# continually stream results as JSONL (useful for piping to jq to turn this data into an event stream)
+# continually stream discovery events as JSONL (useful for piping to jq to turn this data into an event stream)
 # will get new events as new hosts are created/destroyed, come online and offline, etc.
 # see the `DiscoveryEvent` type for a complete list of the event types that will be returned in this stream
-mngr list --stream --format jsonl
+mngr observe --discovery-only
 
 # you can pass the ids of agents and/or hosts to only list details for specific ids:
 mngr list --format "{id}" | head -n 2 | mngr list --stdin
@@ -1148,8 +1148,8 @@ mngr create worker --reuse --provider modal --no-connect && mngr message worker 
 # get JSON output for parsing in scripts
 AGENT_INFO=$(mngr list --format json)
 
-# use JSONL for streaming results into other tools
-mngr list --stream --format jsonl | while read -r line; do
+# use discovery stream for streaming results into other tools
+mngr observe --discovery-only | while read -r line; do
   echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get('name', 'unknown'))"
 done
 
@@ -1185,8 +1185,8 @@ mngr list --format json
 # JSONL output (one object per line, good for streaming/piping)
 mngr list --format jsonl
 
-# stream JSONL results as they arrive (don't wait for all results)
-mngr list --stream --format jsonl
+# stream discovery events as JSONL (hosts and agents discovered/destroyed)
+mngr observe --discovery-only
 
 # JSON and JSONL works with most commands
 mngr snapshot list --format json && mngr plugin list --format jsonl

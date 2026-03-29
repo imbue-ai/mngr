@@ -212,7 +212,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     State is updated externally via update_agents() and update_servers() methods.
     In production, a MngrStreamManager calls these methods from background threads
-    that stream data from `mngr list --stream` and `mngr events --follow`.
+    that stream data from `mngr observe --discovery-only` and `mngr events --follow`.
 
     All reads are thread-safe via an internal lock.
     """
@@ -263,7 +263,7 @@ class MngrStreamManager(MutableModel):
     """Manages background streaming subprocesses that feed data to a MngrCliBackendResolver.
 
     Runs two types of long-lived subprocesses via ConcurrencyGroup:
-    1. `mngr list --stream --quiet` to discover agents and hosts.
+    1. `mngr observe --discovery-only --quiet` to discover agents and hosts.
        Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
        and HOST_SSH_INFO events for SSH connection details per host.
     2. `mngr events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
@@ -286,16 +286,16 @@ class MngrStreamManager(MutableModel):
         """Start the streaming subprocess for continuous agent discovery."""
         self._cg.__enter__()
         self._cg.run_process_in_background(
-            command=[self.mngr_binary, "list", "--stream", "--quiet"],
-            on_output=self._on_list_stream_output,
+            command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
+            on_output=self._on_discovery_stream_output,
         )
 
     def stop(self) -> None:
         """Stop all streaming subprocesses."""
         self._cg.__exit__(None, None, None)
 
-    def _on_list_stream_output(self, line: str, is_stdout: bool) -> None:
-        """Handle a line of output from mngr list --stream."""
+    def _on_discovery_stream_output(self, line: str, is_stdout: bool) -> None:
+        """Handle a line of output from mngr observe --discovery-only."""
         if not is_stdout:
             return
         stripped = line.strip()

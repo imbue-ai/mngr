@@ -645,6 +645,7 @@ def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
         AgentLifecycleState.STOPPED,
         AgentLifecycleState.WAITING,
         AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
         AgentLifecycleState.DONE,
     ):
         with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):

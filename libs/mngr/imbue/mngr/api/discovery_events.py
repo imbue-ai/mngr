@@ -1,9 +1,13 @@
 import json
+import sys
+import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from enum import auto
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 from loguru import logger
@@ -19,12 +23,14 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -522,3 +528,174 @@ def extract_agents_and_hosts_from_full_listing(
                 host_ssh_infos.append((agent_details.host.id, agent_details.host.ssh))
 
     return discovered_agents, tuple(discovered_hosts), tuple(host_ssh_infos)
+
+
+# === Discovery Stream ===
+
+_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+
+
+def _discovery_stream_emit_line(
+    line: str,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+) -> None:
+    """Parse and emit a single JSONL line, deduplicating by event_id."""
+    stripped = line.strip()
+    if not stripped:
+        return
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.trace("Skipped malformed JSONL line in discovery event stream")
+        return
+    event_id = data.get("event_id")
+    with emit_lock:
+        if event_id and event_id in emitted_event_ids:
+            return
+        if event_id:
+            emitted_event_ids.add(event_id)
+        if on_line is not None:
+            on_line(stripped)
+        else:
+            sys.stdout.write(stripped + "\n")
+            sys.stdout.flush()
+
+
+def _discovery_stream_tail_events_file(
+    events_path: Path,
+    initial_offset: int,
+    stop_event: threading.Event,
+    emitted_event_ids: set[str],
+    emit_lock: Lock,
+    on_line: Callable[[str], None] | None,
+) -> None:
+    """Poll the events file for new content written by other mngr processes."""
+    current_offset = initial_offset
+    while not stop_event.is_set():
+        try:
+            if events_path.exists():
+                file_size = events_path.stat().st_size
+                # Handle file truncation (reset to start)
+                if file_size < current_offset:
+                    current_offset = 0
+                if file_size > current_offset:
+                    with open(events_path) as f:
+                        f.seek(current_offset)
+                        new_content = f.read()
+                        current_offset = f.tell()
+                    for file_line in new_content.splitlines():
+                        if stop_event.is_set():
+                            break
+                        _discovery_stream_emit_line(file_line, emitted_event_ids, emit_lock, on_line)
+        except OSError as e:
+            logger.trace("OSError while tailing discovery events file: {}", e)
+        stop_event.wait(timeout=1.0)
+
+
+def _write_unfiltered_full_snapshot(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered list to trigger a full discovery snapshot event.
+
+    The snapshot is written as a side effect of list_agents when the listing is
+    unfiltered and error-free. This function exists to trigger that side effect
+    explicitly (e.g. for the discovery stream's periodic re-polls).
+    """
+    from imbue.mngr.api.list import list_agents
+
+    list_agents(
+        mngr_ctx=mngr_ctx,
+        is_streaming=False,
+        error_behavior=error_behavior,
+        reset_caches=True,
+    )
+
+
+def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior: ErrorBehavior) -> None:
+    """Run an unfiltered full snapshot, logging any errors instead of raising."""
+    try:
+        _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
+    except (MngrError, OSError) as e:
+        logger.warning("Failed to write discovery snapshot: {}", e)
+
+
+def run_discovery_stream(
+    mngr_ctx: MngrContext,
+    error_behavior: ErrorBehavior,
+    on_line: Callable[[str], None] | None = None,
+) -> None:
+    """Stream discovery events as JSONL.
+
+    Snapshots are always unfiltered so they can be used for state reconstruction.
+
+    1. Emit from the latest cached snapshot on disk (instant, if available)
+    2. Run a full sync in the background to update the event stream
+    3. Tail the events file for new events written by the background sync or other processes
+    4. Periodically re-poll (unfiltered) and write new full snapshots
+
+    If on_line is None, events are written to stdout. Otherwise, the callback
+    is called with each deduplicated JSONL line.
+    """
+    events_path = get_discovery_events_path(mngr_ctx.config)
+    emitted_event_ids: set[str] = set()
+    emit_lock = Lock()
+
+    # Phase 1: emit from the latest cached snapshot on disk (fast path)
+    has_cached_snapshot = False
+    if events_path.exists():
+        snapshot_offset = find_latest_full_snapshot_offset(events_path)
+        if snapshot_offset > 0:
+            has_cached_snapshot = True
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+
+    # Record the current file position for tailing
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
+
+    # Phase 2: start tailing the events file for new events
+    stop_event = threading.Event()
+    tail = threading.Thread(
+        target=_discovery_stream_tail_events_file,
+        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, on_line),
+        daemon=True,
+    )
+    tail.start()
+
+    # Phase 3: run the initial full sync
+    # If we had a cached snapshot, run this in the background so the caller sees results immediately.
+    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+    if has_cached_snapshot:
+        initial_sync = threading.Thread(
+            target=_write_unfiltered_full_snapshot_logged,
+            args=(mngr_ctx, error_behavior),
+            daemon=True,
+        )
+        initial_sync.start()
+    else:
+        _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
+        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        if events_path.exists():
+            snapshot_offset = find_latest_full_snapshot_offset(events_path)
+            with open(events_path) as f:
+                f.seek(snapshot_offset)
+                for line in f:
+                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+
+    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
+            if stop_event.is_set():
+                break
+            try:
+                _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
+                # The tail thread will pick up the new snapshot and emit it
+            except (MngrError, OSError) as e:
+                logger.warning("Discovery stream poll failed (continuing): {}", e)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        tail.join(timeout=5.0)

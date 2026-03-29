@@ -1811,26 +1811,6 @@ def test_list_command_shorthand_flag_rejects_format(
     assert "cannot be combined with --format" in result.output
 
 
-@pytest.mark.parametrize(
-    "shorthand_flag",
-    ["--ids", "--addrs"],
-)
-def test_list_command_shorthand_flag_rejects_stream(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    shorthand_flag: str,
-) -> None:
-    """--ids/--addrs should reject --stream."""
-    result = cli_runner.invoke(
-        list_command,
-        [shorthand_flag, "--stream"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
-    assert "cannot be combined with --stream" in result.output
-
-
 def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_output with empty agents list should produce no output."""
     _emit_human_output([], fields=["name", "state"])

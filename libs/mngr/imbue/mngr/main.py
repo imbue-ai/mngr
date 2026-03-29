@@ -1,4 +1,5 @@
 import bdb
+import sys
 from typing import Any
 
 import click
@@ -155,7 +156,7 @@ def cli(ctx: click.Context) -> None:
     """
     Initial entry point for mngr CLI commands.
     """
-    setproctitle.setproctitle("mngr")
+    setproctitle.setproctitle(" ".join(["mngr"] + sys.argv[1:]))
 
     # expose the plugin manager in the command context so that all commands have access to it
     # This uses the singleton that was already created during command registration

@@ -40,6 +40,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
+from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -1642,7 +1643,7 @@ log "=== Shutdown script completed ==="
     def reset_caches(self) -> None:
         """Reset all caches on this instance.
 
-        This is primarily used for "list --stream", where we need to actually see new data, and for
+        This is primarily used for discovery streaming, where we need to actually see new data, and for
         test isolation to ensure a clean state between tests
         """
         self._sandbox_cache_by_id.clear()
@@ -2856,11 +2857,13 @@ log "=== Shutdown script completed ==="
 
         # Lifecycle state from tmux info
         expected_process_name = resolve_expected_process_name(agent_type, command, self.mngr_ctx.config)
+        is_type_known = check_agent_type_known(agent_type, self.mngr_ctx.config)
         state = determine_lifecycle_state(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
             expected_process_name=expected_process_name,
             ps_output=ps_output,
+            is_agent_type_known=is_type_known,
         )
 
         return AgentDetails(
