@@ -65,7 +65,7 @@ WEB_SERVER_COMMAND: Final[str] = "mngr llmweb"
 # Observer: runs 'mngr observe' writing events to the agent's state directory
 # so each mind has its own local copy of agent state events.
 OBSERVER_WINDOW_NAME: Final[str] = "observer"
-OBSERVER_COMMAND: Final[str] = 'mngr observe --events-dir "$MNGR_AGENT_STATE_DIR"'
+OBSERVER_COMMAND: Final[str] = 'mngr -v observe --events-dir "$MNGR_AGENT_STATE_DIR"'
 
 
 class ClaudeMindConfig(ClaudeAgentConfig):

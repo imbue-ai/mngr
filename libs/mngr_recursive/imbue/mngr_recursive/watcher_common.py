@@ -88,8 +88,8 @@ def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
 
     logger.add(
         sys.stdout,
-        level="INFO",
-        format="[{time:YYYY-MM-DDTHH:mm:ss.SSSSSS!UTC}Z] {message}",
+        level="DEBUG",
+        format="[{time:YYYY-MM-DD HH:mm:ss.SSSSSS!UTC}] {message}",
         colorize=False,
     )
 
