@@ -13,6 +13,7 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
@@ -619,6 +620,11 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior
         logger.warning("Failed to write discovery snapshot: {}", e)
 
 
+def _on_stream_thread_failure(e: BaseException, stop_event: threading.Event) -> None:
+    logger.error("Discovery stream thread failed: {}", e)
+    stop_event.set()
+
+
 def run_discovery_stream(
     mngr_ctx: MngrContext,
     error_behavior: ErrorBehavior,
@@ -636,66 +642,66 @@ def run_discovery_stream(
     If on_line is None, events are written to stdout. Otherwise, the callback
     is called with each deduplicated JSONL line.
     """
-    events_path = get_discovery_events_path(mngr_ctx.config)
-    emitted_event_ids: set[str] = set()
-    emit_lock = Lock()
-
-    # Phase 1: emit from the latest cached snapshot on disk (fast path)
-    has_cached_snapshot = False
-    if events_path.exists():
-        snapshot_offset = find_latest_full_snapshot_offset(events_path)
-        if snapshot_offset > 0:
-            has_cached_snapshot = True
-            with open(events_path) as f:
-                f.seek(snapshot_offset)
-                for line in f:
-                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
-
-    # Record the current file position for tailing
-    initial_offset = events_path.stat().st_size if events_path.exists() else 0
-
-    # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
-    tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
-        args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, on_line),
-        daemon=True,
-    )
-    tail.start()
+    with ConcurrencyGroup(name="discovery_stream", exit_timeout_seconds=6.0) as cg:
+        events_path = get_discovery_events_path(mngr_ctx.config)
+        emitted_event_ids: set[str] = set()
+        emit_lock = Lock()
 
-    # Phase 3: run the initial full sync
-    # If we had a cached snapshot, run this in the background so the caller sees results immediately.
-    # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
-    if has_cached_snapshot:
-        initial_sync = threading.Thread(
-            target=_write_unfiltered_full_snapshot_logged,
-            args=(mngr_ctx, error_behavior),
-            daemon=True,
-        )
-        initial_sync.start()
-    else:
-        _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
-        # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+        # Phase 1: emit from the latest cached snapshot on disk (fast path)
+        has_cached_snapshot = False
         if events_path.exists():
             snapshot_offset = find_latest_full_snapshot_offset(events_path)
-            with open(events_path) as f:
-                f.seek(snapshot_offset)
-                for line in f:
-                    _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+            if snapshot_offset > 0:
+                has_cached_snapshot = True
+                with open(events_path) as f:
+                    f.seek(snapshot_offset)
+                    for line in f:
+                        _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
 
-    # Phase 4: periodically re-poll (unfiltered) and write full snapshots
-    try:
-        while not stop_event.is_set():
-            stop_event.wait(timeout=_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
-            if stop_event.is_set():
-                break
-            try:
-                _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-                # The tail thread will pick up the new snapshot and emit it
-            except (MngrError, OSError) as e:
-                logger.warning("Discovery stream poll failed (continuing): {}", e)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_event.set()
-        tail.join(timeout=5.0)
+        # Record the current file position for tailing
+        initial_offset = events_path.stat().st_size if events_path.exists() else 0
+
+        # Phase 2: start tailing the events file for new events
+        cg.start_new_thread(
+            target=_discovery_stream_tail_events_file,
+            args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, on_line),
+            name="discovery_stream_tail",
+            on_failure=lambda e: _on_stream_thread_failure(e, stop_event),
+        )
+
+        # Phase 3: run the initial full sync
+        # If we had a cached snapshot, run this in the background so the caller sees results immediately.
+        # If no cached snapshot exists (first run), we must wait for it before we have anything to show.
+        if has_cached_snapshot:
+            cg.start_new_thread(
+                target=_write_unfiltered_full_snapshot_logged,
+                args=(mngr_ctx, error_behavior),
+                name="discovery_stream_initial_sync",
+                on_failure=lambda e: _on_stream_thread_failure(e, stop_event),
+            )
+        else:
+            _write_unfiltered_full_snapshot_logged(mngr_ctx, error_behavior)
+            # Emit whatever the sync just wrote (the tail thread may not have picked it up yet)
+            if events_path.exists():
+                snapshot_offset = find_latest_full_snapshot_offset(events_path)
+                with open(events_path) as f:
+                    f.seek(snapshot_offset)
+                    for line in f:
+                        _discovery_stream_emit_line(line, emitted_event_ids, emit_lock, on_line)
+
+        # Phase 4: periodically re-poll (unfiltered) and write full snapshots
+        try:
+            while not stop_event.is_set():
+                stop_event.wait(timeout=_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
+                if stop_event.is_set():
+                    break
+                try:
+                    _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
+                    # The tail thread will pick up the new snapshot and emit it
+                except (MngrError, OSError) as e:
+                    logger.warning("Discovery stream poll failed (continuing): {}", e)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_event.set()
