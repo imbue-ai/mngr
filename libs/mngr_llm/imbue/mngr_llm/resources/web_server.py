@@ -67,8 +67,10 @@ MESSAGES_EVENTS_PATH: Final[Path | None] = (
 )
 _LLM_USER_PATH: Final[str] = os.environ.get("LLM_USER_PATH", "")
 LLM_DB_PATH: Final[Path | None] = Path(_LLM_USER_PATH) / "logs.db" if _LLM_USER_PATH else None
+_LOG_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d %H:%M:%S.%f"
 if not _LLM_USER_PATH:
-    sys.stderr.write("[web-server] WARNING: LLM_USER_PATH not set, conversation features will be unavailable\n")
+    _early_ts = datetime.now(timezone.utc).strftime(_LOG_TIMESTAMP_FORMAT)
+    sys.stderr.write(f"[{_early_ts}] [web-server] WARNING: LLM_USER_PATH not set, conversation features will be unavailable\n")
 
 AGENT_WORK_DIR: Final[str] = os.environ.get("MNGR_AGENT_WORK_DIR", "")
 
@@ -95,7 +97,9 @@ def _html_escape(text: str) -> str:
 
 
 def _log(message: str) -> None:
-    sys.stderr.write(f"[web-server] {message}\n")
+    now = datetime.now(timezone.utc)
+    ts = now.strftime(_LOG_TIMESTAMP_FORMAT)
+    sys.stderr.write(f"[{ts}] [web-server] {message}\n")
     sys.stderr.flush()
 
 

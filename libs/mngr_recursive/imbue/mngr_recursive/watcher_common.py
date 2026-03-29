@@ -81,15 +81,15 @@ def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
     """Configure loguru for a watcher process.
 
     Sets up:
-    - stdout logging for INFO+ messages (timestamped)
+    - stdout logging for DEBUG+ messages (timestamped)
     - JSONL file logging for DEBUG+ to <log_dir>/<watcher_name>/events.jsonl
     """
     logger.remove()
 
     logger.add(
         sys.stdout,
-        level="INFO",
-        format="[{time:YYYY-MM-DDTHH:mm:ss.SSSSSS!UTC}Z] {message}",
+        level="DEBUG",
+        format="[{time:YYYY-MM-DD HH:mm:ss.SSSSSS!UTC}] {message}",
         colorize=False,
     )
 
