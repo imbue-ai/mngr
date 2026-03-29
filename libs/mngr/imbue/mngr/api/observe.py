@@ -51,11 +51,6 @@ FULL_STATE_INTERVAL_SECONDS: Final[float] = 300.0
 _ACTIVITY_DEBOUNCE_SECONDS: Final[float] = 2.0
 
 
-def _event_source_filename(source: EventSource) -> str:
-    """Build the events JSONL filename for a given event source."""
-    return f"{source}/events.jsonl"
-
-
 # === Event Types ===
 
 
@@ -468,7 +463,7 @@ class AgentObserver(MutableModel):
                     self.mngr_binary,
                     "events",
                     str(host_name),
-                    _event_source_filename(ACTIVITY_EVENT_SOURCE),
+                    str(ACTIVITY_EVENT_SOURCE),
                     "--follow",
                     "--quiet",
                 ],
