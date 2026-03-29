@@ -326,6 +326,12 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Include gitignored files",
 )
+@optgroup.option(
+    "--default-worktree-base-folder",
+    default=None,
+    type=click.Path(),
+    help="Base folder for git worktrees [default: ~/.mngr/worktrees/]",
+)
 @optgroup.group("Agent Environment Variables")
 @optgroup.option("--env", multiple=True, help="Set environment variable KEY=VALUE")
 @optgroup.option(
@@ -1272,6 +1278,11 @@ def _parse_agent_opts(
 
     is_clone = opts.source_agent is not None
 
+    # Parse worktree base folder
+    parsed_worktree_base_folder = (
+        Path(opts.default_worktree_base_folder).expanduser() if opts.default_worktree_base_folder else None
+    )
+
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
@@ -1280,6 +1291,7 @@ def _parse_agent_opts(
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
         target_path=parsed_target_path,
+        worktree_base_folder=parsed_worktree_base_folder,
         transfer_mode=transfer_mode,
         initial_message=initial_message,
         data_options=data_options,

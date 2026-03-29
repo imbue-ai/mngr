@@ -1877,7 +1877,8 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default.
+        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default,
+        or at <worktree_base_folder>/<name>-<uuid>/ if worktree_base_folder is set.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
@@ -1887,7 +1888,8 @@ class Host(BaseHost, OnlineHostInterface):
         else:
             agent_name = options.name or AgentName("agent")
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
-            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
+            worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
+            work_dir_path = worktree_base / work_dir_dir_name
 
         new_branch_name = options.git.new_branch_name if options.git else None
         base_branch = options.git.base_branch if options.git else None

@@ -636,6 +636,52 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
 
 
 @pytest.mark.tmux
+def test_worktree_base_folder_overrides_default_worktree_location(
+    tmp_home_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    temp_git_repo: Path,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Test that worktree_base_folder places worktrees in the specified directory."""
+    agent_name = AgentName(f"test-wt-base-{int(time.time())}")
+    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+    custom_base = tmp_path / "custom_worktrees"
+
+    _setup_claude_trust_config(temp_git_repo, tmp_home_dir)
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
+
+        agent_options = CreateAgentOptions(
+            agent_type=AgentTypeName("wt-base-test"),
+            name=agent_name,
+            command=CommandString("sleep 60"),
+            transfer_mode=TransferMode.GIT_WORKTREE,
+            worktree_base_folder=custom_base,
+            git=AgentGitOptions(
+                new_branch_name=f"mngr/{agent_name}",
+            ),
+        )
+
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=agent_options,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        agent = _get_agent_from_create_result(result, temp_mngr_ctx)
+        worktree_path = Path(agent.work_dir)
+
+        # Worktree should be placed under the custom base folder, not the default
+        assert worktree_path.parent == custom_base, (
+            f"Expected worktree under {custom_base}, got {worktree_path}"
+        )
+        assert worktree_path.exists()
+        assert (worktree_path / "README.md").exists()
+
+
+@pytest.mark.tmux
 @pytest.mark.rsync
 def test_target_path_different_from_source_sets_is_generated_work_dir_true(
     temp_mngr_ctx: MngrContext,

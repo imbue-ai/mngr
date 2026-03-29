@@ -136,7 +136,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
 - `start_on_boot` - Whether the agent is set to start on host boot
-- `state` - Agent lifecycle state (RUNNING, STOPPED, WAITING, REPLACED, DONE)
+- `state` - Agent lifecycle state (RUNNING, STOPPED, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE)
 - `labels` - Agent labels (key-value pairs, e.g., project=mngr)
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)

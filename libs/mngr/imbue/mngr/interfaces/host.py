@@ -754,6 +754,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Target path for the agent work_dir",
     )
+    worktree_base_folder: Path | None = Field(
+        default=None,
+        description="Base folder for git worktrees (overrides default ~/.mngr/worktrees/)",
+    )
     transfer_mode: TransferMode = Field(
         default=TransferMode.NONE,
         description="How to transfer the project into the agent work_dir",
