@@ -327,7 +327,7 @@ class _CreateCommand(click.Command):
     help="Include gitignored files",
 )
 @optgroup.option(
-    "--default-worktree-base-folder",
+    "--worktree-base-folder",
     default=None,
     type=click.Path(),
     help="Base folder for git worktrees [default: ~/.mngr/worktrees/]",
@@ -1280,7 +1280,7 @@ def _parse_agent_opts(
 
     # Parse worktree base folder
     parsed_worktree_base_folder = (
-        Path(opts.default_worktree_base_folder).expanduser() if opts.default_worktree_base_folder else None
+        Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
     )
 
     agent_opts = CreateAgentOptions(

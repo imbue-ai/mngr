@@ -109,7 +109,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         idle_timeout=None,
         idle_mode=None,
         activity_sources=None,
-        default_worktree_base_folder=None,
+        worktree_base_folder=None,
         start_on_boot=None,
         start_host=True,
         grant=(),
