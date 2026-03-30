@@ -76,16 +76,12 @@ mngr snapshot create [OPTIONS] [IDENTIFIERS]...
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to snapshot (can be specified multiple times) | None |
 | `--host` | text | Host ID or name to snapshot directly (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Snapshot all running agents | `False` |
 
 ## Snapshot Options
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--name` | text | Custom name for the snapshot | None |
-| `--dry-run` | boolean | Show what would be snapshotted without actually creating snapshots | `False` |
-| `--include` | text | Filter agents by CEL expression (repeatable) [future] | None |
-| `--exclude` | text | Exclude agents matching CEL expression (repeatable) [future] | None |
 | `--tag` | text | Metadata tag for the snapshot (KEY=VALUE) [future] | None |
 | `--description` | text | Description for the snapshot [future] | None |
 | `--restart-if-larger-than` | text | Restart host if snapshot exceeds size (e.g., 5G) [future] | None |
@@ -131,10 +127,10 @@ $ mngr snapshot create my-agent
 $ mngr snapshot create my-agent --name before-refactor
 ```
 
-**Snapshot all running agents (dry run)**
+**Snapshot all running agents**
 
 ```bash
-$ mngr snapshot create --all --dry-run
+$ mngr list --format '{name}' | mngr snapshot create -
 ```
 
 **Snapshot multiple agents**
@@ -175,15 +171,12 @@ mngr snapshot list [OPTIONS] [IDENTIFIERS]...
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to list snapshots for (can be specified multiple times) | None |
 | `--host` | text | Host ID or name to list snapshots for directly (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | List snapshots for all running agents | `False` |
 
 ## Filtering
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--limit` | integer | Maximum number of snapshots to show | None |
-| `--include` | text | Filter snapshots by CEL expression (repeatable) [future] | None |
-| `--exclude` | text | Exclude snapshots matching CEL expression (repeatable) [future] | None |
 | `--after` | text | Show only snapshots created after this date [future] | None |
 | `--before` | text | Show only snapshots created before this date [future] | None |
 
@@ -217,7 +210,7 @@ $ mngr snapshot list my-agent
 **List snapshots for all running agents**
 
 ```bash
-$ mngr snapshot list --all
+$ mngr list --format '{name}' | mngr snapshot list -
 ```
 
 **Limit number of results**
@@ -269,9 +262,6 @@ mngr snapshot destroy [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-f`, `--force` | boolean | Skip confirmation prompt | `False` |
-| `--dry-run` | boolean | Show what would be destroyed without actually deleting | `False` |
-| `--include` | text | Filter snapshots by CEL expression (repeatable) [future] | None |
-| `--exclude` | text | Exclude snapshots matching CEL expression (repeatable) [future] | None |
 
 ## Common
 
@@ -306,10 +296,10 @@ $ mngr snapshot destroy my-agent --snapshot snap-abc123 --force
 $ mngr snapshot destroy my-agent --all-snapshots --force
 ```
 
-**Preview what would be destroyed**
+**Destroy all snapshots for multiple agents**
 
 ```bash
-$ mngr snapshot destroy my-agent --all-snapshots --dry-run
+$ mngr snapshot destroy agent1 agent2 --all-snapshots --force
 ```
 
 ## See Also
@@ -346,7 +336,7 @@ $ mngr snapshot create my-host-id
 **Snapshot all running agents**
 
 ```bash
-$ mngr snapshot create --all --dry-run
+$ mngr list --format '{name}' | mngr snapshot create -
 ```
 
 **List snapshots for an agent**
@@ -361,8 +351,8 @@ $ mngr snapshot list my-agent
 $ mngr snapshot destroy my-agent --all-snapshots --force
 ```
 
-**Preview what would be destroyed**
+**Destroy all snapshots for multiple agents**
 
 ```bash
-$ mngr snapshot destroy my-agent --all-snapshots --dry-run
+$ mngr snapshot destroy agent1 agent2 --all-snapshots --force
 ```

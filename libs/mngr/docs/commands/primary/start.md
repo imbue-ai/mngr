@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--connect]
 ```
 
 Start stopped agent(s).
@@ -36,16 +36,12 @@ mngr start [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to start (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Start all stopped agents | `False` |
 | `--host` | text | Host(s) to start all stopped agents on [repeatable] [future] | None |
-| `--include` | text | Filter agents and hosts to start by CEL expression (repeatable) [future] | None |
-| `--exclude` | text | Exclude agents and hosts matching CEL expression (repeatable) [future] | None |
 
 ## Behavior
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--dry-run` | boolean | Show what would be started without actually starting | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
@@ -96,17 +92,11 @@ $ mngr start my-agent --connect
 **Start all stopped agents**
 
 ```bash
-$ mngr start --all
-```
-
-**Preview what would be started**
-
-```bash
-$ mngr start --all --dry-run
+$ mngr list --format '{name}' | mngr start -
 ```
 
 **Custom format template output**
 
 ```bash
-$ mngr start --all --format '{name}'
+$ mngr start agent1 agent2 --format '{name}'
 ```

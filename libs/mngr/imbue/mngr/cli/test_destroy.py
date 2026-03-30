@@ -313,58 +313,6 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
 
 
 @pytest.mark.tmux
-def test_destroy_dry_run(
-    cli_runner: CliRunner,
-    temp_work_dir: Path,
-    mngr_test_prefix: str,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test dry-run mode for destroy command."""
-    agent_name = f"test-destroy-dryrun-{int(time.time())}"
-    session_name = f"{mngr_test_prefix}{agent_name}"
-
-    with tmux_session_cleanup(session_name):
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--command",
-                "sleep 541286",
-                "--source",
-                str(temp_work_dir),
-                "--transfer=none",
-                "--no-connect",
-                "--no-ensure-clean",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert create_result.exit_code == 0
-        wait_for(
-            lambda: tmux_session_exists(session_name),
-            timeout=15.0,
-            error_message=f"Expected tmux session {session_name} to exist",
-        )
-
-        destroy_result = cli_runner.invoke(
-            destroy,
-            [agent_name, "--dry-run"],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-
-        assert destroy_result.exit_code == 0
-        assert "Would destroy:" in destroy_result.output
-
-        wait_for(
-            lambda: tmux_session_exists(session_name),
-            error_message="Agent session should still exist after dry-run",
-        )
-
-
-@pytest.mark.tmux
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -478,23 +426,7 @@ def test_session_cannot_combine_with_agent_names(
     )
 
     assert result.exit_code != 0
-    assert "Cannot specify --session with agent names or --all" in result.output
-
-
-def test_session_cannot_combine_with_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --session cannot be combined with --all."""
-    result = cli_runner.invoke(
-        destroy,
-        ["--session", "mngr-some-agent", "--all", "--force"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-
-    assert result.exit_code != 0
-    assert "Cannot specify --session with agent names or --all" in result.output
+    assert "Cannot specify --session with agent names" in result.output
 
 
 def test_session_fails_with_invalid_prefix(

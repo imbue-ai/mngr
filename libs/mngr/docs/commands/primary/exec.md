@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
+mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.
@@ -38,7 +38,6 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to exec on (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Execute the command on all agents | `False` |
 
 ## Execution
 
@@ -105,7 +104,7 @@ $ mngr exec agent1 agent2 "echo hello"
 **Run on all agents**
 
 ```bash
-$ mngr exec --all "echo hello"
+$ mngr ls --format '{name}' | mngr exec - "echo hello"
 ```
 
 **Run with a custom working directory**

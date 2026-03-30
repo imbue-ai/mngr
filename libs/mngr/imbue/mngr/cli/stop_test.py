@@ -20,12 +20,8 @@ def test_stop_cli_options_fields() -> None:
     opts = StopCliOptions(
         agents=("agent1", "agent2"),
         agent_list=("agent3",),
-        stop_all=False,
-        dry_run=True,
         archive=False,
         sessions=(),
-        include=(),
-        exclude=(),
         snapshot_mode=None,
         graceful=True,
         graceful_timeout=None,
@@ -42,16 +38,14 @@ def test_stop_cli_options_fields() -> None:
     )
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == ("agent3",)
-    assert opts.stop_all is False
-    assert opts.dry_run is True
     assert opts.sessions == ()
 
 
-def test_stop_requires_agent_or_all(
+def test_stop_requires_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that stop requires at least one agent or --all."""
+    """Test that stop requires at least one agent."""
     result = cli_runner.invoke(
         stop,
         [],
@@ -60,40 +54,7 @@ def test_stop_requires_agent_or_all(
     )
 
     assert result.exit_code != 0
-    assert "Must specify at least one agent or use --all" in result.output
-
-
-def test_stop_cannot_combine_agents_and_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --all cannot be combined with agent names."""
-    result = cli_runner.invoke(
-        stop,
-        ["my-agent", "--all"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-
-    assert result.exit_code != 0
-    assert "Cannot specify both agent names and --all" in result.output
-
-
-def test_stop_all_with_no_running_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test stopping all agents when none are running."""
-    result = cli_runner.invoke(
-        stop,
-        ["--all"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    # Should succeed but report no agents to stop
-    assert result.exit_code == 0
-    assert "No running agents found to stop" in result.output
+    assert "Must specify at least one agent (use '-' to read from stdin)" in result.output
 
 
 def test_stop_session_cannot_combine_with_agent_names(
@@ -109,23 +70,7 @@ def test_stop_session_cannot_combine_with_agent_names(
     )
 
     assert result.exit_code != 0
-    assert "Cannot specify --session with agent names or --all" in result.output
-
-
-def test_stop_session_cannot_combine_with_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --session cannot be combined with --all."""
-    result = cli_runner.invoke(
-        stop,
-        ["--session", "mngr-some-agent", "--all"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-
-    assert result.exit_code != 0
-    assert "Cannot specify --session with agent names or --all" in result.output
+    assert "Cannot specify --session with agent names" in result.output
 
 
 def test_stop_session_fails_with_invalid_prefix(
@@ -145,47 +90,6 @@ def test_stop_session_fails_with_invalid_prefix(
 
 
 # =============================================================================
-# Dry-run and format tests
-# =============================================================================
-
-
-def test_stop_dry_run_all_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--dry-run --all with no running agents returns 0."""
-    result = cli_runner.invoke(
-        stop,
-        ["--all", "--dry-run"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "No running agents found to stop" in result.output
-
-
-def test_stop_format_json_all_no_running_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--format json --all with no running agents outputs nothing (early return).
-
-    In JSON mode, the "No running agents" message is not emitted because _output()
-    only writes for HUMAN format. The command returns early before _output_result().
-    """
-    result = cli_runner.invoke(
-        stop,
-        ["--all", "--format", "json"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert result.output.strip() == ""
-
-
-# =============================================================================
 # StopCliOptions additional field tests
 # =============================================================================
 
@@ -195,12 +99,8 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     opts = StopCliOptions(
         agents=("a1", "a2", "a3"),
         agent_list=("a4",),
-        stop_all=True,
-        dry_run=False,
         archive=True,
         sessions=("mngr-session-1", "mngr-session-2"),
-        include=("state == 'RUNNING'",),
-        exclude=("name == 'keep-me'",),
         snapshot_mode="auto",
         graceful=False,
         graceful_timeout="30s",
@@ -216,10 +116,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         disable_plugin=("other-plugin",),
     )
     assert opts.agents == ("a1", "a2", "a3")
-    assert opts.stop_all is True
     assert opts.sessions == ("mngr-session-1", "mngr-session-2")
-    assert opts.include == ("state == 'RUNNING'",)
-    assert opts.exclude == ("name == 'keep-me'",)
     assert opts.snapshot_mode == "auto"
     assert opts.graceful is False
     assert opts.graceful_timeout == "30s"

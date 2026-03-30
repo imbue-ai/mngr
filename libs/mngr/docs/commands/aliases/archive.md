@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr archive [AGENTS...] [--agent <AGENT>] [--all] [-f|--force] [--dry-run]
+mngr archive [AGENTS...|-] [--agent <AGENT>] [-f|--force]
 ```
 
 Archive agents (set the 'archived_at' label).
@@ -53,17 +53,11 @@ $ mngr archive my-agent --force
 **Archive all non-running agents**
 
 ```bash
-$ mngr archive --all
+$ mngr list --format '{name}' | mngr archive -
 ```
 
 **Force-stop and archive all agents**
 
 ```bash
-$ mngr archive --all --force
-```
-
-**Preview what would be archived**
-
-```bash
-$ mngr archive --all --dry-run
+$ mngr list --format '{name}' | mngr archive - --force
 ```
