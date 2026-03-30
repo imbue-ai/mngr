@@ -25,3 +25,4 @@ filters = "-m 'not acceptance and not release'"
 output_dir = "test-results"
 junit = true
 junit_file = "junit.xml"
+download_globs = [".test_output/**"]
