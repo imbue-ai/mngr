@@ -33,7 +33,7 @@ If you cannot reproduce the bug, cannot identify a root cause, or determine the 
 
 If there is a clear, unambiguous fix, just do it.
 
-If the fix involves a meaningful architectural choice (e.g., where to put new logic, which abstraction to use, changing public interfaces), stop and ask the user before proceeding. Briefly lay out the options and your recommendation.
+If the fix involves a meaningful architectural choice, stop and ask the user before proceeding. Briefly lay out the options and your recommendation.
 
 ## 4. Implement the fix
 
