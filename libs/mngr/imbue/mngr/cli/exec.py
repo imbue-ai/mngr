@@ -35,7 +35,6 @@ class ExecCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
-    exec_all: bool
     command_arg: str
     user: str | None
     cwd: str | None
@@ -53,14 +52,6 @@ class ExecCliOptions(CommonCliOptions):
     "agent_list",
     multiple=True,
     help="Agent name or ID to exec on (can be specified multiple times)",
-)
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "exec_all",
-    is_flag=True,
-    help="Execute the command on all agents",
 )
 @optgroup.group("Execution")
 @optgroup.option(
@@ -116,27 +107,20 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     # Build list of agent identifiers
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
-    if not agent_identifiers and not opts.exec_all:
-        raise UserInputError("Must specify at least one agent or use --all")
-
-    if agent_identifiers and opts.exec_all:
-        raise UserInputError("Cannot specify both agent names and --all")
+    if not agent_identifiers:
+        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
     # Resolve agent addresses (NAME@HOST.PROVIDER) to agent IDs for the API layer.
     # This ensures host/provider filtering works correctly for disambiguation.
-    resolved_identifiers: list[str]
-    if agent_identifiers:
-        matches = find_agents_by_addresses(
-            raw_identifiers=agent_identifiers,
-            filter_all=False,
-            target_state=None,
-            mngr_ctx=mngr_ctx,
-        )
-        resolved_identifiers = [str(m.agent_id) for m in matches]
-    else:
-        resolved_identifiers = agent_identifiers
+    matches = find_agents_by_addresses(
+        raw_identifiers=agent_identifiers,
+        filter_all=False,
+        target_state=None,
+        mngr_ctx=mngr_ctx,
+    )
+    resolved_identifiers = [str(m.agent_id) for m in matches]
 
     # For JSONL format, use streaming callbacks
     if output_opts.output_format == OutputFormat.JSONL:
@@ -144,7 +128,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
             mngr_ctx=mngr_ctx,
             agent_identifiers=resolved_identifiers,
             command=opts.command_arg,
-            is_all=opts.exec_all,
+            is_all=False,
             user=opts.user,
             cwd=opts.cwd,
             timeout_seconds=opts.timeout,
@@ -162,7 +146,7 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
         mngr_ctx=mngr_ctx,
         agent_identifiers=resolved_identifiers,
         command=opts.command_arg,
-        is_all=opts.exec_all,
+        is_all=False,
         user=opts.user,
         cwd=opts.cwd,
         timeout_seconds=opts.timeout,
@@ -288,7 +272,7 @@ def _emit_json_output(result: MultiExecResult) -> None:
 CommandHelpMetadata(
     key="exec",
     one_line_description="Execute a shell command on one or more agents' hosts",
-    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
+    synopsis="mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]",
     arguments_description=(
         "- `AGENTS`: Name(s) or ID(s) of the agent(s) whose host will run the command\n"
         "- `COMMAND`: Shell command to execute on the agent's host"
@@ -299,17 +283,19 @@ the working directory.
 The command's stdout is printed to stdout and stderr to stderr. The exit
 code is 0 if all commands succeeded, 1 if any failed.
 
+Use '-' in place of agent names to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields: agent, stdout, stderr, success.""",
     aliases=("x",),
     examples=(
         ("Run a command on an agent", 'mngr exec my-agent "echo hello"'),
         ("Run on multiple agents", 'mngr exec agent1 agent2 "echo hello"'),
-        ("Run on all agents", 'mngr exec --all "echo hello"'),
+        ("Run on all agents", 'mngr list --ids | mngr exec - "echo hello"'),
         ("Run with a custom working directory", 'mngr exec my-agent "ls -la" --cwd /tmp'),
         ("Run as a different user", 'mngr exec my-agent "whoami" --user root'),
         ("Run with a timeout", 'mngr exec my-agent "sleep 100" --timeout 5'),
         ("Use --agent flag (repeatable)", 'mngr exec --agent my-agent --agent another-agent "echo hello"'),
-        ("Custom format template output", "mngr exec --all \"hostname\" --format '{agent}\\t{stdout}'"),
+        ("Custom format template output", "mngr exec my-agent \"hostname\" --format '{agent}\\t{stdout}'"),
     ),
     see_also=(
         ("connect", "Connect to an agent interactively"),

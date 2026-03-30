@@ -1,10 +1,15 @@
-"""Regenerate vet-sourced issue category files from a checkout of imbue-ai/vet.
+"""Regenerate vet-sourced issue category defaults from a checkout of imbue-ai/vet.
 
 Requires --vet-repo or VET_REPO env var.
 
+These are the DEFAULT categories shipped with the imbue-code-review plugin.
+Users customize their categories by copying the defaults to
+.reviewer/code-issue-categories.md and .reviewer/conversation-issue-categories.md
+and editing them directly.
+
 Output:
-  .claude/agents/categories/code-issue-categories.md
-  .claude/agents/categories/conversation-issue-categories.md
+  plugins/imbue-code-review/agents/categories/code-issue-categories.md
+  plugins/imbue-code-review/agents/categories/conversation-issue-categories.md
 
 Usage:
     uv run python scripts/generate_verify_skills.py --vet-repo /path/to/vet
@@ -22,16 +27,16 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-from verify_skill_overrides import CATEGORY_EXTENSIONS
-from verify_skill_overrides import NEW_CATEGORIES
-from verify_skill_overrides import OverrideAction
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-# Output paths (vet-generated, checked in)
-BRANCH_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "code-issue-categories.md"
-CONVERSATION_CATEGORIES_PATH = REPO_ROOT / ".claude" / "agents" / "categories" / "conversation-issue-categories.md"
+# Output paths (vet defaults, checked in)
+BRANCH_CATEGORIES_PATH = (
+    REPO_ROOT / "plugins" / "imbue-code-review" / "agents" / "categories" / "code-issue-categories.md"
+)
+CONVERSATION_CATEGORIES_PATH = (
+    REPO_ROOT / "plugins" / "imbue-code-review" / "agents" / "categories" / "conversation-issue-categories.md"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -130,61 +135,8 @@ def _vet_guide_to_section(guide) -> CategorySection:
     )
 
 
-def _apply_overrides(sections: list[CategorySection]) -> list[CategorySection]:
-    """Apply mngr-specific overrides to the category sections.
-
-    Inserts new categories and extends existing ones with additional guidance.
-    """
-    sections_by_code: dict[str, CategorySection] = {s.issue_code: s for s in sections}
-
-    # Insert new categories after their specified anchor.
-    for issue_code, (guide_text, insert_after) in NEW_CATEGORIES.items():
-        new_section = CategorySection(issue_code=issue_code, guide=guide_text)
-        # Find the index of the anchor and insert after it.
-        anchor_idx = next(
-            (i for i, s in enumerate(sections) if s.issue_code == insert_after),
-            None,
-        )
-        if anchor_idx is None:
-            msg = f"Override anchor '{insert_after}' not found for new category '{issue_code}'"
-            raise ValueError(msg)
-        sections.insert(anchor_idx + 1, new_section)
-        sections_by_code[issue_code] = new_section
-
-    # Apply extensions to existing categories.
-    for override in CATEGORY_EXTENSIONS:
-        section = sections_by_code.get(override.issue_code)
-        if section is None:
-            msg = f"Override target '{override.issue_code}' not found in categories"
-            raise ValueError(msg)
-        match override.action:
-            case OverrideAction.APPEND_GUIDE:
-                section.guide = section.guide + "\n" + override.content
-            case OverrideAction.APPEND_EXAMPLES:
-                section.examples.extend(_split_list_items(override.content))
-            case OverrideAction.APPEND_EXCEPTIONS:
-                section.exceptions.extend(_split_list_items(override.content))
-            case OverrideAction.ADD_CATEGORY:
-                msg = "ADD_CATEGORY should use NEW_CATEGORIES, not CATEGORY_EXTENSIONS"
-                raise ValueError(msg)
-
-    return sections
-
-
-def _split_list_items(text: str) -> list[str]:
-    """Split a block of '- item' lines into individual items (without the leading '- ')."""
-    items: list[str] = []
-    for line in text.strip().splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            items.append(stripped[2:])
-        elif stripped:
-            items.append(stripped)
-    return items
-
-
 def generate_branch_categories(vet_modules) -> str:
-    """Generate branch issue categories from vet, with mngr-specific overrides applied."""
+    """Generate branch issue categories from vet (no overrides)."""
     codes_batch = vet_modules["ISSUE_CODES_FOR_BATCHED_COMMIT_CHECK"]
     codes_correctness = vet_modules["ISSUE_CODES_FOR_CORRECTNESS_CHECK"]
     guides_by_code = vet_modules["ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE"]
@@ -197,7 +149,6 @@ def generate_branch_categories(vet_modules) -> str:
             codes.append(code)
 
     sections = [_vet_guide_to_section(guides_by_code[code]) for code in codes]
-    sections = _apply_overrides(sections)
 
     parts: list[str] = [BRANCH_PREAMBLE]
     for section in sections:
@@ -206,7 +157,7 @@ def generate_branch_categories(vet_modules) -> str:
 
 
 def generate_conversation_categories(vet_modules) -> str:
-    """Generate conversation categories from vet."""
+    """Generate conversation categories from vet (no overrides)."""
     codes = vet_modules["ISSUE_CODES_FOR_CONVERSATION_HISTORY_CHECK"]
     guides_by_code = vet_modules["ISSUE_IDENTIFICATION_GUIDES_BY_ISSUE_CODE"]
 
@@ -283,7 +234,7 @@ def _resolve_vet_repo(explicit: Path | None) -> Path | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Regenerate vet-sourced issue category files.",
+        description="Regenerate vet-sourced issue category defaults.",
     )
     parser.add_argument(
         "--vet-repo",
@@ -300,12 +251,14 @@ def main() -> None:
 
     vet_repo = _resolve_vet_repo(args.vet_repo)
     if vet_repo is None:
+        if args.check:
+            # No vet repo available -- skip the check silently
+            print("No vet repo found (VET_REPO not set). Skipping check.", file=sys.stderr)
+            raise SystemExit(0)
         print(
             "error: vet repo not found.\n"
             "\n"
-            "You modified a vet-generated file (.claude/agents/categories/code-issue-categories.md\n"
-            "or conversation-issue-categories.md). To validate against vet,\n"
-            "set VET_REPO or regenerate with:\n"
+            "Set VET_REPO or pass --vet-repo:\n"
             "\n"
             "    uv run python scripts/generate_verify_skills.py --vet-repo /path/to/vet\n",
             file=sys.stderr,
@@ -316,6 +269,17 @@ def main() -> None:
         print(f"error: does not look like a vet checkout: {vet_repo}", file=sys.stderr)
         raise SystemExit(1)
 
+    if args.check:
+        # Fetch latest main from vet to compare against
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "-C", str(vet_repo), "fetch", "origin", "main"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print(f"warning: could not fetch vet origin/main: {result.stderr.decode()}", file=sys.stderr)
+
     vet_modules = load_vet(vet_repo)
     targets = {
         "branch-categories": (BRANCH_CATEGORIES_PATH, generate_branch_categories(vet_modules)),
@@ -324,7 +288,7 @@ def main() -> None:
     ok = check_or_write(targets, check=args.check)
     if args.check and not ok:
         print(
-            "Run 'uv run python scripts/generate_verify_skills.py --vet-repo <path>' to regenerate.",
+            "Vet defaults are stale. Run 'uv run python scripts/generate_verify_skills.py' to update.",
             file=sys.stderr,
         )
         raise SystemExit(1)

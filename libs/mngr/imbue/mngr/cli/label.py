@@ -36,8 +36,6 @@ class LabelCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
     label: tuple[str, ...]
-    label_all: bool
-    dry_run: bool
 
 
 @pure
@@ -212,26 +210,12 @@ def apply_labels(
     multiple=True,
     help="Agent name or ID to label (can be specified multiple times)",
 )
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "label_all",
-    is_flag=True,
-    help="Apply labels to all agents",
-)
 @optgroup.group("Labels")
 @optgroup.option(
     "-l",
     "--label",
     multiple=True,
     help="Label in KEY=VALUE format (repeatable)",
-)
-@optgroup.group("Behavior")
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be labeled without actually labeling",
 )
 @add_common_options
 @click.pass_context
@@ -255,32 +239,19 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
     # Collect agent identifiers from args and --agent flag
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
-    if not agent_identifiers and not opts.label_all:
-        raise click.UsageError("Must specify at least one agent or use --all (use '-' to read from stdin)")
-
-    if agent_identifiers and opts.label_all:
-        raise click.UsageError("Cannot specify both agent names and --all")
+    if not agent_identifiers:
+        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
 
     # Find matching agents using the shared infrastructure (same as limit, stop, etc.)
     target_agents = find_agents_by_identifiers_or_state(
         agent_identifiers=agent_identifiers,
-        filter_all=opts.label_all,
+        filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,
     )
 
     if not target_agents:
         _output("No agents found to label", output_opts)
-        return
-
-    # Handle dry-run mode
-    if opts.dry_run:
-        _output("Would apply labels:", output_opts)
-        for key, value in labels_to_set.items():
-            _output(f"  {key}={value}", output_opts)
-        _output("To agents:", output_opts)
-        for match in target_agents:
-            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     # Apply labels (grouped by host for efficiency)
@@ -293,7 +264,7 @@ def label(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="label",
     one_line_description="Set labels on agents",
-    synopsis="mngr label [AGENTS...|-] [--agent <AGENT>] [--all] -l KEY=VALUE [-l KEY=VALUE ...]",
+    synopsis="mngr label [AGENTS...|-] [--agent <AGENT>] -l KEY=VALUE [-l KEY=VALUE ...]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to label. Use '-' to read from stdin (one per line).",
     description="""Labels are key-value pairs attached to agents. They are stored in the
 agent's certified data and persist across restarts.
@@ -303,13 +274,14 @@ keys are updated. To see current labels, use 'mngr list'.
 
 Works with both online and offline agents. For offline hosts, labels
 are updated directly in the provider's persisted data without requiring
-the host to be started.""",
+the host to be started.
+
+Use '-' in place of agent names to read them from stdin, one per line.""",
     examples=(
         ("Set a label on an agent", "mngr label my-agent --label archived_at=2026-03-15"),
         ("Set multiple labels on multiple agents", "mngr label agent1 agent2 -l env=prod -l team=backend"),
-        ("Label all agents", "mngr label --all --label project=myproject"),
-        ("Read agent names from stdin", "mngr list --format '{name}' | mngr label - -l reviewed=true"),
-        ("Preview changes", "mngr label my-agent --label status=done --dry-run"),
+        ("Label all agents", "mngr list --ids | mngr label - --label project=myproject"),
+        ("Read agent names from stdin", "mngr list --ids | mngr label - -l reviewed=true"),
     ),
     see_also=(
         ("list", "List agents and their labels"),

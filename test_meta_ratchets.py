@@ -1,4 +1,5 @@
 import ast
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,11 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux", "claude_web_view", "sculptor_web"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = ("migrate_code_mng_to_mngr.sh", "migrate_state_mng_to_mngr.sh")
+_MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
+    "migrate_code_mng_to_mngr.sh",
+    "migrate_state_mng_to_mngr.sh",
+    "release_tombstones.py",
+)
 
 pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
@@ -190,6 +195,38 @@ def _has_test_files(project_dir: Path) -> bool:
         if list(project_dir.rglob(pattern)):
             return True
     return False
+
+
+def _find_tracked_gitignored_files() -> list[str]:
+    """Return tracked files that match .gitignore patterns."""
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--stdin"],
+        input=tracked.stdout,
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+    )
+    return [line for line in ignored.stdout.splitlines() if line.strip()]
+
+
+def test_no_gitignored_files_are_tracked() -> None:
+    """Ensure no tracked files match .gitignore patterns.
+
+    Files that are gitignored should not be committed. If they were committed
+    accidentally, remove them with `git rm --cached <path>`.
+    """
+    offending = _find_tracked_gitignored_files()
+    assert len(offending) == 0, (
+        "The following tracked files match .gitignore patterns (remove with `git rm --cached`):\n"
+        + "\n".join(f"  - {f}" for f in offending)
+    )
 
 
 def test_every_project_with_tests_has_coverage_config() -> None:

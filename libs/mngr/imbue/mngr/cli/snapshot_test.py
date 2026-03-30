@@ -33,12 +33,8 @@ def test_snapshot_create_cli_options_fields() -> None:
         identifiers=("agent1",),
         agent_list=("agent2",),
         hosts=("host1",),
-        all_agents=False,
         name="my-snapshot",
-        dry_run=True,
         on_error="continue",
-        include=(),
-        exclude=(),
         tag=(),
         description=None,
         restart_if_larger_than=None,
@@ -58,9 +54,7 @@ def test_snapshot_create_cli_options_fields() -> None:
     assert opts.identifiers == ("agent1",)
     assert opts.agent_list == ("agent2",)
     assert opts.hosts == ("host1",)
-    assert opts.all_agents is False
     assert opts.name == "my-snapshot"
-    assert opts.dry_run is True
     assert opts.on_error == "continue"
 
 
@@ -70,10 +64,7 @@ def test_snapshot_list_cli_options_fields() -> None:
         identifiers=("agent1",),
         agent_list=(),
         hosts=("host1",),
-        all_agents=False,
         limit=10,
-        include=(),
-        exclude=(),
         after=None,
         before=None,
         output_format="json",
@@ -100,9 +91,6 @@ def test_snapshot_destroy_cli_options_fields() -> None:
         snapshots=("snap-123",),
         all_snapshots=False,
         force=True,
-        dry_run=False,
-        include=(),
-        exclude=(),
         output_format="human",
         quiet=False,
         verbose=0,
@@ -260,9 +248,6 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
         snapshots=(),
         all_snapshots=True,
         force=False,
-        dry_run=True,
-        include=(),
-        exclude=(),
         output_format="json",
         quiet=True,
         verbose=1,
@@ -276,7 +261,6 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
     )
     assert opts.all_snapshots is True
     assert opts.force is False
-    assert opts.dry_run is True
     assert opts.quiet is True
     assert opts.verbose == 1
 
@@ -287,10 +271,7 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
         identifiers=("a1", "a2"),
         agent_list=("a3",),
         hosts=(),
-        all_agents=True,
         limit=5,
-        include=(),
-        exclude=(),
         after=None,
         before=None,
         output_format="jsonl",
@@ -305,7 +286,6 @@ def test_snapshot_list_cli_options_can_be_instantiated() -> None:
         disable_plugin=(),
     )
     assert opts.identifiers == ("a1", "a2")
-    assert opts.all_agents is True
     assert opts.limit == 5
     assert opts.verbose == 2
 

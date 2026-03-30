@@ -233,21 +233,48 @@ def _build_grouped_tables(
         if sec == ReportSection.NON_IMPL_FIXES and integrator is not None and integrator.squashed_commit_hash:
             escaped_hash = html.escape(integrator.squashed_commit_hash[:10])
             sections += f'    <p class="squashed-hash">Squashed commit: <code>{escaped_hash}</code></p>\n'
+        is_clean_pass = sec == ReportSection.CLEAN_PASS
         sections += "    <table>\n      <thead>\n        <tr>"
         if is_running:
             sections += "<th>Test</th><th>Agent</th>"
+        elif is_clean_pass:
+            sections += "<th>Test</th><th>Agent</th><th>Branch</th>"
+            if agent_artifact_runs:
+                sections += "<th>Artifacts</th>"
         else:
             sections += "<th>Test</th><th>Changes</th><th>Agent</th><th>Branch</th><th>Merged?</th>"
             if agent_artifact_runs:
                 sections += "<th>Artifacts</th>"
         sections += "</tr>\n      </thead>\n      <tbody>\n"
-        col_count = 5 + (1 if agent_artifact_runs and not is_running else 0)
+        if is_running:
+            col_count = 2
+        elif is_clean_pass:
+            col_count = 3 + (1 if agent_artifact_runs else 0)
+        else:
+            col_count = 5 + (1 if agent_artifact_runs else 0)
         for r in group:
             agent_name_str = str(r.agent_name)
+            test_id_html = _format_test_id(r.test_node_id)
             if is_running:
                 sections += f"""        <tr>
-          <td>{html.escape(r.test_node_id)}</td>
+          <td>{test_id_html}</td>
           <td><code>{html.escape(agent_name_str)}</code></td>
+        </tr>
+"""
+            elif is_clean_pass:
+                branch_cell = r.branch_name if r.branch_name else "-"
+                artifact_cell = ""
+                if agent_artifact_runs:
+                    if agent_name_str in agent_artifact_runs:
+                        escaped = html.escape(agent_name_str)
+                        artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
+                    else:
+                        artifact_cell = "<td>-</td>"
+                sections += f"""        <tr>
+          <td>{test_id_html}</td>
+          <td><code>{html.escape(agent_name_str)}</code></td>
+          <td><code>{html.escape(branch_cell)}</code></td>
+          {artifact_cell}
         </tr>
 """
             else:
@@ -262,7 +289,7 @@ def _build_grouped_tables(
                     else:
                         artifact_cell = "<td>-</td>"
                 sections += f"""        <tr>
-          <td>{html.escape(r.test_node_id)}</td>
+          <td>{test_id_html}</td>
           <td>{changes_cell}</td>
           <td><code>{html.escape(agent_name_str)}</code></td>
           <td><code>{html.escape(branch_cell)}</code></td>
@@ -270,9 +297,9 @@ def _build_grouped_tables(
           {artifact_cell}
         </tr>
 """
-                if r.summary_markdown:
-                    summary_html = _render_markdown(r.summary_markdown)
-                    sections += f'        <tr class="summary-row"><td colspan="{col_count}" class="md summary-cell">{summary_html}</td></tr>\n'
+            if r.summary_markdown and not is_running:
+                summary_html = _render_markdown(r.summary_markdown)
+                sections += f'        <tr class="summary-row"><td colspan="{col_count}" class="md summary-cell">{summary_html}</td></tr>\n'
         sections += "      </tbody>\n    </table>\n"
 
     return sections
@@ -283,6 +310,11 @@ _CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
     ChangeStatus.FAILED: "&#10007;",
     ChangeStatus.BLOCKED: "&#9644;",
 }
+
+
+def _format_test_id(test_node_id: str) -> str:
+    """Format a test node ID with soft line breaks after :: separators."""
+    return html.escape(test_node_id).replace("::", "::<wbr>")
 
 
 def _format_changes(changes: dict[ChangeKind, Change]) -> str:

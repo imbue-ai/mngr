@@ -1,0 +1,1 @@
+../plugins/imbue-code-review/scripts/stop_hook_gates.sh

@@ -1,1 +1,1 @@
-../libs/mngr/imbue/mngr/resources/Dockerfile
+../libs/mng/imbue/mng/resources/Dockerfile

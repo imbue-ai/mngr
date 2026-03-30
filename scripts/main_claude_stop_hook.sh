@@ -77,20 +77,28 @@ _on_signal() {
 for _sig in HUP INT QUIT TERM PIPE; do
     trap "_on_signal $_sig" "$_sig"
 done
+# Set to true when the safety hatch fires so the EXIT trap does not
+# immediately re-create the stuck file (which would undo the rm -f).
+_STUCK_HATCH_FIRED=false
+
 trap '
     _exit_code=$?
     _log_to_file "INFO" "main_stop_hook EXIT trap fired (pid=$$, exit_code=$_exit_code)"
-    # Track blocked attempts for stuck agent detection
-    if [[ $_exit_code -ne 0 ]]; then
+    # Track blocked attempts for stuck agent detection (skip if the
+    # safety hatch already fired -- otherwise rm + exit + trap creates
+    # an infinite 3-block cycle)
+    if [[ $_exit_code -ne 0 ]] && [[ "$_STUCK_HATCH_FIRED" != "true" ]]; then
         mkdir -p "$(dirname "$STUCK_FILE")" 2>/dev/null || true
         echo "$HASH" >> "$STUCK_FILE" 2>/dev/null || true
     fi
 ' EXIT
 
 # ---------------------------------------------------------------------------
-# Stuck agent detection: if the stop hook has blocked 3 times at the same
-# commit, the agent is unable to make progress. Exit with an error and
-# notify the user to investigate manually.
+# Stuck agent detection for the FULL stop hook (gates + CI + PR).
+#
+# stop_hook_gates.sh has its own safety hatch for gate-only loops (used by
+# both this script and the plugin's standalone Stop hook). This separate
+# tracker covers failures in the CI/PR stages that happen AFTER gates pass.
 # ---------------------------------------------------------------------------
 STUCK_FILE=".claude/blocked_stop_commits"
 HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -115,6 +123,7 @@ if _check_stuck; then
     log_error "Stop hook has blocked 3 times at the same commit ($HASH)."
     log_error "The agent appears stuck. Please investigate manually."
     _log_to_file "ERROR" "Stuck agent detected at $HASH, exiting with error"
+    _STUCK_HATCH_FIRED=true
     rm -f "$STUCK_FILE"
     notify_user || echo "No notify_user function defined, skipping."
     exit 1
@@ -201,50 +210,19 @@ export RED GREEN YELLOW NC
 # Gate checks: autofix and conversation review must both pass before we
 # bother launching the (slow) CI check.
 # ---------------------------------------------------------------------------
-source "$SCRIPT_DIR/config_utils.sh"
-
-AUTOFIX_NEEDED=false
-CONVO_NEEDED=false
-
-# Autofix gate (inlined from check_autofix_ran.sh)
-REVIEWER_SETTINGS=".reviewer/settings.json"
-AUTOFIX_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "autofix.is_enabled" "true")
-if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/verified.md" ]]; then
-    AUTOFIX_NEEDED=true
-fi
-
-# Conversation review gate (inlined from check_conversation_reviewed.sh)
-CONVO_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "verify_conversation.is_enabled" "true")
-if [[ "$CONVO_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/conversation/${HASH}.json" ]]; then
-    CONVO_NEEDED=true
-fi
-
-# Build the autofix command string (may include extra args from config)
-AUTOFIX_EXTRA_ARGS=$(read_json_config "$REVIEWER_SETTINGS" "autofix.append_to_prompt" "")
-if [[ -n "$AUTOFIX_EXTRA_ARGS" ]]; then
-    AUTOFIX_CMD="/autofix ${AUTOFIX_EXTRA_ARGS}"
+if GATE_OUTPUT=$("$SCRIPT_DIR/stop_hook_gates.sh" "$HASH" 2>&1); then
+    _log_to_file "INFO" "Autofix and conversation review gates passed"
 else
-    AUTOFIX_CMD="/autofix"
-fi
-
-if [[ "$AUTOFIX_NEEDED" == "true" && "$CONVO_NEEDED" == "true" ]]; then
-    log_error "Neither autofix nor conversation review have been run."
-    log_error "Run /verify-conversation up to and including Step 4 (Spawn Agent). Spawn that agent in the background, then run \"${AUTOFIX_CMD}\" to verify your changes. Be sure to report the results from the background agent before returning control to the user (be sure to wait for it to finish if it hasn't yet and if you're done running autofix)."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (both autofix and conversation review missing)"
-    exit 2
-elif [[ "$AUTOFIX_NEEDED" == "true" ]]; then
-    log_error "Autofix has not been run yet. Run \"${AUTOFIX_CMD}\" to verify your changes."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (autofix missing)"
-    exit 2
-elif [[ "$CONVO_NEEDED" == "true" ]]; then
-    log_error "Conversation has not been reviewed. Run /verify-conversation before finishing."
-    _log_to_file "INFO" "main_stop_hook exiting with code 2 (conversation review missing)"
+    while IFS= read -r line; do
+        log_error "$line"
+    done <<< "$GATE_OUTPUT"
+    _log_to_file "INFO" "main_stop_hook exiting with code 2 (gate check failed)"
     exit 2
 fi
-
-_log_to_file "INFO" "Autofix and conversation review gates passed"
 
 # PR/CI gate (can be disabled via .reviewer/settings.json)
+source "$SCRIPT_DIR/config_utils.sh"
+REVIEWER_SETTINGS=".reviewer/settings.json"
 CI_ENABLED=$(read_json_config "$REVIEWER_SETTINGS" "ci.is_enabled" "true")
 
 if [[ "$CI_ENABLED" != "true" ]]; then
