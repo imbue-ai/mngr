@@ -200,6 +200,9 @@ def run_mngr_create(
         "--id",
         str(agent_id),
         "--no-connect",
+        # stick the source into some canonical location
+        "--target-path",
+        "/code/",
         "--type",
         agent_type,
         "--host-env",

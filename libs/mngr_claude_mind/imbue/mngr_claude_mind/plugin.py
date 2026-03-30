@@ -99,6 +99,14 @@ class ClaudeMindConfig(ClaudeAgentConfig):
         "into local per-agent config dirs. Symlinks avoid duplication and keep the "
         "per-agent dir lightweight; copies provide full isolation.",
     )
+    model: str | None = Field(
+        default="opus[1m]",
+        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
+    is_fast: bool = Field(
+        default=True,
+        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
     install_llm: bool = Field(
         default=True,
         description="Whether to install llm and its plugins (llm-anthropic, llm-live-chat) during provisioning.",

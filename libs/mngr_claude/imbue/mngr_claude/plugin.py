@@ -211,13 +211,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     model: str | None = Field(
         default=None,
-        description="Model to use for this agent (e.g. 'opus[1m]'). "
-        "Written to $CLAUDE_CONFIG_DIR/settings.json.",
+        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
     )
     is_fast: bool = Field(
         default=False,
-        description="Whether to enable fast mode for this agent. "
-        "Written to $CLAUDE_CONFIG_DIR/settings.json.",
+        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -712,7 +710,12 @@ def _provision_background_scripts(
 
     # Claude-specific scripts from this plugin's resources
     threads: list[ObservableThread] = []
-    for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh", "wait_for_stop_hook.sh"):
+    for script_name in (
+        "stream_transcript.sh",
+        "claude_background_tasks.sh",
+        "common_transcript.sh",
+        "wait_for_stop_hook.sh",
+    ):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
