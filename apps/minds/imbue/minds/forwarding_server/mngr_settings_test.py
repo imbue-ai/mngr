@@ -142,6 +142,44 @@ def test_configure_mngr_settings_preserves_other_settings(tmp_path: Path) -> Non
     assert "commands" in parsed
 
 
+def test_configure_mngr_settings_handles_out_of_order_tables(tmp_path: Path) -> None:
+    """Regression: tomlkit returns OutOfOrderTableProxy when [commands.*] sub-tables
+    are interleaved with other sections, which lacks an .add() method."""
+    repo = make_git_repo(tmp_path)
+
+    settings_dir = repo / MNGR_SETTINGS_DIR_NAME
+    settings_dir.mkdir()
+    settings_path = settings_dir / MNGR_SETTINGS_FILE_NAME
+    settings_path.write_text(
+        '[commands.list]\n'
+        'exclude = [\'state == "STOPPED"\']\n'
+        '\n'
+        '[other_section]\n'
+        'key = "value"\n'
+        '\n'
+        '[commands.events]\n'
+        'filter = \'source != "delivery_failures"\'\n'
+    )
+
+    agent_id = AgentId()
+    configure_mngr_settings(repo, AgentName("selene"), agent_id)
+
+    parsed = _read_settings(repo)
+
+    # Original exclude preserved + new one added
+    excludes = list(parsed["commands"]["list"]["exclude"])
+    assert len(excludes) == 2
+    assert 'state == "STOPPED"' in excludes[0]
+
+    # Events filter merged with existing
+    events_filter = parsed["commands"]["events"]["filter"]
+    assert 'source != "delivery_failures"' in events_filter
+    assert str(agent_id) in events_filter
+
+    # Other section preserved
+    assert parsed["other_section"]["key"] == "value"
+
+
 def test_configure_mngr_settings_is_idempotent(tmp_path: Path) -> None:
     repo = make_git_repo(tmp_path)
     agent_id = AgentId()

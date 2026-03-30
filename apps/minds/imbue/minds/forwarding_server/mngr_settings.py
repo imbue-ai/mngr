@@ -115,9 +115,15 @@ def _ensure_super_table(doc: tomlkit.TOMLDocument, key: str) -> Any:
 
 
 def _ensure_table(parent: Any, key: str) -> Any:
-    """Return a sub-table under *parent*, creating it if absent."""
+    """Return a sub-table under *parent*, creating it if absent.
+
+    Uses dict-style assignment rather than ``.add()`` because
+    *parent* may be an ``OutOfOrderTableProxy`` (returned by tomlkit
+    when sub-tables are interleaved with other sections), which does
+    not expose an ``add`` method.
+    """
     if key not in parent:
-        parent.add(key, tomlkit.table())
+        parent[key] = tomlkit.table()
     return parent[key]
 
 
