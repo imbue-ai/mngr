@@ -348,7 +348,7 @@ def e2e(
 
 
 class MinimalInstallEnv(FrozenModel):
-    """An isolated venv with only core mngr (no plugins), plus subprocess env and git repo."""
+    """A fresh mngr install in an isolated venv, with subprocess env and git repo."""
 
     venv_dir: Path
     env: dict[str, str]
@@ -386,11 +386,12 @@ def minimal_install_env(
     mngr_test_root_name: str,
     tmp_path: Path,
 ) -> MinimalInstallEnv:
-    """Provide an isolated venv with only core mngr (no plugin packages).
+    """Provide a fresh mngr install in an isolated venv for install tests.
 
-    The venv has only the core mngr package and its direct dependencies -- no
-    plugin packages like mngr_modal, mngr_claude, etc. The env dict is configured
-    so mngr uses isolated directories and won't load project config.
+    The venv is built from the workspace (not the dev venv), so it exercises
+    the real install path: entry points, dependency resolution, etc. The env
+    dict is configured so mngr uses isolated directories and won't load
+    project config.
     """
     env = {
         "PATH": f"{isolated_mngr_venv / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}",

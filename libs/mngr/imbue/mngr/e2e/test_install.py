@@ -1,7 +1,9 @@
-"""Tests that mngr works correctly when installed without optional plugin packages.
+"""Tests that mngr works correctly when installed fresh into an isolated venv.
 
-These tests install mngr into an isolated venv that contains only the core package
-and its direct dependencies -- no plugin packages like mngr_modal, mngr_claude, etc.
+These tests install mngr into a clean venv (separate from the dev workspace)
+and exercise basic CLI commands. This catches issues that only manifest in a
+real install: broken entry points, missing dependencies, accidental eager
+imports of optional plugins, etc.
 """
 
 import json
@@ -13,8 +15,8 @@ from imbue.mngr.e2e.conftest import MinimalInstallEnv
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_help_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr --help works in a clean install without any plugin packages."""
+def test_help(minimal_install_env: MinimalInstallEnv) -> None:
+    """mngr --help works in a fresh install."""
     result = minimal_install_env.run_mngr(["--help"])
 
     assert result.returncode == 0, (
@@ -27,8 +29,8 @@ def test_help_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_create_help_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr create --help works without plugin packages."""
+def test_create_help(minimal_install_env: MinimalInstallEnv) -> None:
+    """mngr create --help works in a fresh install."""
     result = minimal_install_env.run_mngr(["create", "--help"])
 
     assert result.returncode == 0, (
@@ -40,8 +42,8 @@ def test_create_help_without_plugins(minimal_install_env: MinimalInstallEnv) -> 
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_list_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr list works in a clean install and returns no agents."""
+def test_list(minimal_install_env: MinimalInstallEnv) -> None:
+    """mngr list works in a fresh install and returns no agents."""
     result = minimal_install_env.run_mngr(["list"])
 
     assert result.returncode == 0, (
@@ -52,8 +54,8 @@ def test_list_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_list_json_without_plugins(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr list --format json works and returns valid JSON with empty agents."""
+def test_list_json(minimal_install_env: MinimalInstallEnv) -> None:
+    """mngr list --format json returns valid JSON in a fresh install."""
     result = minimal_install_env.run_mngr(["list", "--format", "json"])
 
     assert result.returncode == 0, (
@@ -68,8 +70,8 @@ def test_list_json_without_plugins(minimal_install_env: MinimalInstallEnv) -> No
 def test_no_eager_plugin_imports(minimal_install_env: MinimalInstallEnv) -> None:
     """Importing mngr's main module does not eagerly import optional plugin modules.
 
-    This is a defense against accidental top-level imports that would cause
-    ImportError for users who haven't installed optional plugins like modal.
+    This catches accidental top-level imports that would cause ImportError
+    for users who haven't installed optional plugins like modal.
     """
     check_script = (
         "import imbue.mngr.main; import sys; "
