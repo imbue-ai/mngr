@@ -304,6 +304,26 @@ def test_certified_host_data_strips_idle_mode_from_old_json() -> None:
     assert data.idle_timeout_seconds == 900
 
 
+def test_certified_host_data_strips_at_prefix_from_host_name() -> None:
+    """Old data.json files with '@'-prefixed host_name should be normalized."""
+    old_json = {
+        "host_id": "host-at",
+        "host_name": "@local",
+    }
+    data = CertifiedHostData.model_validate(old_json)
+    assert data.host_name == "local"
+
+
+def test_certified_host_data_preserves_host_name_without_at_prefix() -> None:
+    """host_name values without '@' prefix should be left unchanged."""
+    old_json = {
+        "host_id": "host-no-at",
+        "host_name": "my-remote-host",
+    }
+    data = CertifiedHostData.model_validate(old_json)
+    assert data.host_name == "my-remote-host"
+
+
 # =============================================================================
 # CertifiedHostData created_at / updated_at Tests
 # =============================================================================
