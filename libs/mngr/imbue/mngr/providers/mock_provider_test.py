@@ -36,6 +36,7 @@ class MockProviderInstance(BaseProviderInstance):
     mock_tags: dict[str, str] = Field(default_factory=dict)
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
+    mock_offline_hosts: dict[str, HostInterface] = Field(default_factory=dict)
     deleted_hosts: list[HostId] = Field(default_factory=list)
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
 
@@ -97,6 +98,12 @@ class MockProviderInstance(BaseProviderInstance):
 
     def on_connection_error(self, host_id: HostId) -> None:
         pass
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        offline = self.mock_offline_hosts.get(str(host_id))
+        if offline is not None and isinstance(offline, OfflineHost):
+            return offline
+        raise HostNotFoundError(host_id)
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         raise NotImplementedError()
