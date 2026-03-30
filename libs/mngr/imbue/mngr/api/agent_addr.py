@@ -103,13 +103,19 @@ def parse_identifier_as_address(raw: str) -> tuple[str, AgentAddress]:
 
     Returns (identifier_str, address) where identifier_str is the agent name or ID
     portion to use for matching. For plain strings without '@', the raw string is
-    returned unchanged (preserving backward compatibility with agent IDs).
+    returned unchanged (preserving backward compatibility with agent IDs and host
+    identifiers that may contain dots or other characters not valid in agent names).
     """
     if "@" not in raw:
+        # Plain identifier: could be an agent name, agent ID, or host name/ID.
+        # Try to parse as AgentName but do not reject identifiers that fail
+        # validation -- they may be valid host names (e.g. "myhost.docker",
+        # IP addresses) and will be resolved by downstream lookup functions.
         try:
-            return raw, AgentAddress(agent_name=AgentName(raw))
-        except InvalidName as e:
-            raise UserInputError(str(e)) from e
+            agent_name = AgentName(raw)
+        except InvalidName:
+            agent_name = None
+        return raw, AgentAddress(agent_name=agent_name)
 
     address = parse_agent_address(raw)
     # Use the agent_name as the identifier string, or the raw string if no name part
