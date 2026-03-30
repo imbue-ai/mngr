@@ -2,6 +2,7 @@ import os
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -12,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
@@ -187,6 +191,48 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
+def _delete_modal_environment(env: dict[str, str]) -> None:
+    """Delete the Modal environment created by this test, if any.
+
+    The environment name is {MNGR_PREFIX}{user_id}, where user_id is read
+    from the profile directory under MNGR_HOST_DIR.
+    """
+    host_dir = env.get("MNGR_HOST_DIR")
+    prefix = env.get("MNGR_PREFIX")
+    if not host_dir or not prefix:
+        return
+
+    # Find the profile directory and read user_id
+    host_dir_path = Path(host_dir)
+    config_path = host_dir_path / ROOT_CONFIG_FILENAME
+    if not config_path.exists():
+        return
+    try:
+        import tomllib
+
+        with open(config_path, "rb") as f:
+            root_config = tomllib.load(f)
+        profile_id = root_config.get("profile")
+        if not profile_id:
+            return
+        user_id_file = host_dir_path / PROFILES_DIRNAME / profile_id / USER_ID_FILENAME
+        if not user_id_file.exists():
+            return
+        user_id = user_id_file.read_text().strip()
+    except (OSError, ValueError):
+        return
+
+    environment_name = f"{prefix}{user_id}"
+    try:
+        subprocess.run(
+            ["uv", "run", "modal", "environment", "delete", environment_name, "--yes"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def _write_destroy_script(
     test_output_dir: Path,
     env: dict[str, str],
@@ -258,12 +304,11 @@ def e2e(
     env["MNGR_TEST_ASCIINEMA_DIR"] = str(test_output_dir)
     env.pop("TMUX", None)
 
-    # Transform the inherited prefix from mngr_{uuid}- to mngr_test-{uuid}-
-    # so that Modal environment names (which are {prefix}{user_id}) pass the
-    # mngr_test- guard in the Modal backend. This only affects subprocess
-    # commands; the in-process prefix remains unchanged for tmux cleanup.
-    inherited_prefix = env.get("MNGR_PREFIX", "mngr_")
-    env["MNGR_PREFIX"] = inherited_prefix.replace("mngr_", "mngr_test-", 1)
+    # Use a short fixed prefix so that derived names (e.g. Modal environment
+    # names, which are {prefix}{user_id}) stay well under provider length
+    # limits. Test isolation comes from MNGR_HOST_DIR, not the prefix.
+    # The mngr_test- prefix is required by the Modal backend guard.
+    env["MNGR_PREFIX"] = "mngr_test-"
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
@@ -327,6 +372,9 @@ def e2e(
         cwd=temp_git_repo,
         timeout=30.0,
     )
+
+    # Delete the Modal environment (if one was created)
+    _delete_modal_environment(env)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)
