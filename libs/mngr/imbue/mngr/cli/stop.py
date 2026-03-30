@@ -39,13 +39,9 @@ class StopCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
-    stop_all: bool
-    dry_run: bool
     archive: bool
     sessions: tuple[str, ...]
     # Planned features (not yet implemented)
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
     snapshot_mode: str | None
     graceful: bool
     graceful_timeout: str | None
@@ -86,40 +82,17 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     help="Agent name or ID to stop (can be specified multiple times)",
 )
 @optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "stop_all",
-    is_flag=True,
-    help="Stop all running agents",
-)
-@optgroup.option(
     "--session",
     "sessions",
     multiple=True,
     help="Tmux session name to stop (can be specified multiple times). The agent name is extracted by "
     "stripping the configured prefix from the session name.",
 )
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter agents to stop by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable) [future]",
-)
 @optgroup.group("Behavior")
 @optgroup.option(
     "--archive",
     is_flag=True,
     help="Set an 'archived_at' label on each stopped agent (marks it as archived)",
-)
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be stopped without actually stopping",
 )
 @optgroup.option(
     "--snapshot-mode",
@@ -149,10 +122,6 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     # Check for unsupported [future] options
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
     if opts.snapshot_mode is not None:
         raise NotImplementedError("--snapshot-mode is not implemented yet")
     if not opts.graceful:
@@ -165,8 +134,8 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
-        if agent_identifiers or opts.stop_all:
-            raise UserInputError("Cannot specify --session with agent names or --all")
+        if agent_identifiers:
+            raise UserInputError("Cannot specify --session with agent names")
         for session_name in opts.sessions:
             agent_name = get_agent_name_from_session(session_name, mngr_ctx.config.prefix)
             if agent_name is None:
@@ -176,29 +145,19 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                 )
             agent_identifiers.append(agent_name)
 
-    if not agent_identifiers and not opts.stop_all:
-        raise click.UsageError("Must specify at least one agent or use --all")
+    if not agent_identifiers:
+        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
 
-    if agent_identifiers and opts.stop_all:
-        raise click.UsageError("Cannot specify both agent names and --all")
-
-    # Find agents to stop (RUNNING agents when using --all)
+    # Find agents to stop (RUNNING agents)
     agents_to_stop = find_agents_by_addresses(
         raw_identifiers=agent_identifiers,
-        filter_all=opts.stop_all,
+        filter_all=False,
         target_state=AgentLifecycleState.RUNNING,
         mngr_ctx=mngr_ctx,
     )
 
     if not agents_to_stop:
         _output("No running agents found to stop", output_opts)
-        return
-
-    # Handle dry-run mode
-    if opts.dry_run:
-        _output("Would stop:", output_opts)
-        for match in agents_to_stop:
-            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     # Stop each agent
@@ -248,7 +207,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
@@ -260,16 +219,17 @@ This marks the agent as archived without destroying it, allowing it to
 be filtered out of listings while preserving its state. The 'mngr archive'
 command is a shorthand for 'mngr stop --archive'.
 
+Use '-' in place of agent names to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields: name.""",
     aliases=(),
     examples=(
         ("Stop an agent by name", "mngr stop my-agent"),
         ("Stop multiple agents", "mngr stop agent1 agent2"),
-        ("Stop all running agents", "mngr stop --all"),
+        ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
-        ("Preview what would be stopped", "mngr stop --all --dry-run"),
-        ("Custom format template output", "mngr stop --all --format '{name}'"),
+        ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),
     ),
     see_also=(
         ("start", "Start stopped agents"),

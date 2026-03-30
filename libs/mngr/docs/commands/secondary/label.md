@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr label [AGENTS...|-] [--agent <AGENT>] [--all] -l KEY=VALUE [-l KEY=VALUE ...]
+mngr label [AGENTS...|-] [--agent <AGENT>] -l KEY=VALUE [-l KEY=VALUE ...]
 ```
 
 Set labels on agents.
@@ -20,6 +20,8 @@ keys are updated. To see current labels, use 'mngr list'.
 Works with both online and offline agents. For offline hosts, labels
 are updated directly in the provider's persisted data without requiring
 the host to be started.
+
+Use '-' in place of agent names to read them from stdin, one per line.
 
 **Usage:**
 
@@ -37,19 +39,12 @@ mngr label [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to label (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Apply labels to all agents | `False` |
 
 ## Labels
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-l`, `--label` | text | Label in KEY=VALUE format (repeatable) | None |
-
-## Behavior
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--dry-run` | boolean | Show what would be labeled without actually labeling | `False` |
 
 ## Common
 
@@ -91,17 +86,11 @@ $ mngr label agent1 agent2 -l env=prod -l team=backend
 **Label all agents**
 
 ```bash
-$ mngr label --all --label project=myproject
+$ mngr list --ids | mngr label - --label project=myproject
 ```
 
 **Read agent names from stdin**
 
 ```bash
-$ mngr list --format '{name}' | mngr label - -l reviewed=true
-```
-
-**Preview changes**
-
-```bash
-$ mngr label my-agent --label status=done --dry-run
+$ mngr list --ids | mngr label - -l reviewed=true
 ```

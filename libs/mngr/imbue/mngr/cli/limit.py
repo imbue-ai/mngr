@@ -45,11 +45,6 @@ class LimitCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
     hosts: tuple[str, ...]
-    limit_all: bool
-    dry_run: bool
-    # Planned features (not yet implemented)
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
     # Lifecycle
     start_on_boot: bool | None
     idle_timeout: str | None
@@ -251,30 +246,6 @@ def _resolve_host_identifiers(
     multiple=True,
     help="Host name or ID to configure (can be specified multiple times)",
 )
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "limit_all",
-    is_flag=True,
-    help="Apply limits to all agents",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter agents to configure by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable) [future]",
-)
-@optgroup.group("Behavior")
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what limits would be changed without actually changing them",
-)
 @optgroup.group("Lifecycle")
 @optgroup.option(
     "--start-on-boot/--no-start-on-boot",
@@ -349,10 +320,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     logger.debug("Started limit command")
 
     # Check for unsupported [future] options
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
     if opts.refresh_ssh_keys:
         raise NotImplementedError("--refresh-ssh-keys is not implemented yet")
     if opts.add_ssh_key:
@@ -373,26 +340,23 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
             "Cannot combine --activity-sources with --add-activity-source or --remove-activity-source"
         )
 
-    # Validate targets: must specify agents, --host, or --all
+    # Validate targets: must specify agents or --host
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
     has_agents = bool(agent_identifiers)
     has_hosts = bool(opts.hosts)
 
-    if not has_agents and not has_hosts and not opts.limit_all:
-        raise click.UsageError("Must specify at least one agent, --host, or --all")
-
-    if has_agents and opts.limit_all:
-        raise click.UsageError("Cannot specify both agent names and --all")
+    if not has_agents and not has_hosts:
+        raise click.UsageError("Must specify at least one agent or --host (use '-' to read agent names from stdin)")
 
     # If only --host is specified (no agents), agent-level settings are not allowed
-    if has_hosts and not has_agents and not opts.limit_all and _has_agent_level_settings(opts):
+    if has_hosts and not has_agents and _has_agent_level_settings(opts):
         raise click.UsageError(
             "Agent-level settings (--start-on-boot, --grant, --revoke) require agent targeting. "
-            "Use --agent or --all with --host to target agents on specific hosts."
+            "Use --agent or positional args with --host to target agents on specific hosts."
         )
 
-    # If --host only (no agents, no --all), apply host-level changes directly
-    if has_hosts and not has_agents and not opts.limit_all:
+    # If --host only (no agents), apply host-level changes directly
+    if has_hosts and not has_agents:
         changes: list[dict[str, Any]] = []
         all_hosts = _build_host_references(mngr_ctx)
         for host_identifier in opts.hosts:
@@ -402,7 +366,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
                 opts=opts,
                 output_opts=output_opts,
                 mngr_ctx=mngr_ctx,
-                dry_run=opts.dry_run,
                 changes=changes,
             )
         _output_result(changes, output_opts)
@@ -411,7 +374,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     # Find agents (match all states for limit command)
     agents = find_agents_by_addresses(
         raw_identifiers=agent_identifiers,
-        filter_all=opts.limit_all,
+        filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,
     )
@@ -429,16 +392,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
             return
     else:
         target_agents = agents
-
-    # Handle dry-run mode
-    if opts.dry_run:
-        _output("Would configure:", output_opts)
-        for match in target_agents:
-            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
-        if _has_host_level_settings(opts):
-            unique_hosts = {str(m.host_id) for m in target_agents}
-            _output(f"Host-level changes would apply to {len(unique_hosts)} host(s)", output_opts)
-        return
 
     # Apply changes
     changes = []
@@ -493,7 +446,6 @@ def _apply_host_only_changes(
     all_hosts: list[DiscoveredHost],
     opts: LimitCliOptions,
     output_opts: OutputOptions,
-    dry_run: bool,
     changes: list[dict[str, Any]],
     mngr_ctx: MngrContext,
 ) -> None:
@@ -505,10 +457,6 @@ def _apply_host_only_changes(
     # it only returns None when host_identifier is None, which cannot happen here
     resolved_host = resolve_host_reference(host_identifier, all_hosts)
     assert resolved_host is not None
-
-    if dry_run:
-        _output(f"Would update activity config for host {resolved_host.host_id}", output_opts)
-        return
 
     provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
     host = provider.get_host(resolved_host.host_id)
@@ -582,7 +530,7 @@ def _apply_agent_changes(
 CommandHelpMetadata(
     key="limit",
     one_line_description="Configure limits for agents and hosts [experimental]",
-    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]",
+    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to configure (can also be specified via `--agent`)",
     description="""Agents effectively have permissions that are equivalent to the *union* of all
 permissions on the same host. Changing permissions for agents requires them
@@ -595,14 +543,15 @@ When targeting agents, host-level settings (idle-timeout, idle-mode,
 activity-sources) are applied to each agent's underlying host.
 
 Agent-level settings (start-on-boot, grant, revoke) require agent targeting
-and cannot be used with --host alone.""",
+and cannot be used with --host alone.
+
+Use '-' in place of agent names to read them from stdin, one per line.""",
     aliases=("lim",),
     examples=(
         ("Set idle timeout for an agent's host", "mngr limit my-agent --idle-timeout 5m"),
         ("Grant permissions to an agent", "mngr limit my-agent --grant network --grant internet"),
-        ("Disable idle detection for all agents", "mngr limit --all --idle-mode disabled"),
+        ("Disable idle detection for all agents", "mngr list --ids | mngr limit - --idle-mode disabled"),
         ("Update host idle settings directly", "mngr limit --host my-host --idle-timeout 1h"),
-        ("Preview changes without applying", "mngr limit --all --idle-timeout 5m --dry-run"),
     ),
     see_also=(
         ("create", "Create a new agent"),

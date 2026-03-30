@@ -52,13 +52,9 @@ class SnapshotCreateCliOptions(CommonCliOptions):
     identifiers: tuple[str, ...]
     agent_list: tuple[str, ...]
     hosts: tuple[str, ...]
-    all_agents: bool
     name: str | None
-    dry_run: bool
     on_error: str
     # Future options
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
     tag: tuple[str, ...]
     description: str | None
     restart_if_larger_than: str | None
@@ -72,11 +68,8 @@ class SnapshotListCliOptions(CommonCliOptions):
     identifiers: tuple[str, ...]
     agent_list: tuple[str, ...]
     hosts: tuple[str, ...]
-    all_agents: bool
     limit: int | None
     # Future options
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
     after: str | None
     before: str | None
 
@@ -89,10 +82,6 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
     snapshots: tuple[str, ...]
     all_snapshots: bool
     force: bool
-    dry_run: bool
-    # Future options
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
 
 
 # =============================================================================
@@ -172,7 +161,6 @@ def _classify_mixed_identifiers(
 def _resolve_snapshot_hosts(
     agent_identifiers: list[str],
     host_identifiers: list[str],
-    all_agents: bool,
     mngr_ctx: MngrContext,
 ) -> list[tuple[str, ProviderInstanceName, list[str]]]:
     """Resolve agent and host identifiers to unique host targets.
@@ -183,10 +171,10 @@ def _resolve_snapshot_hosts(
     seen_hosts: dict[str, tuple[ProviderInstanceName, list[str]]] = {}
 
     # Resolve from agent identifiers
-    if agent_identifiers or all_agents:
+    if agent_identifiers:
         agents = find_agents_by_addresses(
             raw_identifiers=agent_identifiers,
-            filter_all=all_agents,
+            filter_all=False,
             target_state=AgentLifecycleState.RUNNING,
             mngr_ctx=mngr_ctx,
         )
@@ -218,10 +206,6 @@ def _resolve_snapshot_hosts(
 
 def _check_create_future_options(opts: SnapshotCreateCliOptions) -> None:
     """Raise NotImplementedError for unimplemented create options."""
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
     if opts.tag:
         raise NotImplementedError("--tag is not implemented yet")
     if opts.description is not None:
@@ -236,22 +220,10 @@ def _check_create_future_options(opts: SnapshotCreateCliOptions) -> None:
 
 def _check_list_future_options(opts: SnapshotListCliOptions) -> None:
     """Raise NotImplementedError for unimplemented list options."""
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
     if opts.after is not None:
         raise NotImplementedError("--after is not implemented yet")
     if opts.before is not None:
         raise NotImplementedError("--before is not implemented yet")
-
-
-def _check_destroy_future_options(opts: SnapshotDestroyCliOptions) -> None:
-    """Raise NotImplementedError for unimplemented destroy options."""
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
 
 
 # =============================================================================
@@ -431,34 +403,11 @@ def snapshot(ctx: click.Context, **kwargs: Any) -> None:
     multiple=True,
     help="Host ID or name to snapshot directly (can be specified multiple times)",
 )
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "all_agents",
-    is_flag=True,
-    help="Snapshot all running agents",
-)
 @optgroup.group("Snapshot Options")
 @optgroup.option(
     "--name",
     default=None,
     help="Custom name for the snapshot",
-)
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be snapshotted without actually creating snapshots",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter agents by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable) [future]",
 )
 @optgroup.option(
     "--tag",
@@ -524,11 +473,8 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = mixed_agent_ids + list(opts.agent_list)
     host_identifiers = mixed_host_ids + list(opts.hosts)
 
-    if not agent_identifiers and not host_identifiers and not opts.all_agents:
-        raise click.UsageError("Must specify at least one agent, host, or use --all")
-
-    if (agent_identifiers or host_identifiers) and opts.all_agents:
-        raise click.UsageError("Cannot specify both agent/host names and --all")
+    if not agent_identifiers and not host_identifiers:
+        raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
@@ -536,24 +482,11 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     targets = _resolve_snapshot_hosts(
         agent_identifiers=agent_identifiers,
         host_identifiers=host_identifiers,
-        all_agents=opts.all_agents,
         mngr_ctx=mngr_ctx,
     )
 
     if not targets:
         emit_info("No hosts found to snapshot", output_opts.output_format)
-        return
-
-    # Dry run
-    if opts.dry_run:
-        for host_id_str, provider_name, agent_names in targets:
-            agents_str = f" (agents: {', '.join(agent_names)})" if agent_names else ""
-            msg = f"Would snapshot host {host_id_str} via {provider_name}{agents_str}"
-            emit_event(
-                "dry_run",
-                {"message": msg, "host_id": host_id_str, "provider": str(provider_name)},
-                output_opts.output_format,
-            )
         return
 
     # Create snapshots
@@ -616,30 +549,12 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     multiple=True,
     help="Host ID or name to list snapshots for directly (can be specified multiple times)",
 )
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "all_agents",
-    is_flag=True,
-    help="List snapshots for all running agents",
-)
 @optgroup.group("Filtering")
 @optgroup.option(
     "--limit",
     type=int,
     default=None,
     help="Maximum number of snapshots to show",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter snapshots by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude snapshots matching CEL expression (repeatable) [future]",
 )
 @optgroup.option(
     "--after",
@@ -672,17 +587,13 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = mixed_agent_ids + list(opts.agent_list)
     host_identifiers = mixed_host_ids + list(opts.hosts)
 
-    if not agent_identifiers and not host_identifiers and not opts.all_agents:
-        raise click.UsageError("Must specify at least one agent, host, or use --all")
-
-    if (agent_identifiers or host_identifiers) and opts.all_agents:
-        raise click.UsageError("Cannot specify both agent/host names and --all")
+    if not agent_identifiers and not host_identifiers:
+        raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
 
     # Resolve to hosts
     targets = _resolve_snapshot_hosts(
         agent_identifiers=agent_identifiers,
         host_identifiers=host_identifiers,
-        all_agents=opts.all_agents,
         mngr_ctx=mngr_ctx,
     )
 
@@ -741,21 +652,6 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
     is_flag=True,
     help="Skip confirmation prompt",
 )
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be destroyed without actually deleting",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter snapshots by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude snapshots matching CEL expression (repeatable) [future]",
-)
 @add_common_options
 @click.pass_context
 def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
@@ -767,13 +663,11 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     )
     logger.debug("Started snapshot destroy command")
 
-    _check_destroy_future_options(opts)
-
     # Validate inputs
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers:
-        raise click.UsageError("Must specify at least one agent")
+        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
 
     if not opts.snapshots and not opts.all_snapshots:
         raise click.UsageError("Must specify --snapshot or --all-snapshots")
@@ -785,7 +679,6 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     targets = _resolve_snapshot_hosts(
         agent_identifiers=agent_identifiers,
         host_identifiers=[],
-        all_agents=False,
         mngr_ctx=mngr_ctx,
     )
 
@@ -814,17 +707,6 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     if not snapshots_to_delete:
         emit_info("No snapshots found to destroy", output_opts.output_format)
         _emit_destroy_result([], output_opts)
-        return
-
-    # Dry run
-    if opts.dry_run:
-        for host_id_str, _prov, snap_id, snap_name in snapshots_to_delete:
-            msg = f"Would destroy snapshot {snap_id} ({snap_name}) on host {host_id_str}"
-            emit_event(
-                "dry_run",
-                {"message": msg, "snapshot_id": str(snap_id), "host_id": host_id_str},
-                output_opts.output_format,
-            )
         return
 
     # Confirmation prompt (human mode only, unless --force)
@@ -881,17 +763,19 @@ agent's host is used; otherwise it is treated as a host identifier.
 When no subcommand is given, defaults to 'create'. For example,
 ``mngr snapshot my-agent`` is equivalent to ``mngr snapshot create my-agent``.
 
-Useful for checkpointing work, creating restore points, or managing disk space.""",
+Useful for checkpointing work, creating restore points, or managing disk space.
+
+Use '-' in place of agent/host names to read them from stdin, one per line.""",
     aliases=("snap",),
     examples=(
         ("Snapshot an agent's host (short form)", "mngr snapshot my-agent"),
         ("Snapshot an agent's host (explicit)", "mngr snapshot create my-agent"),
         ("Create a named snapshot", "mngr snapshot create my-agent --name before-refactor"),
         ("Snapshot by host ID", "mngr snapshot create my-host-id"),
-        ("Snapshot all running agents", "mngr snapshot create --all --dry-run"),
+        ("Snapshot all running agents", "mngr list --ids | mngr snapshot create -"),
         ("List snapshots for an agent", "mngr snapshot list my-agent"),
         ("Destroy all snapshots for an agent", "mngr snapshot destroy my-agent --all-snapshots --force"),
-        ("Preview what would be destroyed", "mngr snapshot destroy my-agent --all-snapshots --dry-run"),
+        ("Destroy all snapshots for multiple agents", "mngr snapshot destroy agent1 agent2 --all-snapshots --force"),
     ),
     see_also=(
         ("create", "Create a new agent (supports --snapshot to restore from snapshot)"),
@@ -912,12 +796,14 @@ identifier is automatically resolved: if it matches a known agent, that
 agent's host is snapshotted; otherwise it is treated as a host identifier.
 Multiple identifiers that resolve to the same host are deduplicated.
 
+Use '-' in place of identifiers to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields:
 snapshot_id, host_id, provider, agent_names.""",
     examples=(
         ("Snapshot an agent's host", "mngr snapshot create my-agent"),
         ("Create a named snapshot", "mngr snapshot create my-agent --name before-refactor"),
-        ("Snapshot all running agents (dry run)", "mngr snapshot create --all --dry-run"),
+        ("Snapshot all running agents", "mngr list --ids | mngr snapshot create -"),
         ("Snapshot multiple agents", "mngr snapshot create agent1 agent2 --on-error continue"),
         ("Custom format template output", "mngr snapshot create my-agent --format '{snapshot_id}'"),
     ),
@@ -938,11 +824,13 @@ Positional arguments can be agent names/IDs or host names/IDs. Each
 identifier is automatically resolved: if it matches a known agent, that
 agent's host is used; otherwise it is treated as a host identifier.
 
+Use '-' in place of identifiers to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields:
 id, name, created_at, size, size_bytes, host_id.""",
     examples=(
         ("List snapshots for an agent", "mngr snapshot list my-agent"),
-        ("List snapshots for all running agents", "mngr snapshot list --all"),
+        ("List snapshots for all running agents", "mngr list --ids | mngr snapshot list -"),
         ("Limit number of results", "mngr snapshot list my-agent --limit 5"),
         ("Output as JSON", "mngr snapshot list my-agent --format json"),
         ("Custom format template", "mngr snapshot list my-agent --format '{name}\\t{size}\\t{host_id}'"),
@@ -962,12 +850,14 @@ CommandHelpMetadata(
 (to delete all snapshots for the resolved hosts). A confirmation prompt is
 shown unless --force is specified.
 
+Use '-' in place of agent names to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields:
 snapshot_id, host_id, provider.""",
     examples=(
         ("Destroy a specific snapshot", "mngr snapshot destroy my-agent --snapshot snap-abc123 --force"),
         ("Destroy all snapshots for an agent", "mngr snapshot destroy my-agent --all-snapshots --force"),
-        ("Preview what would be destroyed", "mngr snapshot destroy my-agent --all-snapshots --dry-run"),
+        ("Destroy all snapshots for multiple agents", "mngr snapshot destroy agent1 agent2 --all-snapshots --force"),
     ),
     see_also=(
         ("snapshot create", "Create a new snapshot"),

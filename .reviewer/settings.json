@@ -1,4 +1,7 @@
 {
+    "stop_hook": {
+        "enabled_when": "test -n \"${MNGR_AGENT_STATE_DIR:-}\""
+    },
     "autofix": {
         "is_enabled": true,
         "append_to_prompt": ""

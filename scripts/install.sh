@@ -292,6 +292,17 @@ else
     esac
 fi
 
+# ── Claude Code plugins ───────────────────────────────────────────────────────
+
+if command -v claude &>/dev/null; then
+    printf "\n"
+    printf "mngr provides a Claude Code plugin for automated code review enforcement.\n"
+    printf "To install it, run:\n"
+    printf "\n"
+    printf "  ${BOLD}claude plugin marketplace add imbue-ai/mngr && claude plugin install imbue-code-review@imbue-mngr${RESET}\n"
+    printf "\n"
+fi
+
 info "Get started with: mngr --help"
 
 # IMPORTANT: Instructions that require user action after installation (e.g.

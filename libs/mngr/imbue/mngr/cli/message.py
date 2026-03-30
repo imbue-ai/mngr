@@ -40,9 +40,6 @@ class MessageCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
-    all_agents: bool
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
     message_content: str | None
     message_file: str | None
     provider: tuple[str, ...]
@@ -58,24 +55,6 @@ class MessageCliOptions(CommonCliOptions):
     "agent_list",
     multiple=True,
     help="Agent name or ID to send message to (can be specified multiple times)",
-)
-@optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "all_agents",
-    is_flag=True,
-    help="Send message to all agents",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Include agents matching CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression (repeatable)",
 )
 @optgroup.option(
     "--start/--no-start",
@@ -133,12 +112,9 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     stdin_consumed = STDIN_PLACEHOLDER in opts.agents
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
-    # Validate input: must have agents specified or use --all or use filters
-    if not agent_identifiers and not opts.all_agents and not opts.include:
-        raise UserInputError("Must specify at least one agent, use --all, or use --include filters")
-
-    if agent_identifiers and opts.all_agents:
-        raise UserInputError("Cannot specify both agent names and --all")
+    # Validate input: must have agents specified
+    if not agent_identifiers:
+        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
 
     # Read message from file if --message-file is provided
     resolved_message_content = opts.message_content
@@ -153,7 +129,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
     # Build include filters from agent identifiers, parsing addresses
-    include_filters = list(opts.include)
+    include_filters: list[str] = []
     if agent_identifiers:
         # Create a CEL filter that matches any of the provided identifiers.
         # Parse agent addresses to extract the name/ID part and host/provider constraints.
@@ -175,8 +151,8 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             mngr_ctx=mngr_ctx,
             message_content=message_content,
             include_filters=tuple(include_filters),
-            exclude_filters=opts.exclude,
-            all_agents=opts.all_agents,
+            exclude_filters=(),
+            all_agents=False,
             error_behavior=error_behavior,
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
@@ -192,8 +168,8 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         mngr_ctx=mngr_ctx,
         message_content=message_content,
         include_filters=tuple(include_filters),
-        exclude_filters=opts.exclude,
-        all_agents=opts.all_agents,
+        exclude_filters=(),
+        all_agents=False,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
         provider_names=opts.provider,
@@ -308,17 +284,19 @@ def _emit_json_output(result: MessageResult) -> None:
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>] [--message-file <FILE>]",
+    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 
 If no message is specified with --message or --message-file, reads from stdin
-(if not a tty) or opens an editor (if interactive).""",
+(if not a tty) or opens an editor (if interactive).
+
+Use '-' in place of agent names to read them from stdin, one per line.""",
     aliases=("msg",),
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
-        ("Send to all agents", 'mngr message --all --message "Hello everyone"'),
+        ("Send to all agents", "mngr list --ids | mngr message - --message 'Hello everyone'"),
         ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),

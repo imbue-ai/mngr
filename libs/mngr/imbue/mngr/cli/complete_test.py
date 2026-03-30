@@ -489,8 +489,8 @@ def test_get_completions_value_taking_option_suppresses_completions(
     data = CompletionCacheData(
         commands=["snapshot"],
         subcommand_by_command={"snapshot": ["create"]},
-        options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
-        flag_options_by_command={"snapshot.create": ["--all", "--dry-run", "-a"]},
+        options_by_command={"snapshot.create": ["--name", "--on-error"]},
+        flag_options_by_command={"snapshot.create": []},
         positional_completions={"snapshot.create": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
@@ -509,8 +509,8 @@ def test_get_completions_long_flag_allows_positional(
     """After a --long flag (--force), positional candidates should be offered."""
     data = CompletionCacheData(
         commands=["destroy"],
-        options_by_command={"destroy": ["--all", "--force"]},
-        flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
+        options_by_command={"destroy": ["--force"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
         positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
@@ -529,8 +529,8 @@ def test_get_completions_short_flag_allows_positional(
     """After a -short flag (-f), positional candidates should be offered."""
     data = CompletionCacheData(
         commands=["destroy"],
-        options_by_command={"destroy": ["--all", "--force"]},
-        flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
+        options_by_command={"destroy": ["--force"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
         positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
@@ -550,8 +550,8 @@ def test_get_completions_combined_short_flags_allow_positional(
     data = CompletionCacheData(
         commands=["destroy"],
         aliases={"rm": "destroy"},
-        options_by_command={"destroy": ["--all", "--force", "--remove-created-branch"]},
-        flag_options_by_command={"destroy": ["--all", "--force", "--remove-created-branch", "-a", "-f", "-b"]},
+        options_by_command={"destroy": ["--force", "--remove-created-branch"]},
+        flag_options_by_command={"destroy": ["--force", "--remove-created-branch", "-f", "-b"]},
         positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
@@ -570,8 +570,8 @@ def test_get_completions_combined_short_flags_with_unknown_flag(
     """Combined flags where one character is not a known flag should suppress completions."""
     data = CompletionCacheData(
         commands=["destroy"],
-        options_by_command={"destroy": ["--all", "--force"]},
-        flag_options_by_command={"destroy": ["--all", "--force", "-a", "-f"]},
+        options_by_command={"destroy": ["--force"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
         positional_completions={"destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
@@ -587,17 +587,17 @@ def test_get_completions_subcommand_flag_allows_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """After a flag on a subcommand (--dry-run), positional candidates should be offered."""
+    """After a flag on a subcommand (--force), positional candidates should be offered."""
     data = CompletionCacheData(
         commands=["snapshot"],
-        subcommand_by_command={"snapshot": ["create"]},
-        options_by_command={"snapshot.create": ["--all", "--dry-run", "--name"]},
-        flag_options_by_command={"snapshot.create": ["--all", "--dry-run", "-a"]},
-        positional_completions={"snapshot.create": [["agent_names"]]},
+        subcommand_by_command={"snapshot": ["destroy"]},
+        options_by_command={"snapshot.destroy": ["--force", "--snapshot"]},
+        flag_options_by_command={"snapshot.destroy": ["--force", "-f"]},
+        positional_completions={"snapshot.destroy": [["agent_names"]]},
     )
     _write_command_cache(completion_cache_dir, data)
     _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
-    set_comp_env("mngr snapshot create --dry-run ", "4")
+    set_comp_env("mngr snapshot destroy --force ", "4")
 
     result = _get_completions()
 

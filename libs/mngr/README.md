@@ -4,10 +4,64 @@
 
 # mngr: build your team of AI engineering agents
 
+[![GitHub Stars](https://img.shields.io/github/stars/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr)
+[![PyPI](https://img.shields.io/pypi/v/imbue-mngr?style=flat-square)](https://pypi.org/project/imbue-mngr/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square)](https://pypi.org/project/imbue-mngr/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://github.com/imbue-ai/mngr/blob/main/./LICENSE)
+[![Open Issues](https://img.shields.io/github/issues/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr/issues)
+
+Spin up isolated AI coding agents
+
+*Built on SSH, git, and tmux. Extensible via plugins. No managed service required.*
+
+> **Why mngr?** Most agent tooling is a managed cloud: opaque infrastructure, per-seat pricing, hard to script. mngr takes the opposite approach. Agents run in isolated containers you own, over SSH you can inspect, on compute that shuts down when idle. It's built on primitives you already know (SSH, git, tmux, docker) and extensible via plugins for anything you need on top.
+
+---
+
 **installation:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
+
+## Overview
+
+`mngr` makes it easy to create and use any AI agent (ex: Claude Code, Codex), whether you want to run locally or remotely.
+
+`mngr` is built on open-source tools and standards (SSH, git, tmux, docker, etc.), and is extensible via [plugins](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/plugins.md) to enable the latest AI coding workflows.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#EFF6FF', 'primaryTextColor': '#1E3A5F', 'primaryBorderColor': '#3B82F6', 'lineColor': '#64748B', 'edgeLabelBackground': '#FFFFFF', 'fontSize': '15px'}}}%%
+flowchart LR
+    classDef user fill:#DBEAFE,stroke:#2563EB,stroke-width:2px,color:#1E3A5F,font-weight:bold
+    classDef cli fill:#1E3A5F,stroke:#1E3A5F,stroke-width:2px,color:#FFFFFF,font-weight:bold
+    classDef agent fill:#D1FAE5,stroke:#059669,stroke-width:2px,color:#064E3B
+    classDef host fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+    classDef repo fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
+
+    user([You]):::user
+    cli[mngr CLI]:::cli
+    agent["Agent (Claude · Codex · OpenCode)"]:::agent
+    host["Isolated Host (local · Modal · Docker)"]:::host
+    codebase[(Your Codebase)]:::repo
+
+    user -->|"create / message / exec"| cli
+    cli -->|spawns| agent
+    agent -->|runs in| host
+    host <-->|"git · SSH · rsync"| codebase
+    cli <-->|"connect · transcript · pull"| host
+```
+
+## What mngr can do
+
+- **Simple** — one command launches an agent locally or on Modal; sensible defaults throughout
+- **Fast** — agents start in under 2 seconds
+- **Cost-transparent** — free CLI; agents auto-shutdown when idle; pay only for inference and compute
+- **Secure** — SSH key isolation, network allowlists, full container control
+- **Composable** — shared hosts, snapshot and fork agent state, direct exec, push/pull/pair
+- **Observable** — transcripts, direct SSH, programmatic messaging
+- **Easy to learn** — `mngr ask` answers usage questions without leaving the terminal
+
+---
 
 **mngr is *very* simple to use:**
 
@@ -49,7 +103,7 @@ user    0m0.955s
 sys     0m0.166s
 ```
 
-**mngr itself is free, *and* the cheapest way to run remote agents (they shut down when idle):**
+**mngr is free, *and* the cheapest way to run remote agents (they shut down when idle):**
 
 ```bash
 mngr create @.modal --no-connect --message "just say 'hello'" --idle-timeout 60 -- --model sonnet
@@ -127,12 +181,6 @@ If you don't have a Dockerfile for your project, run:
 
 From the repo where you would like a Dockerfile created.
 -->
-
-## Overview
-
-`mngr` makes it easy to create and use any AI agent (ex: Claude Code, Codex), whether you want to run locally or remotely.
-
-`mngr` is built on open-source tools and standards (SSH, git, tmux, docker, etc.), and is extensible via [plugins](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/plugins.md) to enable the latest AI coding workflows.
 
 ## Installation
 
@@ -249,6 +297,28 @@ You can interact with `mngr` via the terminal (run `mngr --help` to learn more).
 - agents store their status and logs in a standard location (default: `$MNGR_HOST_DIR/agents/<agent_id>/`)
 - all hosts are accessed via SSH--if you can SSH into it, it can be a host
 - ...[and more](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/conventions.md)
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#EFF6FF', 'primaryTextColor': '#1E3A5F', 'primaryBorderColor': '#3B82F6', 'lineColor': '#64748B', 'edgeLabelBackground': '#FFFFFF', 'fontSize': '15px'}}}%%
+flowchart TB
+    classDef transport fill:#DBEAFE,stroke:#2563EB,stroke-width:2px,color:#1E3A5F,font-weight:bold
+    classDef session fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+    classDef agent fill:#D1FAE5,stroke:#059669,stroke-width:2px,color:#064E3B
+    classDef storage fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
+
+    ssh["SSH (any SSH-accessible machine)"]:::transport
+
+    subgraph HOST["Host"]
+        subgraph TMUX["tmux session: mngr-name"]
+            w0["window 0 → agent process"]:::agent
+            w1["window 1+ (optional)"]:::session
+        end
+        dir["$MNGR_HOST_DIR/agents/id/ · status · logs · config"]:::storage
+    end
+
+    ssh --> HOST
+    w0 -->|writes| dir
+```
 
 See [`architecture.md`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/architecture.md) for an in-depth overview of the `mngr` architecture and design principles.
 

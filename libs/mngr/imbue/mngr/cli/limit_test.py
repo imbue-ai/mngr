@@ -35,10 +35,6 @@ def _make_limit_opts(
         agents=(),
         agent_list=(),
         hosts=(),
-        limit_all=False,
-        dry_run=False,
-        include=(),
-        exclude=(),
         start_on_boot=start_on_boot,
         idle_timeout=idle_timeout,
         idle_mode=idle_mode,
@@ -69,10 +65,6 @@ def test_limit_cli_options_fields() -> None:
         agents=("agent1", "agent2"),
         agent_list=("agent3",),
         hosts=(),
-        limit_all=False,
-        dry_run=True,
-        include=(),
-        exclude=(),
         start_on_boot=None,
         idle_timeout=None,
         idle_mode=None,
@@ -97,8 +89,6 @@ def test_limit_cli_options_fields() -> None:
     )
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == ("agent3",)
-    assert opts.limit_all is False
-    assert opts.dry_run is True
     assert opts.hosts == ()
 
 
@@ -106,7 +96,7 @@ def test_limit_requires_target(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that limit requires at least one agent, host, or --all."""
+    """Test that limit requires at least one agent or host."""
     result = cli_runner.invoke(
         limit,
         ["--idle-timeout", "300"],
@@ -115,7 +105,7 @@ def test_limit_requires_target(
     )
 
     assert result.exit_code != 0
-    assert "Must specify at least one agent, --host, or --all" in result.output
+    assert "Must specify at least one agent or --host" in result.output
 
 
 def test_limit_requires_setting(
@@ -132,38 +122,6 @@ def test_limit_requires_setting(
 
     assert result.exit_code != 0
     assert "Must specify at least one setting to change" in result.output
-
-
-def test_limit_cannot_combine_agents_and_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --all cannot be combined with agent names."""
-    result = cli_runner.invoke(
-        limit,
-        ["my-agent", "--all", "--idle-timeout", "300"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-
-    assert result.exit_code != 0
-    assert "Cannot specify both agent names and --all" in result.output
-
-
-def test_limit_all_with_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test --all when no agents exist (should succeed with 'no agents found')."""
-    result = cli_runner.invoke(
-        limit,
-        ["--all", "--idle-timeout", "300"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "No agents found to configure" in result.output
 
 
 def test_limit_host_only_rejects_agent_settings(
@@ -346,7 +304,7 @@ def test_activity_sources_mutually_exclusive_with_add_remove(
     result = cli_runner.invoke(
         limit,
         [
-            "--all",
+            "my-agent",
             "--activity-sources",
             "ssh,agent",
             "--add-activity-source",
@@ -358,35 +316,6 @@ def test_activity_sources_mutually_exclusive_with_add_remove(
 
     assert result.exit_code != 0
     assert "Cannot combine --activity-sources with --add-activity-source" in result.output
-
-
-def test_limit_all_dry_run_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--all --dry-run --idle-timeout with no agents reports none found."""
-    result = cli_runner.invoke(
-        limit,
-        ["--all", "--dry-run", "--idle-timeout", "300"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert "No agents found to configure" in result.output
-
-
-def test_limit_all_json_format_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--all --format json --idle-timeout with no agents exits 0."""
-    result = cli_runner.invoke(
-        limit,
-        ["--all", "--format", "json", "--idle-timeout", "300"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
 
 
 # =============================================================================

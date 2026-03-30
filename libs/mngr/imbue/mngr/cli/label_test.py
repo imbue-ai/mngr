@@ -153,11 +153,11 @@ def test_label_requires_label_flag(
     assert result.exit_code != 0
 
 
-def test_label_requires_agent_or_all(
+def test_label_requires_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """label command should fail when no agent is specified and --all is not used."""
+    """label command should fail when no agent is specified."""
     result = cli_runner.invoke(
         label,
         ["--label", "key=value"],
@@ -165,20 +165,7 @@ def test_label_requires_agent_or_all(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
-
-
-def test_label_agents_and_all_conflict(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """label command should fail when both agents and --all are provided."""
-    result = cli_runner.invoke(
-        label,
-        ["my-agent", "--all", "--label", "key=value"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
+    assert "Must specify at least one agent" in result.output
 
 
 # =============================================================================
@@ -224,52 +211,6 @@ def test_label_merges_with_existing_labels(
     )
     assert result.exit_code == 0
     assert agent.get_labels() == {"existing": "value", "overwrite_me": "new", "added": "yes"}
-
-
-def test_label_all_applies_to_all_agents(
-    local_host: Host,
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    tmp_path: Path,
-) -> None:
-    """Label --all should apply labels to all agents."""
-    work_dir_1 = tmp_path / "work1"
-    work_dir_1.mkdir()
-    work_dir_2 = tmp_path / "work2"
-    work_dir_2.mkdir()
-
-    agent_1 = create_test_agent_state(local_host, work_dir_1, "all-label-agent-1")
-    agent_2 = create_test_agent_state(local_host, work_dir_2, "all-label-agent-2")
-
-    result = cli_runner.invoke(
-        label,
-        ["--all", "--label", "batch=true"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert agent_1.get_labels() == {"batch": "true"}
-    assert agent_2.get_labels() == {"batch": "true"}
-
-
-def test_label_dry_run_does_not_modify(
-    local_host: Host,
-    temp_work_dir: Path,
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Label --dry-run should not actually modify any labels."""
-    agent = create_test_agent_state(local_host, temp_work_dir, "dry-run-agent")
-
-    result = cli_runner.invoke(
-        label,
-        ["dry-run-agent", "--label", "should_not=appear", "--dry-run"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert "Would apply labels" in result.output
-    assert agent.get_labels() == {}
 
 
 def test_label_json_output(

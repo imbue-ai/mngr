@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--all] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
+mngr [exec|x] [AGENTS...|-] COMMAND [--agent <AGENT>] [--user <USER>] [--cwd <DIR>] [--timeout <SECONDS>] [--on-error <MODE>]
 ```
 
 Execute a shell command on one or more agents' hosts.
@@ -16,6 +16,8 @@ the working directory.
 
 The command's stdout is printed to stdout and stderr to stderr. The exit
 code is 0 if all commands succeeded, 1 if any failed.
+
+Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: agent, stdout, stderr, success.
 
@@ -38,7 +40,6 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to exec on (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Execute the command on all agents | `False` |
 
 ## Execution
 
@@ -105,7 +106,7 @@ $ mngr exec agent1 agent2 "echo hello"
 **Run on all agents**
 
 ```bash
-$ mngr exec --all "echo hello"
+$ mngr list --ids | mngr exec - "echo hello"
 ```
 
 **Run with a custom working directory**
@@ -135,5 +136,5 @@ $ mngr exec --agent my-agent --agent another-agent "echo hello"
 **Custom format template output**
 
 ```bash
-$ mngr exec --all "hostname" --format '{agent}\t{stdout}'
+$ mngr exec my-agent "hostname" --format '{agent}\t{stdout}'
 ```
