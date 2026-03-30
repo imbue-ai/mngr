@@ -32,16 +32,9 @@ def _build_list_exclude_filter(mind_name: AgentName) -> str:
     return '!has(labels.mind) || labels.mind == "{}"'.format(mind_name)
 
 
-def _build_events_self_filter(agent_id: AgentId) -> str:
+def _build_events_self_include_filter(agent_id: AgentId) -> str:
     """Build a CEL include filter that excludes this agent's own state change events."""
     return 'source != "{}" || agent_id != "{}"'.format(_AGENT_STATES_SOURCE, agent_id)
-
-
-def _merge_events_filter(existing_filter: str | None, new_filter: str) -> str:
-    """Combine an existing events filter with a new one using AND."""
-    if existing_filter is None or existing_filter.strip() == "":
-        return new_filter
-    return "({}) && ({})".format(existing_filter, new_filter)
 
 
 def configure_mngr_settings(
@@ -55,8 +48,8 @@ def configure_mngr_settings(
     Creates or updates the project-level mngr config to:
     1. Add an exclude filter to ``[commands.list]`` so ``mngr list`` only
        shows agents labelled with this mind's name.
-    2. Add a filter to ``[commands.events]`` so ``mngr events`` excludes
-       this agent's own ``mngr/agent_states`` events.
+    2. Add an include filter to ``[commands.events]`` so ``mngr events``
+       excludes this agent's own ``mngr/agent_states`` events.
 
     Existing settings are preserved; new entries are merged in.
     The resulting file is staged and committed on the current branch.
@@ -72,7 +65,7 @@ def configure_mngr_settings(
             doc = tomlkit.parse(settings_path.read_text())
 
         _add_list_exclude_filter(doc, mind_name)
-        _add_events_self_filter(doc, agent_id)
+        _add_events_self_include_filter(doc, agent_id)
 
         settings_path.write_text(tomlkit.dumps(doc))
 
@@ -93,18 +86,18 @@ def _add_list_exclude_filter(doc: tomlkit.TOMLDocument, mind_name: AgentName) ->
     list_table["exclude"] = existing_excludes
 
 
-def _add_events_self_filter(doc: tomlkit.TOMLDocument, agent_id: AgentId) -> None:
-    """Add a filter to [commands.events] in the TOML document."""
+def _add_events_self_include_filter(doc: tomlkit.TOMLDocument, agent_id: AgentId) -> None:
+    """Add an include filter to [commands.events] in the TOML document."""
     commands = _ensure_super_table(doc, "commands")
     events_table = _ensure_table(commands, "events")
 
-    new_filter = _build_events_self_filter(agent_id)
-    existing_filter = events_table.get("filter")
+    new_filter = _build_events_self_include_filter(agent_id)
+    existing_includes: list[str] = list(events_table.get("include", []))
 
-    if existing_filter is not None and new_filter in existing_filter:
-        return
+    if new_filter not in existing_includes:
+        existing_includes.append(new_filter)
 
-    events_table["filter"] = _merge_events_filter(existing_filter, new_filter)
+    events_table["include"] = existing_includes
 
 
 def _ensure_super_table(doc: tomlkit.TOMLDocument, key: str) -> Any:

@@ -4,9 +4,8 @@ from typing import Any
 
 from imbue.minds.forwarding_server.mngr_settings import MNGR_SETTINGS_DIR_NAME
 from imbue.minds.forwarding_server.mngr_settings import MNGR_SETTINGS_FILE_NAME
-from imbue.minds.forwarding_server.mngr_settings import _build_events_self_filter
+from imbue.minds.forwarding_server.mngr_settings import _build_events_self_include_filter
 from imbue.minds.forwarding_server.mngr_settings import _build_list_exclude_filter
-from imbue.minds.forwarding_server.mngr_settings import _merge_events_filter
 from imbue.minds.forwarding_server.mngr_settings import configure_mngr_settings
 from imbue.minds.forwarding_server.vendor_mngr import run_git
 from imbue.minds.primitives import AgentName
@@ -23,30 +22,15 @@ def _read_settings(repo: Path) -> dict[str, Any]:
 
 def test_build_list_exclude_filter_contains_mind_name() -> None:
     result = _build_list_exclude_filter(AgentName("selene"))
-    assert 'labels.mind != "selene"' in result
+    assert 'labels.mind == "selene"' in result
     assert "!has(labels.mind)" in result
 
 
-def test_build_events_self_filter_contains_agent_id() -> None:
+def test_build_events_self_include_filter_contains_agent_id() -> None:
     agent_id = AgentId()
-    result = _build_events_self_filter(agent_id)
+    result = _build_events_self_include_filter(agent_id)
     assert 'agent_id != "{}"'.format(agent_id) in result
     assert 'source != "mngr/agent_states"' in result
-
-
-def test_merge_events_filter_returns_new_when_no_existing() -> None:
-    merged = _merge_events_filter(None, "a == b")
-    assert merged == "a == b"
-
-
-def test_merge_events_filter_returns_new_when_existing_is_empty() -> None:
-    merged = _merge_events_filter("", "a == b")
-    assert merged == "a == b"
-
-
-def test_merge_events_filter_combines_with_existing() -> None:
-    merged = _merge_events_filter('source != "foo"', "a == b")
-    assert merged == '(source != "foo") && (a == b)'
 
 
 def test_configure_mngr_settings_creates_settings_file(tmp_path: Path) -> None:
@@ -62,12 +46,13 @@ def test_configure_mngr_settings_creates_settings_file(tmp_path: Path) -> None:
     # Verify [commands.list] exclude filter
     excludes = parsed["commands"]["list"]["exclude"]
     assert len(excludes) == 1
-    assert 'labels.mind != "selene"' in excludes[0]
+    assert 'labels.mind == "selene"' in excludes[0]
 
-    # Verify [commands.events] filter
-    events_filter = parsed["commands"]["events"]["filter"]
-    assert str(agent_id) in events_filter
-    assert "mngr/agent_states" in events_filter
+    # Verify [commands.events] include filters
+    events_includes = parsed["commands"]["events"]["include"]
+    assert len(events_includes) == 1
+    assert str(agent_id) in events_includes[0]
+    assert "mngr/agent_states" in events_includes[0]
 
 
 def test_configure_mngr_settings_commits_file(tmp_path: Path) -> None:
@@ -102,10 +87,10 @@ def test_configure_mngr_settings_merges_with_existing_list_excludes(tmp_path: Pa
     excludes = list(parsed["commands"]["list"]["exclude"])
     assert len(excludes) == 2
     assert 'state == "STOPPED"' in excludes[0]
-    assert 'labels.mind != "selene"' in excludes[1]
+    assert 'labels.mind == "selene"' in excludes[1]
 
 
-def test_configure_mngr_settings_merges_with_existing_events_filter(tmp_path: Path) -> None:
+def test_configure_mngr_settings_merges_with_existing_events_include(tmp_path: Path) -> None:
     repo = make_git_repo(tmp_path)
 
     settings_dir = repo / MNGR_SETTINGS_DIR_NAME
@@ -113,17 +98,17 @@ def test_configure_mngr_settings_merges_with_existing_events_filter(tmp_path: Pa
     settings_path = settings_dir / MNGR_SETTINGS_FILE_NAME
     settings_path.write_text(
         '[commands.events]\n'
-        'filter = \'source != "delivery_failures"\'\n'
+        'include = [\'source != "delivery_failures"\']\n'
     )
 
     agent_id = AgentId()
     configure_mngr_settings(repo, AgentName("selene"), agent_id)
 
     parsed = _read_settings(repo)
-    events_filter = parsed["commands"]["events"]["filter"]
-    assert 'source != "delivery_failures"' in events_filter
-    assert str(agent_id) in events_filter
-    assert "&&" in events_filter
+    events_includes = list(parsed["commands"]["events"]["include"])
+    assert len(events_includes) == 2
+    assert 'source != "delivery_failures"' in events_includes[0]
+    assert str(agent_id) in events_includes[1]
 
 
 def test_configure_mngr_settings_preserves_other_settings(tmp_path: Path) -> None:
@@ -158,7 +143,7 @@ def test_configure_mngr_settings_handles_out_of_order_tables(tmp_path: Path) -> 
         'key = "value"\n'
         '\n'
         '[commands.events]\n'
-        'filter = \'source != "delivery_failures"\'\n'
+        'include = [\'source != "delivery_failures"\']\n'
     )
 
     agent_id = AgentId()
@@ -171,10 +156,11 @@ def test_configure_mngr_settings_handles_out_of_order_tables(tmp_path: Path) -> 
     assert len(excludes) == 2
     assert 'state == "STOPPED"' in excludes[0]
 
-    # Events filter merged with existing
-    events_filter = parsed["commands"]["events"]["filter"]
-    assert 'source != "delivery_failures"' in events_filter
-    assert str(agent_id) in events_filter
+    # Events include filters merged with existing
+    events_includes = list(parsed["commands"]["events"]["include"])
+    assert len(events_includes) == 2
+    assert 'source != "delivery_failures"' in events_includes[0]
+    assert str(agent_id) in events_includes[1]
 
     # Other section preserved
     assert parsed["other_section"]["key"] == "value"
@@ -187,7 +173,7 @@ def test_configure_mngr_settings_is_idempotent(tmp_path: Path) -> None:
     configure_mngr_settings(repo, AgentName("selene"), agent_id)
 
     first_parsed = _read_settings(repo)
-    first_events_filter = first_parsed["commands"]["events"]["filter"]
+    first_events_includes = first_parsed["commands"]["events"]["include"]
 
     # Running again should not add duplicate filters
     configure_mngr_settings(repo, AgentName("selene"), agent_id)
@@ -196,5 +182,5 @@ def test_configure_mngr_settings_is_idempotent(tmp_path: Path) -> None:
     excludes = list(parsed["commands"]["list"]["exclude"])
     assert len(excludes) == 1
 
-    events_filter = parsed["commands"]["events"]["filter"]
-    assert events_filter == first_events_filter
+    events_includes = parsed["commands"]["events"]["include"]
+    assert events_includes == first_events_includes
