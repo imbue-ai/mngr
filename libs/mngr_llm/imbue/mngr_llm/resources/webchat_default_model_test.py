@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 from imbue.mngr_llm.resources.webchat_default_model import DefaultModelPlugin
 from imbue.mngr_llm.resources.webchat_default_model import _FALLBACK_MODEL
@@ -49,5 +50,6 @@ def test_default_model_plugin_registers_endpoint() -> None:
     plugin = DefaultModelPlugin()
     plugin.endpoint(app=app)
 
-    route_paths = [route.path for route in app.routes]
+    api_routes = [route for route in app.routes if isinstance(route, APIRoute)]
+    route_paths = [route.path for route in api_routes]
     assert "/api/default-model" in route_paths
