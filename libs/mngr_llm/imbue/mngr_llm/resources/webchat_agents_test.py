@@ -9,24 +9,18 @@ from fastapi.testclient import TestClient
 
 from imbue.mngr_llm.resources.webchat_agents import AgentsPlugin
 from imbue.mngr_llm.resources.webchat_agents import _fetch_agent_list
-from imbue.mngr_llm.resources.webchat_agents import _get_mng_command
 
 
-def test_get_mng_command_defaults_to_mng(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MNG_RECURSIVE_COMMAND", raising=False)
-    result = _get_mng_command()
-    assert result == ["mng"]
+def test_fetch_agent_list_returns_empty_when_mngr_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When UV_TOOL_BIN_DIR is unset (mngr not installed), returns an empty list."""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    result = _fetch_agent_list(host_name="")
+    assert result == []
 
 
-def test_get_mng_command_respects_recursive_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MNG_RECURSIVE_COMMAND", "/usr/local/bin/mng --config x")
-    result = _get_mng_command()
-    assert result == ["/usr/local/bin/mng", "--config", "x"]
-
-
-def test_fetch_agent_list_returns_empty_on_command_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the mng command cannot be found, returns an empty list."""
-    monkeypatch.setenv("MNG_RECURSIVE_COMMAND", "nonexistent-cmd-xyz-12345")
+def test_fetch_agent_list_returns_empty_on_command_failure(tmp_path: Any) -> None:
+    """When the mngr binary doesn't exist at the expected path, returns an empty list."""
+    # Point UV_TOOL_BIN_DIR to a directory without a mngr binary.
     result = _fetch_agent_list(host_name="")
     assert result == []
 
@@ -34,7 +28,7 @@ def test_fetch_agent_list_returns_empty_on_command_failure(monkeypatch: pytest.M
 def _create_test_app(agents: list[dict[str, Any]]) -> FastAPI:
     """Create a FastAPI app with a stubbed /api/agents endpoint.
 
-    Instead of calling mng list, the endpoint returns the provided agent list
+    Instead of calling mngr list, the endpoint returns the provided agent list
     directly, exercising the plugin's route-registration logic.
     """
     app = FastAPI()

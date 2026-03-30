@@ -1,6 +1,6 @@
 """Agents endpoint for the webchat server.
 
-Provides a ``/api/agents`` endpoint that runs ``mng list`` on demand and
+Provides a ``/api/agents`` endpoint that runs ``mngr list`` on demand and
 returns the current agent list. Designed to be registered on the
 llm-webchat FastAPI application via the pluggy ``endpoint`` hook.
 """
@@ -8,7 +8,6 @@ llm-webchat FastAPI application via the pluggy ``endpoint`` hook.
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import Any
 from typing import Final
@@ -21,47 +20,47 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_recursive.watcher_common import MngrNotInstalledError
+from imbue.mngr_recursive.watcher_common import get_mngr_command
 from llm_webchat.hookspecs import hookimpl
 
 _FETCH_TIMEOUT_SECONDS: Final[float] = 60.0
 _FETCH_WARN_THRESHOLD_SECONDS: Final[float] = 15.0
 
 
-def _get_mng_command() -> list[str]:
-    """Return the mng command parts, respecting MNG_RECURSIVE_COMMAND if set."""
-    recursive_command = os.environ.get("MNG_RECURSIVE_COMMAND", "")
-    if recursive_command:
-        return recursive_command.split()
-    return ["mng"]
-
-
 def _fetch_agent_list(host_name: str) -> list[dict[str, Any]]:
-    """Run ``mng list --format json --quiet`` and return the parsed agent list.
+    """Run ``mngr list --format json --quiet`` and return the parsed agent list.
 
     Filters to the given host if non-empty. Returns an empty list on any error.
     """
     start = time.monotonic()
     try:
+        mngr_command = get_mngr_command()
+    except MngrNotInstalledError as e:
+        logger.debug("Cannot fetch agent list: {}", e)
+        return []
+
+    try:
         with ConcurrencyGroup(name="agents-fetch") as cg:
             result = cg.run_process_to_completion(
-                [*_get_mng_command(), "list", "--format", "json", "--quiet"],
+                [*mngr_command, "list", "--format", "json", "--quiet"],
                 timeout=_FETCH_TIMEOUT_SECONDS,
                 is_checked_after=False,
             )
     except Exception as e:
-        logger.debug("Failed to run mng list: {}", e)
+        logger.debug("Failed to run mngr list: {}", e)
         return []
 
     elapsed = time.monotonic() - start
     if elapsed > _FETCH_WARN_THRESHOLD_SECONDS:
-        logger.warning("mng list took {:.1f}s (expected <{:.0f}s)", elapsed, _FETCH_WARN_THRESHOLD_SECONDS)
+        logger.warning("mngr list took {:.1f}s (expected <{:.0f}s)", elapsed, _FETCH_WARN_THRESHOLD_SECONDS)
 
     if result.is_timed_out:
-        logger.warning("mng list timed out after {}s", _FETCH_TIMEOUT_SECONDS)
+        logger.warning("mngr list timed out after {}s", _FETCH_TIMEOUT_SECONDS)
         return []
 
     if result.returncode != 0:
-        logger.debug("mng list failed (exit {}): {}", result.returncode, result.stderr.strip())
+        logger.debug("mngr list failed (exit {}): {}", result.returncode, result.stderr.strip())
         return []
 
     stdout = result.stdout.strip()
@@ -71,7 +70,7 @@ def _fetch_agent_list(host_name: str) -> list[dict[str, Any]]:
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as e:
-        logger.warning("Failed to parse mng list JSON output: {}", e)
+        logger.warning("Failed to parse mngr list JSON output: {}", e)
         return []
 
     agents_raw: list[dict[str, Any]] = data.get("agents", [])
