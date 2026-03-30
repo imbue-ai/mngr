@@ -515,8 +515,9 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
                     controller_cov_report.pop("term-missing", None)
                     controller_cov_report.pop("term", None)
 
-    # xdist workers should not acquire the lock - only the controller does
-    if _is_xdist_worker():
+    # xdist workers should not acquire the lock - only the controller does.
+    # --collect-only skips the lock because it only discovers tests without running them.
+    if _is_xdist_worker() or session.config.option.collectonly:
         setattr(session, "start_time", time.time())  # noqa: B010
     else:
         # Acquire the lock and store the handle on the session to keep it open
