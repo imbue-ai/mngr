@@ -6,15 +6,7 @@
  * route is visited.
  */
 
-// Load stylesheet immediately (no dependency on $llm).
-(function () {
-  var linkElement = document.createElement("link");
-  linkElement.rel = "stylesheet";
-  linkElement.href = "/plugins/webchat_agents.css";
-  document.head.appendChild(linkElement);
-})();
-
-// Defer the rest until "load" so that the main app's ES module has
+// Defer everything until "load" so that the main app's ES module has
 // executed and window.$llm is available. Plugin "load" listeners are
 // registered before the module's listener (regular scripts run first),
 // so this fires after $llm is set but before bootstrap() reads the
@@ -23,6 +15,30 @@ window.addEventListener("load", function () {
   "use strict";
 
   var AGENTS_ROUTE = "/agents";
+
+  // ── Base path ────────────────────────────────────────────────
+
+  /**
+   * Read the root path that the ASGI server was mounted at.  The
+   * llm-webchat server injects this into the HTML as a meta tag.
+   * All absolute URLs (fetch, hrefs, pushState) must be prefixed
+   * with this value so the plugin works behind a reverse proxy.
+   */
+  function getBasePath() {
+    var meta = document.querySelector('meta[name="llm-webchat-base-path"]');
+    return ((meta && meta.getAttribute("content")) || "").replace(/\/+$/, "");
+  }
+
+  var basePath = getBasePath();
+
+  // Load stylesheet using the base path so it resolves correctly
+  // behind a reverse proxy.
+  (function () {
+    var linkElement = document.createElement("link");
+    linkElement.rel = "stylesheet";
+    linkElement.href = basePath + "/plugins/webchat_agents.css";
+    document.head.appendChild(linkElement);
+  })();
 
   // ── SVG icons ────────────────────────────────────────────────
 
@@ -61,9 +77,9 @@ window.addEventListener("load", function () {
   }
 
   function isAgentsRoute() {
-    // m.route.prefix is "" so m.route.get() returns the pathname
+    var expected = basePath + AGENTS_ROUTE;
     try {
-      return window.location.pathname === AGENTS_ROUTE;
+      return window.location.pathname === expected;
     } catch (e) {
       return false;
     }
@@ -72,7 +88,7 @@ window.addEventListener("load", function () {
   // ── Data fetching ────────────────────────────────────────────
 
   function fetchAgents(container) {
-    fetch("/api/agents")
+    fetch(basePath + "/api/agents")
       .then(function (response) {
         if (!response.ok)
           throw new Error("Failed to fetch agents: " + response.status);
@@ -124,6 +140,13 @@ window.addEventListener("load", function () {
     return html;
   }
 
+  function navigateHome() {
+    // Use mithril routing to navigate to the home page.  This keeps
+    // the SPA state consistent and avoids a full page reload.
+    history.pushState(null, "", basePath + "/");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+
   function renderAgentsContent(container) {
     // Find or create the list container within the page wrapper
     var listContainer = container.querySelector(".agents-list-container");
@@ -136,7 +159,7 @@ window.addEventListener("load", function () {
     container.innerHTML =
       '<div class="agents-page">' +
       '<div class="agents-page-header">' +
-      '<a class="agents-back-link" href="/">' +
+      '<a class="agents-back-link" href="' + basePath + '/">' +
       BACK_ARROW_SVG +
       "Conversations" +
       "</a>" +
@@ -152,8 +175,7 @@ window.addEventListener("load", function () {
     if (backLink) {
       backLink.addEventListener("click", function (event) {
         event.preventDefault();
-        history.pushState(null, "", "/");
-        window.dispatchEvent(new PopStateEvent("popstate"));
+        navigateHome();
       });
     }
   }
@@ -174,6 +196,11 @@ window.addEventListener("load", function () {
 
   // ── Sidebar link ─────────────────────────────────────────────
 
+  function navigateToAgents() {
+    history.pushState(null, "", basePath + AGENTS_ROUTE);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+
   function updateSidebarLinkState() {
     var link = document.querySelector(".agents-sidebar-link");
     if (link) {
@@ -186,26 +213,27 @@ window.addEventListener("load", function () {
   }
 
   function injectSidebarLink() {
-    var slot = document.querySelector('[data-slot="sidebar-before-list"]');
-    if (!slot) {
-      slot = document.querySelector(".conversation-selector");
-    }
-    if (!slot) return false;
-
     // Avoid duplicate injection
     if (document.querySelector(".agents-sidebar-link")) return true;
 
+    // Insert after the sidebar header (between the header controls
+    // and the conversation list).  This keeps it visually grouped
+    // with the navigation controls rather than mixed into the
+    // conversation list.
+    var sidebarHeader = document.querySelector('[data-slot="sidebar-header"]');
+    if (!sidebarHeader) return false;
+
     var link = document.createElement("a");
     link.className = "agents-sidebar-link";
-    link.href = AGENTS_ROUTE;
+    link.href = basePath + AGENTS_ROUTE;
     link.innerHTML = AGENTS_ICON_SVG + "<span>Agents</span>";
     link.addEventListener("click", function (event) {
       event.preventDefault();
-      history.pushState(null, "", AGENTS_ROUTE);
-      window.dispatchEvent(new PopStateEvent("popstate"));
+      navigateToAgents();
     });
 
-    slot.parentNode.insertBefore(link, slot);
+    // Insert the link immediately after the sidebar header div.
+    sidebarHeader.parentNode.insertBefore(link, sidebarHeader.nextSibling);
     updateSidebarLinkState();
     return true;
   }
@@ -215,16 +243,20 @@ window.addEventListener("load", function () {
   $llm.on("ready", function () {
     injectSidebarLink();
 
-    // Re-inject after mithril re-renders (the sidebar may be re-created)
-    var observer = new MutationObserver(function () {
-      if (!document.querySelector(".agents-sidebar-link")) {
-        injectSidebarLink();
-      }
-      updateSidebarLinkState();
-    });
-    var sidebar = document.querySelector('[data-slot="sidebar"]');
-    if (sidebar) {
-      observer.observe(sidebar, { childList: true, subtree: true });
+    // Re-inject after mithril re-renders (the sidebar may be
+    // re-created).  Observe the #app container rather than the
+    // sidebar element itself, because mithril may replace the
+    // entire sidebar DOM node -- which would disconnect an
+    // observer attached to it.
+    var appRoot = document.getElementById("app");
+    if (appRoot) {
+      var observer = new MutationObserver(function () {
+        if (!document.querySelector(".agents-sidebar-link")) {
+          injectSidebarLink();
+        }
+        updateSidebarLinkState();
+      });
+      observer.observe(appRoot, { childList: true, subtree: true });
     }
   });
 });
