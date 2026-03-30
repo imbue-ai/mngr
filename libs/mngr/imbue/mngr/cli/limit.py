@@ -548,7 +548,7 @@ and cannot be used with --host alone.""",
     examples=(
         ("Set idle timeout for an agent's host", "mngr limit my-agent --idle-timeout 5m"),
         ("Grant permissions to an agent", "mngr limit my-agent --grant network --grant internet"),
-        ("Disable idle detection for all agents", "mngr list --format '{name}' | mngr limit - --idle-mode disabled"),
+        ("Disable idle detection for all agents", "mngr list --ids | mngr limit - --idle-mode disabled"),
         ("Update host idle settings directly", "mngr limit --host my-host --idle-timeout 1h"),
     ),
     see_also=(

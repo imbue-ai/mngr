@@ -626,10 +626,10 @@ Supports custom format templates via --format. Available fields: name.""",
     examples=(
         ("Destroy an agent by name", "mngr destroy my-agent"),
         ("Destroy multiple agents", "mngr destroy agent1 agent2 agent3"),
-        ("Destroy all agents", "mngr list --format '{name}' | mngr destroy - --force"),
+        ("Destroy all agents", "mngr list --ids | mngr destroy - --force"),
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
-        ("Pipe agent names from list", "mngr list --format '{name}' | mngr destroy - --force"),
+        ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force"),
         ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),
     see_also=(

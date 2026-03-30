@@ -97,7 +97,7 @@ $ mngr destroy agent1 agent2 agent3
 **Destroy all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr destroy - --force
+$ mngr list --ids | mngr destroy - --force
 ```
 
 **Destroy using --agent flag (repeatable)**
@@ -115,7 +115,7 @@ $ mngr destroy --session mngr-my-agent
 **Pipe agent names from list**
 
 ```bash
-$ mngr list --format '{name}' | mngr destroy - --force
+$ mngr list --ids | mngr destroy - --force
 ```
 
 **Custom format template output**

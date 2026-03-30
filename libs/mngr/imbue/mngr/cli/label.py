@@ -278,8 +278,8 @@ the host to be started.""",
     examples=(
         ("Set a label on an agent", "mngr label my-agent --label archived_at=2026-03-15"),
         ("Set multiple labels on multiple agents", "mngr label agent1 agent2 -l env=prod -l team=backend"),
-        ("Label all agents", "mngr list --format '{name}' | mngr label - --label project=myproject"),
-        ("Read agent names from stdin", "mngr list --format '{name}' | mngr label - -l reviewed=true"),
+        ("Label all agents", "mngr list --ids | mngr label - --label project=myproject"),
+        ("Read agent names from stdin", "mngr list --ids | mngr label - -l reviewed=true"),
     ),
     see_also=(
         ("list", "List agents and their labels"),

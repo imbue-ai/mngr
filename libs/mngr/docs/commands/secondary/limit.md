@@ -115,7 +115,7 @@ $ mngr limit my-agent --grant network --grant internet
 **Disable idle detection for all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr limit - --idle-mode disabled
+$ mngr list --ids | mngr limit - --idle-mode disabled
 ```
 
 **Update host idle settings directly**

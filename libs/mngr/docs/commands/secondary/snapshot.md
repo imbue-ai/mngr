@@ -130,7 +130,7 @@ $ mngr snapshot create my-agent --name before-refactor
 **Snapshot all running agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr snapshot create -
+$ mngr list --ids | mngr snapshot create -
 ```
 
 **Snapshot multiple agents**
@@ -210,7 +210,7 @@ $ mngr snapshot list my-agent
 **List snapshots for all running agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr snapshot list -
+$ mngr list --ids | mngr snapshot list -
 ```
 
 **Limit number of results**
@@ -336,7 +336,7 @@ $ mngr snapshot create my-host-id
 **Snapshot all running agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr snapshot create -
+$ mngr list --ids | mngr snapshot create -
 ```
 
 **List snapshots for an agent**

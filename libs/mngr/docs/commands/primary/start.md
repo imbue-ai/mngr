@@ -92,7 +92,7 @@ $ mngr start my-agent --connect
 **Start all stopped agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr start -
+$ mngr list --ids | mngr start -
 ```
 
 **Custom format template output**

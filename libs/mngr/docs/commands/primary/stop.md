@@ -93,7 +93,7 @@ $ mngr stop agent1 agent2
 **Stop all running agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr stop -
+$ mngr list --ids | mngr stop -
 ```
 
 **Stop and archive an agent**

@@ -84,11 +84,11 @@ $ mngr label agent1 agent2 -l env=prod -l team=backend
 **Label all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr label - --label project=myproject
+$ mngr list --ids | mngr label - --label project=myproject
 ```
 
 **Read agent names from stdin**
 
 ```bash
-$ mngr list --format '{name}' | mngr label - -l reviewed=true
+$ mngr list --ids | mngr label - -l reviewed=true
 ```

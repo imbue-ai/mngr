@@ -243,7 +243,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Start an agent by name", "mngr start my-agent"),
         ("Start multiple agents", "mngr start agent1 agent2"),
         ("Start and connect", "mngr start my-agent --connect"),
-        ("Start all stopped agents", "mngr list --format '{name}' | mngr start -"),
+        ("Start all stopped agents", "mngr list --ids | mngr start -"),
         ("Custom format template output", "mngr start agent1 agent2 --format '{name}'"),
     ),
     see_also=(

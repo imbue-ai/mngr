@@ -104,7 +104,7 @@ $ mngr exec agent1 agent2 "echo hello"
 **Run on all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr exec - "echo hello"
+$ mngr list --ids | mngr exec - "echo hello"
 ```
 
 **Run with a custom working directory**

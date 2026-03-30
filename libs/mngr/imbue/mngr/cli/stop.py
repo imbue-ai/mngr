@@ -224,7 +224,7 @@ Supports custom format templates via --format. Available fields: name.""",
     examples=(
         ("Stop an agent by name", "mngr stop my-agent"),
         ("Stop multiple agents", "mngr stop agent1 agent2"),
-        ("Stop all running agents", "mngr list --format '{name}' | mngr stop -"),
+        ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
         ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),

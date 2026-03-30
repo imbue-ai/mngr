@@ -294,7 +294,7 @@ If no message is specified with --message or --message-file, reads from stdin
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
-        ("Send to all agents", "mngr list --format '{name}' | mngr message - --message 'Hello everyone'"),
+        ("Send to all agents", "mngr list --ids | mngr message - --message 'Hello everyone'"),
         ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),

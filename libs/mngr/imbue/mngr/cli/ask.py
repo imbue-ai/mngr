@@ -69,7 +69,7 @@ _QUERY_PREFIX: Final[str] = (
     'response: mngr create --no-connect -m "fix all failing tests and commit"\n\n'
     #
     "user: How do I send the same message to all my running agents?\n"
-    "response: mngr list --format '{name}' | mngr message - -m \"rebase on main and resolve any conflicts\"\n\n"
+    'response: mngr list --ids | mngr message - -m "rebase on main and resolve any conflicts"\n\n'
     #
     "user: How do I send a long task description from a file to an agent?\n"
     "response: Pipe it from stdin:\n"
@@ -91,7 +91,7 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr list --running\n\n"
     #
     "user: How do I destroy all my agents?\n"
-    "response: mngr list --format '{name}' | mngr destroy - --force\n\n"
+    "response: mngr list --ids | mngr destroy - --force\n\n"
     #
     "user: How do I create an agent with environment secrets?\n"
     "response: mngr create --env-file .env.secrets\n\n"
@@ -129,7 +129,7 @@ _QUERY_PREFIX: Final[str] = (
     #
     "user: How do I message only agents with a specific tag?\n"
     "response: Use list with a CEL filter and pipe to message:\n"
-    "    mngr list --include 'labels.feature == \"auth\"' --format '{name}' | mngr message - -m \"run the auth test suite\"\n\n"
+    '    mngr list --include \'labels.feature == "auth"\' --ids | mngr message - -m "run the auth test suite"\n\n'
     #
     "user: How do I launch 3 independent tasks in parallel on the cloud?\n"
     "response: Run multiple creates with --no-connect:\n"
@@ -166,7 +166,7 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr stop my-agent\n\n"
     #
     "user: How do I stop all running agents?\n"
-    "response: mngr list --format '{name}' | mngr stop -\n\n"
+    "response: mngr list --ids | mngr stop -\n\n"
     #
     "now answer this user's question:\n"
     "user: "
@@ -183,13 +183,13 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "Run the command 5 times (once per agent).\n\n"
     #
     "user: send all agents a message to rebase on main\n"
-    "response: mngr list --format '{name}' | mngr message - -m \"rebase on main and resolve any conflicts\"\n\n"
+    'response: mngr list --ids | mngr message - -m "rebase on main and resolve any conflicts"\n\n'
     #
     "user: stop all running agents\n"
-    "response: mngr list --format '{name}' | mngr stop -\n\n"
+    "response: mngr list --ids | mngr stop -\n\n"
     #
     "user: destroy everything\n"
-    "response: mngr list --format '{name}' | mngr destroy - --force\n\n"
+    "response: mngr list --ids | mngr destroy - --force\n\n"
     #
     "user: create a cloud agent that immediately starts fixing tests\n"
     'response: mngr create @.modal --no-connect -m "fix all failing tests and commit"\n\n'

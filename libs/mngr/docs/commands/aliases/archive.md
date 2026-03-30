@@ -53,11 +53,11 @@ $ mngr archive my-agent --force
 **Archive all non-running agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr archive -
+$ mngr list --ids | mngr archive -
 ```
 
 **Force-stop and archive all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr archive - --force
+$ mngr list --ids | mngr archive - --force
 ```

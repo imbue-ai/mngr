@@ -288,7 +288,7 @@ Supports custom format templates via --format. Available fields: agent, stdout, 
     examples=(
         ("Run a command on an agent", 'mngr exec my-agent "echo hello"'),
         ("Run on multiple agents", 'mngr exec agent1 agent2 "echo hello"'),
-        ("Run on all agents", "mngr list --format '{name}' | mngr exec - \"echo hello\""),
+        ("Run on all agents", 'mngr list --ids | mngr exec - "echo hello"'),
         ("Run with a custom working directory", 'mngr exec my-agent "ls -la" --cwd /tmp'),
         ("Run as a different user", 'mngr exec my-agent "whoami" --user root'),
         ("Run with a timeout", 'mngr exec my-agent "sleep 100" --timeout 5'),

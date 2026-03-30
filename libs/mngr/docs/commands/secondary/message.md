@@ -95,7 +95,7 @@ $ mngr message agent1 agent2 --message "Hello to all"
 **Send to all agents**
 
 ```bash
-$ mngr list --format '{name}' | mngr message - --message 'Hello everyone'
+$ mngr list --ids | mngr message - --message 'Hello everyone'
 ```
 
 **Send message from a file**
