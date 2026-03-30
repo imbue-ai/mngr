@@ -366,7 +366,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
                 opts=opts,
                 output_opts=output_opts,
                 mngr_ctx=mngr_ctx,
-                dry_run=False,
                 changes=changes,
             )
         _output_result(changes, output_opts)
@@ -447,7 +446,6 @@ def _apply_host_only_changes(
     all_hosts: list[DiscoveredHost],
     opts: LimitCliOptions,
     output_opts: OutputOptions,
-    dry_run: bool,
     changes: list[dict[str, Any]],
     mngr_ctx: MngrContext,
 ) -> None:
@@ -459,10 +457,6 @@ def _apply_host_only_changes(
     # it only returns None when host_identifier is None, which cannot happen here
     resolved_host = resolve_host_reference(host_identifier, all_hosts)
     assert resolved_host is not None
-
-    if dry_run:
-        _output(f"Would update activity config for host {resolved_host.host_id}", output_opts)
-        return
 
     provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
     host = provider.get_host(resolved_host.host_id)
