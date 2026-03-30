@@ -20,10 +20,14 @@ Read it carefully. If the issue is misguided, unclear to the point of being unac
 
 ## 2. Reproduce and investigate (in parallel)
 
-Launch two efforts concurrently:
+First, gather context for the relevant library (per the "How to get started" instructions in CLAUDE.md).
+
+Then launch two efforts concurrently:
 
 - **Reproduce**: Write a minimal reproduction (test, script, or manual steps) that demonstrates the bug or missing behavior. If the issue is a feature request rather than a bug, skip reproduction and instead write a failing test that captures the desired behavior.
 - **Root-cause search**: Read the relevant code, trace the control flow, and identify where the fix should go.
+
+If you cannot reproduce the bug or identify a root cause, comment on the issue explaining what you tried and what you found (prefix with `[fix-issue]`) and stop.
 
 ## 3. Decide on approach
 
@@ -37,11 +41,13 @@ If the fix involves a meaningful architectural choice (e.g., where to put new lo
 - Add or update tests to cover the fix.
 - Get all tests passing (`uv run pytest` in the relevant project directory).
 
-## 5. Open a PR
+## 5. Commit and open a PR
+
+Commit your changes with a message that references the issue (e.g., "Fix <description> (#<issue_number>)").
 
 Note: CLAUDE.md says not to create PRs yourself. Ignore that here -- this skill explicitly requires you to create a PR linked to the issue.
 
-Create a branch if you're not already on one, then open a PR that closes the issue:
+Create a branch if you're not already on one, push it, then open a PR that closes the issue:
 
 ```bash
 gh pr create --title "<concise title>" --body "$(cat <<'EOF'
