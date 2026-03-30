@@ -25,6 +25,7 @@ from loguru import logger
 from paramiko import ChannelException
 from paramiko import SFTPClient
 from paramiko import SSHException
+from paramiko import Transport
 from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
@@ -132,6 +133,17 @@ _retry_on_transient_ssh_error = retry(
     ),
     reraise=True,
 )
+
+
+def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
+    """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
+    try:
+        client = pyinfra_host.connector.client
+    except AttributeError:
+        return None
+    if client is not None:
+        return client.get_transport()
+    return None
 
 
 @pure
@@ -293,8 +305,11 @@ class Host(BaseHost, OnlineHostInterface):
         closed, EOF) with the same backoff used by file operations.
         """
         self._ensure_connected()
+        # Save the transport used for this command so we can detect if it dies
+        # during execution (e.g. another thread disconnects the connection).
+        transport_before = _get_ssh_transport(self.connector.host)
         try:
-            return self.connector.host.run_shell_command(command, **pyinfra_kwargs)
+            result = self.connector.host.run_shell_command(command, **pyinfra_kwargs)
         except ChannelException as e:
             logger.debug("Channel open refused while running command: {}, retrying without disconnect", e)
             raise
@@ -316,6 +331,21 @@ class Host(BaseHost, OnlineHostInterface):
                 logger.debug("Socket closed while running command, disconnecting for retry")
                 self.connector.host.disconnect()
             raise
+
+        # Detect ghost failures: pyinfra silently returns (False, output) when
+        # a channel dies mid-command (paramiko's recv_exit_status() returns -1).
+        # This happens when another thread disconnects the shared SSH connection.
+        # Check whether the transport we used is still alive; if not, retry.
+        success, _output = result
+        if not success and transport_before is not None and not transport_before.is_active():
+            logger.debug("Command failed and SSH transport is dead, disconnecting for retry")
+            self.connector.host.disconnect()
+            raise SSHException(
+                "Command returned failure with dead SSH transport "
+                "(likely channel closed during execution by concurrent disconnect)"
+            )
+
+        return result
 
     def _get_file(
         self,

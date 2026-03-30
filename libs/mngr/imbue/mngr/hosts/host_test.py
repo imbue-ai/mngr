@@ -945,7 +945,11 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
 class _FakeTransport:
     """Fake paramiko transport for testing."""
 
-    pass
+    def __init__(self, *, is_active: bool = True) -> None:
+        self._is_active = is_active
+
+    def is_active(self) -> bool:
+        return self._is_active
 
 
 class _BaseFakeSFTP:
@@ -1538,6 +1542,55 @@ def test_run_shell_command_ssh_exception_disconnects_before_retry(
     assert success is True
     assert fake._run_shell_command_call_count == 2
     assert fake.disconnect_call_count == 1
+
+
+def test_run_shell_command_retries_on_dead_transport_ghost_failure(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When run_shell_command returns (False, output) and the SSH transport is dead, retry.
+
+    This happens when another thread disconnects the shared SSH connection:
+    paramiko's recv_exit_status() returns -1 for the dead channel, and pyinfra
+    returns (False, empty_output) without raising an exception.
+    """
+    dead_transport = _FakeTransport(is_active=False)
+    ok_result = (True, CommandOutput([]))
+    # First call: command "fails" (exit -1 from dead channel) with dead transport.
+    # Second call: command succeeds after retry reconnects.
+    ghost_failure = (False, CommandOutput([]))
+    fake = _FakeHostWithSSH(
+        ssh_client=_FakeSSHClient(transport_return=dead_transport),
+        run_shell_command_results=[ghost_failure, ok_result],
+    )
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("mkdir -p /some/dir"))
+
+    assert success is True
+    assert fake._run_shell_command_call_count == 2
+    assert fake.disconnect_call_count >= 1
+
+
+def test_run_shell_command_does_not_retry_real_failure_with_live_transport(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When run_shell_command returns (False, output) but the transport is alive, do not retry.
+
+    This is a genuine command failure (e.g. permission denied), not a ghost failure.
+    """
+    live_transport = _FakeTransport(is_active=True)
+    real_failure = (False, CommandOutput([]))
+    fake = _FakeHostWithSSH(
+        ssh_client=_FakeSSHClient(transport_return=live_transport),
+        run_shell_command_results=[real_failure],
+    )
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    success, _ = host._run_shell_command(StringCommand("false"))
+
+    assert success is False
+    assert fake._run_shell_command_call_count == 1
+    assert fake.disconnect_call_count == 0
 
 
 def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
