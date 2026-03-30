@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from fastapi import FastAPI
+
+from imbue.mngr_llm.resources.webchat_default_model import DefaultModelPlugin
 from imbue.mngr_llm.resources.webchat_default_model import _FALLBACK_MODEL
 from imbue.mngr_llm.resources.webchat_default_model import _read_default_chat_model
 
@@ -42,10 +45,6 @@ def test_read_default_chat_model_returns_fallback_on_invalid_toml(tmp_path: Path
 
 def test_default_model_plugin_registers_endpoint() -> None:
     """Verify that the plugin registers the correct route on the FastAPI app."""
-    from fastapi import FastAPI
-
-    from imbue.mngr_llm.resources.webchat_default_model import DefaultModelPlugin
-
     app = FastAPI()
     plugin = DefaultModelPlugin()
     plugin.endpoint(app=app)
