@@ -661,8 +661,8 @@ mngr events my-task --tail 20
 # show only the first 10 events
 mngr events my-task --head 10
 
-# filter events using a CEL expression
-mngr events my-task --filter 'type == "user_message"'
+# include only events matching a CEL expression
+mngr events my-task --include 'type == "user_message"'
 
 # view the transcript of an agent's conversation
 mngr transcript my-task
