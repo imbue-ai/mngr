@@ -137,10 +137,10 @@ def test_detect_mngr_install_mode_returns_package_for_missing_package() -> None:
 
 
 def test_detect_mngr_install_mode_returns_editable_for_mngr() -> None:
-    """detect_mngr_install_mode for 'mngr' should return EDITABLE in a dev workspace."""
+    """detect_mngr_install_mode for 'imbue-mngr' should return EDITABLE in a dev workspace."""
     # In a development workspace with editable install, this should return EDITABLE.
     # In a regular install, it would return PACKAGE. Either is valid.
-    result = detect_mngr_install_mode("mngr")
+    result = detect_mngr_install_mode("imbue-mngr")
     assert result in (MngrInstallMode.EDITABLE, MngrInstallMode.PACKAGE)
 
 

@@ -34,7 +34,7 @@ def capture_tmux_pane_content(
 
     When include_scrollback is True, captures the full scrollback buffer.
     """
-    result: CommandResult = host.execute_command(
+    result: CommandResult = host.execute_idempotent_command(
         build_tmux_capture_pane_command(session_name, include_scrollback=include_scrollback),
         timeout_seconds=timeout_seconds,
     )

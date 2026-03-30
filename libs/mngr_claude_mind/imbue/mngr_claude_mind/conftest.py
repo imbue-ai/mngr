@@ -46,13 +46,19 @@ class LocalShellHost:
     def __init__(self, host_dir: Path) -> None:
         self.host_dir = host_dir
 
-    def execute_command(self, command: str, **kwargs: Any) -> _ShellCommandResult:
+    def _execute_command(self, command: str, **kwargs: Any) -> _ShellCommandResult:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, env=os.environ)
         return _ShellCommandResult(
             success=result.returncode == 0,
             stdout=result.stdout,
             stderr=result.stderr,
         )
+
+    def execute_idempotent_command(self, command: str, **kwargs: Any) -> _ShellCommandResult:
+        return self._execute_command(command, **kwargs)
+
+    def execute_stateful_command(self, command: str, **kwargs: Any) -> _ShellCommandResult:
+        return self._execute_command(command, **kwargs)
 
     def read_text_file(self, path: Path) -> str:
         return path.read_text()

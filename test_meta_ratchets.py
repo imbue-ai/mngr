@@ -17,7 +17,11 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux", "claude_web_view", "sculptor_web"})
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = ("migrate_code_mng_to_mngr.sh", "migrate_state_mng_to_mngr.sh")
+_MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
+    "migrate_code_mng_to_mngr.sh",
+    "migrate_state_mng_to_mngr.sh",
+    "release_tombstones.py",
+)
 
 pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 

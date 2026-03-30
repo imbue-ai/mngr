@@ -63,7 +63,7 @@ def execute_with_timing(
     before it becomes an outright failure.
     """
     start = time.monotonic()
-    result = host.execute_command(cmd, timeout_seconds=hard_timeout)
+    result = host.execute_idempotent_command(cmd, timeout_seconds=hard_timeout)
     elapsed = time.monotonic() - start
     if elapsed > warn_threshold:
         logger.warning("{} took {:.1f}s (expected <{:.0f}s): {}", label, elapsed, warn_threshold, cmd)

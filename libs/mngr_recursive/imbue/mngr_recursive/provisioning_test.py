@@ -37,7 +37,8 @@ def _make_mock_host(is_local: bool = False, host_dir: Path | None = None) -> Mag
     host = MagicMock()
     host.is_local = is_local
     host.host_dir = host_dir or Path("/tmp/mngr-test/host")
-    host.execute_command.return_value = _make_command_result(True, stdout="/home/testuser\n")
+    host.execute_idempotent_command.return_value = _make_command_result(True, stdout="/home/testuser\n")
+    host.execute_stateful_command.return_value = _make_command_result(True, stdout="/home/testuser\n")
     host.write_file.return_value = None
     host.write_text_file.return_value = None
     return host
@@ -110,7 +111,7 @@ def test_upload_deploy_files_with_path_source(tmp_path: Path) -> None:
         count = _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     assert count == 1
-    host.execute_command.assert_called()
+    host.execute_idempotent_command.assert_called()
     host.write_file.assert_called_once_with(
         path=Path("/home/testuser/.mngr/config.toml"),
         content=source_file.read_bytes(),
@@ -163,7 +164,7 @@ def test_upload_deploy_files_creates_parent_dirs() -> None:
         _upload_deploy_files(host, deploy_files, "/home/testuser", ctx)
 
     # Check that mkdir -p was called for the parent directory
-    mkdir_calls = [call for call in host.execute_command.call_args_list if "mkdir -p" in str(call)]
+    mkdir_calls = [call for call in host.execute_idempotent_command.call_args_list if "mkdir -p" in str(call)]
     assert len(mkdir_calls) == 1
 
 
@@ -178,11 +179,11 @@ def test_local_host_ensures_uv_available() -> None:
     provision_mngr_on_host(host=host, mngr_ctx=ctx)
 
     # Should have checked for uv (command -v uv)
-    uv_checks = [call for call in host.execute_command.call_args_list if "command -v uv" in str(call)]
+    uv_checks = [call for call in host.execute_idempotent_command.call_args_list if "command -v uv" in str(call)]
     assert len(uv_checks) == 1
 
     # Should NOT have tried to get home dir or upload deploy files
-    home_checks = [call for call in host.execute_command.call_args_list if "echo $HOME" in str(call)]
+    home_checks = [call for call in host.execute_idempotent_command.call_args_list if "echo $HOME" in str(call)]
     assert len(home_checks) == 0
 
 
@@ -195,11 +196,11 @@ def test_remote_host_uploads_deploy_files_and_ensures_uv() -> None:
     provision_mngr_on_host(host=host, mngr_ctx=ctx)
 
     # Should have checked for home dir (remote path resolution)
-    home_checks = [call for call in host.execute_command.call_args_list if "echo $HOME" in str(call)]
+    home_checks = [call for call in host.execute_idempotent_command.call_args_list if "echo $HOME" in str(call)]
     assert len(home_checks) == 1
 
     # Should have checked for uv
-    uv_checks = [call for call in host.execute_command.call_args_list if "command -v uv" in str(call)]
+    uv_checks = [call for call in host.execute_idempotent_command.call_args_list if "command -v uv" in str(call)]
     assert len(uv_checks) == 1
 
 
@@ -213,7 +214,7 @@ def test_skip_when_install_mode_is_skip() -> None:
     provision_mngr_on_host(host=host, mngr_ctx=ctx)
 
     # Should not execute any commands (no home dir lookup, no file uploads, etc.)
-    host.execute_command.assert_not_called()
+    host.execute_idempotent_command.assert_not_called()
 
 
 def test_get_installed_mngr_packages_finds_mngr() -> None:
@@ -230,7 +231,7 @@ def test_errors_fatal_raises_on_failure() -> None:
     """When is_errors_fatal=True, errors should raise MngrError."""
     host = _make_mock_host(is_local=False)
     # Make echo $HOME fail
-    host.execute_command.return_value = _make_command_result(False, stderr="connection refused")
+    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="connection refused")
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(is_errors_fatal=True, install_mode=MngrInstallMode.PACKAGE),
     )
@@ -243,7 +244,7 @@ def test_errors_non_fatal_warns_on_failure() -> None:
     """When is_errors_fatal=False, MngrErrors should log warnings instead of raising."""
     host = _make_mock_host(is_local=False)
     # Make echo $HOME fail so _get_remote_home raises MngrError
-    host.execute_command.return_value = _make_command_result(False, stderr="connection refused")
+    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="connection refused")
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(is_errors_fatal=False, install_mode=MngrInstallMode.PACKAGE),
     )
@@ -259,7 +260,7 @@ def test_agent_package_mode_builds_correct_command() -> None:
     """Package mode should build a uv tool install command with UV_TOOL_DIR and UV_TOOL_BIN_DIR."""
     host_dir = Path("/tmp/mngr-test/host")
     host = _make_mock_host(is_local=False, host_dir=host_dir)
-    host.execute_command.return_value = _make_command_result(True)
+    host.execute_idempotent_command.return_value = _make_command_result(True)
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(install_mode=MngrInstallMode.PACKAGE),
     )
@@ -270,7 +271,7 @@ def test_agent_package_mode_builds_correct_command() -> None:
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
     # Find the uv tool install call
-    install_calls = [call for call in host.execute_command.call_args_list if "uv tool install" in str(call)]
+    install_calls = [call for call in host.execute_idempotent_command.call_args_list if "uv tool install" in str(call)]
     assert len(install_calls) >= 1
     install_cmd = str(install_calls[0])
     assert "imbue-mngr==0.1.4" in install_cmd
@@ -294,7 +295,7 @@ def test_agent_editable_local_mode_builds_correct_command(tmp_path: Path) -> Non
 
     host_dir = Path("/tmp/mngr-test/host")
     host = _make_mock_host(is_local=True, host_dir=host_dir)
-    host.execute_command.return_value = _make_command_result(True)
+    host.execute_idempotent_command.return_value = _make_command_result(True)
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(install_mode=MngrInstallMode.EDITABLE),
     )
@@ -305,7 +306,7 @@ def test_agent_editable_local_mode_builds_correct_command(tmp_path: Path) -> Non
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
     # Find the uv tool install call
-    install_calls = [call for call in host.execute_command.call_args_list if "uv tool install" in str(call)]
+    install_calls = [call for call in host.execute_idempotent_command.call_args_list if "uv tool install" in str(call)]
     assert len(install_calls) >= 1
     install_cmd = str(install_calls[0])
 
@@ -338,13 +339,13 @@ def test_agent_skip_mode_does_nothing() -> None:
 
     provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
-    host.execute_command.assert_not_called()
+    host.execute_idempotent_command.assert_not_called()
 
 
 def test_agent_errors_fatal_raises() -> None:
     """When is_errors_fatal=True, agent-level mngr install failures should raise."""
     host = _make_mock_host()
-    host.execute_command.return_value = _make_command_result(False, stderr="mkdir failed")
+    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="mkdir failed")
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(is_errors_fatal=True, install_mode=MngrInstallMode.PACKAGE),
     )
@@ -357,7 +358,7 @@ def test_agent_errors_fatal_raises() -> None:
 def test_agent_errors_non_fatal_warns() -> None:
     """When is_errors_fatal=False, agent-level mngr install failures should warn."""
     host = _make_mock_host()
-    host.execute_command.return_value = _make_command_result(False, stderr="mkdir failed")
+    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="mkdir failed")
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(is_errors_fatal=False, install_mode=MngrInstallMode.PACKAGE),
     )
@@ -371,7 +372,7 @@ def test_agent_creates_tool_and_bin_dirs() -> None:
     """provision_mngr_for_agent should create the tools/ and bin/ directories."""
     host_dir = Path("/tmp/mngr-test/host")
     host = _make_mock_host(host_dir=host_dir)
-    host.execute_command.return_value = _make_command_result(True)
+    host.execute_idempotent_command.return_value = _make_command_result(True)
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(install_mode=MngrInstallMode.PACKAGE),
     )
@@ -382,7 +383,7 @@ def test_agent_creates_tool_and_bin_dirs() -> None:
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
     agent_state_dir = host_dir / "agents" / "agent-123"
-    mkdir_calls = [str(call) for call in host.execute_command.call_args_list if "mkdir -p" in str(call)]
+    mkdir_calls = [str(call) for call in host.execute_idempotent_command.call_args_list if "mkdir -p" in str(call)]
     assert any(str(agent_state_dir / "tools") in c for c in mkdir_calls)
     assert any(str(agent_state_dir / "bin") in c for c in mkdir_calls)
 
@@ -393,7 +394,7 @@ def test_agent_creates_tool_and_bin_dirs() -> None:
 def test_uv_installed_when_missing() -> None:
     """When uv is not available, it should be installed via curl."""
     host = _make_mock_host(is_local=False)
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         # echo $HOME
         _make_command_result(True, stdout="/home/testuser\n"),
         # command -v uv (uv NOT available)
@@ -411,7 +412,7 @@ def test_uv_installed_when_missing() -> None:
     provision_mngr_on_host(host=host, mngr_ctx=ctx)
 
     # Find the curl call
-    curl_calls = [call for call in host.execute_command.call_args_list if "astral.sh/uv" in str(call)]
+    curl_calls = [call for call in host.execute_idempotent_command.call_args_list if "astral.sh/uv" in str(call)]
     assert len(curl_calls) == 1
 
 
@@ -423,7 +424,7 @@ def test_on_host_created_calls_provision() -> None:
     host = _make_mock_host(is_local=True)
     ctx = _make_mock_mngr_ctx()
     on_host_created(host=host, mngr_ctx=ctx)
-    host.execute_command.assert_called()
+    host.execute_idempotent_command.assert_called()
 
 
 # --- Data types tests ---
@@ -465,7 +466,7 @@ def test_build_uv_env_prefix_sets_tool_and_bin_dirs() -> None:
 def test_ensure_uv_raises_on_install_failure() -> None:
     """_ensure_uv_available should raise when installation fails."""
     host = _make_mock_host()
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         _make_command_result(False),
         _make_command_result(False, stderr="curl failed"),
     ]
@@ -476,7 +477,7 @@ def test_ensure_uv_raises_on_install_failure() -> None:
 def test_ensure_uv_raises_when_not_on_path_after_install() -> None:
     """_ensure_uv_available should raise when uv is installed but not findable."""
     host = _make_mock_host()
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         _make_command_result(False),
         _make_command_result(True),
         _make_command_result(False),
@@ -498,13 +499,13 @@ def test_install_package_mode_raises_when_no_mngr_package() -> None:
 def test_install_package_mode_retries_with_force_reinstall() -> None:
     """_install_mngr_package_mode should retry with --force-reinstall on failure."""
     host = _make_mock_host()
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         _make_command_result(False, stderr="already installed"),
         _make_command_result(True),
     ]
     _install_mngr_package_mode(host, [("imbue-mngr", "0.1.4")], Path("/tools"), Path("/bin"))
-    assert len(host.execute_command.call_args_list) == 2
-    second_call = str(host.execute_command.call_args_list[1])
+    assert len(host.execute_idempotent_command.call_args_list) == 2
+    second_call = str(host.execute_idempotent_command.call_args_list[1])
     assert "--force-reinstall" in second_call
 
 
@@ -514,7 +515,7 @@ def test_install_package_mode_retries_with_force_reinstall() -> None:
 def test_agent_package_mode_warns_when_no_packages() -> None:
     """provision_mngr_for_agent should warn when no mngr packages are found locally."""
     host = _make_mock_host()
-    host.execute_command.return_value = _make_command_result(True)
+    host.execute_idempotent_command.return_value = _make_command_result(True)
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(install_mode=MngrInstallMode.PACKAGE),
     )
@@ -531,7 +532,7 @@ def test_agent_package_mode_warns_when_no_packages() -> None:
 def test_upload_deploy_files_raises_on_mkdir_failure() -> None:
     """_upload_deploy_files should raise when mkdir -p fails."""
     host = _make_mock_host()
-    host.execute_command.return_value = _make_command_result(False, stderr="permission denied")
+    host.execute_idempotent_command.return_value = _make_command_result(False, stderr="permission denied")
     deploy_files: dict[Path, Path | str] = {
         Path("~/.mngr/config.toml"): "content",
     }
@@ -544,7 +545,7 @@ def test_upload_deploy_files_raises_on_mkdir_failure() -> None:
 def test_install_package_mode_raises_when_force_reinstall_also_fails() -> None:
     """_install_mngr_package_mode should raise when both install and force-reinstall fail."""
     host = _make_mock_host()
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         _make_command_result(False, stderr="install failed"),
         _make_command_result(False, stderr="reinstall also failed"),
     ]
@@ -567,7 +568,7 @@ def test_agent_editable_mode_dispatches_and_retries_force_reinstall(tmp_path: Pa
             return _make_command_result(False, stderr="already installed")
         return _make_command_result(True)
 
-    host.execute_command.side_effect = execute_side_effect
+    host.execute_idempotent_command.side_effect = execute_side_effect
     ctx = _make_mock_mngr_ctx(
         plugin_config=RecursivePluginConfig(install_mode=MngrInstallMode.EDITABLE),
     )
@@ -577,9 +578,9 @@ def test_agent_editable_mode_dispatches_and_retries_force_reinstall(tmp_path: Pa
         mock_root.return_value = repo_root
         provision_mngr_for_agent(agent=agent, host=host, mngr_ctx=ctx)
 
-    install_calls = [call for call in host.execute_command.call_args_list if "uv tool install" in str(call)]
+    install_calls = [call for call in host.execute_idempotent_command.call_args_list if "uv tool install" in str(call)]
     assert len(install_calls) >= 1
-    force_calls = [call for call in host.execute_command.call_args_list if "--force-reinstall" in str(call)]
+    force_calls = [call for call in host.execute_idempotent_command.call_args_list if "--force-reinstall" in str(call)]
     assert len(force_calls) >= 1
 
 
@@ -614,7 +615,7 @@ def test_editable_local_raises_when_force_reinstall_also_fails(tmp_path: Path) -
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     host = _make_mock_host(is_local=True, host_dir=host_dir)
-    host.execute_command.side_effect = [
+    host.execute_idempotent_command.side_effect = [
         _make_command_result(True),
         _make_command_result(True),
         _make_command_result(False, stderr="install failed"),

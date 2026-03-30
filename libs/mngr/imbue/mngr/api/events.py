@@ -293,7 +293,7 @@ def _read_event_content_via_host(
     """Read event content by executing cat on the online host."""
     with log_span("Reading event file '{}' for {} via host", event_file_name, display_name):
         file_path = events_path / event_file_name
-        result = online_host.execute_command(
+        result = online_host.execute_idempotent_command(
             f"cat {shlex.quote(str(file_path))}",
             timeout_seconds=30.0,
         )
@@ -490,7 +490,7 @@ def _discover_event_sources_via_host(
     """Find all events.jsonl files recursively under events_path via host commands."""
     with log_span("Discovering event sources via host"):
         cmd = f"find {shlex.quote(str(events_path))} -name 'events.jsonl*' -type f 2>/dev/null | sort; true"
-        result = online_host.execute_command(cmd, timeout_seconds=15.0)
+        result = online_host.execute_idempotent_command(cmd, timeout_seconds=15.0)
         if not result.stdout.strip():
             return []
 

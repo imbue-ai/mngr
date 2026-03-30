@@ -32,11 +32,17 @@ class _FakeTtydHost:
         self.executed_cmds: list[str] = []
         self.written_files: list[tuple[Path, bytes, str]] = []
 
-    def execute_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
+    def _execute_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
         self.executed_cmds.append(cmd)
         if "command -v ttyd" in cmd and not self._ttyd_installed:
             return SimpleNamespace(returncode=1, success=False, stdout="", stderr="")
         return SimpleNamespace(returncode=0, success=True, stdout="", stderr="")
+
+    def execute_idempotent_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
+        return self._execute_command(cmd, **kwargs)
+
+    def execute_stateful_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
+        return self._execute_command(cmd, **kwargs)
 
     def write_file(self, path: Path, content: bytes, mode: str = "0644") -> None:
         self.written_files.append((path, content, mode))

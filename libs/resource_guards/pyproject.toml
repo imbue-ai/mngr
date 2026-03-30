@@ -1,6 +1,6 @@
 [project]
 name = "resource-guards"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pytest resource guard infrastructure for enforcing test marks on external resource usage"
 readme = "README.md"
 requires-python = ">=3.11"

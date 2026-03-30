@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>]
+mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>] [--message-file <FILE>]
 ```
 
 Send a message to one or more agents.
@@ -14,8 +14,8 @@ Send a message to one or more agents.
 Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 
-If no message is specified with --message, reads from stdin (if not a tty)
-or opens an editor (if interactive).
+If no message is specified with --message or --message-file, reads from stdin
+(if not a tty) or opens an editor (if interactive).
 
 Alias: msg
 
@@ -45,6 +45,7 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-m`, `--message` | text | The message content to send | None |
+| `--message-file` | path | File containing the message content to send | None |
 
 ## Error Handling
 
@@ -98,6 +99,12 @@ $ mngr message agent1 agent2 --message "Hello to all"
 
 ```bash
 $ mngr message --all --message "Hello everyone"
+```
+
+**Send message from a file**
+
+```bash
+$ mngr message my-agent --message-file prompt.txt
 ```
 
 **Pipe message from stdin**

@@ -175,7 +175,7 @@ class OnlineHostInterface(HostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
-    def execute_command(
+    def execute_idempotent_command(
         self,
         command: str,
         user: str | None = None,
@@ -183,7 +183,25 @@ class OnlineHostInterface(HostInterface, ABC):
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
-        """Execute a shell command on this host and return the result."""
+        """Execute an idempotent shell command on this host and return the result."""
+        ...
+
+    @abstractmethod
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        """
+        Execute a shell command on this host *that cannot be retried* and return the result.
+
+        Prefer to use execute_idempotent_command whenever possible, as it is a much simpler abstraction and more robust.
+        This is really here if you *must* do something which cannot be made idempotent.
+        It automatically handles making the command idempotent, but it's much slower and more complex.
+        """
         ...
 
     @abstractmethod

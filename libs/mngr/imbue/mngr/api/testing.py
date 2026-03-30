@@ -33,7 +33,7 @@ class FakeHost(MutableModel):
         description="SSH connection info (user, hostname, port, key_path) for remote hosts",
     )
 
-    def execute_command(
+    def _execute_command(
         self,
         command: str,
         user: str | None = None,
@@ -57,6 +57,28 @@ class FakeHost(MutableModel):
             stderr=result.stderr,
             success=result.returncode == 0,
         )
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        """Execute an idempotent command locally."""
+        return self._execute_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        """Execute a stateful command locally."""
+        return self._execute_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file from the local filesystem."""

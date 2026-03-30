@@ -13,16 +13,16 @@ from imbue.mngr.plugin_catalog import RecommendedPlugin
 def test_recommended_plugins_contains_expected_packages() -> None:
     """RECOMMENDED_PLUGINS should include the published mngr-* plugins."""
     names = {p.package_name for p in RECOMMENDED_PLUGINS}
-    assert "mngr-opencode" in names
-    assert "mngr-pair" in names
-    assert "mngr-tutor" in names
+    assert "imbue-mngr-opencode" in names
+    assert "imbue-mngr-pair" in names
+    assert "imbue-mngr-tutor" in names
 
 
 def test_recommended_plugins_mngr_tutor_is_preselected() -> None:
-    """mngr-tutor should be the only pre-selected plugin."""
+    """imbue-mngr-tutor should be the only pre-selected plugin."""
     preselected = [p for p in RECOMMENDED_PLUGINS if p.is_preselected]
     assert len(preselected) == 1
-    assert preselected[0].package_name == "mngr-tutor"
+    assert preselected[0].package_name == "imbue-mngr-tutor"
 
 
 def test_recommended_plugins_all_have_descriptions() -> None:

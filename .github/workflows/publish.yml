@@ -61,7 +61,7 @@ jobs:
       - name: Build concurrency-group
         run: pyproject-build libs/concurrency_group -o dist/
 
-      - name: Build mngr
+      - name: Build imbue-mngr
         run: pyproject-build libs/mngr -o dist/
 
       - name: Build modal-proxy
