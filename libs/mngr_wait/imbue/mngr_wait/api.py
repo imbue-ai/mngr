@@ -8,9 +8,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.agent_addr import filter_agents_by_host_constraint
-from imbue.mngr.api.agent_addr import parse_identifier_as_address
-from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
@@ -53,20 +51,12 @@ def resolve_wait_target(
 
     Uses the existing find.py resolution functions for agent/host lookup.
     """
-    plain_id, address = parse_identifier_as_address(identifier)
-
     with log_span("Discovering hosts and agents"):
-        agents_by_host, _providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(plain_id,),
-            include_destroyed=False,
-            reset_caches=False,
+        plain_id, filtered_agents_by_host, _providers = discover_by_address(
+            identifier, mngr_ctx, include_destroyed=False
         )
 
-    # Filter by host/provider constraints from the address
-    filtered_agents_by_host = filter_agents_by_host_constraint(agents_by_host, address)
-    all_hosts = list(agents_by_host.keys())
+    all_hosts = list(filtered_agents_by_host.keys())
 
     # Determine target type from identifier format
     if plain_id.startswith("agent-"):

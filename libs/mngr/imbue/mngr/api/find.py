@@ -487,6 +487,7 @@ def find_agents_by_identifiers_or_state(
     target_state: AgentLifecycleState | None,
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
+    provider_names: tuple[str, ...] | None = None,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -495,11 +496,13 @@ def find_agents_by_identifiers_or_state(
     When filter_all is False, returns agents matching the given identifiers
     (by name or ID).
 
+    When provider_names is set, only those providers are queried during discovery.
+
     Raises AgentNotFoundError if any identifier does not match an agent.
     """
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=provider_names,
         agent_identifiers=tuple(agent_identifiers) if not filter_all and agent_identifiers else None,
         include_destroyed=include_destroyed,
         reset_caches=False,

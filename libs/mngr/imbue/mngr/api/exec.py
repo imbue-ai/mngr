@@ -11,8 +11,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
-from imbue.mngr.api.agent_addr import parse_identifier_as_address
-from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import group_agents_by_host
@@ -68,17 +66,7 @@ def exec_command_on_agent(
     Resolves the agent by name, ID, or address, optionally starts it if stopped,
     then executes the command on its host (defaulting to the agent's work_dir).
     """
-    plain_id, _address = parse_identifier_as_address(agent_str)
-
-    agents_by_host, _providers = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=None,
-        agent_identifiers=(plain_id,),
-        include_destroyed=False,
-        reset_caches=False,
-    )
-
-    agent, host = find_agent_by_address(agent_str, agents_by_host, mngr_ctx, "exec", is_start_desired=is_start_desired)
+    agent, host = find_agent_by_address(agent_str, mngr_ctx, "exec", is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
