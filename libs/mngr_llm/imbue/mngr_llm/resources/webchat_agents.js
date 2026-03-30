@@ -6,18 +6,23 @@
  * route is visited.
  */
 
+// Load stylesheet immediately (no dependency on $llm).
 (function () {
+  var linkElement = document.createElement("link");
+  linkElement.rel = "stylesheet";
+  linkElement.href = "/plugins/webchat_agents.css";
+  document.head.appendChild(linkElement);
+})();
+
+// Defer the rest until "load" so that the main app's ES module has
+// executed and window.$llm is available. Plugin "load" listeners are
+// registered before the module's listener (regular scripts run first),
+// so this fires after $llm is set but before bootstrap() reads the
+// plugin route map.
+window.addEventListener("load", function () {
   "use strict";
 
   var AGENTS_ROUTE = "/agents";
-  var CSS_BASENAME = "webchat_agents.css";
-
-  // ── Load stylesheet ──────────────────────────────────────────
-
-  var linkElement = document.createElement("link");
-  linkElement.rel = "stylesheet";
-  linkElement.href = "/plugins/" + CSS_BASENAME;
-  document.head.appendChild(linkElement);
 
   // ── SVG icons ────────────────────────────────────────────────
 
@@ -222,4 +227,4 @@
       observer.observe(sidebar, { childList: true, subtree: true });
     }
   });
-})();
+});

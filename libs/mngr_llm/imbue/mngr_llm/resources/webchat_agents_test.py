@@ -74,5 +74,5 @@ def test_agents_plugin_registers_route() -> None:
     app = FastAPI()
     plugin = AgentsPlugin(host_name="")
     plugin.endpoint(app=app)
-    routes = [r.path for r in app.routes]
+    routes = [r.path for r in app.routes if hasattr(r, "path")]
     assert "/api/agents" in routes
