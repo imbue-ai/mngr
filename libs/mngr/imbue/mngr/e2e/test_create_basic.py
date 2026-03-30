@@ -171,17 +171,21 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     mngr create my-task --no-connect --format json
     # (--quiet suppresses all output)
     """)
-    expect(
-        e2e.run(
-            "mngr create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
-            comment="you can control output format for scripting",
-        )
-    ).to_succeed()
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --command 'sleep 99999' --no-ensure-clean --format json",
+        comment="you can control output format for scripting",
+    )
+    expect(create_result).to_succeed()
+    create_json = json.loads(create_result.stdout)
+    assert "agent_id" in create_json
+    assert "host_id" in create_json
 
     list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
-    assert len(parsed["agents"]) == 1
+    agents = parsed["agents"]
+    assert len(agents) == 1
+    assert agents[0]["name"] == "my-task"
 
 
 @pytest.mark.release
