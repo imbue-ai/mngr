@@ -134,5 +134,5 @@ $ mngr exec --agent my-agent --agent another-agent "echo hello"
 **Custom format template output**
 
 ```bash
-$ mngr exec --all "hostname" --format '{agent}\t{stdout}'
+$ mngr exec my-agent "hostname" --format '{agent}\t{stdout}'
 ```

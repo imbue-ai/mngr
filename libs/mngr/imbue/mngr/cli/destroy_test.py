@@ -85,7 +85,7 @@ def test_destroy_requires_agent_or_all(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that destroy requires at least one agent or --all."""
+    """Test that destroy requires at least one agent."""
     result = cli_runner.invoke(
         destroy,
         [],

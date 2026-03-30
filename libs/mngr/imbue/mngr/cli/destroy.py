@@ -632,7 +632,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
         ("Pipe agent names from list", "mngr list --format '{name}' | mngr destroy - --force"),
-        ("Custom format template output", "mngr destroy --all --force --format '{name}'"),
+        ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),
     see_also=(
         ("create", "Create a new agent"),

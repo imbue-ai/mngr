@@ -121,5 +121,5 @@ $ mngr list --format '{name}' | mngr destroy - --force
 **Custom format template output**
 
 ```bash
-$ mngr destroy --all --force --format '{name}'
+$ mngr destroy my-agent --force --format '{name}'
 ```

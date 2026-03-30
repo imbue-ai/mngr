@@ -293,7 +293,7 @@ Supports custom format templates via --format. Available fields: agent, stdout, 
         ("Run as a different user", 'mngr exec my-agent "whoami" --user root'),
         ("Run with a timeout", 'mngr exec my-agent "sleep 100" --timeout 5'),
         ("Use --agent flag (repeatable)", 'mngr exec --agent my-agent --agent another-agent "echo hello"'),
-        ("Custom format template output", "mngr exec --all \"hostname\" --format '{agent}\\t{stdout}'"),
+        ("Custom format template output", "mngr exec my-agent \"hostname\" --format '{agent}\\t{stdout}'"),
     ),
     see_also=(
         ("connect", "Connect to an agent interactively"),

@@ -96,7 +96,7 @@ def test_limit_requires_target(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that limit requires at least one agent, host, or --all."""
+    """Test that limit requires at least one agent or host."""
     result = cli_runner.invoke(
         limit,
         ["--idle-timeout", "300"],
