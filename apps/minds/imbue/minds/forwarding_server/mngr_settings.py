@@ -29,7 +29,7 @@ _AGENT_STATES_SOURCE: Final[str] = "mngr/agent_states"
 
 def _build_list_exclude_filter(mind_name: AgentName) -> str:
     """Build a CEL expression that excludes agents not belonging to this mind."""
-    return '!has(labels.mind) || labels.mind == "{}"'.format(mind_name)
+    return '!has(labels.mind) || labels.mind != "{}" || name == "{}"'.format(mind_name)
 
 
 def _build_events_self_include_filter(agent_id: AgentId) -> str:
