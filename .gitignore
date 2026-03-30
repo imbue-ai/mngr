@@ -258,12 +258,7 @@ current.tar.gz
 .autofix/
 .reviewer/outputs/
 .reviewer/settings.local.json
-<<<<<<< HEAD
-||||||| f56a4bc09
-.reviewer/.stop_hook_consecutive_blocks
-=======
 **/.reviewer/.stop_hook_consecutive_blocks
->>>>>>> origin/main
 .reviews/
 
 # Stuck agent tracking (stop hook escape valve)
