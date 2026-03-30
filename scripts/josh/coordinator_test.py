@@ -464,8 +464,6 @@ task-one
         assert (task_dir / "task-one.json").exists()
         assert not (task_dir / "task-two.json").exists()
 
-        process_manager.terminate_all()
-
     def test_no_deletion_on_initial_sync(self, tmp_path: Path):
         """Test that existing JSON files are not deleted during initial sync."""
         # Create task file with one task
@@ -496,8 +494,6 @@ task-one
         assert task_names == {"task-one"}
         assert (task_dir / "task-one.json").exists()
         assert orphan_json.exists()  # Should still exist
-
-        process_manager.terminate_all()
 
     def test_handler_terminated_on_deletion(self, tmp_path: Path):
         """Test that handlers are terminated when tasks are deleted."""
@@ -540,8 +536,6 @@ long-running-task
 
         # Handler should be terminated
         assert "long-running-task" not in process_manager.active_handlers
-
-        process_manager.terminate_all()
 
     def test_markdown_files_moved_on_deletion(self, tmp_path: Path):
         """Test that markdown files are moved to md_done when tasks are deleted."""
