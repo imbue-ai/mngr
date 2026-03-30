@@ -9,13 +9,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.agent_addr import filter_agents_by_host_constraint
+from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.agent_addr import parse_identifier_as_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -69,7 +68,7 @@ def exec_command_on_agent(
     Resolves the agent by name, ID, or address, optionally starts it if stopped,
     then executes the command on its host (defaulting to the agent's work_dir).
     """
-    plain_id, address = parse_identifier_as_address(agent_str)
+    plain_id, _address = parse_identifier_as_address(agent_str)
 
     agents_by_host, _providers = discover_hosts_and_agents(
         mngr_ctx,
@@ -79,19 +78,7 @@ def exec_command_on_agent(
         reset_caches=False,
     )
 
-    filtered_agents_by_host = filter_agents_by_host_constraint(agents_by_host, address)
-
-    if address.has_host_component and not filtered_agents_by_host:
-        host_desc = ""
-        if address.host_name is not None:
-            host_desc += f" host '{address.host_name}'"
-        if address.provider_name is not None:
-            host_desc += f" provider '{address.provider_name}'"
-        raise UserInputError(f"No hosts found matching{host_desc}")
-
-    agent, host = find_and_maybe_start_agent_by_name_or_id(
-        plain_id, filtered_agents_by_host, mngr_ctx, "exec", is_start_desired=is_start_desired
-    )
+    agent, host = find_agent_by_address(agent_str, agents_by_host, mngr_ctx, "exec", is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
