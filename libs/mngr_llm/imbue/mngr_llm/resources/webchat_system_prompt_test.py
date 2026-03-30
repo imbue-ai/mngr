@@ -22,6 +22,13 @@ def test_modify_command_skips_when_system_already_present() -> None:
     assert command == ["llm", "-m", "gpt-4", "--system", "existing prompt", "hello"]
 
 
+def test_modify_command_skips_when_short_system_flag_present() -> None:
+    plugin = SystemPromptPlugin(system_prompt="You are helpful.")
+    command = ["llm", "-m", "gpt-4", "-s", "existing prompt", "hello"]
+    plugin.modify_llm_prompt_command(command)
+    assert command == ["llm", "-m", "gpt-4", "-s", "existing prompt", "hello"]
+
+
 def test_modify_command_skips_when_no_system_prompt() -> None:
     plugin = SystemPromptPlugin(system_prompt=None)
     command = ["llm", "-m", "gpt-4", "hello"]

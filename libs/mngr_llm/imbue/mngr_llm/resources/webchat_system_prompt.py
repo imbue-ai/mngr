@@ -49,8 +49,8 @@ def _build_system_prompt(agent_work_dir: Path) -> str | None:
 
 
 def _command_has_system_prompt(command: list[str]) -> bool:
-    """Return True if the command already contains a --system flag."""
-    return "--system" in command
+    """Return True if the command already contains a --system or -s flag."""
+    return "--system" in command or "-s" in command
 
 
 class SystemPromptPlugin(FrozenModel):
