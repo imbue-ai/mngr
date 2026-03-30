@@ -124,19 +124,34 @@ def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
     return result_holder[0]
 
 
-def should_pull_changes(result: TestMapReduceResult) -> bool:
-    """Determine whether an agent's changes should be pulled.
+def _should_pull(
+    errored: bool,
+    changes: dict[ChangeKind, Change],
+    tests_passing_before: bool | None,
+    tests_passing_after: bool | None,
+) -> bool:
+    """Core logic: should we pull an agent's changes?
 
     Pull when: not errored, at least one succeeded change, and tests are at
     least as good as before (if they were passing, they must still be passing).
     """
-    if result.errored:
+    if errored:
         return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in result.changes.values()):
+    if not any(c.status == ChangeStatus.SUCCEEDED for c in changes.values()):
         return False
-    if result.tests_passing_before is True and result.tests_passing_after is not True:
+    if tests_passing_before is True and tests_passing_after is not True:
         return False
     return True
+
+
+def should_pull_changes(result: TestMapReduceResult) -> bool:
+    """Determine whether an agent's changes should be pulled (from a TestMapReduceResult)."""
+    return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
+
+
+def should_pull_changes_from_result(result: TestResult) -> bool:
+    """Determine whether an agent's changes should be pulled (from a TestResult)."""
+    return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
 
 
 class CollectTestsError(MngrError, RuntimeError):
@@ -452,6 +467,8 @@ def launch_and_poll_agents(
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
     artifact_output_dir: Path | None = None,
+    source_dir: Path | None = None,
+    base_commit: str | None = None,
 ) -> tuple[dict[str, AgentDetails], set[str], dict[str, TestResult]]:
     """Launch agents incrementally and poll until all finish.
 
@@ -584,6 +601,16 @@ def launch_and_poll_agents(
             )
             if pre_read is not None:
                 cached_results[agent_id_str] = pre_read
+                if base_commit is not None and source_dir is not None and should_pull_changes_from_result(pre_read):
+                    pull_agent_branch(
+                        agent_detail.id,
+                        agent_detail.name,
+                        agent_detail.initial_branch,
+                        all_hosts[agent_id_str],
+                        source_dir,
+                        mngr_ctx.concurrency_group,
+                        base_commit,
+                    )
 
         for agent_id_str in list(pending_ids):
             if agent_id_str not in seen_ids:
@@ -621,6 +648,20 @@ def launch_and_poll_agents(
                     )
                     if pre_read is not None:
                         cached_results[agent_id_str] = pre_read
+                        if (
+                            base_commit is not None
+                            and source_dir is not None
+                            and should_pull_changes_from_result(pre_read)
+                        ):
+                            pull_agent_branch(
+                                AgentId(agent_id_str),
+                                info.agent_name,
+                                info.branch_name,
+                                all_hosts[agent_id_str],
+                                source_dir,
+                                mngr_ctx.concurrency_group,
+                                base_commit,
+                            )
                     pending_ids.discard(agent_id_str)
                     changed = True
 
@@ -838,7 +879,9 @@ def read_integrator_result(
 
 
 def pull_agent_branch(
-    agent_detail: AgentDetails,
+    agent_id: AgentId,
+    agent_name: AgentName,
+    branch_name: str | None,
     host: OnlineHostInterface,
     destination: Path,
     cg: ConcurrencyGroup,
@@ -852,9 +895,8 @@ def pull_agent_branch(
 
     Returns the branch name if successful, None otherwise.
     """
-    branch_name = agent_detail.initial_branch
     if branch_name is None:
-        logger.warning("Agent '{}' has no branch to pull", agent_detail.name)
+        logger.warning("Agent '{}' has no branch to pull", agent_name)
         return None
 
     try:
@@ -862,7 +904,7 @@ def pull_agent_branch(
             _create_local_branch(destination, branch_name, base_commit, cg)
 
         pull_git(
-            agent=_get_agent_from_host(host, agent_detail.id),
+            agent=_get_agent_from_host(host, agent_id),
             host=host,
             destination=destination,
             source_branch=branch_name,
@@ -871,20 +913,22 @@ def pull_agent_branch(
             uncommitted_changes=UncommittedChangesMode.STASH,
             cg=cg,
         )
-        logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_detail.name)
+        logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_name)
         return branch_name
     except HostError as exc:
-        logger.warning("Connection lost while pulling branch from agent '{}': {}", agent_detail.name, exc)
+        logger.warning("Connection lost while pulling branch from agent '{}': {}", agent_name, exc)
         return None
     except (MngrError, ProcessError) as exc:
-        logger.warning("Failed to pull branch from agent '{}': {}", agent_detail.name, exc)
+        logger.warning("Failed to pull branch from agent '{}': {}", agent_name, exc)
         return None
 
 
 def _create_local_branch(destination: Path, branch_name: str, base_commit: str, cg: ConcurrencyGroup) -> None:
-    """Create a local git branch from a base commit and switch to it.
+    """Create a local git branch from a base commit (without checking it out).
 
     If the branch already exists (e.g. from a previous run), it is reused.
+    The branch is not checked out -- pull_git / _fetch_and_merge handles
+    checkout and restores the original branch afterward.
     """
     result = cg.run_process_to_completion(
         ["git", "branch", branch_name, base_commit],
@@ -895,7 +939,6 @@ def _create_local_branch(destination: Path, branch_name: str, base_commit: str, 
         logger.info("Created local branch '{}' from commit {}", branch_name, base_commit[:8])
     else:
         logger.info("Branch '{}' already exists, reusing it", branch_name)
-    cg.run_process_to_completion(["git", "checkout", branch_name], cwd=destination)
 
 
 def _get_agent_from_host(
@@ -1039,13 +1082,24 @@ def gather_results(
 
     # Pull branches from remote agents whose changes should be kept.
     # For local agents (base_commit is None), branches already exist as worktrees.
+    # In the main polling flow, branches are pulled during finalization (before
+    # stopping agents). This loop serves as a fallback for the reintegrate flow
+    # where agents may already be stopped.
     if base_commit is not None:
         for result in results:
             if should_pull_changes(result):
                 agent_id_str = next(str(info.agent_id) for info in agents if info.test_node_id == result.test_node_id)
                 detail = final_details.get(agent_id_str)
                 if detail is not None:
-                    pull_agent_branch(detail, hosts[agent_id_str], source_dir, cg, base_commit=base_commit)
+                    pull_agent_branch(
+                        detail.id,
+                        detail.name,
+                        detail.initial_branch,
+                        hosts[agent_id_str],
+                        source_dir,
+                        cg,
+                        base_commit=base_commit,
+                    )
 
     return results
 

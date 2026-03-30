@@ -337,7 +337,9 @@ def _run_integrator_phase(
                 # Only pull branches from remote providers; local worktree branches already exist
                 if is_remote:
                     pull_agent_branch(
-                        agent_detail,
+                        agent_detail.id,
+                        agent_detail.name,
+                        agent_detail.initial_branch,
                         integrator_host,
                         config.source_dir,
                         mngr_ctx.concurrency_group,
@@ -607,6 +609,7 @@ def _run_tmr_pipeline(
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
+    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
     final_details, timed_out_ids, cached_results = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
@@ -621,14 +624,15 @@ def _run_tmr_pipeline(
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         artifact_output_dir=output_dir,
+        source_dir=source_dir,
+        base_commit=base_commit if is_remote_provider else None,
     )
 
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (read result.json, pull branches for fixes)
-    # Only pass base_commit for remote providers -- local worktree branches already exist
-    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
+    # Step 8: Gather final results (branches already pulled during polling for
+    # remote providers; gather_results re-attempts for any that were missed)
     results = gather_results(
         agents=agent_infos,
         final_details=final_details,
