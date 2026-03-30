@@ -294,6 +294,28 @@ You can interact with `mngr` via the terminal (run `mngr --help` to learn more).
 - all hosts are accessed via SSH--if you can SSH into it, it can be a host
 - ...[and more](libs/mngr/docs/conventions.md)
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#EFF6FF', 'primaryTextColor': '#1E3A5F', 'primaryBorderColor': '#3B82F6', 'lineColor': '#64748B', 'edgeLabelBackground': '#FFFFFF', 'fontSize': '15px'}}}%%
+flowchart TB
+    classDef transport fill:#DBEAFE,stroke:#2563EB,stroke-width:2px,color:#1E3A5F,font-weight:bold
+    classDef session fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+    classDef agent fill:#D1FAE5,stroke:#059669,stroke-width:2px,color:#064E3B
+    classDef storage fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
+
+    ssh["SSH (any SSH-accessible machine)"]:::transport
+
+    subgraph HOST["Host"]
+        subgraph TMUX["tmux session: mngr-name"]
+            w0["window 0 → agent process"]:::agent
+            w1["window 1+ (optional)"]:::session
+        end
+        dir["$MNGR_HOST_DIR/agents/id/ · status · logs · config"]:::storage
+    end
+
+    ssh --> HOST
+    w0 -->|writes| dir
+```
+
 See [`architecture.md`](libs/mngr/docs/architecture.md) for an in-depth overview of the `mngr` architecture and design principles.
 
 ## Security
