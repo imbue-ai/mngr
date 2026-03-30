@@ -227,7 +227,7 @@ def test_prevent_importing_underscore_prefixed_names_in_non_test_code() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
 
 
 def test_prevent_cast_usage() -> None:
