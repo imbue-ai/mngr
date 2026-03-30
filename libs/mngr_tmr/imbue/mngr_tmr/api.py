@@ -294,6 +294,7 @@ def launch_test_agent(
             test_node_id=test_node_id,
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
+            work_dir=create_result.agent.work_dir,
             branch_name=branch,
             created_at=time.monotonic(),
         ),
@@ -521,7 +522,7 @@ def launch_and_poll_agents(
             elapsed = now - info.created_at
             if elapsed >= agent_timeout_seconds:
                 # Before stopping, try to read the result file -- the agent may have finished
-                result = try_read_agent_result(AgentId(agent_id_str), all_hosts[agent_id_str])
+                result = try_read_agent_result(info.work_dir, all_hosts[agent_id_str])
                 if result is not None:
                     logger.info(
                         "Agent '{}' has result file (found before timeout stop), treating as done", info.agent_name
@@ -603,9 +604,9 @@ def launch_and_poll_agents(
         for agent_id_str in list(pending_ids):
             if now - last_result_check[agent_id_str] >= result_check_interval_seconds:
                 last_result_check[agent_id_str] = now
-                result = try_read_agent_result(AgentId(agent_id_str), all_hosts[agent_id_str])
+                info = agent_id_to_info[agent_id_str]
+                result = try_read_agent_result(info.work_dir, all_hosts[agent_id_str])
                 if result is not None:
-                    info = agent_id_to_info[agent_id_str]
                     logger.info(
                         "Agent '{}' has result file (detected via direct check), treating as done",
                         info.agent_name,
@@ -666,19 +667,15 @@ def _parse_result_json(raw: str) -> TestResult:
 
 
 def try_read_agent_result(
-    agent_id: AgentId,
+    work_dir: Path,
     host: OnlineHostInterface,
 ) -> TestResult | None:
-    """Try to read an agent's result.json, returning None if not found.
+    """Try to read an agent's outcome file remotely, returning None if not found.
 
     Used to detect agents that have finished writing their result but whose
     lifecycle status has not yet updated to a terminal state.
     """
-    try:
-        agent = _get_agent_from_host(host, agent_id)
-    except (MngrError, HostError, AgentNotFoundOnHostError):
-        return None
-    result_path = agent.work_dir / ".test_output" / TESTING_AGENT_OUTCOME_FILENAME
+    result_path = work_dir / ".test_output" / TESTING_AGENT_OUTCOME_FILENAME
     try:
         raw = host.read_text_file(result_path)
         return _parse_result_json(raw)
@@ -955,7 +952,7 @@ def _collect_agent_results(
             # (without going through list_agents). Try reading result directly.
             if agent_id_str in hosts:
                 direct_result = cached_results.get(agent_id_str) or try_read_agent_result(
-                    AgentId(agent_id_str), hosts[agent_id_str]
+                    agent_info.work_dir, hosts[agent_id_str]
                 )
                 if direct_result is not None:
                     results.append(
@@ -982,7 +979,9 @@ def _collect_agent_results(
             )
             continue
 
-        test_result = cached_results.get(agent_id_str) or try_read_agent_result(detail.id, hosts[agent_id_str])
+        test_result = cached_results.get(agent_id_str) or try_read_agent_result(
+            agent_info.work_dir, hosts[agent_id_str]
+        )
         if test_result is not None:
             results.append(
                 TestMapReduceResult(
@@ -1092,11 +1091,22 @@ def launch_integrator_agent(
             test_node_id="integrator",
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
+            work_dir=create_result.agent.work_dir,
             branch_name=f"mngr-tmr/integrated-{short_id}",
             created_at=time.monotonic(),
         ),
         create_result.host,
     )
+
+
+def _try_read_integrator_outcome(work_dir: Path, host: OnlineHostInterface) -> bool:
+    """Check if the integrator's outcome file exists on the remote host."""
+    result_path = work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
+    try:
+        host.read_text_file(result_path)
+        return True
+    except (HostError, FileNotFoundError, OSError):
+        return False
 
 
 def wait_for_integrator(
@@ -1130,6 +1140,12 @@ def wait_for_integrator(
             if agent_detail.state in _TERMINAL_STATES:
                 logger.info("Integrator agent finished (state={})", agent_detail.state)
                 return agent_detail.initial_branch
+
+        # Check outcome file directly -- the integrator may have finished writing
+        # before its lifecycle status updates.
+        if _try_read_integrator_outcome(integrator.work_dir, host):
+            logger.info("Integrator outcome file detected, treating as done")
+            return integrator.branch_name
 
         time.sleep(poll_interval_seconds)
 

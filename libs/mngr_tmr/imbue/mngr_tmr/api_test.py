@@ -274,12 +274,14 @@ def test_build_current_results_pending_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-one-abc123"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
         TestAgentInfo(
             test_node_id="tests/test_b.py::test_two",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-two-def456"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
     ]
@@ -298,6 +300,7 @@ def test_build_current_results_timed_out_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=agent_id,
             agent_name=AgentName("tmr-test-one-abc123"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
     ]

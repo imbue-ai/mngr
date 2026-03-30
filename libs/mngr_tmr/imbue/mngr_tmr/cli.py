@@ -203,6 +203,7 @@ def _run_reintegrate(
             test_node_id=detail.labels.get("test_node_id", str(detail.name)),
             agent_id=detail.id,
             agent_name=detail.name,
+            work_dir=detail.work_dir,
             created_at=0.0,
         )
         agent_infos.append(info)

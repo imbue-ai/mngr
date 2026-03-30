@@ -186,7 +186,11 @@ branch with a flat list of commits that is easy to review.
 5. After cherry-picking, record the commit hashes using `git rev-parse HEAD` after
    each step (the squashed commit and each impl commit).
 
-6. Write the result to .test_output/{INTEGRATOR_OUTCOME_FILENAME} (relative to the git repo root) with:
+6. Write the result atomically to avoid races with the orchestrator reading it:
+   a. First write to .test_output/{INTEGRATOR_OUTCOME_FILENAME}.draft (relative to the git repo root)
+   b. Then rename (mv) the .draft file to .test_output/{INTEGRATOR_OUTCOME_FILENAME}
+
+   The schema is:
 {{"squashed_branches": ["branch1", "branch2"], "squashed_commit_hash": "abc1234", "impl_priority": ["branch3"], "impl_commit_hashes": {{"branch3": "def5678"}}, "failed": ["branch4"]}}
 
 - squashed_branches: list of branch names whose test/doc commits were squashed
