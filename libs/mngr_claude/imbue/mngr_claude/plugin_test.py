@@ -38,6 +38,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -75,7 +76,7 @@ def make_claude_agent(
     work_dir: Path | None = None,
 ) -> tuple[ClaudeAgent, Host]:
     """Create a ClaudeAgent with a real local host for testing."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     if work_dir is None:
         work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
@@ -732,7 +733,7 @@ def test_configure_readiness_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should raise when .claude/settings.local.json is not gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
@@ -759,7 +760,7 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should skip gitignore check when the work_dir is not a git repo."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
@@ -791,7 +792,7 @@ def test_configure_readiness_hooks_creates_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should create .claude/settings.local.json."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _init_git_with_gitignore(work_dir)
@@ -826,7 +827,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should merge with existing settings."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _init_git_with_gitignore(work_dir)

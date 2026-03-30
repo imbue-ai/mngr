@@ -51,6 +51,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
 
@@ -75,7 +76,7 @@ def _create_testable_agent(
     on_destroy_should_raise: bool = False,
 ) -> tuple[_TestableAgent, Host]:
     """Create a _TestableAgent with proper filesystem setup."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()
@@ -117,7 +118,7 @@ def host_with_agents_dir(
     temp_host_dir: Path,
 ) -> tuple[Host, Path]:
     """Create a Host with an agents directory for testing."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     agents_dir = local_provider.host_dir / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
@@ -499,7 +500,7 @@ def _create_test_agent(
     temp_work_dir: Path,
 ) -> BaseAgent:
     """Create a minimal test agent for command building tests."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()

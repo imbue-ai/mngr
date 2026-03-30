@@ -151,7 +151,7 @@ def test_snapshot_create_mixed_identifier_classified_as_host(
     """Test that a positional arg not matching any agent is treated as a host identifier.
 
     The identifier is classified as a host (no agent match), and since the local
-    provider only accepts "localhost" as a host name, it fails with "not found".
+    provider only accepts "local" as a host name, it fails with "not found".
     """
     result = cli_runner.invoke(
         snapshot,

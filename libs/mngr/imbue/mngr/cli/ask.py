@@ -42,6 +42,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 _QUERY_PREFIX: Final[str] = (
     "answer this question about `mngr`. "
@@ -253,7 +254,7 @@ def _destroy_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> Iterat
 def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
     """Resolve the local host as an OnlineHostInterface."""
     provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    host_interface = provider.get_host(HostName("localhost"))
+    host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
     if not isinstance(host_interface, OnlineHostInterface):
         raise MngrError("Local host is not online")
     return host_interface

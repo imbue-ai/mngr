@@ -19,7 +19,7 @@ def test_resolve_file_target_raises_for_nonexistent_target(temp_mngr_ctx: MngrCo
 
 def test_resolve_file_target_resolves_local_host(temp_mngr_ctx: MngrContext) -> None:
     result = resolve_file_target(
-        target_identifier="localhost",
+        target_identifier="local",
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
@@ -31,7 +31,7 @@ def test_resolve_file_target_resolves_local_host(temp_mngr_ctx: MngrContext) -> 
 def test_resolve_file_target_host_rejects_relative_to_state(temp_mngr_ctx: MngrContext) -> None:
     with pytest.raises(UserInputError, match="only valid for agent targets"):
         resolve_file_target(
-            target_identifier="localhost",
+            target_identifier="local",
             mngr_ctx=temp_mngr_ctx,
             relative_to=PathRelativeTo.STATE,
         )

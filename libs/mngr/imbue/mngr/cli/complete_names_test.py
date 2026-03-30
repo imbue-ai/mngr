@@ -19,7 +19,7 @@ def test_complete_names_reads_discovery_stream(tmp_path: Path) -> None:
     agent_names, host_names = resolve_names_from_discovery_stream(events_path)
 
     assert agent_names == ["alpha-agent", "beta-agent"]
-    assert host_names == ["localhost"]
+    assert host_names == ["local"]
 
 
 def test_complete_names_handles_destroyed_agents(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ def test_complete_names_handles_destroyed_agents(tmp_path: Path) -> None:
             {"agent_id": "agent-0", "agent_name": "kept-agent", "host_id": "host-1", "provider_name": "local"},
             {"agent_id": "agent-1", "agent_name": "doomed-agent", "host_id": "host-1", "provider_name": "local"},
         ],
-        "hosts": [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}],
+        "hosts": [{"host_id": "host-1", "host_name": "local", "provider_name": "local"}],
     }
     destroyed = {
         "timestamp": "2025-01-01T00:01:00Z",
@@ -346,7 +346,7 @@ def test_main_prints_host_names_with_hosts_flag(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     lines = result.stdout.strip().splitlines()
-    assert lines == ["localhost"]
+    assert lines == ["local"]
 
 
 def test_main_prints_both_with_both_flag(tmp_path: Path) -> None:
@@ -364,4 +364,4 @@ def test_main_prints_both_with_both_flag(tmp_path: Path) -> None:
     assert result.returncode == 0
     lines = result.stdout.strip().splitlines()
     assert "my-agent" in lines
-    assert "localhost" in lines
+    assert "local" in lines

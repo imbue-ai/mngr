@@ -37,6 +37,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
@@ -47,7 +48,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 def _get_local_host_for_test(test_ctx: MngrContext) -> OnlineHostInterface:
     local_provider = get_provider_instance(ProviderInstanceName(LOCAL_PROVIDER_NAME), test_ctx)
-    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName("localhost")))
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
     return local_host
 
 
@@ -140,7 +141,7 @@ def test_create_agent_with_new_host(
 
         target_host = NewHostOptions(
             provider=LOCAL_PROVIDER_NAME,
-            name=HostName("localhost"),
+            name=HostName(LOCAL_HOST_NAME),
         )
 
         result = create(

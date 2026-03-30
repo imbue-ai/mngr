@@ -28,6 +28,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
@@ -355,13 +356,13 @@ def local_host(local_provider: LocalProviderInstance) -> Host:
     """Create a local Host via the local provider.
 
     This fixture eliminates the repeated pattern of:
-        host = local_provider.create_host(HostName("localhost"))
+        host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     Use this when tests need a Host instance for creating agents,
     executing commands, etc. The local provider always returns a Host
     (the concrete OnlineHostInterface implementation).
     """
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     return host
 
 

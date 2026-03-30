@@ -13,6 +13,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.backend import LocalProviderBackend
 from imbue.mngr.providers.local.config import LocalProviderConfig
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -108,7 +109,7 @@ def test_built_instance_can_create_host(tmp_path: Path, temp_mngr_ctx: MngrConte
         mngr_ctx=temp_mngr_ctx,
     )
 
-    host = instance.create_host(HostName("localhost"))
+    host = instance.create_host(HostName(LOCAL_HOST_NAME))
     assert host is not None
     assert host.id is not None
 
@@ -151,7 +152,7 @@ def test_multiple_instances_with_different_names(
     assert instance1.name == ProviderInstanceName("local-1")
     assert instance2.name == ProviderInstanceName("local-2")
 
-    host1 = instance1.create_host(HostName("localhost"))
-    host2 = instance2.create_host(HostName("localhost"))
+    host1 = instance1.create_host(HostName(LOCAL_HOST_NAME))
+    host2 = instance2.create_host(HostName(LOCAL_HOST_NAME))
 
     assert host1.id != host2.id

@@ -38,6 +38,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.polling import poll_for_value
@@ -141,7 +142,7 @@ def test_resolve_events_target_finds_host(
 ) -> None:
     """Verify resolve_events_target falls back to host when no agent matches."""
     per_host_dir = local_provider.host_dir
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     # Create an agent so the host appears in discover_hosts_and_agents
     _create_agent_data_json(per_host_dir, "unrelated-agent-47291", "sleep 47291")
@@ -184,7 +185,7 @@ def events_host_target(
     """
     events_dir = tmp_path / "host_events"
     events_dir.mkdir()
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, OnlineHostInterface)
     target = EventsTarget(
         volume=None,
@@ -1184,7 +1185,7 @@ def test_handle_online_offline_transition_restarts_threads(
         volume=events_volume,
         display_name="test",
         provider=local_provider,
-        host_id=local_provider.get_host(HostName("localhost")).id,
+        host_id=local_provider.get_host(HostName(LOCAL_HOST_NAME)).id,
         events_subpath=agent_events_subpath,
     )
 
@@ -1351,7 +1352,7 @@ def test_events_target_rejects_online_host_without_events_path(
     local_provider,
 ) -> None:
     """EventsTarget should reject online_host set without events_path."""
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(MngrError, match="online_host and events_path must both be set"):
         EventsTarget(online_host=host, events_path=None, display_name="bad-target")
 

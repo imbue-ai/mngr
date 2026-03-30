@@ -12,7 +12,7 @@ from imbue.mngr_file.data_types import PathRelativeTo
 def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     """List files on the local host via the host interface."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target_identifier="local",
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
@@ -29,7 +29,7 @@ def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
 def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """Write a file to the local host dir and read it back."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target_identifier="local",
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
@@ -65,7 +65,7 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
 def test_list_files_recursive_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     """List files recursively on the local host dir."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target_identifier="local",
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
