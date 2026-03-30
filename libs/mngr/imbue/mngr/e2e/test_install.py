@@ -1,9 +1,7 @@
 """Tests that mngr works correctly when installed without optional plugin packages.
 
-These tests install mngr into an isolated venv that contains only the core
-package and its direct dependencies -- no plugin packages like mngr_modal,
-mngr_claude, etc. This catches regressions where the core CLI accidentally
-assumes an optional plugin is always available (e.g. eagerly importing modal).
+These tests install mngr into an isolated venv that contains only the core package
+and its direct dependencies -- no plugin packages like mngr_modal, mngr_claude, etc.
 """
 
 import json
