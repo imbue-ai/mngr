@@ -17,14 +17,14 @@ fi
 
 # Get PR URL from .claude/pr_url (if exists)
 PR_URL=""
-if [[ -f "$CLAUDE_PROJECT_DIR/.claude/pr_url" ]]; then
-    PR_URL=$(cat "$CLAUDE_PROJECT_DIR/.claude/pr_url" 2>/dev/null || echo "")
+if [[ -f "$MNGR_AGENT_WORK_DIR/.claude/pr_url" ]]; then
+    PR_URL=$(cat "$MNGR_AGENT_WORK_DIR/.claude/pr_url" 2>/dev/null || echo "")
 fi
 
 # Get PR status from .claude/pr_status (if exists)
 PR_STATUS=""
-if [[ -f "$CLAUDE_PROJECT_DIR/.claude/pr_status" ]]; then
-    PR_STATUS=$(cat "$CLAUDE_PROJECT_DIR/.claude/pr_status" 2>/dev/null || echo "")
+if [[ -f "$MNGR_AGENT_WORK_DIR/.claude/pr_status" ]]; then
+    PR_STATUS=$(cat "$MNGR_AGENT_WORK_DIR/.claude/pr_status" 2>/dev/null || echo "")
 fi
 
 # Build the status line
