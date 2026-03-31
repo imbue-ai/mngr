@@ -6,9 +6,9 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.agent_addr import parse_identifier_as_address
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
-from imbue.mngr.cli.agent_addr import parse_identifier_as_address
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata

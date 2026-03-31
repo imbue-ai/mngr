@@ -7,12 +7,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata

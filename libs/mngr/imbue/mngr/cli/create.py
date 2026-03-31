@@ -21,6 +21,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.agent_addr import AgentAddress
+from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -35,8 +37,6 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import resolve_source_location
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import AgentAddress
-from imbue.mngr.cli.agent_addr import parse_agent_address
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
@@ -271,7 +271,7 @@ class _CreateCommand(click.Command):
     "--from",
     "--source",
     "source",
-    help="Directory to use as work_dir root [AGENT | AGENT.HOST | AGENT.HOST:PATH | HOST:PATH]. Defaults to current dir if no other source args are given",
+    help="Directory to use as work_dir root [AGENT | AGENT@HOST | AGENT@HOST.PROVIDER:PATH | @HOST:PATH]. Defaults to current dir if no other source args are given",
 )
 @optgroup.option("--source-agent", "--from-agent", "source_agent", help="Source agent for cloning work_dir")
 @optgroup.option("--source-host", help="Source host")
@@ -1032,7 +1032,7 @@ def _find_source_location(
     parsed_source_host = source_host
 
     if source:
-        # Parse [AGENT[.HOST]]:PATH format
+        # Parse [AGENT[@HOST[.PROVIDER]]]:PATH format
         parsed = _parse_source_string(source)
         parsed_source_path = parsed.path
         parsed_source_agent = parsed.agent_name
@@ -1460,28 +1460,64 @@ def _parse_branch_flag(branch: str, agent_name: AgentName) -> tuple[str | None, 
 
 
 class ParsedSourceString(FrozenModel):
-    """Result of parsing a source string in [AGENT[.HOST]]:PATH format."""
+    """Result of parsing a source string in [AGENT[@HOST[.PROVIDER]]]:PATH format."""
 
     path: Path | None = Field(description="Path component")
     agent_name: str | None = Field(description="Agent name component")
-    host_name: str | None = Field(description="Host name component")
+    host_name: str | None = Field(description="Host name component (may include .PROVIDER suffix)")
 
 
 @pure
 def _parse_source_string(source_str: str) -> ParsedSourceString:
-    """Parse [AGENT[.HOST]]:PATH format into components."""
+    """Parse [AGENT[@[HOST][.PROVIDER]]][:PATH] format into components.
+
+    Without a colon and without '@', the string is treated as a plain path
+    (the common case for --source ./some/dir). When '@' is present, the string
+    is parsed as an agent address regardless of whether a colon follows. With a
+    colon, the part before the colon is the address and the part after is the path.
+
+    The host_name field may include a .PROVIDER suffix (e.g. "myhost.modal").
+    """
     if ":" not in source_str:
-        # Just a path
+        if "@" in source_str:
+            # Agent address without a path (e.g. "my-agent@my-host")
+            address = parse_agent_address(source_str)
+            host_str = _host_str_from_address_components(address.host_name, address.provider_name)
+            return ParsedSourceString(
+                path=None,
+                agent_name=str(address.agent_name) if address.agent_name else None,
+                host_name=host_str,
+            )
+        # No colon or @ -- treat as a plain path (most common case: --source ./dir)
         return ParsedSourceString(path=Path(source_str), agent_name=None, host_name=None)
 
-    prefix, path_str = source_str.rsplit(":", 1)
+    prefix, path_str = source_str.split(":", 1)
     path = Path(path_str) if path_str else None
 
-    if "." in prefix:
-        agent, host = prefix.split(".", 1)
-        return ParsedSourceString(path=path, agent_name=agent or None, host_name=host or None)
+    if not prefix:
+        return ParsedSourceString(path=path, agent_name=None, host_name=None)
 
-    return ParsedSourceString(path=path, agent_name=prefix or None, host_name=None)
+    address = parse_agent_address(prefix)
+    host_str = _host_str_from_address_components(address.host_name, address.provider_name)
+    return ParsedSourceString(
+        path=path,
+        agent_name=str(address.agent_name) if address.agent_name else None,
+        host_name=host_str,
+    )
+
+
+@pure
+def _host_str_from_address_components(
+    host_name: HostName | None, provider_name: ProviderInstanceName | None
+) -> str | None:
+    """Combine host and provider name components into a single host string."""
+    if host_name is not None and provider_name is not None:
+        return f"{host_name}.{provider_name}"
+    if host_name is not None:
+        return str(host_name)
+    if provider_name is not None:
+        return f".{provider_name}"
+    return None
 
 
 # === Helper Functions (stubs) ===

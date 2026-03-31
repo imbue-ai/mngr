@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
@@ -18,6 +19,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 
 
 class AgentAddress(FrozenModel):
@@ -103,13 +105,19 @@ def parse_identifier_as_address(raw: str) -> tuple[str, AgentAddress]:
 
     Returns (identifier_str, address) where identifier_str is the agent name or ID
     portion to use for matching. For plain strings without '@', the raw string is
-    returned unchanged (preserving backward compatibility with agent IDs).
+    returned unchanged (preserving backward compatibility with agent IDs and host
+    identifiers that may contain dots or other characters not valid in agent names).
     """
     if "@" not in raw:
+        # Plain identifier: could be an agent name, agent ID, or host name/ID.
+        # Try to parse as AgentName but do not reject identifiers that fail
+        # validation -- they may be valid host names (e.g. "myhost.docker",
+        # IP addresses) and will be resolved by downstream lookup functions.
         try:
-            return raw, AgentAddress(agent_name=AgentName(raw))
-        except InvalidName as e:
-            raise UserInputError(str(e)) from e
+            agent_name = AgentName(raw)
+        except InvalidName:
+            agent_name = None
+        return raw, AgentAddress(agent_name=agent_name)
 
     address = parse_agent_address(raw)
     # Use the agent_name as the identifier string, or the raw string if no name part
@@ -156,6 +164,60 @@ def filter_agents_by_host_constraint(
     }
 
 
+def discover_by_address(
+    raw_address: str,
+    mngr_ctx: MngrContext,
+    include_destroyed: bool = False,
+    reset_caches: bool = False,
+) -> tuple[str, dict[DiscoveredHost, Sequence[DiscoveredAgent]], list[BaseProviderInstance]]:
+    """Discover hosts and agents scoped by a single agent address.
+
+    Parses the address to extract:
+    - The plain identifier (agent name/ID) for the discovery event-stream optimization
+    - The provider name (if any) to skip irrelevant providers during discovery
+
+    After discovery, filters results by host/provider constraints from the address.
+
+    Returns (identifier, filtered_agents_by_host, providers) where:
+    - identifier is the agent name/ID portion for downstream resolution
+    - agents_by_host is filtered by host/provider constraints
+    - providers is the list of queried provider instances
+    """
+    plain_id, address = parse_identifier_as_address(raw_address)
+
+    provider_names = (str(address.provider_name),) if address.provider_name is not None else None
+
+    agents_by_host, providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=(plain_id,),
+        include_destroyed=include_destroyed,
+        reset_caches=reset_caches,
+    )
+
+    filtered = filter_agents_by_host_constraint(agents_by_host, address)
+    return plain_id, filtered, providers
+
+
+@pure
+def _extract_provider_names(
+    parsed: Sequence[tuple[str, AgentAddress]],
+) -> tuple[str, ...] | None:
+    """Extract provider names from parsed addresses for discovery optimization.
+
+    Returns a tuple of unique provider names if ALL addresses specify a provider,
+    or None if any address lacks a provider constraint (requiring full discovery).
+    """
+    provider_names: list[str] = []
+    for _, addr in parsed:
+        if addr.provider_name is None:
+            return None
+        provider_names.append(str(addr.provider_name))
+    if not provider_names:
+        return None
+    return tuple(sorted(set(provider_names)))
+
+
 def find_agents_by_addresses(
     raw_identifiers: Sequence[str],
     filter_all: bool,
@@ -168,6 +230,9 @@ def find_agents_by_addresses(
     Like find_agents_by_identifiers_or_state but supports agent addresses
     in the format [NAME][@[HOST][.PROVIDER]].
 
+    When all addresses specify a provider, only those providers are queried
+    during discovery (skipping irrelevant providers for better performance).
+
     For identifiers without host/provider components, behaves identically to
     find_agents_by_identifiers_or_state. For identifiers with host/provider
     components, post-filters the results to only include agents on matching hosts.
@@ -178,6 +243,9 @@ def find_agents_by_addresses(
     # Extract plain identifier strings (agent names/IDs)
     plain_identifiers = [ident for ident, _ in parsed]
 
+    # Extract provider names from addresses for discovery optimization
+    provider_names = _extract_provider_names(parsed)
+
     # Delegate to the existing find function
     matches = find_agents_by_identifiers_or_state(
         agent_identifiers=plain_identifiers,
@@ -185,6 +253,7 @@ def find_agents_by_addresses(
         target_state=target_state,
         mngr_ctx=mngr_ctx,
         include_destroyed=include_destroyed,
+        provider_names=provider_names,
     )
 
     return _post_filter_matches_by_addresses(raw_identifiers, parsed, matches)
@@ -242,7 +311,6 @@ def _post_filter_matches_by_addresses(
 
 def find_agent_by_address(
     agent_str: str,
-    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     command_name: str,
     is_start_desired: bool = False,
@@ -250,24 +318,25 @@ def find_agent_by_address(
 ) -> tuple[AgentInterface, OnlineHostInterface]:
     """Find an agent by address string, supporting host/provider disambiguation.
 
-    Parses the address, filters the agents_by_host mapping by host/provider
-    constraints, then delegates to find_and_maybe_start_agent_by_name_or_id.
+    Handles the full flow: parses the address, discovers hosts and agents
+    (using the provider constraint to skip irrelevant providers), filters by
+    host/provider, and resolves to an agent+host pair.
     """
-    identifier, address = parse_identifier_as_address(agent_str)
+    identifier, agents_by_host, _providers = discover_by_address(agent_str, mngr_ctx, include_destroyed=False)
 
-    filtered_agents_by_host = filter_agents_by_host_constraint(agents_by_host, address)
-
-    if address.has_host_component and not filtered_agents_by_host:
-        host_desc = ""
-        if address.host_name is not None:
-            host_desc += f" host '{address.host_name}'"
-        if address.provider_name is not None:
-            host_desc += f" provider '{address.provider_name}'"
-        raise UserInputError(f"No hosts found matching{host_desc}")
+    if not agents_by_host:
+        _, address = parse_identifier_as_address(agent_str)
+        if address.has_host_component:
+            host_desc = ""
+            if address.host_name is not None:
+                host_desc += f" host '{address.host_name}'"
+            if address.provider_name is not None:
+                host_desc += f" provider '{address.provider_name}'"
+            raise UserInputError(f"No hosts found matching{host_desc}")
 
     return find_and_maybe_start_agent_by_name_or_id(
         identifier,
-        filtered_agents_by_host,
+        agents_by_host,
         mngr_ctx,
         command_name,
         is_start_desired=is_start_desired,

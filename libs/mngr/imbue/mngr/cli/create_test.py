@@ -11,9 +11,9 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.agent_addr import AgentAddress
+from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.api.find import ResolvedSource
-from imbue.mngr.cli.agent_addr import AgentAddress
-from imbue.mngr.cli.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
@@ -24,6 +24,7 @@ from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
+from imbue.mngr.cli.create import _parse_source_string
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -951,6 +952,47 @@ def test_parse_branch_flag_new_without_wildcard() -> None:
     assert base is None
     assert new == "my-exact-branch"
     assert has_explicit_base is False
+
+
+# =============================================================================
+# Tests for _parse_source_string
+# =============================================================================
+
+
+def test_parse_source_string_plain_path() -> None:
+    """A plain path without @ or : is treated as a filesystem path."""
+    result = _parse_source_string("./some/dir")
+
+    assert result.path == Path("./some/dir")
+    assert result.agent_name is None
+    assert result.host_name is None
+
+
+def test_parse_source_string_agent_at_host_without_colon() -> None:
+    """AGENT@HOST without a colon parses as an address with no path."""
+    result = _parse_source_string("my-agent@my-host")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host"
+    assert result.path is None
+
+
+def test_parse_source_string_agent_at_host_with_provider_without_colon() -> None:
+    """AGENT@HOST.PROVIDER without a colon parses as an address with no path."""
+    result = _parse_source_string("my-agent@my-host.modal")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host.modal"
+    assert result.path is None
+
+
+def test_parse_source_string_agent_at_host_with_colon_path() -> None:
+    """AGENT@HOST:PATH parses all three components."""
+    result = _parse_source_string("my-agent@my-host:/path/to/dir")
+
+    assert result.agent_name == "my-agent"
+    assert result.host_name == "my-host"
+    assert result.path == Path("/path/to/dir")
 
 
 # =============================================================================

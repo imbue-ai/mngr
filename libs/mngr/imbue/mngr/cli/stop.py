@@ -7,11 +7,11 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.destroy import get_agent_name_from_session

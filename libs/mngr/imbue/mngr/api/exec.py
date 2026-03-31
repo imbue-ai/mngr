@@ -9,11 +9,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.agent_addr import find_agent_by_address
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import find_agents_by_identifiers_or_state
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -62,20 +61,12 @@ def exec_command_on_agent(
 ) -> ExecResult:
     """Execute a shell command on the host where an agent runs.
 
-    Resolves the agent by name or ID, optionally starts it if stopped,
+    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
+
+    Resolves the agent by name, ID, or address, optionally starts it if stopped,
     then executes the command on its host (defaulting to the agent's work_dir).
     """
-    agents_by_host, _providers = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=None,
-        agent_identifiers=(agent_str,),
-        include_destroyed=False,
-        reset_caches=False,
-    )
-
-    agent, host = find_and_maybe_start_agent_by_name_or_id(
-        agent_str, agents_by_host, mngr_ctx, "exec", is_start_desired=is_start_desired
-    )
+    agent, host = find_agent_by_address(agent_str, mngr_ctx, "exec", is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir
@@ -239,14 +230,16 @@ def exec_command_on_agents(
 ) -> MultiExecResult:
     """Execute a shell command on the hosts where multiple agents run.
 
-    Resolves each agent by name or ID, optionally starts them if stopped,
+    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
+
+    Resolves each agent by name, ID, or address, optionally starts them if stopped,
     then executes the command on each host (defaulting to the agent's work_dir).
     """
     result = MultiExecResult()
 
-    # Find all matching agents
-    matches = find_agents_by_identifiers_or_state(
-        agent_identifiers=agent_identifiers,
+    # Find all matching agents (with address support for host/provider filtering)
+    matches = find_agents_by_addresses(
+        raw_identifiers=list(agent_identifiers),
         filter_all=is_all,
         target_state=None,
         mngr_ctx=mngr_ctx,
