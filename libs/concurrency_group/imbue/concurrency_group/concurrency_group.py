@@ -377,6 +377,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         silenced_exceptions: tuple[type[BaseException], ...] | None = None,
         suppressed_exceptions: tuple[type[BaseException], ...] | None = None,
         is_checked: bool = True,
+        on_failure: Callable[[BaseException], None] | None = None,
     ) -> ObservableThread:
         thread = ObservableThread(
             target=target,
@@ -386,6 +387,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             daemon=daemon,
             silenced_exceptions=silenced_exceptions,
             suppressed_exceptions=suppressed_exceptions,
+            on_failure=on_failure,
         )
         self.start_thread(thread, is_checked)
         return thread

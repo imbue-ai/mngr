@@ -266,7 +266,7 @@ TARGET can be an agent ID (agent-*), host ID (host-*), or an agent/host name.
 If TARGET is omitted, it is read from stdin (one line, must be an ID like agent-* or host-*).
 
 States can be provided as positional arguments after TARGET, via the repeatable --state option, or both.
-Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, DONE) and
+Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE) and
 all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED).
 
 If no states are specified, waits for any terminal state (the target stops running).

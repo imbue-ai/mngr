@@ -25,6 +25,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import get_short_random_string
@@ -46,7 +47,7 @@ def _create_running_test_agent(
     mngr_test_prefix: str,
 ) -> RunningTestAgent:
     """Create a real test agent with a running tmux session on the local provider."""
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     agent_id = AgentId.generate()
     agent_name = AgentName(f"exec-test-{get_short_random_string()}")

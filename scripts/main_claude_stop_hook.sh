@@ -179,8 +179,10 @@ if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" ]]; then
     log_info "Currently on base branch ($BASE_BRANCH) - no PR needed"
     IS_INFORMATIONAL_ONLY=true
 else
-    # Get files that have changed since the (now updated) base branch
-    CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null || echo "")
+    # Get files that have changed since the (now updated) base branch.
+    # Use origin/$BASE_BRANCH since we just fetched and it matches the PR target.
+    # Local $BASE_BRANCH may be stale.
+    CHANGED_FILES=$(git diff --name-only "origin/$BASE_BRANCH"...HEAD 2>/dev/null || echo "")
     if [[ -z "$CHANGED_FILES" ]]; then
         log_info "No files changed compared to $BASE_BRANCH - this was an informational session"
         IS_INFORMATIONAL_ONLY=true

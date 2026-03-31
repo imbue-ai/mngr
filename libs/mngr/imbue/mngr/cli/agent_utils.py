@@ -1,10 +1,13 @@
 from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.agent_addr import discover_by_address
+from imbue.mngr.api.agent_addr import find_agent_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
 from imbue.mngr.api.list import list_agents
-from imbue.mngr.cli.agent_addr import find_agent_by_address
 from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.config.data_types import MngrContext
@@ -40,9 +43,9 @@ def _host_matches_filter(host_ref: DiscoveredHost, host_filter: str) -> bool:
 
 @pure
 def filter_agents_by_host(
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     host_filter: str,
-) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+) -> dict[DiscoveredHost, Sequence[DiscoveredAgent]]:
     """Filter the agents_by_host mapping to only include hosts matching the filter.
 
     Raises UserInputError if no hosts match the filter.
@@ -158,18 +161,21 @@ def find_agent_for_command(
     Raises UserInputError if no agent specified and not running in interactive mode.
     """
     if agent_identifier is not None:
-        agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(agent_identifier,),
-            include_destroyed=False,
-            reset_caches=False,
-        )
         if host_filter is not None:
+            # When host_filter is provided (separate from address syntax),
+            # do discovery + additional host filtering before resolution.
+            plain_id, agents_by_host, _ = discover_by_address(agent_identifier, mngr_ctx, include_destroyed=False)
             agents_by_host = filter_agents_by_host(agents_by_host, host_filter)
+            return find_and_maybe_start_agent_by_name_or_id(
+                plain_id,
+                agents_by_host,
+                mngr_ctx,
+                command_usage,
+                is_start_desired=is_start_desired,
+                skip_agent_state_check=skip_agent_state_check,
+            )
         return find_agent_by_address(
             agent_identifier,
-            agents_by_host,
             mngr_ctx,
             command_usage,
             is_start_desired=is_start_desired,

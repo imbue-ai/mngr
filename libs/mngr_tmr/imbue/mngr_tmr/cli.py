@@ -38,6 +38,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr_tmr.api import collect_tests
 from imbue.mngr_tmr.api import gather_results
 from imbue.mngr_tmr.api import get_base_commit
@@ -188,7 +189,7 @@ def _run_reintegrate(
 
     # Get local host for artifact pulling
     local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName("localhost"))
+    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
 
     # Build agent infos and hosts from discovered agents
@@ -492,7 +493,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     # Step 3: Get the local host for source_location (tests are collected locally)
     local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName("localhost"))
+    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
 
     # Step 4: Build launch config and launch agents

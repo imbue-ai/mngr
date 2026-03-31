@@ -28,8 +28,8 @@ def llmconversations() -> None:
 
 @click.command("llmweb", hidden=True)
 def llmweb() -> None:
-    """Run the llm web server (internal)."""
-    from imbue.mngr_llm.resources.web_server import main
+    """Run the llm-webchat based web server (internal)."""
+    from imbue.mngr_llm.resources.webchat_server import main
 
     main()
 

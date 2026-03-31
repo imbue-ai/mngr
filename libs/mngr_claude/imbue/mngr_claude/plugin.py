@@ -35,6 +35,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -53,6 +54,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr.utils.polling import poll_until
@@ -89,6 +92,16 @@ _CLAUDE_HOME_SYNC_ITEMS: Final[tuple[str, ...]] = (
     "commands",
     "plugins",
 )
+
+_INSTALLED_PLUGINS_RELATIVE_PATH: Final[Path] = Path("plugins") / "installed_plugins.json"
+
+_INSTALLED_PLUGINS_SOURCE_DIR_MARKER: Final[Path] = Path("plugins") / ".installed_plugins_source_dir"
+"""Metadata file written at deploy build time containing the build machine's claude dir.
+
+At runtime, ``_fixup_installed_plugins_json`` reads this to determine the original
+installPath prefix, rewrites paths to point to the per-agent config dir, then
+removes the marker.
+"""
 
 
 def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
@@ -209,6 +222,14 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "in ~/.claude.json before startup. This prevents the trust dialog from appearing. "
         "Also dismisses the effort callout dialog.",
     )
+    model: str | None = Field(
+        default=None,
+        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
+    is_fast: bool = Field(
+        default=False,
+        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    )
     emit_common_transcript: bool = Field(
         default=True,
         description="Emit a common, agent-agnostic transcript alongside the raw Claude transcript. "
@@ -240,7 +261,53 @@ def _collect_claude_home_dir_files(claude_dir: Path) -> dict[Path, Path]:
     return files
 
 
-def _build_settings_json_content(sync_local: bool) -> str:
+def _collect_claude_home_files_content(
+    claude_dir: Path,
+    *,
+    sync_local_settings: bool,
+) -> dict[Path, str]:
+    """Collect files from ~/.claude/ as content strings for remote/deploy use.
+
+    Returns dict mapping relative paths (e.g., Path("settings.json"),
+    Path("skills/my-skill/SKILL.md")) to their string content.
+
+    settings.json is always rebuilt via _build_settings_json_content to
+    force skipDangerousModePermissionPrompt and disable fastMode. All other
+    files in _CLAUDE_HOME_SYNC_ITEMS are read as-is. Callers are responsible
+    for any further transforms (e.g., installPath rewriting).
+    """
+    files: dict[Path, str] = {}
+    files[Path("settings.json")] = _build_settings_json_content(sync_local_settings)
+    for relative_path, source_path in _collect_claude_home_dir_files(claude_dir).items():
+        if relative_path == Path("settings.json"):
+            continue
+        files[relative_path] = source_path.read_text()
+    return files
+
+
+@pure
+def _rewrite_installed_plugins_paths(content: str, local_claude_dir: Path, target_config_dir: Path) -> str:
+    """Rewrite installPath values in installed_plugins.json for a target config dir.
+
+    Rebases absolute local paths (under local_claude_dir) onto target_config_dir
+    so that Claude Code can find plugin files in the per-agent config dir.
+    """
+    data: dict[str, Any] = json.loads(content)
+    local_prefix = str(local_claude_dir) + "/"
+    for plugin_entries in data.get("plugins", {}).values():
+        for entry in plugin_entries:
+            install_path = entry.get("installPath", "")
+            if install_path.startswith(local_prefix):
+                relative = install_path[len(local_prefix) :]
+                entry["installPath"] = str(target_config_dir / relative)
+    return json.dumps(data, indent=2) + "\n"
+
+
+def _build_settings_json_content(
+    sync_local: bool,
+    model: str | None = None,
+    is_fast: bool = False,
+) -> str:
     """Build settings.json content for remote/deploy per-agent config dirs.
 
     Used for remote hosts and deploy only. Local hosts symlink settings.json
@@ -248,16 +315,18 @@ def _build_settings_json_content(sync_local: bool) -> str:
 
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Forces skipDangerousModePermissionPrompt=True
-    and disables fastMode (not supported via the API on remote hosts).
     """
     local_path = Path.home() / ".claude" / "settings.json"
     if sync_local and local_path.exists():
         data: dict[str, Any] = json.loads(local_path.read_text())
-        if data.get("fastMode") is True:
-            logger.warning("Disabling fast mode for remote deployment because it is not yet supported via the API")
-            data["fastMode"] = False
     else:
         data = _generate_claude_home_settings()
+    if model is not None:
+        data["model"] = model
+    if is_fast:
+        data["fastMode"] = True
+    else:
+        data["fastMode"] = False
     data["skipDangerousModePermissionPrompt"] = True
     return json.dumps(data, indent=2) + "\n"
 
@@ -633,6 +702,107 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
             )
 
 
+def _rsync_claude_home_directories(
+    host: OnlineHostInterface,
+    local_host: OnlineHostInterface,
+    local_claude_dir: Path,
+    config_dir: Path,
+) -> None:
+    """Transfer directory items from ~/.claude/ to a remote config dir using rsync.
+
+    Uses host.copy_directory (rsync) for bulk transfer of directories like
+    skills/, agents/, commands/, plugins/. Individual files like settings.json
+    are handled separately by the caller since they require generation/merging.
+    """
+    for item_name in _CLAUDE_HOME_SYNC_ITEMS:
+        item_path = local_claude_dir / item_name
+        if not item_path.exists() or not item_path.is_dir():
+            continue
+        with log_span("Rsyncing {} to per-agent config dir", item_name):
+            host.copy_directory(local_host, item_path, config_dir / item_name)
+
+
+def _fixup_installed_plugins_json(host: OnlineHostInterface, config_dir: Path) -> None:
+    """Rewrite installPath values in the per-agent installed_plugins.json.
+
+    Called after _sync_local_user_resources or _rsync_claude_home_directories
+    to ensure every per-agent config dir has a self-contained
+    installed_plugins.json with paths pointing to config_dir/plugins/cache/...
+    (rather than the source ~/.claude/ directory).
+
+    Determines the original claude dir prefix from either a deploy marker file
+    (written by get_files_for_deploy) or the current machine's ~/.claude/.
+    If the plugins/ directory is a symlink, breaks it into a real directory
+    with file-level symlinks so the rewritten file can be written without
+    modifying the source.
+    """
+    installed_plugins_path = config_dir / _INSTALLED_PLUGINS_RELATIVE_PATH
+    try:
+        content = host.read_text_file(installed_plugins_path)
+    except FileNotFoundError:
+        return
+
+    marker_path = config_dir / _INSTALLED_PLUGINS_SOURCE_DIR_MARKER
+    try:
+        source_claude_dir = Path(host.read_text_file(marker_path).strip())
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(marker_path))}", timeout_seconds=5.0)
+    except FileNotFoundError:
+        source_claude_dir = Path.home() / ".claude"
+
+    rewritten = _rewrite_installed_plugins_paths(content, source_claude_dir, config_dir)
+    if rewritten == content:
+        return
+
+    plugins_dir = config_dir / "plugins"
+    if plugins_dir.is_symlink():
+        source_dir = plugins_dir.resolve()
+        plugins_dir.unlink()
+        plugins_dir.mkdir(parents=True)
+        for item in source_dir.iterdir():
+            if item.name != "installed_plugins.json" and item.name != _INSTALLED_PLUGINS_SOURCE_DIR_MARKER.name:
+                (plugins_dir / item.name).symlink_to(item)
+
+    host.write_text_file(installed_plugins_path, rewritten)
+
+
+def _apply_settings_json_overrides(
+    host: OnlineHostInterface,
+    config_dir: Path,
+    config: ClaudeAgentConfig,
+) -> None:
+    """Apply per-agent settings overrides (model, is_fast) to settings.json.
+
+    Only called for local hosts. When overrides are needed, reads existing
+    settings (following symlinks if present), then writes a regular file
+    with the overrides applied. Replaces any existing symlink to avoid
+    modifying the user's global settings.
+    """
+    if config.model is None and not config.is_fast:
+        return
+
+    settings_path = config_dir / "settings.json"
+
+    data: dict[str, Any] = {}
+    try:
+        content = host.read_text_file(settings_path)
+    except FileNotFoundError:
+        content = None
+    else:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning("Corrupt settings.json, replacing with overrides only")
+
+    if config.model is not None:
+        data["model"] = config.model
+    if config.is_fast:
+        data["fastMode"] = True
+
+    # Remove existing file/symlink before writing a regular file
+    host.execute_idempotent_command(f"rm -f {shlex.quote(str(settings_path))}", timeout_seconds=5.0)
+    host.write_text_file(settings_path, json.dumps(data, indent=2) + "\n")
+
+
 def _load_claude_resource_script(filename: str) -> str:
     """Load a shell script from the mngr_claude resources package."""
     resource_files = importlib.resources.files(_claude_resources)
@@ -645,9 +815,9 @@ def _provision_background_scripts(
 ) -> None:
     """Write the background task scripts to $MNGR_AGENT_STATE_DIR/commands/.
 
-    Provisions stream_transcript.sh, claude_background_tasks.sh, and
-    common_transcript.sh so they can be launched by the agent's
-    assemble_command at runtime.
+    Provisions stream_transcript.sh, claude_background_tasks.sh,
+    common_transcript.sh, and wait_for_stop_hook.sh so they can be
+    launched by the agent's assemble_command or hooks at runtime.
 
     Note: mngr_log.sh (shared logging library) is provisioned by
     Host.provision_agent() to both host-level and agent-level commands
@@ -658,7 +828,12 @@ def _provision_background_scripts(
 
     # Claude-specific scripts from this plugin's resources
     threads: list[ObservableThread] = []
-    for script_name in ("stream_transcript.sh", "claude_background_tasks.sh", "common_transcript.sh"):
+    for script_name in (
+        "stream_transcript.sh",
+        "claude_background_tasks.sh",
+        "common_transcript.sh",
+        "wait_for_stop_hook.sh",
+    ):
         script_content = _load_claude_resource_script(script_name)
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
@@ -729,6 +904,35 @@ def _has_api_credentials_available(
             return True
 
     return False
+
+
+def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+    """Verify .claude/settings.local.json is gitignored in the given repo path.
+
+    Raises PluginMngrError if the file is not gitignored. Silently returns
+    if the path is not a git repository.
+    """
+    settings_relative = Path(".claude") / "settings.local.json"
+
+    is_git_repo = host.execute_idempotent_command(
+        "git rev-parse --is-inside-work-tree",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not is_git_repo.success:
+        return
+
+    result = host.execute_idempotent_command(
+        f"git check-ignore -q {shlex.quote(str(settings_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not result.success:
+        raise PluginMngrError(
+            f".claude/settings.local.json is not gitignored in {repo_path}.\n"
+            "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
+            f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
+        )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -828,6 +1032,23 @@ class CostThresholdDialogIndicator(DialogIndicator):
 
 class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    @classmethod
+    def preflight_check(
+        cls,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        agent_options: CreateAgentOptions,
+        agent_config: AgentTypeConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Validate that .claude/settings.local.json is gitignored in the source repo.
+
+        mngr writes readiness hooks to this file during provisioning. If it's not
+        gitignored, it would appear as an unstaged change. Checking early avoids
+        wasting time on host creation and work_dir setup before surfacing this error.
+        """
+        _check_settings_local_gitignored(source_host, source_path)
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.
@@ -1125,25 +1346,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         settings_relative = Path(".claude") / "settings.local.json"
         settings_path = self.work_dir / settings_relative
 
-        # Only check gitignore if git is available and this is a git repository
-        is_git_repo = host.execute_idempotent_command(
-            "git rev-parse --is-inside-work-tree",
-            cwd=self.work_dir,
-            timeout_seconds=5.0,
-        )
-        if is_git_repo.success:
-            # Verify .claude/settings.local.json is gitignored to avoid unstaged changes
-            result = host.execute_idempotent_command(
-                f"git check-ignore -q {shlex.quote(str(settings_relative))}",
-                cwd=self.work_dir,
-                timeout_seconds=5.0,
-            )
-            if not result.success:
-                raise PluginMngrError(
-                    f".claude/settings.local.json is not gitignored in {self.work_dir}.\n"
-                    "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
-                    f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
-                )
+        # Check gitignore. During create(), preflight_check already verified
+        # this on the source, but this covers other code paths (e.g. mngr provision).
+        _check_settings_local_gitignored(host, self.work_dir)
 
         hooks_config = build_readiness_hooks_config()
 
@@ -1268,6 +1473,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         if config.sync_home_settings:
             _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
+            _fixup_installed_plugins_json(host, config_dir)
+
+        _apply_settings_json_overrides(host, config_dir, config)
 
     def _setup_remote_config_dir(
         self,
@@ -1283,22 +1491,31 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             _warn_about_version_consistency(config, mngr_ctx.concurrency_group)
 
         file_transfers: list[tuple[Path, bytes]] = []
-        # 1. Always ship settings.json
+        local_claude_dir = Path.home() / ".claude"
+
+        # 1. Always ship settings.json (generated content, not a direct copy)
         file_transfers.append(
-            (config_dir / "settings.json", _build_settings_json_content(config.sync_home_settings).encode("utf-8"))
+            (
+                config_dir / "settings.json",
+                _build_settings_json_content(
+                    config.sync_home_settings,
+                    model=config.model,
+                    is_fast=config.is_fast,
+                ).encode("utf-8"),
+            )
         )
 
-        # 2. Transfer other home dir files (skills, agents, commands) if syncing is enabled
+        # 2. Rsync directory items (skills, agents, commands, plugins) in bulk,
+        # then fix up installed_plugins.json paths for the remote host
         if config.sync_home_settings:
             logger.info("Transferring claude home directory settings to per-agent config dir...")
-            local_claude_dir = Path.home() / ".claude"
-            for relative_path, source_path in _collect_claude_home_dir_files(local_claude_dir).items():
-                # settings.json is handled separately above
-                if relative_path == Path("settings.json"):
-                    continue
-                file_transfers.append((config_dir / relative_path, source_path.read_bytes()))
+            local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
+            if not isinstance(local_host_ref, OnlineHostInterface):
+                raise MngrError("Local host is not online")
+            _rsync_claude_home_directories(host, local_host_ref, local_claude_dir, config_dir)
+            _fixup_installed_plugins_json(host, config_dir)
 
-        # 3. Always ship .claude.json
+        # 3. Always ship .claude.json (generated content, not a direct copy)
         # Resolve the work_dir on the remote host so the trust entry matches
         # the path Claude Code sees (e.g., Modal symlinks /mngr/... to /__modal/volumes/...)
         resolved_work_dir = self.work_dir
@@ -1313,7 +1530,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
             (config_dir / ".claude.json", (json.dumps(claude_json_data, indent=2) + "\n").encode("utf-8"))
         )
 
-        # Ship the files we were supposed to ship (all at once, in parallel):
+        # Ship the generated files (settings.json, .claude.json):
         _parallel_file_transfer(file_transfers, host, mngr_ctx)
 
         # 4. Ship credentials (API key via .claude.json, OAuth via .credentials.json)
@@ -1623,13 +1840,22 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
+_MKDIR_BATCH_SIZE: Final[int] = 50
+
+
 def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    remote_folders: list[str] = []
-    for dest_path, _dest_contents in transfers:
-        remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
+    # Deduplicate parent directories -- many files share the same parent, and
+    # sending all 1000+ paths in a single mkdir command can exceed the OS
+    # argument length limit ("/bin/bash: File name too long").
+    unique_dirs = sorted({str(dest_path.parent) for dest_path, _ in transfers})
+
+    # Batch mkdir calls so no single command exceeds OS argument limits.
+    for i in range(0, len(unique_dirs), _MKDIR_BATCH_SIZE):
+        batch = unique_dirs[i : i + _MKDIR_BATCH_SIZE]
+        args = " ".join(shlex.quote(d) for d in batch)
+        mkdir_result = host.execute_idempotent_command(f"mkdir -p {args}")
+        if not mkdir_result.success:
+            raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 
     # then upload them all in parallel
     count = 0
@@ -1749,11 +1975,12 @@ def get_files_for_deploy(
     files: dict[Path, Path | str] = {}
 
     local_claude_dir = Path.home() / ".claude"
+    home_files = _collect_claude_home_files_content(local_claude_dir, sync_local_settings=include_user_settings)
 
-    # Always ship settings.json and .claude.json to $HOME/.claude/ in the
-    # deploy image. These serve as source material that provisioning reads
-    # when setting up the per-agent config dir at runtime.
-    files[Path("~/.claude/settings.json")] = _build_settings_json_content(include_user_settings)
+    # settings.json always ships (the collector includes it with the correct flags)
+    files[Path("~/.claude/settings.json")] = home_files.pop(Path("settings.json"))
+
+    # Always ship .claude.json to $HOME/.claude/ in the deploy image.
     # we set the time to a constant for better caching:
     FIXED_TIME = datetime(2026, 2, 23, 3, 4, 7, tzinfo=timezone.utc)
     # it's a little silly to pass in repo_root here, but whatever, it will also get reset when we're provisioning
@@ -1763,11 +1990,11 @@ def get_files_for_deploy(
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
     if include_user_settings:
-        # Skills, agents, commands (skip settings.json, handled above)
-        for relative_path, source_path in _collect_claude_home_dir_files(local_claude_dir).items():
-            if relative_path == Path("settings.json"):
-                continue
-            files[Path("~/.claude") / relative_path] = source_path
+        for relative_path, content in home_files.items():
+            files[Path("~/.claude") / relative_path] = content
+        # Write source dir marker so runtime fixup can rewrite installPaths
+        if _INSTALLED_PLUGINS_RELATIVE_PATH in home_files:
+            files[Path("~/.claude") / _INSTALLED_PLUGINS_SOURCE_DIR_MARKER] = str(local_claude_dir)
 
         # ~/.claude/.credentials.json (OAuth tokens)
         credentials = local_claude_dir / ".credentials.json"

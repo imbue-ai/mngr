@@ -106,7 +106,9 @@ def resolve_agent_type(
 
     For custom types (defined in config with a parent_type), resolves through
     the parent type to get the correct agent class and config class, then
-    applies the custom type's overrides on top of the parent defaults.
+    applies the custom type's overrides on top of the parent type's
+    user-configured settings (falling back to bare defaults if the parent
+    type has no user config).
 
     For plugin-registered or direct command types, returns the registered
     class and config directly.
@@ -118,8 +120,15 @@ def resolve_agent_type(
         agent_class = get_agent_class(str(parent_type))
         config_class = get_agent_config_class(str(parent_type))
 
-        parent_default_config = config_class()
-        merged_config = _apply_custom_overrides_to_parent_config(parent_default_config, custom_config)
+        # Start from the parent type's user-configured settings (if any),
+        # falling back to defaults. This ensures that e.g. [agent_types.claude]
+        # is_fast = true is inherited by a child type with parent_type = "claude".
+        parent_user_config = config.agent_types.get(parent_type)
+        if parent_user_config is not None:
+            parent_base_config = _apply_custom_overrides_to_parent_config(config_class(), parent_user_config)
+        else:
+            parent_base_config = config_class()
+        merged_config = _apply_custom_overrides_to_parent_config(parent_base_config, custom_config)
 
         return ResolvedAgentType(
             agent_class=agent_class,

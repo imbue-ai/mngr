@@ -19,6 +19,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -186,7 +187,12 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def is_running(self) -> bool:
         """Check if the agent is currently running by checking lifecycle state."""
         state = self.get_lifecycle_state()
-        is_running = state in (AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING, AgentLifecycleState.REPLACED)
+        is_running = state in (
+            AgentLifecycleState.RUNNING,
+            AgentLifecycleState.WAITING,
+            AgentLifecycleState.REPLACED,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        )
         logger.trace("Determined agent {} is_running={} (lifecycle_state={})", self.name, is_running, state)
         return is_running
 
@@ -218,12 +224,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             is_active = self._check_file_exists(self._get_agent_dir() / "active")
 
             expected_process_name = self.get_expected_process_name()
+            is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
             state = determine_lifecycle_state(
                 tmux_info=tmux_info if tmux_info else None,
                 is_active=is_active,
                 expected_process_name=expected_process_name,
                 ps_output=ps_output,
+                is_agent_type_known=is_type_known,
             )
             logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
             return state

@@ -7,17 +7,18 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import apply_labels
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -88,7 +89,9 @@ def archive(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers and not opts.archive_all:
-        raise UserInputError("Must specify at least one agent or use --all")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise UserInputError("Must specify at least one agent or use --all")
+        return
 
     if agent_identifiers and opts.archive_all:
         raise UserInputError("Cannot specify both agent names and --all")

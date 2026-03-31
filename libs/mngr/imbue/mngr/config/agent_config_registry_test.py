@@ -217,6 +217,86 @@ def test_resolve_agent_type_without_parent_type() -> None:
         reset_agent_config_registry()
 
 
+def test_resolve_agent_type_inherits_parent_user_config() -> None:
+    """resolve_agent_type should inherit settings from the parent type's user config.
+
+    When the parent type itself has user-configured overrides (e.g. [agent_types.parent-type]),
+    those should be inherited by child types, not just the bare defaults.
+    """
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        # Parent type has user-configured extra_bool=True
+        parent_user_config = _SubclassAgentConfig.model_construct(
+            extra_bool=True,
+        )
+        # Child type sets extra_str but not extra_bool
+        child_config = _SubclassAgentConfig.model_construct(
+            parent_type=AgentTypeName("parent-type"),
+            extra_str="child-value",
+        )
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): parent_user_config,
+                AgentTypeName("child-type"): child_config,
+            },
+        )
+
+        result = resolve_agent_type(AgentTypeName("child-type"), config)
+
+        assert result.agent_class is _FakeAgentClass
+        resolved_config = result.agent_config
+        assert isinstance(resolved_config, _SubclassAgentConfig)
+        # extra_bool should be inherited from the parent's user config
+        assert resolved_config.extra_bool is True
+        # extra_str should come from the child's own config
+        assert resolved_config.extra_str == "child-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_child_overrides_parent_user_config() -> None:
+    """Child type fields should override inherited parent user config fields."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        parent_user_config = _SubclassAgentConfig.model_construct(
+            extra_bool=True,
+            extra_str="parent-value",
+        )
+        child_config = _SubclassAgentConfig.model_construct(
+            parent_type=AgentTypeName("parent-type"),
+            extra_bool=False,
+        )
+
+        config = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): parent_user_config,
+                AgentTypeName("child-type"): child_config,
+            },
+        )
+
+        result = resolve_agent_type(AgentTypeName("child-type"), config)
+
+        resolved_config = result.agent_config
+        assert isinstance(resolved_config, _SubclassAgentConfig)
+        # Child explicitly set extra_bool=False, should override parent's True
+        assert resolved_config.extra_bool is False
+        # extra_str not set in child, should inherit from parent
+        assert resolved_config.extra_str == "parent-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
 def test_resolve_agent_type_preserves_subclass_fields() -> None:
     """resolve_agent_type should preserve subclass-specific fields from custom config."""
     reset_agent_class_registry()

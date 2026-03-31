@@ -25,6 +25,7 @@ from loguru import logger
 from paramiko import ChannelException
 from paramiko import SFTPClient
 from paramiko import SSHException
+from paramiko import Transport
 from pydantic import Field
 from pydantic import ValidationError
 from pyinfra.api.command import StringCommand
@@ -134,6 +135,17 @@ _retry_on_transient_ssh_error = retry(
 )
 
 
+def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
+    """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
+    try:
+        client = pyinfra_host.connector.client
+    except AttributeError:
+        return None
+    if client is not None:
+        return client.get_transport()
+    return None
+
+
 @pure
 def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     """Compute the state directory path for an agent given the host directory and agent ID."""
@@ -171,7 +183,13 @@ class Host(BaseHost, OnlineHostInterface):
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host."""
-        return HostName(self.connector.name)
+        name = self.connector.name
+        # Strip the '@' prefix that pyinfra uses internally to signal local
+        # execution (via LocalConnector).  This is an implementation detail
+        # that should not leak into user-facing host names.
+        if name.startswith("@"):
+            name = name[1:]
+        return HostName(name)
 
     # =========================================================================
     # Core Primitives (pyinfra-compatible signatures)
@@ -293,8 +311,11 @@ class Host(BaseHost, OnlineHostInterface):
         closed, EOF) with the same backoff used by file operations.
         """
         self._ensure_connected()
+        # Save the transport used for this command so we can detect if it dies
+        # during execution (e.g. another thread disconnects the connection).
+        transport_before = _get_ssh_transport(self.connector.host)
         try:
-            return self.connector.host.run_shell_command(command, **pyinfra_kwargs)
+            result = self.connector.host.run_shell_command(command, **pyinfra_kwargs)
         except ChannelException as e:
             logger.debug("Channel open refused while running command: {}, retrying without disconnect", e)
             raise
@@ -316,6 +337,21 @@ class Host(BaseHost, OnlineHostInterface):
                 logger.debug("Socket closed while running command, disconnecting for retry")
                 self.connector.host.disconnect()
             raise
+
+        # Detect ghost failures: pyinfra silently returns (False, output) when
+        # a channel dies mid-command (paramiko's recv_exit_status() returns -1).
+        # This happens when another thread disconnects the shared SSH connection.
+        # Check whether the transport we used is still alive; if not, retry.
+        success, _output = result
+        if not success and transport_before is not None and not transport_before.is_active():
+            logger.debug("Command failed and SSH transport is dead, disconnecting for retry")
+            self.connector.host.disconnect()
+            raise SSHException(
+                "Command returned failure with dead SSH transport "
+                "(likely channel closed during execution by concurrent disconnect)"
+            )
+
+        return result
 
     def _get_file(
         self,
@@ -1877,7 +1913,8 @@ class Host(BaseHost, OnlineHostInterface):
     ) -> CreateWorkDirResult:
         """Create a work_dir using git worktree.
 
-        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default.
+        Worktrees are placed at ~/.mngr/worktrees/<name>-<uuid>/ by default,
+        or at <worktree_base_folder>/<name>-<uuid>/ if worktree_base_folder is set.
         """
         if host.id != self.id:
             raise UserInputError("Worktree mode only works when source is on the same host")
@@ -1887,7 +1924,8 @@ class Host(BaseHost, OnlineHostInterface):
         else:
             agent_name = options.name or AgentName("agent")
             work_dir_dir_name = f"{agent_name}-{uuid4().hex}"
-            work_dir_path = self.host_dir / "worktrees" / work_dir_dir_name
+            worktree_base = options.worktree_base_folder or (self.host_dir / "worktrees")
+            work_dir_path = worktree_base / work_dir_dir_name
 
         new_branch_name = options.git.new_branch_name if options.git else None
         base_branch = options.git.base_branch if options.git else None

@@ -92,7 +92,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--from`, `--source` | text | Directory to use as work_dir root [AGENT &#x7C; AGENT.HOST &#x7C; AGENT.HOST:PATH &#x7C; HOST:PATH]. Defaults to current dir if no other source args are given | None |
+| `--from`, `--source` | text | Directory to use as work_dir root [AGENT &#x7C; AGENT@HOST &#x7C; AGENT@HOST.PROVIDER:PATH &#x7C; @HOST:PATH]. Defaults to current dir if no other source args are given | None |
 | `--source-agent`, `--from-agent` | text | Source agent for cloning work_dir | None |
 | `--source-host` | text | Source host | None |
 | `--source-path` | text | Source path | None |
@@ -118,6 +118,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--ensure-clean`, `--no-ensure-clean` | boolean | Abort if working tree is dirty | `True` |
 | `--include-unclean`, `--exclude-unclean` | boolean | Include uncommitted files [default: include if --no-ensure-clean] | None |
 | `--include-gitignored`, `--no-include-gitignored` | boolean | Include gitignored files | `False` |
+| `--worktree-base-folder` | path | Base folder for git worktrees [default: ~/.mngr/worktrees/] | None |
 
 ## Agent Environment Variables
 
