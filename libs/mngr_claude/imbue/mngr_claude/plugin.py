@@ -1623,13 +1623,36 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
+_MAX_MKDIR_COMMAND_LENGTH = 100_000
+"""Stay well under the 128 KB Linux ARG_MAX / 256 KB macOS limit."""
+
+
+def _batched_mkdir(host: OnlineHostInterface, folders: Sequence[str]) -> None:
+    """Create directories on a host, batching to avoid argument-length limits."""
+    batch: list[str] = []
+    batch_len = len("mkdir -p")
+    for folder in folders:
+        quoted = shlex.quote(folder)
+        entry_len = 1 + len(quoted)
+        if batch and batch_len + entry_len > _MAX_MKDIR_COMMAND_LENGTH:
+            result = host.execute_idempotent_command(f"mkdir -p {' '.join(batch)}")
+            if not result.success:
+                raise MngrError(f"Failed to create directories: {result.stderr}")
+            batch = []
+            batch_len = len("mkdir -p")
+        batch.append(quoted)
+        batch_len += entry_len
+    if batch:
+        result = host.execute_idempotent_command(f"mkdir -p {' '.join(batch)}")
+        if not result.success:
+            raise MngrError(f"Failed to create directories: {result.stderr}")
+
+
 def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    remote_folders: list[str] = []
-    for dest_path, _dest_contents in transfers:
-        remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
+    unique_folders = sorted({str(dest_path.parent) for dest_path, _ in transfers})
+    # Batch mkdir calls to avoid hitting the OS argument length limit when there
+    # are many directories (e.g. large ~/.claude/plugins/ trees).
+    _batched_mkdir(host, unique_folders)
 
     # then upload them all in parallel
     count = 0
