@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from llm_webchat.hookspecs import hookimpl
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from llm_webchat.hookspecs import hookimpl
 
 
 def _build_system_prompt(agent_work_dir: Path) -> str | None:
