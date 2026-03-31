@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [-f|--force] [--dry-run] [-b|--remove-created-branch]
+mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch]
 ```
 
 Destroy agent(s) and clean up resources.
@@ -19,6 +19,8 @@ Use with caution! This operation is irreversible.
 By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
 agents unless --force is specified.
+
+Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: name.
 
@@ -40,17 +42,13 @@ mngr destroy [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to destroy (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Destroy all agents | `False` |
 | `--session` | text | Tmux session name to destroy (can be specified multiple times). The agent name is extracted by stripping the configured prefix from the session name. | None |
-| `--include` | text | Filter agents to destroy by CEL expression (repeatable) | None |
-| `--exclude` | text | Exclude agents matching CEL expression from destruction (repeatable) | None |
 
 ## Behavior
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-f`, `--force` | boolean | Skip confirmation prompts and force destroy running agents | `False` |
-| `--dry-run` | boolean | Show what would be destroyed without actually destroying | `False` |
 | `--gc`, `--no-gc` | boolean | Run garbage collection after destroying agents to clean up orphaned resources (default: enabled) | `True` |
 | `-b`, `--remove-created-branch` | boolean | Delete the git branch that mngr created for the agent's work directory | `False` |
 | `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow removal of the git worktree directory (default: enabled) | `True` |
@@ -101,13 +99,7 @@ $ mngr destroy agent1 agent2 agent3
 **Destroy all agents**
 
 ```bash
-$ mngr destroy --all --force
-```
-
-**Preview what would be destroyed**
-
-```bash
-$ mngr destroy my-agent --dry-run
+$ mngr list --ids | mngr destroy - --force
 ```
 
 **Destroy using --agent flag (repeatable)**
@@ -122,26 +114,14 @@ $ mngr destroy --agent my-agent --agent another-agent
 $ mngr destroy --session mngr-my-agent
 ```
 
-**Destroy agents matching a CEL filter**
-
-```bash
-$ mngr destroy --include 'name.startsWith("test-")' --force
-```
-
-**Destroy all except docker agents**
-
-```bash
-$ mngr destroy --all --exclude 'host.provider == "docker"' --force
-```
-
 **Pipe agent names from list**
 
 ```bash
-$ mngr list --format '{name}' | mngr destroy - --force
+$ mngr list --ids | mngr destroy - --force
 ```
 
 **Custom format template output**
 
 ```bash
-$ mngr destroy --all --force --format '{name}'
+$ mngr destroy my-agent --force --format '{name}'
 ```

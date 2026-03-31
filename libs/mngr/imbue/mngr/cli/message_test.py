@@ -21,9 +21,6 @@ from imbue.mngr.primitives import OutputFormat
 _DEFAULT_OPTS = MessageCliOptions(
     agents=(),
     agent_list=(),
-    all_agents=False,
-    include=(),
-    exclude=(),
     message_content=None,
     message_file=None,
     on_error="continue",
@@ -47,9 +44,6 @@ def test_message_cli_options_has_expected_fields() -> None:
     opts = MessageCliOptions(
         agents=("agent1", "agent2"),
         agent_list=("agent3",),
-        all_agents=False,
-        include=("name == 'test'",),
-        exclude=(),
         message_content="Hello",
         message_file=None,
         on_error="continue",
@@ -68,7 +62,6 @@ def test_message_cli_options_has_expected_fields() -> None:
     )
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == ("agent3",)
-    assert opts.all_agents is False
     assert opts.message_content == "Hello"
     assert opts.message_file is None
 
@@ -124,11 +117,11 @@ def test_emit_json_output_includes_counts(capsys: pytest.CaptureFixture[str]) ->
     assert '"total_failed": 1' in captured.out
 
 
-def test_message_requires_agent_or_all(
+def test_message_requires_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that message requires at least one agent, --all, or --include."""
+    """Test that message requires at least one agent."""
     result = cli_runner.invoke(
         message,
         ["-m", "hello"],
@@ -138,38 +131,6 @@ def test_message_requires_agent_or_all(
 
     assert result.exit_code != 0
     assert "Must specify at least one agent" in result.output
-
-
-def test_message_cannot_combine_agents_and_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --all cannot be combined with agent names."""
-    result = cli_runner.invoke(
-        message,
-        ["my-agent", "--all", "-m", "hello"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-
-    assert result.exit_code != 0
-    assert "Cannot specify both agent names and --all" in result.output
-
-
-def test_message_sends_nothing_with_no_matching_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that message --all with no agents reports no agents found."""
-    result = cli_runner.invoke(
-        message,
-        ["--all", "-m", "hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "No agents found to send message to" in result.output
 
 
 def test_message_nonexistent_agent(
@@ -186,25 +147,6 @@ def test_message_nonexistent_agent(
     # The message command reports "no agents found" rather than failing
     assert result.exit_code == 0
     assert "No agents found" in result.output
-
-
-def test_message_all_json_format_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test message --all --format json with no agents outputs JSON with empty lists."""
-    result = cli_runner.invoke(
-        message,
-        ["--all", "-m", "hello", "--format", "json"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    data = json.loads(result.output)
-    assert data["successful_agents"] == []
-    assert data["failed_agents"] == []
-    assert data["total_sent"] == 0
-    assert data["total_failed"] == 0
 
 
 # =============================================================================
@@ -321,25 +263,6 @@ def test_message_dash_reads_agent_names_from_input(
     assert "No agents found" in result.output
 
 
-def test_message_all_jsonl_format_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test message --all --format jsonl with no agents exits 0 with empty output.
-
-    In JSONL mode, events are emitted via streaming callbacks. With no agents matched,
-    no callbacks fire, so the output is empty.
-    """
-    result = cli_runner.invoke(
-        message,
-        ["--all", "-m", "hello", "--format", "jsonl"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert result.output.strip() == ""
-
-
 # =============================================================================
 # Tests for --message-file
 # =============================================================================
@@ -356,7 +279,7 @@ def test_message_file_reads_content_from_file(
 
     result = cli_runner.invoke(
         message,
-        ["--all", "--message-file", str(message_file)],
+        ["nonexistent-test-agent", "--message-file", str(message_file)],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -376,7 +299,7 @@ def test_message_and_message_file_both_provided_raises_error(
 
     result = cli_runner.invoke(
         message,
-        ["--all", "-m", "Hello from flag", "--message-file", str(message_file)],
+        ["nonexistent-test-agent", "-m", "Hello from flag", "--message-file", str(message_file)],
         obj=plugin_manager,
     )
 
@@ -394,7 +317,7 @@ def test_message_file_nonexistent_file_raises_error(
 
     result = cli_runner.invoke(
         message,
-        ["--all", "--message-file", str(nonexistent_file)],
+        ["nonexistent-test-agent", "--message-file", str(nonexistent_file)],
         obj=plugin_manager,
     )
 

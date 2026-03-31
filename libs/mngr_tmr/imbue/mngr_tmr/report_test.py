@@ -237,7 +237,7 @@ def test_build_grouped_tables_running_first() -> None:
 
 
 def test_build_grouped_tables_has_merged_column() -> None:
-    r = make_test_result(before=True, after=True)
+    r = make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)
     tables_html = _build_grouped_tables([r])
     assert "Merged?" in tables_html
 
@@ -263,7 +263,7 @@ def test_build_grouped_tables_impl_priority_sorting() -> None:
     )
     integrator = IntegratorResult(impl_priority=("mngr-tmr/b", "mngr-tmr/a"))
     tables_html = _build_grouped_tables([r_a, r_b], integrator=integrator)
-    assert tables_html.index("t::b") < tables_html.index("t::a")
+    assert tables_html.index("t::<wbr>b") < tables_html.index("t::<wbr>a")
 
 
 def test_generate_html_report(tmp_path: Path) -> None:

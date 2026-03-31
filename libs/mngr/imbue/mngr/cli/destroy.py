@@ -2,7 +2,6 @@ import threading
 from collections.abc import Sequence
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
 from typing import assert_never
 
 import click
@@ -14,7 +13,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.pure import pure
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
@@ -51,8 +49,6 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
-from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
 from imbue.mngr.utils.git_utils import remove_worktree
 
@@ -128,14 +124,10 @@ class DestroyCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
     force: bool
-    destroy_all: bool
-    dry_run: bool
     gc: bool
     remove_created_branch: bool
     allow_worktree_removal: bool
     sessions: tuple[str, ...]
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
 
 
 @click.command(name="destroy")
@@ -148,29 +140,11 @@ class DestroyCliOptions(CommonCliOptions):
     help="Agent name or ID to destroy (can be specified multiple times)",
 )
 @optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "destroy_all",
-    is_flag=True,
-    help="Destroy all agents",
-)
-@optgroup.option(
     "--session",
     "sessions",
     multiple=True,
     help="Tmux session name to destroy (can be specified multiple times). The agent name is extracted by "
     "stripping the configured prefix from the session name.",
-)
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter agents to destroy by CEL expression (repeatable)",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents matching CEL expression from destruction (repeatable)",
 )
 @optgroup.group("Behavior")
 @optgroup.option(
@@ -178,11 +152,6 @@ class DestroyCliOptions(CommonCliOptions):
     "--force",
     is_flag=True,
     help="Skip confirmation prompts and force destroy running agents",
-)
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be destroyed without actually destroying",
 )
 @optgroup.option(
     "--gc/--no-gc",
@@ -212,19 +181,13 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         is_format_template_supported=True,
     )
 
-    # Compile CEL filters if provided
-    compiled_include_filters: list[Any] = []
-    compiled_exclude_filters: list[Any] = []
-    if opts.include or opts.exclude:
-        compiled_include_filters, compiled_exclude_filters = compile_cel_filters(opts.include, opts.exclude)
-
     # Validate input
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     # Handle --session option by extracting agent names from session names
     if opts.sessions:
-        if agent_identifiers or opts.destroy_all:
-            raise UserInputError("Cannot specify --session with agent names or --all")
+        if agent_identifiers:
+            raise UserInputError("Cannot specify --session with agent names")
         for session_name in opts.sessions:
             agent_name = get_agent_name_from_session(session_name, mngr_ctx.config.prefix)
             if agent_name is None:
@@ -234,26 +197,14 @@ def destroy(ctx: click.Context, **kwargs) -> None:
                 )
             agent_identifiers.append(agent_name)
 
-    # --include alone (without --exclude) is sufficient to target agents (acts like --all with filtering).
-    # --exclude alone requires explicit agent names or --all, since it would otherwise implicitly
-    # target all agents for a destructive operation.
-    is_include_filter_only = not agent_identifiers and not opts.destroy_all and bool(opts.include)
-    effective_destroy_all = opts.destroy_all or is_include_filter_only
-
-    if not agent_identifiers and not effective_destroy_all:
-        raise UserInputError("Must specify at least one agent, use --all, or use --include filters")
-
-    if agent_identifiers and opts.destroy_all:
-        raise UserInputError("Cannot specify both agent names and --all")
+    if not agent_identifiers:
+        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
 
     # Find agents to destroy
     try:
         targets = _find_agents_to_destroy(
             agent_identifiers=agent_identifiers,
-            destroy_all=effective_destroy_all,
             mngr_ctx=mngr_ctx,
-            compiled_include_filters=compiled_include_filters,
-            compiled_exclude_filters=compiled_exclude_filters,
         )
     except AgentNotFoundError as e:
         if opts.force:
@@ -264,11 +215,6 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     if not targets.online_agents and not targets.offline_hosts:
         _output("No agents found to destroy", output_opts)
-        return
-
-    # Handle dry-run mode
-    if opts.dry_run:
-        _output_targets(targets, "Would destroy:", output_opts)
         return
 
     # Confirm destruction if not forced
@@ -329,7 +275,7 @@ def destroy(ctx: click.Context, **kwargs) -> None:
         _remove_created_branch(created_branch, source_repo_path, mngr_ctx.concurrency_group, output_opts)
 
     # Run garbage collection if enabled
-    if opts.gc and not opts.dry_run and destroyed_agents:
+    if opts.gc and destroyed_agents:
         _run_post_destroy_gc(mngr_ctx=mngr_ctx, output_opts=output_opts)
 
     # Output final result
@@ -338,71 +284,29 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
 def _find_agents_to_destroy(
     agent_identifiers: Sequence[str],
-    destroy_all: bool,
     mngr_ctx: MngrContext,
-    compiled_include_filters: Sequence[Any] = (),
-    compiled_exclude_filters: Sequence[Any] = (),
 ) -> _DestroyTargets:
     """Find all agents to destroy.
 
     Uses find_agents_by_addresses for matching (supports NAME@HOST.PROVIDER syntax),
-    then optionally applies CEL include/exclude filters, then partitions results
-    into online agents vs offline hosts.
+    then partitions results into online agents vs offline hosts.
 
     Returns _DestroyTargets containing online agents and offline hosts to destroy.
     Raises AgentNotFoundError if any specified identifier does not match an agent.
     """
-    # Step 1: Find matching agents using the shared address-aware resolution.
+    # Find matching agents using the shared address-aware resolution.
     # This handles address parsing, name/ID matching, and host/provider filtering.
     # include_destroyed=True so we can find and clean up agents on already-destroyed hosts.
     matches = find_agents_by_addresses(
         raw_identifiers=agent_identifiers,
-        filter_all=destroy_all,
+        filter_all=False,
         target_state=None,
         mngr_ctx=mngr_ctx,
         include_destroyed=True,
     )
 
-    # Step 2: Apply CEL filters if provided
-    if compiled_include_filters or compiled_exclude_filters:
-        matches = _apply_cel_filters_to_matches(matches, compiled_include_filters, compiled_exclude_filters)
-
-    # Step 3: Partition matches into online agents vs offline hosts.
+    # Partition matches into online agents vs offline hosts.
     return _partition_destroy_targets(matches, mngr_ctx)
-
-
-@pure
-def _agent_match_to_cel_context(match: AgentMatch) -> dict[str, Any]:
-    """Convert an AgentMatch to a dict suitable for CEL evaluation."""
-    return {
-        "name": str(match.agent_name),
-        "id": str(match.agent_id),
-        "host": {
-            "name": str(match.host_name),
-            "id": str(match.host_id),
-            "provider": str(match.provider_name),
-        },
-    }
-
-
-def _apply_cel_filters_to_matches(
-    matches: Sequence[AgentMatch],
-    compiled_include_filters: Sequence[Any],
-    compiled_exclude_filters: Sequence[Any],
-) -> list[AgentMatch]:
-    """Apply compiled CEL include/exclude filters to a list of AgentMatch objects."""
-    filtered: list[AgentMatch] = []
-    for match in matches:
-        context = _agent_match_to_cel_context(match)
-        is_included = apply_cel_filters_to_context(
-            context=context,
-            include_filters=compiled_include_filters,
-            exclude_filters=compiled_exclude_filters,
-            error_context_description=f"agent {match.agent_name}",
-        )
-        if is_included:
-            filtered.append(match)
-    return filtered
 
 
 def _partition_destroy_targets(
@@ -614,36 +518,6 @@ def _confirm_destruction(targets: _DestroyTargets) -> None:
         raise click.Abort()
 
 
-def _output_targets(
-    targets: _DestroyTargets,
-    prefix: str,
-    output_opts: OutputOptions,
-) -> None:
-    """Output a list of agents to destroy."""
-    agent_data: list[dict[str, object]] = [
-        {"agent_id": str(agent.id), "agent_name": str(agent.name), "host_id": str(host.id)}
-        for agent, host in targets.online_agents
-    ]
-    for offline in targets.offline_hosts:
-        for name in offline.agent_names:
-            agent_data.append({"agent_name": str(name), "host_id": str(offline.host.id), "host_offline": True})
-
-    match output_opts.output_format:
-        case OutputFormat.JSON:
-            emit_final_json({"agents": agent_data})
-        case OutputFormat.JSONL:
-            emit_event("agents_list", {"agents": agent_data}, OutputFormat.JSONL)
-        case OutputFormat.HUMAN:
-            write_human_line("\n{}", prefix)
-            for agent, host in targets.online_agents:
-                write_human_line("  - {} (on host {})", agent.name, host.id)
-            for offline in targets.offline_hosts:
-                for name in offline.agent_names:
-                    write_human_line("  - {} (on offline host {})", name, offline.host.id)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _output(message: str, output_opts: OutputOptions) -> None:
     """Output a message according to the format."""
     if output_opts.output_format == OutputFormat.HUMAN:
@@ -737,7 +611,7 @@ def _run_post_destroy_gc(mngr_ctx: MngrContext, output_opts: OutputOptions) -> N
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--all] [--session <SESSION>] [--include <CEL>] [--exclude <CEL>] [-f|--force] [--dry-run] [-b|--remove-created-branch]",
+    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -747,19 +621,18 @@ By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
 agents unless --force is specified.
 
+Use '-' in place of agent names to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields: name.""",
     aliases=("rm",),
     examples=(
         ("Destroy an agent by name", "mngr destroy my-agent"),
         ("Destroy multiple agents", "mngr destroy agent1 agent2 agent3"),
-        ("Destroy all agents", "mngr destroy --all --force"),
-        ("Preview what would be destroyed", "mngr destroy my-agent --dry-run"),
+        ("Destroy all agents", "mngr list --ids | mngr destroy - --force"),
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
-        ("Destroy agents matching a CEL filter", "mngr destroy --include 'name.startsWith(\"test-\")' --force"),
-        ("Destroy all except docker agents", "mngr destroy --all --exclude 'host.provider == \"docker\"' --force"),
-        ("Pipe agent names from list", "mngr list --format '{name}' | mngr destroy - --force"),
-        ("Custom format template output", "mngr destroy --all --force --format '{name}'"),
+        ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force"),
+        ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),
     see_also=(
         ("create", "Create a new agent"),

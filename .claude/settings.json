@@ -34,6 +34,17 @@
       }
     ]
   },
+  "extraKnownMarketplaces": {
+    "imbue-mngr": {
+      "source": {
+        "source": "github",
+        "repo": "imbue-ai/mngr"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "imbue-code-review@imbue-mngr": true
+  },
   "model": "opus[1m]",
   "effortLevel": "high",
   "statusLine": {

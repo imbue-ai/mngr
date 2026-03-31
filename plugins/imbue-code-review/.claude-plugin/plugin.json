@@ -1,0 +1,10 @@
+{
+  "name": "imbue-code-review",
+  "version": "0.1.0",
+  "description": "Automated code review enforcement. Runs autofix, architecture verification, and conversation review -- and blocks sessions from finishing until they pass.",
+  "author": {
+    "name": "Imbue"
+  },
+  "repository": "https://github.com/imbue-ai/mngr",
+  "keywords": ["code-review", "autofix", "architecture", "enforcement"]
+}

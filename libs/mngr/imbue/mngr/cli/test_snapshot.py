@@ -33,59 +33,9 @@ def test_snapshot_create_local_agent_rejects_unsupported_provider(
     assert "does not support snapshots" in result.output
 
 
-@pytest.mark.tmux
-def test_snapshot_create_dry_run_jsonl_resolves_local_agent(
-    cli_runner: CliRunner,
-    create_test_agent,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --dry-run with --format jsonl outputs structured data on stdout."""
-    agent_name = f"test-snap-dryrun-jsonl-{get_short_random_string()}"
-    create_test_agent(agent_name)
-
-    result = cli_runner.invoke(
-        snapshot,
-        ["create", agent_name, "--dry-run", "--format", "jsonl"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "dry_run" in result.output
-    assert agent_name in result.output
-
-
 # =============================================================================
 # Tests without agents (lightweight)
 # =============================================================================
-
-
-def test_snapshot_create_all_no_running_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that snapshot create --all succeeds when no agents are running."""
-    result = cli_runner.invoke(
-        snapshot,
-        ["create", "--all"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-
-
-def test_snapshot_list_all_no_running_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that snapshot list --all succeeds when no agents are running."""
-    result = cli_runner.invoke(
-        snapshot,
-        ["list", "--all"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
 
 
 def test_snapshot_create_nonexistent_agent_errors(

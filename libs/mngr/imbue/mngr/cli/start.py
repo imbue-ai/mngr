@@ -39,14 +39,10 @@ class StartCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[str, ...]
-    start_all: bool
-    dry_run: bool
     connect: bool
     connect_command: str | None
     # Planned features (not yet implemented)
     host: tuple[str, ...]
-    include: tuple[str, ...]
-    exclude: tuple[str, ...]
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -112,34 +108,11 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     help="Agent name or ID to start (can be specified multiple times)",
 )
 @optgroup.option(
-    "-a",
-    "--all",
-    "--all-agents",
-    "start_all",
-    is_flag=True,
-    help="Start all stopped agents",
-)
-@optgroup.option(
     "--host",
     multiple=True,
     help="Host(s) to start all stopped agents on [repeatable] [future]",
 )
-@optgroup.option(
-    "--include",
-    multiple=True,
-    help="Filter agents and hosts to start by CEL expression (repeatable) [future]",
-)
-@optgroup.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude agents and hosts matching CEL expression (repeatable) [future]",
-)
 @optgroup.group("Behavior")
-@optgroup.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be started without actually starting",
-)
 @optgroup.option(
     "--connect/--no-connect",
     default=False,
@@ -162,40 +135,26 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
     # Check for unsupported [future] options
     if opts.host:
         raise NotImplementedError("--host is not implemented yet")
-    if opts.include:
-        raise NotImplementedError("--include is not implemented yet")
-    if opts.exclude:
-        raise NotImplementedError("--exclude is not implemented yet")
 
     # Validate input
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
-    if not agent_identifiers and not opts.start_all:
-        raise click.UsageError("Must specify at least one agent or use --all")
+    if not agent_identifiers:
+        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
 
-    if agent_identifiers and opts.start_all:
-        raise click.UsageError("Cannot specify both agent names and --all")
-
-    if opts.connect and (opts.start_all or len(agent_identifiers) > 1):
+    if opts.connect and len(agent_identifiers) > 1:
         raise click.UsageError("--connect can only be used with a single agent")
 
-    # Find agents to start (STOPPED agents when using --all)
+    # Find agents to start (STOPPED agents)
     agents_to_start = find_agents_by_addresses(
         raw_identifiers=agent_identifiers,
-        filter_all=opts.start_all,
+        filter_all=False,
         target_state=AgentLifecycleState.STOPPED,
         mngr_ctx=mngr_ctx,
     )
 
     if not agents_to_start:
         _output("No stopped agents found to start", output_opts)
-        return
-
-    # Handle dry-run mode
-    if opts.dry_run:
-        _output("Would start:", output_opts)
-        for match in agents_to_start:
-            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     # Start each agent
@@ -270,7 +229,7 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--all] [--host <HOST>] [--connect] [--dry-run]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--connect]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -278,15 +237,16 @@ session.
 If multiple agents share a host, they will all be started together when
 the host starts.
 
+Use '-' in place of agent names to read them from stdin, one per line.
+
 Supports custom format templates via --format. Available fields: name.""",
     aliases=(),
     examples=(
         ("Start an agent by name", "mngr start my-agent"),
         ("Start multiple agents", "mngr start agent1 agent2"),
         ("Start and connect", "mngr start my-agent --connect"),
-        ("Start all stopped agents", "mngr start --all"),
-        ("Preview what would be started", "mngr start --all --dry-run"),
-        ("Custom format template output", "mngr start --all --format '{name}'"),
+        ("Start all stopped agents", "mngr list --ids | mngr start -"),
+        ("Custom format template output", "mngr start agent1 agent2 --format '{name}'"),
     ),
     see_also=(
         ("stop", "Stop running agents"),

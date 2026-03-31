@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [--all] [-m <MESSAGE>] [--message-file <FILE>]
+mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>]
 ```
 
 Send a message to one or more agents.
@@ -16,6 +16,8 @@ message is sent to the agent's stdin.
 
 If no message is specified with --message or --message-file, reads from stdin
 (if not a tty) or opens an editor (if interactive).
+
+Use '-' in place of agent names to read them from stdin, one per line.
 
 Alias: msg
 
@@ -35,9 +37,6 @@ mngr message [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to send message to (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Send message to all agents | `False` |
-| `--include` | text | Include agents matching CEL expression (repeatable) | None |
-| `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
 | `--start`, `--no-start` | boolean | Automatically start offline hosts and stopped agents before sending | `False` |
 
 ## Message Content
@@ -98,7 +97,7 @@ $ mngr message agent1 agent2 --message "Hello to all"
 **Send to all agents**
 
 ```bash
-$ mngr message --all --message "Hello everyone"
+$ mngr list --ids | mngr message - --message 'Hello everyone'
 ```
 
 **Send message from a file**

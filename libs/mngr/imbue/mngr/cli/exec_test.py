@@ -26,7 +26,6 @@ def test_exec_cli_options_fields() -> None:
     opts = ExecCliOptions(
         agents=("my-agent",),
         agent_list=(),
-        exec_all=False,
         command_arg="echo hello",
         user=None,
         cwd=None,
@@ -67,11 +66,11 @@ def test_exec_requires_command(
     assert result.exit_code != 0
 
 
-def test_exec_requires_agent_or_all(
+def test_exec_requires_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that exec requires at least one agent or --all."""
+    """Test that exec requires at least one agent."""
     result = cli_runner.invoke(
         exec_command,
         ["echo hello"],
@@ -79,7 +78,7 @@ def test_exec_requires_agent_or_all(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
-    assert "Must specify at least one agent or use --all" in result.output
+    assert "Must specify at least one agent" in result.output
 
 
 def test_emit_human_output_single_success(capsys: pytest.CaptureFixture[str]) -> None:
@@ -157,72 +156,6 @@ def test_emit_jsonl_exec_result(capsys: pytest.CaptureFixture[str]) -> None:
     assert output["event"] == "exec_result"
     assert output["agent"] == "test-agent"
     assert output["success"] is True
-
-
-def test_exec_all_with_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test exec --all with no running agents exits 0 and reports success."""
-    result = cli_runner.invoke(
-        exec_command,
-        ["--all", "echo hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    # Human format should not contain any agent headers or error output
-    assert "Failed" not in result.output
-    assert "error" not in result.output.lower()
-
-
-def test_exec_all_jsonl_format_with_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test exec --all --format jsonl with no running agents exits 0 with no events."""
-    result = cli_runner.invoke(
-        exec_command,
-        ["--all", "--format", "jsonl", "echo hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    # With no agents, JSONL streaming should emit zero events
-    assert result.output.strip() == ""
-
-
-def test_exec_all_json_format_with_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test exec --all --format json with no running agents exits 0 and outputs valid JSON."""
-    result = cli_runner.invoke(
-        exec_command,
-        ["--all", "--format", "json", "echo hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    data = json.loads(result.output.strip())
-    assert data["total_executed"] == 0
-    assert data["total_failed"] == 0
-    assert data["results"] == []
-    assert data["failed_agents"] == []
-
-
-def test_exec_cannot_combine_agents_and_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --all cannot be combined with agent names."""
-    result = cli_runner.invoke(
-        exec_command,
-        ["my-agent", "--all", "echo hello"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
 
 
 # =============================================================================

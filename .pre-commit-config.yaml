@@ -20,6 +20,12 @@ repos:
         language: system
         files: 'libs/mngr/imbue/mngr/cli/.*\.py$|libs/mngr/imbue/mngr/main\.py$|scripts/make_cli_docs\.py$|libs/mngr/docs/commands/.*\.md$|^README\.md$|^libs/mngr/README\.md$'
         pass_filenames: false
+    -   id: check-vet-generated-skills
+        name: "Check vet default categories against vet"
+        entry: bash -c 'uv run python scripts/generate_verify_skills.py --check'
+        language: system
+        files: 'scripts/generate_verify_skills\.py$|plugins/imbue-code-review/agents/categories/code-issue-categories\.md$|plugins/imbue-code-review/agents/categories/conversation-issue-categories\.md$'
+        pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command
         name: "Clean stale workspace member directories"

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--all] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]
+mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--grant <PERM>] [--revoke <PERM>]
 ```
 
 Configure limits for agents and hosts [experimental].
@@ -23,6 +23,8 @@ activity-sources) are applied to each agent's underlying host.
 
 Agent-level settings (start-on-boot, grant, revoke) require agent targeting
 and cannot be used with --host alone.
+
+Use '-' in place of agent names to read them from stdin, one per line.
 
 Alias: lim
 
@@ -43,15 +45,6 @@ mngr limit [OPTIONS] [AGENTS]...
 | ---- | ---- | ----------- | ------- |
 | `--agent` | text | Agent name or ID to configure (can be specified multiple times) | None |
 | `--host` | text | Host name or ID to configure (can be specified multiple times) | None |
-| `-a`, `--all`, `--all-agents` | boolean | Apply limits to all agents | `False` |
-| `--include` | text | Filter agents to configure by CEL expression (repeatable) [future] | None |
-| `--exclude` | text | Exclude agents matching CEL expression (repeatable) [future] | None |
-
-## Behavior
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--dry-run` | boolean | Show what limits would be changed without actually changing them | `False` |
 
 ## Lifecycle
 
@@ -124,17 +117,11 @@ $ mngr limit my-agent --grant network --grant internet
 **Disable idle detection for all agents**
 
 ```bash
-$ mngr limit --all --idle-mode disabled
+$ mngr list --ids | mngr limit - --idle-mode disabled
 ```
 
 **Update host idle settings directly**
 
 ```bash
 $ mngr limit --host my-host --idle-timeout 1h
-```
-
-**Preview changes without applying**
-
-```bash
-$ mngr limit --all --idle-timeout 5m --dry-run
 ```
