@@ -20,6 +20,7 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -346,7 +347,11 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     has_hosts = bool(opts.hosts)
 
     if not has_agents and not has_hosts:
-        raise click.UsageError("Must specify at least one agent or --host (use '-' to read agent names from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise click.UsageError(
+                "Must specify at least one agent or --host (use '-' to read agent names from stdin)"
+            )
+        return
 
     # If only --host is specified (no agents), agent-level settings are not allowed
     if has_hosts and not has_agents and _has_agent_level_settings(opts):
