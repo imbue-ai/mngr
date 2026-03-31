@@ -422,9 +422,7 @@ class MngrStreamManager(MutableModel):
                 if process is not None:
                     process.terminate()
                 self._events_servers.pop(aid_str, None)
-            self._discovered_agents = tuple(
-                a for a in self._discovered_agents if str(a.agent_id) not in destroyed_ids
-            )
+            self._discovered_agents = tuple(a for a in self._discovered_agents if str(a.agent_id) not in destroyed_ids)
             self._ssh_by_host_id.pop(str(event.host_id), None)
             agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
             discovered_agents = self._discovered_agents

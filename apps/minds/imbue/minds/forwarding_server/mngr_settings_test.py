@@ -75,10 +75,7 @@ def test_configure_mngr_settings_merges_with_existing_list_excludes(tmp_path: Pa
     settings_dir = repo / MNGR_SETTINGS_DIR_NAME
     settings_dir.mkdir()
     settings_path = settings_dir / MNGR_SETTINGS_FILE_NAME
-    settings_path.write_text(
-        '[commands.list]\n'
-        'exclude = [\'state == "STOPPED"\']\n'
-    )
+    settings_path.write_text("[commands.list]\nexclude = ['state == \"STOPPED\"']\n")
 
     agent_id = AgentId()
     configure_mngr_settings(repo, AgentName("selene"), agent_id)
@@ -96,10 +93,7 @@ def test_configure_mngr_settings_merges_with_existing_events_include(tmp_path: P
     settings_dir = repo / MNGR_SETTINGS_DIR_NAME
     settings_dir.mkdir()
     settings_path = settings_dir / MNGR_SETTINGS_FILE_NAME
-    settings_path.write_text(
-        '[commands.events]\n'
-        'include = [\'source != "delivery_failures"\']\n'
-    )
+    settings_path.write_text("[commands.events]\ninclude = ['source != \"delivery_failures\"']\n")
 
     agent_id = AgentId()
     configure_mngr_settings(repo, AgentName("selene"), agent_id)
@@ -136,14 +130,14 @@ def test_configure_mngr_settings_handles_out_of_order_tables(tmp_path: Path) -> 
     settings_dir.mkdir()
     settings_path = settings_dir / MNGR_SETTINGS_FILE_NAME
     settings_path.write_text(
-        '[commands.list]\n'
-        'exclude = [\'state == "STOPPED"\']\n'
-        '\n'
-        '[other_section]\n'
+        "[commands.list]\n"
+        "exclude = ['state == \"STOPPED\"']\n"
+        "\n"
+        "[other_section]\n"
         'key = "value"\n'
-        '\n'
-        '[commands.events]\n'
-        'include = [\'source != "delivery_failures"\']\n'
+        "\n"
+        "[commands.events]\n"
+        "include = ['source != \"delivery_failures\"']\n"
     )
 
     agent_id = AgentId()
