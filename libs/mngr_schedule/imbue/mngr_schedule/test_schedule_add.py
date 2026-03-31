@@ -13,21 +13,35 @@ import pytest
 
 from imbue.mngr_schedule.implementations.modal.deploy import get_modal_app_name
 
-# Read the real home directory BEFORE the autouse fixture overrides HOME.
-# This is needed because the subprocess needs the real Modal credentials.
-_REAL_HOME = Path.home()
+
+@pytest.fixture()
+def monorepo_root() -> Path:
+    """Get the git root from this file's location.
+
+    mngr schedule add needs to package the repo, so the subprocess must run
+    from the git root. We can't use cwd because isolate_home() chdir's to a
+    temp directory.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=Path(__file__).parent,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"git rev-parse failed: {result.stderr}"
+    return Path(result.stdout.strip())
 
 
 def _build_subprocess_env() -> dict[str, str]:
-    """Build environment for subprocess calls that need real Modal credentials.
+    """Build environment for subprocess calls that need Modal credentials.
 
-    The autouse test fixture overrides HOME to a temp directory for test isolation.
-    Subprocesses need the real HOME to find ~/.modal.toml, git config, mngr profiles,
-    etc. We restore the real HOME and remove test isolation vars so the subprocess
-    uses the real mngr configuration (which has the correct Modal environment).
+    Removes test isolation vars (MNGR_HOST_DIR, etc.) so the subprocess uses
+    real mngr configuration, while keeping the test HOME (which has git config
+    from the setup_git_config fixture). Modal credentials come from env vars
+    (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET) which are set by CI and by the offload
+    --env flags -- NOT from ~/.modal.toml.
     """
     env = os.environ.copy()
-    env["HOME"] = str(_REAL_HOME)
     # Remove test isolation vars that would interfere with the real mngr config
     env.pop("MNGR_HOST_DIR", None)
     env.pop("MNGR_PREFIX", None)
@@ -39,7 +53,7 @@ def _build_subprocess_env() -> dict[str, str]:
 
 @pytest.mark.release
 @pytest.mark.timeout(600)
-def test_schedule_add_deploys_to_modal() -> None:
+def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
     """Test that schedule add successfully deploys a cron function to Modal.
 
     This end-to-end test verifies the full flow:
@@ -78,6 +92,7 @@ def test_schedule_add_deploys_to_modal() -> None:
             text=True,
             timeout=600,
             env=env,
+            cwd=monorepo_root,
         )
 
         assert result.returncode == 0, (
@@ -92,7 +107,7 @@ def test_schedule_add_deploys_to_modal() -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(900)
-def test_schedule_add_with_verification() -> None:
+def test_schedule_add_with_verification(monorepo_root: Path) -> None:
     """Test that schedule add with quick verification deploys and verifies.
 
     This test verifies the full flow including post-deploy verification:
@@ -132,6 +147,7 @@ def test_schedule_add_with_verification() -> None:
             text=True,
             timeout=900,
             env=env,
+            cwd=monorepo_root,
         )
 
         assert result.returncode == 0, (
@@ -146,7 +162,7 @@ def test_schedule_add_with_verification() -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(600)
-def test_schedule_list_shows_deployed_schedule() -> None:
+def test_schedule_list_shows_deployed_schedule(monorepo_root: Path) -> None:
     """Test that schedule list shows a schedule after it has been deployed.
 
     This end-to-end test verifies:
@@ -185,6 +201,7 @@ def test_schedule_list_shows_deployed_schedule() -> None:
             text=True,
             timeout=600,
             env=env,
+            cwd=monorepo_root,
         )
         assert add_result.returncode == 0, (
             f"schedule add failed\nstdout: {add_result.stdout}\nstderr: {add_result.stderr}"
@@ -197,6 +214,7 @@ def test_schedule_list_shows_deployed_schedule() -> None:
             text=True,
             timeout=60,
             env=env,
+            cwd=monorepo_root,
         )
         assert list_result.returncode == 0, (
             f"schedule list failed\nstdout: {list_result.stdout}\nstderr: {list_result.stderr}"
@@ -228,6 +246,7 @@ def _cleanup_modal_app(app_name: str, env: dict[str, str]) -> None:
             text=True,
             timeout=30,
             env=env,
+            cwd=monorepo_root,
         )
         if list_result.returncode == 0:
             apps = json.loads(list_result.stdout)

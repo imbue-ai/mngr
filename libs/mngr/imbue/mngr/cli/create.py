@@ -974,6 +974,18 @@ def _resolve_source_location(
         or opts.source_agent is not None
         or opts.source_host is not None
     )
+    # If the parsed source looks like a path that doesn't exist on disk, it might
+    # actually be an agent name (e.g. "--from other-agent"). Fall through to full
+    # resolution which can distinguish agent names from paths.
+    if not has_agent_or_host and parsed is not None and parsed.path is not None:
+        candidate = Path(parsed.path)
+        if (
+            not candidate.is_absolute()
+            and not str(candidate).startswith(("./", "../", "~"))
+            and not candidate.exists()
+        ):
+            has_agent_or_host = True
+
     if not has_agent_or_host:
         # Just a local path -- use the fast local-provider path
         if parsed is not None and parsed.path is not None:
