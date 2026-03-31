@@ -1689,13 +1689,22 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
+_MKDIR_BATCH_SIZE: Final[int] = 50
+
+
 def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    remote_folders: list[str] = []
-    for dest_path, _dest_contents in transfers:
-        remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
+    # Deduplicate parent directories -- many files share the same parent, and
+    # sending all 1000+ paths in a single mkdir command can exceed the OS
+    # argument length limit ("/bin/bash: File name too long").
+    unique_dirs = sorted({str(dest_path.parent) for dest_path, _ in transfers})
+
+    # Batch mkdir calls so no single command exceeds OS argument limits.
+    for i in range(0, len(unique_dirs), _MKDIR_BATCH_SIZE):
+        batch = unique_dirs[i : i + _MKDIR_BATCH_SIZE]
+        args = " ".join(shlex.quote(d) for d in batch)
+        mkdir_result = host.execute_idempotent_command(f"mkdir -p {args}")
+        if not mkdir_result.success:
+            raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 
     # then upload them all in parallel
     count = 0
