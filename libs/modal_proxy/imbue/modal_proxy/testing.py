@@ -104,6 +104,10 @@ class TestingImage(ImageInterface):
         # No-op -- return a new image with a fresh ID to simulate layer caching
         return TestingImage(image_id=f"img-{uuid.uuid4().hex}")
 
+    def build(self, app: AppInterface) -> None:
+        # No-op -- images are not real in the test environment
+        pass
+
 
 class TestingVolume(VolumeInterface):
     """Volume backed by a real directory on disk."""

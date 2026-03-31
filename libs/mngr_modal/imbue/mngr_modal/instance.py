@@ -1896,6 +1896,10 @@ log "=== Shutdown script completed ==="
             with log_span("Getting Modal app", app_name=self.app_name):
                 app = self._get_modal_app()
 
+            # Eagerly trigger the image build so we can measure build time separately from sandbox creation
+            with log_span("Building Modal image layers"):
+                modal_image.build(app)
+
             # Create the sandbox
             # Add shutdown buffer to the timeout sent to Modal so the activity watcher can
             # trigger a clean shutdown before Modal's hard timeout kills the host
