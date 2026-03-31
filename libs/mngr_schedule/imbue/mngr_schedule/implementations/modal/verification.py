@@ -40,7 +40,12 @@ _SCREEN_CAPTURE_INTERVAL_SECONDS: Final[float] = 30.0
 
 # Agent lifecycle states that indicate the agent is still actively running.
 _RUNNING_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
-    {AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING, AgentLifecycleState.REPLACED}
+    {
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.WAITING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+    }
 )
 
 
@@ -105,7 +110,7 @@ def _wait_for_agent_to_finish(
     """Wait for an agent to finish running, periodically capturing its screen.
 
     Polls the agent's lifecycle state until it is no longer in a running state
-    (RUNNING, WAITING, or REPLACED). Periodically captures and logs the agent's
+    (RUNNING, WAITING, REPLACED, or RUNNING_UNKNOWN_AGENT_TYPE). Periodically captures and logs the agent's
     tmux pane content via capture_pane_content() so the deployment progress can
     be monitored.
 

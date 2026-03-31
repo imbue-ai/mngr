@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import traceback
 import webbrowser
@@ -181,6 +182,10 @@ def _prompt_and_report_issue(title: str, body: str, search_text: str) -> None:
     issue's URL. Otherwise, opens the new issue form pre-populated with title
     and body.
     """
+    # don't bother reporting when this is autonomous
+    if os.environ.get("IS_AUTONOMOUS", "0") == "1":
+        return
+
     if not click.confirm("\nWould you like to report this as a GitHub issue?", default=True):
         return
 

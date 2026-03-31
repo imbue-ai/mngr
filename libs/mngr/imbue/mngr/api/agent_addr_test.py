@@ -6,13 +6,13 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.agent_addr import AgentAddress
+from imbue.mngr.api.agent_addr import _address_matches_agent_match
+from imbue.mngr.api.agent_addr import _address_matches_host
+from imbue.mngr.api.agent_addr import _post_filter_matches_by_addresses
+from imbue.mngr.api.agent_addr import filter_agents_by_host_constraint
+from imbue.mngr.api.agent_addr import parse_identifier_as_address
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.cli.agent_addr import AgentAddress
-from imbue.mngr.cli.agent_addr import _address_matches_agent_match
-from imbue.mngr.cli.agent_addr import _address_matches_host
-from imbue.mngr.cli.agent_addr import _post_filter_matches_by_addresses
-from imbue.mngr.cli.agent_addr import filter_agents_by_host_constraint
-from imbue.mngr.cli.agent_addr import parse_identifier_as_address
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.primitives import AgentId
@@ -64,6 +64,24 @@ def test_parse_identifier_with_provider_only() -> None:
     assert ident == "my-agent"
     assert addr.host_name is None
     assert addr.provider_name == ProviderInstanceName("modal")
+
+
+def test_parse_identifier_with_dotted_host_name() -> None:
+    """Dotted host names (e.g. myhost.docker) pass through without error."""
+    ident, addr = parse_identifier_as_address("myhost.docker")
+
+    assert ident == "myhost.docker"
+    assert addr.agent_name is None
+    assert addr.host_name is None
+    assert addr.provider_name is None
+
+
+def test_parse_identifier_with_ip_address() -> None:
+    """IP addresses pass through without error (used as host identifiers)."""
+    ident, addr = parse_identifier_as_address("192.168.1.1")
+
+    assert ident == "192.168.1.1"
+    assert addr.agent_name is None
 
 
 # =============================================================================

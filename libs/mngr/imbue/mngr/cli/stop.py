@@ -7,11 +7,11 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.cli.agent_addr import find_agents_by_addresses
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.destroy import get_agent_name_from_session
@@ -22,6 +22,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -146,7 +147,9 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
             agent_identifiers.append(agent_name)
 
     if not agent_identifiers:
-        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     # Find agents to stop (RUNNING agents)
     agents_to_stop = find_agents_by_addresses(

@@ -59,7 +59,7 @@ def test_setup_watcher_logging_writes_jsonl_on_log(tmp_path: Path) -> None:
     assert event["event_id"].startswith("evt-")
 
 
-def test_setup_watcher_logging_debug_goes_to_file_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_setup_watcher_logging_debug_goes_to_file_and_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     log_dir = tmp_path / "logs"
     setup_watcher_logging("test_watcher", log_dir)
     logger.debug("debug message")
@@ -71,7 +71,7 @@ def test_setup_watcher_logging_debug_goes_to_file_only(tmp_path: Path, capsys: p
     assert event["level"] == "DEBUG"
 
     captured = capsys.readouterr()
-    assert "debug message" not in captured.out
+    assert "debug message" in captured.out
 
 
 def test_setup_watcher_logging_info_goes_to_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

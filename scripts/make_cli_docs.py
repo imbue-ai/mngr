@@ -52,6 +52,7 @@ SECONDARY_COMMANDS = {
     "events",
     "file",
     "gc",
+    "help",
     "kanpan",
     "label",
     "limit",

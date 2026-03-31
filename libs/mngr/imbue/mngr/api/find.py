@@ -30,6 +30,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
 class ParsedSourceLocation(FrozenModel):
@@ -41,6 +42,23 @@ class ParsedSourceLocation(FrozenModel):
 
 
 @pure
+def _parse_address_part(address_str: str) -> tuple[str | None, str | None]:
+    """Parse agent address portion of a source string into (agent, host) components.
+
+    Handles the NAME[@[HOST][.PROVIDER]] format. Returns (agent_str, host_str) where
+    host_str includes the provider suffix if present (e.g. "myhost.docker").
+    """
+    if "@" not in address_str:
+        # No @ means just an agent name
+        return (address_str or None, None)
+
+    agent_part, host_part = address_str.split("@", 1)
+    agent = agent_part or None
+    host = host_part or None
+    return (agent, host)
+
+
+@pure
 def parse_source_string(
     source: str | None,
     source_agent: str | None = None,
@@ -49,10 +67,18 @@ def parse_source_string(
 ) -> ParsedSourceLocation:
     """Parse source location string into components.
 
-    source format: [AGENT | AGENT.HOST[.PROVIDER] | AGENT.HOST[.PROVIDER]:PATH | HOST[.PROVIDER]:PATH | PATH]
+    source format: [AGENT[@[HOST][.PROVIDER]]][:PATH] | PATH
 
-    Everything after the first ':' is treated as the path (to handle colons in paths).
-    HOST can optionally include .PROVIDER suffix (e.g., myhost.docker).
+    Uses the standard agent address format (NAME@HOST.PROVIDER) for specifying
+    agent and host components. Everything after the first ':' is treated as the path.
+
+    Examples:
+      - "my-agent" -> agent="my-agent"
+      - "my-agent@my-host" -> agent="my-agent", host="my-host"
+      - "my-agent@my-host.modal" -> agent="my-agent", host="my-host.modal"
+      - "my-agent@my-host:/path" -> agent="my-agent", host="my-host", path="/path"
+      - "@my-host:/path" -> host="my-host", path="/path"
+      - "/path/to/dir" -> path="/path/to/dir"
 
     Raises UserInputError if both source and individual parameters are specified.
     """
@@ -64,27 +90,15 @@ def parse_source_string(
         parsed_host: str | None = None
         parsed_path: str | None = None
 
-        if ":" in source:
+        if source.startswith(("/", "./", "~/", "../")):
+            parsed_path = source
+        elif ":" in source:
             prefix, path_part = source.split(":", 1)
             parsed_path = path_part
-            if "." in prefix:
-                agent_part, host_part = prefix.split(".", 1)
-                parsed_agent = agent_part
-                parsed_host = host_part
-            elif prefix:
-                parsed_host = prefix
-            else:
-                # Empty prefix before colon (e.g., ":path") - no agent or host
-                pass
+            if prefix:
+                parsed_agent, parsed_host = _parse_address_part(prefix)
         else:
-            if source.startswith(("/", "./", "~/", "../")):
-                parsed_path = source
-            elif "." in source:
-                agent_part, host_part = source.split(".", 1)
-                parsed_agent = agent_part
-                parsed_host = host_part
-            else:
-                parsed_agent = source
+            parsed_agent, parsed_host = _parse_address_part(source)
 
         source_agent = parsed_agent
         source_host = parsed_host
@@ -236,10 +250,10 @@ def resolve_source_location(
 ) -> ResolvedSource:
     """Parse and resolve source location to a concrete host, path, and optional agent ID.
 
-    source format: [AGENT | AGENT.HOST[.PROVIDER] | AGENT.HOST[.PROVIDER]:PATH | HOST[.PROVIDER]:PATH | PATH]
+    source format: [AGENT[@[HOST][.PROVIDER]]][:PATH] | PATH
 
-    Everything after the first ':' is treated as the path (to handle colons in paths).
-    HOST can optionally include .PROVIDER suffix (e.g., myhost.docker).
+    Uses the standard agent address format (NAME@HOST.PROVIDER) for specifying
+    agent and host components. Everything after the first ':' is treated as the path.
 
     If the resolved host is offline, it will be started if is_start_desired is True (the default).
     If is_start_desired is False and the host is offline, raises UserInputError.
@@ -268,7 +282,7 @@ def resolve_source_location(
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
             provider = get_provider_instance(ProviderInstanceName(LOCAL_PROVIDER_NAME), mngr_ctx)
-            host_interface = provider.get_host(HostName("localhost"))
+            host_interface = provider.get_host(HostName(LOCAL_HOST_NAME))
         else:
             provider = get_provider_instance(resolved_host.provider_name, mngr_ctx)
             host_interface = provider.get_host(resolved_host.host_id)
@@ -358,7 +372,12 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     """
     # Check if the agent's tmux session exists and start it if needed
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state not in (AgentLifecycleState.RUNNING, AgentLifecycleState.REPLACED, AgentLifecycleState.WAITING):
+    if lifecycle_state not in (
+        AgentLifecycleState.RUNNING,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        AgentLifecycleState.WAITING,
+    ):
         if is_start_desired:
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(
@@ -441,7 +460,7 @@ def find_and_maybe_start_agent_by_name_or_id(
 
     if len(matching) > 1:
         # Build helpful error message showing the matching agents
-        agent_list = "\n".join([f"  - {agent.id} (on {host.connector.name})" for agent, host in matching])
+        agent_list = "\n".join([f"  - {agent.id} (on {host.get_name()})" for agent, host in matching])
         raise UserInputError(
             f"Multiple agents found with name '{agent_str}':\n{agent_list}\n\n"
             f"Please use the agent ID instead:\n"
@@ -474,6 +493,7 @@ def find_agents_by_identifiers_or_state(
     target_state: AgentLifecycleState | None,
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
+    provider_names: tuple[str, ...] | None = None,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -482,11 +502,13 @@ def find_agents_by_identifiers_or_state(
     When filter_all is False, returns agents matching the given identifiers
     (by name or ID).
 
+    When provider_names is set, only those providers are queried during discovery.
+
     Raises AgentNotFoundError if any identifier does not match an agent.
     """
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=provider_names,
         agent_identifiers=tuple(agent_identifiers) if not filter_all and agent_identifiers else None,
         include_destroyed=include_destroyed,
         reset_caches=False,

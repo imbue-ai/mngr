@@ -19,6 +19,7 @@ def test_default_agent_states_include_agent_terminal_states() -> None:
     assert "STOPPED" in states
     assert "WAITING" in states
     assert "REPLACED" in states
+    assert "RUNNING_UNKNOWN_AGENT_TYPE" in states
     assert "DONE" in states
 
 

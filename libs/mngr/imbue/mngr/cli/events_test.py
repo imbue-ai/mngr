@@ -16,7 +16,8 @@ def _make_events_opts(
     target: str = "my-agent",
     sources: tuple[str, ...] = (),
     source: tuple[str, ...] = (),
-    filter: str | None = None,
+    include: tuple[str, ...] = (),
+    exclude: tuple[str, ...] = (),
     follow: bool = False,
     tail: int | None = None,
     head: int | None = None,
@@ -35,7 +36,8 @@ def _make_events_opts(
         target=target,
         sources=sources,
         source=source,
-        filter=filter,
+        include=include,
+        exclude=exclude,
         follow=follow,
         tail=tail,
         head=head,
@@ -148,10 +150,11 @@ def test_emit_event_record_appends_newline_if_missing(capsys: pytest.CaptureFixt
 # =============================================================================
 
 
-def test_events_cli_options_with_filter() -> None:
-    """Verify the filter field can be set."""
-    opts = _make_events_opts(filter='source == "messages"')
-    assert opts.filter == 'source == "messages"'
+def test_events_cli_options_with_include_and_exclude() -> None:
+    """Verify the include and exclude fields can be set."""
+    opts = _make_events_opts(include=('source == "messages"',), exclude=('source == "logs"',))
+    assert opts.include == ('source == "messages"',)
+    assert opts.exclude == ('source == "logs"',)
 
 
 # =============================================================================
@@ -241,15 +244,15 @@ def test_events_cli_filters_by_source_option(
     assert "log-2" not in result.output
 
 
-def test_events_cli_source_and_filter_together(
+def test_events_cli_source_and_include_together(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_provider,
     temp_mngr_ctx,
 ) -> None:
-    """CLI events should allow --source and --filter to be used together."""
+    """CLI events should allow --source and --include to be used together."""
     _, events_dir_messages = create_agent_with_events_dir(
-        local_provider.host_dir, "events-source-filter-test", events_source="messages"
+        local_provider.host_dir, "events-source-include-test", events_source="messages"
     )
     event1 = json.dumps(
         {
@@ -269,12 +272,51 @@ def test_events_cli_source_and_filter_together(
     )
     (events_dir_messages / "events.jsonl").write_text(event1 + "\n" + event2 + "\n")
 
-    # Use both --source and --filter
+    # Use both --source and --include
     result = cli_runner.invoke(
         events,
-        ["events-source-filter-test", "--source", "messages", "--filter", 'type == "chat"'],
+        ["events-source-include-test", "--source", "messages", "--include", 'type == "chat"'],
         obj=plugin_manager,
     )
     assert result.exit_code == 0
     assert "msg-a" in result.output
     assert "msg-b" not in result.output
+
+
+def test_events_cli_source_and_exclude_together(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """CLI events should allow --source and --exclude to be used together."""
+    _, events_dir_messages = create_agent_with_events_dir(
+        local_provider.host_dir, "events-source-exclude-test", events_source="messages"
+    )
+    event1 = json.dumps(
+        {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "event_id": "msg-c",
+            "source": "messages",
+            "type": "chat",
+        }
+    )
+    event2 = json.dumps(
+        {
+            "timestamp": "2026-01-02T00:00:00Z",
+            "event_id": "msg-d",
+            "source": "messages",
+            "type": "system",
+        }
+    )
+    (events_dir_messages / "events.jsonl").write_text(event1 + "\n" + event2 + "\n")
+
+    # Use --source with --exclude to drop system events
+    result = cli_runner.invoke(
+        events,
+        ["events-source-exclude-test", "--source", "messages", "--exclude", 'type == "system"'],
+        obj=plugin_manager,
+    )
+    assert result.exit_code == 0
+    assert "msg-c" in result.output
+    assert "msg-d" not in result.output

@@ -10,7 +10,8 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
-from imbue.mngr_recursive.watcher_common import DEFAULT_CEL_FILTER
+from imbue.mngr_recursive.watcher_common import DEFAULT_CEL_EXCLUDE_FILTERS
+from imbue.mngr_recursive.watcher_common import DEFAULT_CEL_INCLUDE_FILTERS
 
 
 class ConversationId(NonEmptyStr):
@@ -72,10 +73,15 @@ class WatcherSettings(FrozenModel):
         default=PositiveInt(5),
         description="Poll interval for the transcript watcher (seconds).",
     )
-    event_cel_filter: str = Field(
-        default=DEFAULT_CEL_FILTER,
-        description="CEL filter expression passed to 'mngr events --filter'. "
-        "Controls which event sources the event watcher receives.",
+    event_cel_include_filters: tuple[str, ...] = Field(
+        default=DEFAULT_CEL_INCLUDE_FILTERS,
+        description="CEL include filter expressions passed to 'mngr events --include'. "
+        "All include filters must match for an event to be included.",
+    )
+    event_cel_exclude_filters: tuple[str, ...] = Field(
+        default=DEFAULT_CEL_EXCLUDE_FILTERS,
+        description="CEL exclude filter expressions passed to 'mngr events --exclude'. "
+        "Events matching any exclude filter are dropped.",
     )
     event_exclude_sources: tuple[str, ...] = Field(
         default=(),

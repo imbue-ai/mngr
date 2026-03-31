@@ -432,6 +432,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
     - PostToolUseFailure: removes 'permissions_waiting' file (tool failed/denied, permission resolved)
     - Notification (idle_prompt): removes 'active' and 'permissions_waiting' files
+    - Stop: runs wait_for_stop_hook.sh which waits for all other stop hooks to
+      finish, then removes 'active' and 'permissions_waiting' and emits an activity event
 
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)
@@ -525,6 +527,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             "type": "command",
                             "command": _SESSION_GUARD
                             + """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
+                        },
+                    ],
+                }
+            ],
+            "Stop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _SESSION_GUARD
+                            + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
                 }

@@ -467,6 +467,14 @@ def test_create_work_log_conversation_runs_inject_and_records_tagged_event() -> 
     assert "Work Log" in db_commands[0]
     assert "work_log" in db_commands[0]
 
+    # Verify the conversation name is updated in the llm conversations table
+    name_update_commands = [
+        c for c in host.executed_commands if "sqlite3" in c and "UPDATE conversations" in c
+    ]
+    assert len(name_update_commands) == 1
+    assert "Work Log" in name_update_commands[0]
+    assert "fake-conv-id-123" in name_update_commands[0]
+
 
 def test_create_work_log_conversation_skips_event_on_inject_failure() -> None:
     host = StubHost(

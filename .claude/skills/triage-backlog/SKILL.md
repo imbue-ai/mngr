@@ -58,7 +58,29 @@ For each entry (in priority order), follow this cycle:
 - Cross-reference against the loaded GitHub issues to see if a matching issue already exists.
 - Think hard about what the user likely meant. Consider the surrounding entries for additional context.
 
-#### Step 2: Ask Clarifying Questions (if needed)
+#### Step 2: Classify the entry
+
+After initial research, classify the entry as either **straightforward** or **ambiguous**:
+
+- **Straightforward:** The intent is clear, the fix/change is obvious, and there's no real decision to make about *what* to do. Go directly to Step 3 (Preview).
+- **Ambiguous:** There's a design decision to make, multiple possible approaches, unclear scope, or the entry questions whether something should exist at all. For these, you MUST investigate more deeply before previewing. Go to Step 2a.
+
+#### Step 2a: Investigate ambiguous entries
+
+For ambiguous entries, do deeper research before presenting anything to the user:
+
+- Read the relevant code in depth (not just grep for names -- understand the actual behavior).
+- Understand the relationships between the concepts mentioned (e.g., how two similar-sounding options differ).
+- Identify the concrete options for how to handle the issue.
+
+Then present the user with **options** before drafting a ticket:
+
+- Summarize what you found (briefly).
+- List the concrete options (e.g., "Option A: remove it entirely. Option B: rename to X. Option C: merge with Y.").
+- Ask which direction they want to go.
+- Only after the user picks a direction should you draft the issue preview.
+
+#### Step 2b: Ask Clarifying Questions (if needed)
 
 If there is genuine ambiguity that you cannot resolve from context, ask clarifying questions. Before asking:
 
@@ -73,20 +95,24 @@ Show the user a complete preview of the GitHub issue you would create:
 
 ```
 ---
-TITLE: <issue title>
+TITLE: <issue title -- should be of the form "Fix X by doing Y" or "Add X to Y" -- not just a problem statement, but the concrete approach>
 PRIORITY: <priority:critical|high|medium|low>
 SIZE: <size:xs|s|m|l|xl>
 PROJECT: <project:name>  (list each on its own line if multiple)
 LABELS: <other labels, comma-separated>
 ---
 
-<issue body in markdown>
+<issue body in markdown, following the structure below>
 
 ---
 Original backlog entry:
 > <exact original text, preserving indentation with spaces>
 ---
 ```
+
+**Issue title guidelines:**
+- The title should encode both the problem AND the solution approach, e.g. "Fix trust dialog on remote agents by auto-trusting target_path" not just "Trust dialog appears when launching remote agents".
+- Keep it under ~80 characters while still being specific.
 
 **Label selection:** Every issue MUST have exactly one priority label, one size label, and at least one project label. Add category labels as appropriate.
 
@@ -121,22 +147,53 @@ To see the current list of project labels, run: `gh label list --search "project
 
 Also consider whether `good first issue` applies (small, self-contained, well-defined).
 
-**Issue body guidelines:**
-- Write a clear description of what needs to be done and why.
-- Include relevant context (file paths, function names, related systems) that you discovered during research.
-- If there are open questions or design decisions, note them.
-- If the entry had indented sub-thoughts, incorporate them as context or as a "Notes" section.
-- Keep it concise but complete enough that someone could pick it up without additional context.
+**Issue body structure:** Every issue body MUST use this two-section structure:
+
+```
+## Problem
+
+<What is broken or missing, stated clearly and specifically. Include:
+- The exact behavior observed (or the gap)
+- Where in the code this happens (file paths, line numbers, function names)
+- Why this matters (what goes wrong for the user)>
+
+## Solution
+
+<A single, concrete, fully-defined approach. Include:
+- What specifically needs to change (which files, which logic)
+- How the fix works (not just "fix it" -- describe the mechanism)
+- Any edge cases or considerations the implementer should be aware of>
+```
+
+**CRITICAL: The Solution section must describe exactly ONE approach.** No "or" alternatives, no "either X or Y", no "Option A / Option B", no "we could do X, or alternatively Y". The implementer should be able to read the Solution and know exactly what to do without making any design decisions themselves. If you find yourself wanting to write "or", STOP -- you have not yet decided on the solution. Use the "investigate ambiguous entries" flow (Step 2a) to resolve the ambiguity with the user BEFORE drafting the ticket. This is the single most important rule for issue quality.
+
+Keep it concise but specific enough that someone could implement the fix without re-doing the investigation. The goal is that an implementer reads the ticket and knows exactly what to do.
 
 **Original text preservation:** The exact original text from the backlog file MUST appear at the bottom of the issue body in a blockquote. This is non-negotiable -- if the interpretation is wrong, the user needs to be able to see what they originally wrote.
 
 #### Step 4: Wait for Approval
 
-Present the preview and wait for the user to:
-- **Approve** -- create the issue as shown.
-- **Edit** -- modify the title, body, or labels before creating.
-- **Skip** -- move on without creating an issue for this entry.
-- **Stop** -- end the triage session (remaining entries stay in the file).
+Present the preview and wait for the user to respond. Always present options as a multiple-choice list so the user can respond with a single character:
+
+> **a)** Approve -- create the issue as shown
+> **e)** Edit -- modify the title, body, or labels before creating
+> **t)** Think harder -- launch a background agent to investigate this more deeply, then move to the next entry
+> **s)** Skip -- move on without creating an issue for this entry
+> **n)** Note and skip -- skip this entry but the user wants to leave a note (correction, context, etc.) that should be appended to the entry in the backlog file for next time
+> **x)** Stop -- end the triage session (remaining entries stay in the file)
+
+**If the user chooses Edit:** Incorporate their feedback, then show the full updated preview again and re-present the same `a/e/t/s/n/x` options. Do NOT create the issue until the user explicitly approves with `a`. This loop repeats until the user approves, skips, or stops.
+
+**If the user chooses Note and skip:** Ask the user for their note, then append it as an indented sub-line under the entry in the backlog file (preserving the entry for future triage). Move on to the next entry.
+
+**If the user chooses Think harder:** Launch a background sub-agent (using the Agent tool with `run_in_background: true`) to do a deep investigation of the entry. The sub-agent should:
+- Read all relevant code in depth, not just grep for names.
+- Understand the current behavior and why it exists.
+- Identify concrete options for how to handle the issue, with pros/cons.
+- Check for related issues, recent changes, and potential impacts.
+- Return a summary with recommendations and questions.
+
+While the sub-agent runs, immediately move on to the next entry in the queue. When the sub-agent completes (you will be notified), do NOT immediately present its findings. Instead, queue the results and only present them after the user has fully resolved the current entry (i.e., after they approve, skip, or stop on whatever entry is currently being discussed). Never present findings from a background agent while the user is in the middle of deciding on a different entry -- only one entry should be under discussion at a time.
 
 #### Step 5: Create and Clean Up
 
@@ -145,9 +202,10 @@ Once approved:
 1. **If merging into an existing issue:** Update that issue with `gh issue edit <number>` to incorporate the new information. Show the user the updated issue.
 2. **If creating a new issue:** Run:
    ```bash
-   gh issue create --title "<title>" --body "<body>" --label "<priority>" --label "<size>" --label "<project>" --label "<category>"
+   gh issue create --title "<title>" --body "<body>" --label "<priority>" --label "<size>" --label "<project>" --label "<category>" --label "autotriage"
    ```
    Each label MUST be a separate `--label` flag. Never comma-separate labels in a single flag.
+   The `autotriage` label MUST always be included on every issue created by this skill.
    Report the created issue number and URL.
 3. **Remove the entry from the backlog file.** Delete the unindented line and all its indented sub-lines from the file. Be precise -- only remove the exact entry that was just processed.
 4. **Move on to the next entry** in priority order.

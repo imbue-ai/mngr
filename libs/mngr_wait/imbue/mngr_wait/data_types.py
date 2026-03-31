@@ -130,7 +130,7 @@ def _check_agent_state_match(
             if SHARED_STATE_STOPPED in target_states:
                 return SHARED_STATE_STOPPED
         elif agent_state_str in target_states:
-            # Agent-only states (WAITING, DONE, REPLACED)
+            # Agent-only states (WAITING, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE)
             return agent_state_str
         else:
             # Agent state not in target states

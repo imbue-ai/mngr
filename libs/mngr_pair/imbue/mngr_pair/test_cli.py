@@ -68,10 +68,10 @@ def test_pair_source_host_with_local_host(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --source-host with '@local' (local host) works for filtering."""
+    """Test that --source-host with 'localhost' (local host) works for filtering."""
     result = cli_runner.invoke(
         pair,
-        ["nonexistent-agent", "--source-host", "@local"],
+        ["nonexistent-agent", "--source-host", "localhost"],
         obj=plugin_manager,
     )
     # Should fail because the agent doesn't exist on the local host
@@ -88,7 +88,7 @@ def test_pair_source_host_agent_not_on_specified_host(
     """Test that --source-host shows error when agent doesn't exist on that host."""
     result = cli_runner.invoke(
         pair,
-        ["some-agent", "--source-host", "@local"],
+        ["some-agent", "--source-host", "localhost"],
         obj=plugin_manager,
     )
     # Should fail because agent doesn't exist on the specified host

@@ -947,8 +947,8 @@ def test_get_or_create_profile_dir_creates_profile_dir_if_specified_but_missing(
     assert result.exists()
 
 
-def test_get_or_create_profile_dir_handles_invalid_config_toml(tmp_path: Path) -> None:
-    """get_or_create_profile_dir should handle invalid config.toml by creating new profile."""
+def test_get_or_create_profile_dir_raises_on_invalid_config_toml(tmp_path: Path) -> None:
+    """get_or_create_profile_dir should raise ConfigParseError when config.toml is invalid."""
     base_dir = tmp_path / "mngr"
     base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -956,15 +956,8 @@ def test_get_or_create_profile_dir_handles_invalid_config_toml(tmp_path: Path) -
     config_path = base_dir / "config.toml"
     config_path.write_text("[invalid toml syntax")
 
-    result = get_or_create_profile_dir(base_dir)
-
-    # Should have created a new profile (with new config)
-    assert result.exists()
-    assert result.parent == base_dir / "profiles"
-
-    # config.toml should have been overwritten with valid content
-    new_content = config_path.read_text()
-    assert 'profile = "' in new_content
+    with pytest.raises(ConfigParseError, match="Failed to parse config file"):
+        get_or_create_profile_dir(base_dir)
 
 
 def test_get_or_create_profile_dir_handles_config_without_profile_key(tmp_path: Path) -> None:

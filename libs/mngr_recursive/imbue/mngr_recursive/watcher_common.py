@@ -1,7 +1,7 @@
 """Shared utilities for agent supporting service scripts.
 
 Provides common watchdog integration, logging, and polling infrastructure
-used by supporting services in mngr_llm (conversation_watcher, web_server)
+used by supporting services in mngr_llm (conversation_watcher, webchat_server)
 and mngr_claude_mind (event_watcher).
 
 Lives in mngr_recursive so that all plugins that need watcher infrastructure
@@ -57,23 +57,20 @@ def get_mngr_command() -> list[str]:
     return [mngr_bin]
 
 
-DEFAULT_CEL_FILTER: Final[str] = (
-    # only include events that are:
-    # not from delivery_failures (which is about the delivery of messages to the core thinking loop, so it would never see these anyway)
-    'source != "delivery_failures"'
-    # and they're not about servers coming online (that's just startup noise from mngr)
-    ' && source != "handled_events"'
-    # and they're not the raw agent state messages
-    ' && source != "mngr/agents"'
-    # and either:
-    " && ("
-    #      are normal events (eg, not logs):
-    '    !source.startsWith("logs/") || '
-    #     or they are logs, but they're ERROR or WARNING level (to catch important log messages without overwhelming the stream):
-    '    (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))'
-    ")"
-    # also remove any mngr/agent_state events for non-mind agents:
-    """ && !(source == 'mngr/agent_states' && !(has(agent.labels.mind)))"""
+DEFAULT_CEL_INCLUDE_FILTERS: Final[tuple[str, ...]] = (
+    # only include log events if they are ERROR or WARNING level
+    '!source.startsWith("logs/") || (source.startsWith("logs/") && (level == "ERROR" || level == "WARNING"))',
+)
+
+DEFAULT_CEL_EXCLUDE_FILTERS: Final[tuple[str, ...]] = (
+    # delivery_failures is about the delivery of messages to the core thinking loop, so it would never see these anyway
+    'source == "delivery_failures"',
+    # handled_events is just startup noise from mngr
+    'source == "handled_events"',
+    # raw agent state messages
+    'source == "mngr/agents"',
+    # mngr/agent_states events for non-mind agents
+    """source == 'mngr/agent_states' && !(has(agent.labels.mind))""",
 )
 
 
@@ -81,15 +78,15 @@ def setup_watcher_logging(watcher_name: str, log_dir: Path) -> None:
     """Configure loguru for a watcher process.
 
     Sets up:
-    - stdout logging for INFO+ messages (timestamped)
+    - stdout logging for DEBUG+ messages (timestamped)
     - JSONL file logging for DEBUG+ to <log_dir>/<watcher_name>/events.jsonl
     """
     logger.remove()
 
     logger.add(
         sys.stdout,
-        level="INFO",
-        format="[{time:YYYY-MM-DDTHH:mm:ss.SSSSSS!UTC}Z] {message}",
+        level="DEBUG",
+        format="[{time:YYYY-MM-DD HH:mm:ss.SSSSSS!UTC}] {message}",
         colorize=False,
     )
 

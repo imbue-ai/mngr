@@ -316,8 +316,8 @@ class DirectSandbox(SandboxInterface):
         return DirectExecProcess.model_construct(process=process)
 
     @_translate_exceptions
-    def tunnels(self) -> dict[int, TunnelInfo]:
-        raw_tunnels = self.sandbox.tunnels()
+    def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
+        raw_tunnels = self.sandbox.tunnels(timeout=timeout)
         return {port: TunnelInfo(tcp_socket=tunnel.tcp_socket) for port, tunnel in raw_tunnels.items()}
 
     @_translate_exceptions

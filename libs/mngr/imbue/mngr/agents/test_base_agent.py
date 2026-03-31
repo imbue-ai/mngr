@@ -19,6 +19,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import Permission
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -30,7 +31,7 @@ def _create_test_agent(
     command: str = "sleep 100000",
 ) -> BaseAgent:
     """Helper function to create a test agent on the local provider."""
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     # Create agent directory structure
     agent_id = AgentId.generate()
@@ -431,7 +432,7 @@ def test_base_agent_assemble_command_from_override(
 ) -> None:
     """Test assemble_command uses command_override when provided."""
     agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-cmd-override", temp_work_dir)
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     command = agent.assemble_command(
         host=host,
@@ -451,7 +452,7 @@ def test_base_agent_assemble_command_from_config(
     agent = _create_test_agent(
         local_provider, temp_mngr_ctx, "test-cmd-config", temp_work_dir, command="config command"
     )
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     command = agent.assemble_command(
         host=host,
@@ -469,7 +470,7 @@ def test_base_agent_assemble_command_with_args(
 ) -> None:
     """Test assemble_command appends agent_args."""
     agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-cmd-args", temp_work_dir, command="base")
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     command = agent.assemble_command(
         host=host,
@@ -490,7 +491,7 @@ def test_base_agent_assemble_command_falls_back_to_agent_type(
     This verifies the documented "Direct command" fallback behavior where an unrecognized
     agent type is treated as a command to run.
     """
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     host_id = host.id
 
     # Create agent with no command in config
@@ -572,7 +573,7 @@ def test_base_agent_lifecycle_hooks_are_noop(
 ) -> None:
     """Test that default lifecycle hooks are no-ops."""
     agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-lifecycle", temp_work_dir)
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     options = CreateAgentOptions(
         name=AgentName("test"),

@@ -34,6 +34,7 @@ class ObservableThread(threading.Thread):
         daemon: bool = True,
         silenced_exceptions: tuple[type[BaseException], ...] | None = None,
         suppressed_exceptions: tuple[type[BaseException], ...] | None = None,
+        on_failure: Callable[[BaseException], None] | None = None,
     ) -> None:
         """Initialize ObservableThread."""
         super().__init__(name=name, daemon=daemon)
@@ -44,6 +45,7 @@ class ObservableThread(threading.Thread):
         self._exception: BaseException | None = None
         self._silenced_exceptions = silenced_exceptions or ()
         self._suppressed_exceptions = suppressed_exceptions or ()
+        self._on_failure = on_failure
 
     @property
     def target_name(self) -> str | None:
@@ -63,6 +65,8 @@ class ObservableThread(threading.Thread):
                     self.name,
                     self.target_name,
                 )
+                if self._on_failure:
+                    self._on_failure(e)
                 raise
 
     def join(self, timeout: float | None = None) -> None:

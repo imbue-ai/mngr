@@ -1,5 +1,4 @@
 import os
-import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,6 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import load_local_config
 from imbue.mngr.config.pre_readers import load_project_config
@@ -245,24 +243,14 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     profiles_dir = base_dir / PROFILES_DIRNAME
     profiles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Try read-only lookup first
-    existing = find_profile_dir_lightweight(base_dir)
-    if existing is not None:
-        return existing
-
-    # Config specifies a profile ID but the directory doesn't exist yet -- create it
     config_path = base_dir / ROOT_CONFIG_FILENAME
-    if config_path.exists():
-        try:
-            with open(config_path, "rb") as f:
-                root_config = tomllib.load(f)
-            profile_id = root_config.get("profile")
-            if profile_id:
-                profile_dir = profiles_dir / profile_id
-                profile_dir.mkdir(parents=True, exist_ok=True)
-                return profile_dir
-        except tomllib.TOMLDecodeError:
-            pass
+    root_config = try_load_toml(config_path)
+    if root_config is not None:
+        profile_id = root_config.get("profile")
+        if profile_id:
+            profile_dir = profiles_dir / profile_id
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            return profile_dir
 
     # No valid config.toml or no profile specified -- create a new profile
     profile_id = uuid4().hex

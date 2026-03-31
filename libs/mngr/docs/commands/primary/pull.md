@@ -58,7 +58,7 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | text | Target specification: AGENT, AGENT.HOST, AGENT.HOST:PATH, or HOST:PATH [future] | None |
+| `--target` | text | Target specification: AGENT, AGENT@HOST, AGENT@HOST.PROVIDER:PATH, or @HOST:PATH [future] | None |
 | `--target-agent` | text | Target agent name or ID [future] | None |
 | `--target-host` | text | Target host name or ID [future] | None |
 | `--target-path` | text | Path within target to sync to [future] | None |

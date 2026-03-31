@@ -1,7 +1,5 @@
 import sqlite3
-import threading
 from collections.abc import Generator
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -110,15 +108,4 @@ def write_conversation_to_db(
         conn.commit()
 
 
-@pytest.fixture()
-def web_server_test_server() -> Generator[tuple[object, int], None, None]:
-    """Start and stop a test HTTP server for web_server handler tests."""
-    from imbue.mngr_llm.resources import web_server as ws_mod
 
-    handler_class = ws_mod._WebServerHandler  # noqa: SLF001
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server, port
-    server.shutdown()

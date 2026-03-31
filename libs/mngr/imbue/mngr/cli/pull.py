@@ -110,7 +110,7 @@ class PullCliOptions(CommonCliOptions):
 @optgroup.group("Target (for agent-to-agent sync)")
 @optgroup.option(
     "--target",
-    help="Target specification: AGENT, AGENT.HOST, AGENT.HOST:PATH, or HOST:PATH [future]",
+    help="Target specification: AGENT, AGENT@HOST, AGENT@HOST.PROVIDER:PATH, or @HOST:PATH [future]",
 )
 @optgroup.option("--target-agent", help="Target agent name or ID [future]")
 @optgroup.option("--target-host", help="Target host name or ID [future]")

@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import cast
 
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
+from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_descendant_process_names
@@ -127,6 +130,46 @@ def test_lifecycle_done_when_modified_process_title_and_pane_is_shell() -> None:
     assert determine_lifecycle_state("0|2.1.73|123", False, "claude", ps_output) == AgentLifecycleState.DONE
 
 
+def test_lifecycle_running_unknown_when_non_shell_descendant_and_unknown_type() -> None:
+    ps_output = "200 123 python3\n"
+    assert (
+        determine_lifecycle_state("0|bash|123", True, "claude", ps_output, is_agent_type_known=False)
+        == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
+    )
+
+
+def test_lifecycle_running_unknown_when_pane_not_shell_and_unknown_type() -> None:
+    ps_output = "123 1 python3\n"
+    assert (
+        determine_lifecycle_state("0|python3|123", True, "claude", ps_output, is_agent_type_known=False)
+        == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
+    )
+
+
+def test_lifecycle_running_unknown_when_pane_pid_not_in_ps_and_unknown_type() -> None:
+    assert (
+        determine_lifecycle_state("0|python3|123", True, "claude", "", is_agent_type_known=False)
+        == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
+    )
+
+
+def test_lifecycle_replaced_when_non_shell_descendant_and_known_type() -> None:
+    """Verify that known types still get REPLACED (not RUNNING_UNKNOWN_AGENT_TYPE)."""
+    ps_output = "200 123 python3\n"
+    assert (
+        determine_lifecycle_state("0|bash|123", True, "claude", ps_output, is_agent_type_known=True)
+        == AgentLifecycleState.REPLACED
+    )
+
+
+def test_lifecycle_done_when_shell_and_unknown_type() -> None:
+    """Unknown type does not affect DONE state (shell in pane means agent exited)."""
+    assert (
+        determine_lifecycle_state("0|bash|123", True, "claude", "", is_agent_type_known=False)
+        == AgentLifecycleState.DONE
+    )
+
+
 def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> None:
     """WAITING when tmux reports version string but claude is running as descendant."""
     ps_output = "123 1 bash\n456 123 claude\n"
@@ -184,6 +227,41 @@ def test_resolve_expected_process_name_for_bare_command() -> None:
     config = MngrConfig.model_construct(agent_types={})
     result = resolve_expected_process_name("unknown", CommandString("sleep"), config)
     assert result == "sleep"
+
+
+# =========================================================================
+# check_agent_type_known tests
+# =========================================================================
+
+
+def test_check_agent_type_known_for_registered_type() -> None:
+    try:
+        register_agent_class("claude", type("FakeClaudeAgent", (), {}))
+        config = MngrConfig.model_construct(agent_types={})
+        assert check_agent_type_known("claude", config) is True
+    finally:
+        reset_agent_class_registry()
+
+
+def test_check_agent_type_known_for_unregistered_type() -> None:
+    config = MngrConfig.model_construct(agent_types={})
+    assert check_agent_type_known("totally-unknown-type-xyz", config) is False
+
+
+def test_check_agent_type_known_for_custom_type_with_registered_parent() -> None:
+    try:
+        register_agent_class("claude", type("FakeClaudeAgent", (), {}))
+        custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("claude"))
+        config = MngrConfig.model_construct(agent_types={AgentTypeName("my-claude"): custom_config})
+        assert check_agent_type_known("my-claude", config) is True
+    finally:
+        reset_agent_class_registry()
+
+
+def test_check_agent_type_known_for_custom_type_with_unregistered_parent() -> None:
+    custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("totally-unknown-parent-xyz"))
+    config = MngrConfig.model_construct(agent_types={AgentTypeName("my-custom"): custom_config})
+    assert check_agent_type_known("my-custom", config) is False
 
 
 # =========================================================================

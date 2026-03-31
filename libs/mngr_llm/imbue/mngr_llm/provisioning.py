@@ -323,6 +323,34 @@ def _insert_conversation_record(
             logger.warning("Failed to insert conversation record for {}: {}", conversation_id, result.stderr)
 
 
+def _update_conversation_name(
+    host: OnlineHostInterface,
+    settings: ProvisioningSettings,
+    *,
+    db_path: Path,
+    conversation_id: str,
+    name: str,
+) -> None:
+    """Update the name column in the llm conversations table.
+
+    The llm library sets conversation names based on the prompt text, which
+    produces poor names for conversations created via ``llm inject`` (e.g.
+    empty string or ``...``). This updates the name to something meaningful
+    so that llm-webchat displays it properly.
+    """
+    sql = f"UPDATE conversations SET name = {_sql_quote(name)} WHERE id = {_sql_quote(conversation_id)}"
+    cmd = f"sqlite3 {shlex.quote(str(db_path))} {shlex.quote(sql)}"
+    result = execute_with_timing(
+        host,
+        cmd,
+        hard_timeout=settings.fs_hard_timeout_seconds,
+        warn_threshold=settings.fs_warn_threshold_seconds,
+        label="update conversation name",
+    )
+    if not result.success:
+        logger.warning("Failed to update conversation name for {}: {}", conversation_id, result.stderr)
+
+
 def _inject_conversation(
     host: OnlineHostInterface,
     settings: ProvisioningSettings,
@@ -331,10 +359,16 @@ def _inject_conversation(
     prompt: str,
     response: str,
     label: str,
+    display_name: str,
     llm_user_path: Path | None = None,
     env_vars: dict[str, str] | None = None,
 ) -> str | None:
-    """Run ``llm inject`` to create a new conversation. Returns the conversation ID on success."""
+    """Run ``llm inject`` to create a new conversation. Returns the conversation ID on success.
+
+    After creating the conversation, updates the name in the llm
+    ``conversations`` table to use ``display_name`` instead of the
+    auto-generated name from the prompt text.
+    """
     env_prefix = f"LLM_USER_PATH={shlex.quote(str(llm_user_path))} " if llm_user_path else ""
     if env_vars:
         env_prefix += " ".join(f"{key}={shlex.quote(value)}" for key, value in env_vars.items()) + " "
@@ -355,7 +389,17 @@ def _inject_conversation(
     stdout = result.stdout.strip()
     parts = stdout.rsplit(" ", 1)
     if len(parts) == 2:
-        return parts[1]
+        conversation_id = parts[1]
+        # Update the conversation name in the llm database
+        db_path = llm_user_path / "logs.db" if llm_user_path else Path("logs.db")
+        _update_conversation_name(
+            host,
+            settings,
+            db_path=db_path,
+            conversation_id=conversation_id,
+            name=display_name,
+        )
+        return conversation_id
 
     logger.warning("Could not parse conversation ID from llm inject output: {}", stdout)
     return None
@@ -379,6 +423,7 @@ def ensure_named_conversation(
         prompt=prompt,
         response="Confirmed.",
         label=internal_tag,
+        display_name=display_name,
         llm_user_path=llm_data_dir,
         env_vars=dict(LLM_MATCHED_RESPONSE=""),
     )
@@ -436,6 +481,7 @@ def create_first_daily_conversation(
 ) -> None:
     """Create a daily conversation tagged with today's date."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    daily_display_name = f"Daily Thread ({today})"
 
     llm_data_dir = agent_state_dir / "llm_data"
     conversation_id = _inject_conversation(
@@ -445,6 +491,7 @@ def create_first_daily_conversation(
         prompt="",
         response=welcome_message,
         label="daily",
+        display_name=daily_display_name,
         llm_user_path=llm_data_dir,
     )
     if conversation_id is None:
@@ -455,7 +502,7 @@ def create_first_daily_conversation(
         agent_state_dir,
         settings,
         conversation_id=conversation_id,
-        tags={"daily": today, "name": f"Daily Thread ({today})"},
+        tags={"daily": today, "name": daily_display_name},
     )
     logger.info("Created daily conversation: conversation_id={} date={}", conversation_id, today)
 
@@ -480,6 +527,7 @@ def create_work_log_conversation(
         prompt="",
         response="Work log initialized. I will use this thread to communicate what I am currently working on.",
         label="work_log",
+        display_name="Work Log",
         llm_user_path=llm_data_dir,
     )
     if conversation_id is None:

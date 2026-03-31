@@ -237,7 +237,7 @@ class TestingSandbox(SandboxInterface):
             exec_proc._completed_text = finished.stdout
             return exec_proc
 
-    def tunnels(self) -> dict[int, TunnelInfo]:
+    def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
         if self._is_terminated:
             raise ModalProxyError("Sandbox has been terminated")
         # Return a fixed tunnel for SSH port 22 -> localhost:22222

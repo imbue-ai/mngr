@@ -15,6 +15,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -27,7 +28,7 @@ def _create_stopped_agent(
     agent_name: str,
 ) -> Host:
     """Create an agent via the provider API without starting it (no tmux session)."""
-    host = local_provider.get_host(HostName("localhost"))
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     host.create_agent_state(
         work_dir_path=temp_work_dir,
         options=CreateAgentOptions(

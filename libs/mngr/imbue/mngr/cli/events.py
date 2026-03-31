@@ -26,7 +26,8 @@ class EventsCliOptions(CommonCliOptions):
     target: str
     sources: tuple[str, ...]
     source: tuple[str, ...]
-    filter: str | None
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
     follow: bool
     tail: int | None
     head: int | None
@@ -66,12 +67,15 @@ def _write_and_flush_stdout(content: str) -> None:
     multiple=True,
     help="Event source to include, relative to events/ (e.g. 'messages', 'logs/mngr'). Can be repeated.",
 )
-# FIXME: this should be consistent with the rest of the API (two repeatable args, --include and --exclude, that can be used together to build up complex filters)
 @optgroup.option(
-    "--filter",
-    "filter",
-    default=None,
-    help="CEL expression to filter which events to include (e.g. 'source == \"messages\"')",
+    "--include",
+    multiple=True,
+    help="CEL expression that events must match to be included (repeatable, all must match).",
+)
+@optgroup.option(
+    "--exclude",
+    multiple=True,
+    help="CEL expression; events matching any exclude filter are dropped (repeatable).",
 )
 @add_common_options
 @click.pass_context
@@ -102,10 +106,10 @@ def events(ctx: click.Context, **kwargs: Any) -> None:
     # Compile CEL filters
     cel_include_filters: list[Any] = []
     cel_exclude_filters: list[Any] = []
-    if opts.filter is not None:
+    if opts.include or opts.exclude:
         cel_include_filters, cel_exclude_filters = compile_cel_filters(
-            include_filters=[opts.filter],
-            exclude_filters=[],
+            include_filters=opts.include,
+            exclude_filters=opts.exclude,
         )
 
     _stream_all_events_cli(target, opts, cel_include_filters, cel_exclude_filters, all_sources)
@@ -146,7 +150,7 @@ def _stream_all_events_cli(
 CommandHelpMetadata(
     key="events",
     one_line_description="View events from an agent or host",
-    synopsis="mngr events TARGET [SOURCES...] [--source SOURCE] [--filter CEL] [--follow] [--tail N] [--head N]",
+    synopsis="mngr events TARGET [SOURCES...] [--source SOURCE] [--include CEL] [--exclude CEL] [--follow] [--tail N] [--head N]",
     arguments_description=(
         "- `TARGET`: Agent or host name/ID whose events to view\n"
         "- `SOURCES`: Event sources to include (optional; includes all sources if omitted). "
@@ -157,8 +161,10 @@ The command first tries to match TARGET as an agent, then as a host.
 
 Streams all events from all sources in date-sorted order. Use --source
 or positional SOURCES arguments to restrict which event sources to include.
-Use --filter to further restrict events via a CEL expression. Use --follow
-to continuously stream new events.
+Use --include and --exclude to further restrict events via CEL expressions.
+All --include filters must match for an event to be included, and events
+matching any --exclude filter are dropped. Use --follow to continuously
+stream new events.
 
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
@@ -169,7 +175,8 @@ Press Ctrl+C to stop.""",
         ("Stream only message events", "mngr events my-agent messages"),
         ("Stream events from multiple sources", "mngr events my-agent messages logs/mngr"),
         ("Same thing using --source", "mngr events my-agent --source messages --source logs/mngr"),
-        ("Filter within a source", "mngr events my-agent messages --filter 'data.role == \"user\"'"),
+        ("Include only user messages", "mngr events my-agent --include 'source == \"messages\"' --include 'data.role == \"user\"'"),
+        ("Exclude log events", "mngr events my-agent --exclude 'source.startsWith(\"logs/\")'"),
         ("View last 100 events", "mngr events my-agent --tail 100"),
         ("Follow all events in real-time", "mngr events my-agent --follow"),
     ),

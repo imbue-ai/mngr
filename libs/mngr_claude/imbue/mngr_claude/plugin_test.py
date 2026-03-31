@@ -38,6 +38,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -49,7 +50,9 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import WaitingReason
+from imbue.mngr_claude.plugin import _apply_settings_json_overrides
 from imbue.mngr_claude.plugin import _build_install_command_hint
+from imbue.mngr_claude.plugin import _build_settings_json_content
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
@@ -75,7 +78,7 @@ def make_claude_agent(
     work_dir: Path | None = None,
 ) -> tuple[ClaudeAgent, Host]:
     """Create a ClaudeAgent with a real local host for testing."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     if work_dir is None:
         work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
@@ -580,6 +583,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
         ("PermissionRequest", ["touch", "permissions_waiting"]),
         ("PostToolUse", ["rm", "permissions_waiting"]),
         ("PostToolUseFailure", ["rm", "permissions_waiting"]),
+        ("Stop", ["wait_for_stop_hook.sh"]),
     ],
 )
 def test_build_readiness_hooks_config_has_hook(hook_name: str, expected_substrings: list[str]) -> None:
@@ -643,6 +647,7 @@ def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
         AgentLifecycleState.STOPPED,
         AgentLifecycleState.WAITING,
         AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
         AgentLifecycleState.DONE,
     ):
         with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
@@ -728,11 +733,76 @@ def test_uses_paste_detection_send_returns_true(
     assert agent.uses_paste_detection_send() is True
 
 
+def test_preflight_check_raises_when_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should raise when .claude/settings.local.json is not gitignored in source."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    init_git_repo(source_dir, initial_commit=False)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    with pytest.raises(PluginMngrError, match="not gitignored"):
+        ClaudeAgent.preflight_check(
+            source_host=host,
+            source_path=source_dir,
+            agent_options=options,
+            agent_config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+def test_preflight_check_passes_when_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should pass when .claude/settings.local.json is gitignored."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _init_git_with_gitignore(source_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    # Should not raise
+    ClaudeAgent.preflight_check(
+        source_host=host,
+        source_path=source_dir,
+        agent_options=options,
+        agent_config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def test_preflight_check_skips_when_not_git_repo(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should skip gitignore check when source is not a git repo."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    # Should not raise (no git repo, no gitignore check)
+    ClaudeAgent.preflight_check(
+        source_host=host,
+        source_path=source_dir,
+        agent_options=options,
+        agent_config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
 def test_configure_readiness_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should raise when .claude/settings.local.json is not gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
@@ -759,7 +829,7 @@ def test_configure_readiness_hooks_skips_gitignore_check_when_not_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should skip gitignore check when the work_dir is not a git repo."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
@@ -791,7 +861,7 @@ def test_configure_readiness_hooks_creates_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should create .claude/settings.local.json."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _init_git_with_gitignore(work_dir)
@@ -826,7 +896,7 @@ def test_configure_readiness_hooks_merges_with_existing_settings(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """_configure_readiness_hooks should merge with existing settings."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _init_git_with_gitignore(work_dir)
@@ -2546,3 +2616,170 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
 
     # Should not raise
     agent._transfer_source_plugin_data(host, source_dir)
+
+
+# =============================================================================
+# _build_settings_json_content tests
+# =============================================================================
+
+
+def test_build_settings_json_content_defaults() -> None:
+    """_build_settings_json_content with no overrides returns base settings."""
+    content = _build_settings_json_content(sync_local=False)
+    data = json.loads(content)
+    assert data["skipDangerousModePermissionPrompt"] is True
+    assert "model" not in data
+    assert data.get("fastMode") is not True
+
+
+def test_build_settings_json_content_sets_model() -> None:
+    """_build_settings_json_content with model sets the model field."""
+    content = _build_settings_json_content(sync_local=False, model="opus[1m]")
+    data = json.loads(content)
+    assert data["model"] == "opus[1m]"
+
+
+def test_build_settings_json_content_sets_is_fast() -> None:
+    """_build_settings_json_content with is_fast=True sets fastMode."""
+    content = _build_settings_json_content(sync_local=False, is_fast=True)
+    data = json.loads(content)
+    assert data["fastMode"] is True
+
+
+def test_build_settings_json_content_sets_model_and_is_fast() -> None:
+    """_build_settings_json_content with both model and is_fast sets both."""
+    content = _build_settings_json_content(sync_local=False, model="sonnet", is_fast=True)
+    data = json.loads(content)
+    assert data["model"] == "sonnet"
+    assert data["fastMode"] is True
+
+
+def test_build_settings_json_content_preserves_local_is_fast_when_config_enables_it() -> None:
+    """When is_fast=True, local fastMode is not disabled even if sync_local is True."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True}))
+
+    content = _build_settings_json_content(sync_local=True, is_fast=True)
+    data = json.loads(content)
+    assert data["fastMode"] is True
+
+
+def test_build_settings_json_content_disables_local_is_fast_when_config_does_not_enable_it() -> None:
+    """When is_fast=False, local fastMode is disabled with a warning."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True, "other": "value"}))
+
+    content = _build_settings_json_content(sync_local=True, is_fast=False)
+    data = json.loads(content)
+    assert data["fastMode"] is False
+    assert data["other"] == "value"
+
+
+# =============================================================================
+# _apply_settings_json_overrides tests
+# =============================================================================
+
+
+def test_apply_settings_json_overrides_noop_when_no_overrides(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides is a no-op when model=None and is_fast=False."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    settings_path = config_dir / "settings.json"
+    original = json.dumps({"existing": True})
+    settings_path.write_text(original)
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False)
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    # File unchanged
+    assert settings_path.read_text() == original
+
+
+def test_apply_settings_json_overrides_creates_file_with_model(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides creates settings.json with model when none exists."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    settings_path = config_dir / "settings.json"
+    data = json.loads(settings_path.read_text())
+    assert data["model"] == "opus[1m]"
+
+
+def test_apply_settings_json_overrides_creates_file_with_is_fast(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides creates settings.json with fastMode when none exists."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False, is_fast=True)
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    settings_path = config_dir / "settings.json"
+    data = json.loads(settings_path.read_text())
+    assert data["fastMode"] is True
+
+
+def test_apply_settings_json_overrides_merges_with_existing(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides merges overrides into existing settings."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    settings_path = config_dir / "settings.json"
+    settings_path.write_text(json.dumps({"existing": "value", "skipDangerousModePermissionPrompt": True}))
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False, model="sonnet", is_fast=True)
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    data = json.loads(settings_path.read_text())
+    assert data["existing"] == "value"
+    assert data["model"] == "sonnet"
+    assert data["fastMode"] is True
+    assert data["skipDangerousModePermissionPrompt"] is True
+
+
+def test_apply_settings_json_overrides_replaces_symlink(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides replaces a symlink with a regular file."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    # Create a "global" settings file and symlink to it
+    global_settings = tmp_path / "global_settings.json"
+    global_settings.write_text(json.dumps({"global": True}))
+    settings_path = config_dir / "settings.json"
+    settings_path.symlink_to(global_settings)
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    # settings.json should now be a regular file (not a symlink)
+    assert not settings_path.is_symlink()
+    data = json.loads(settings_path.read_text())
+    assert data["model"] == "opus[1m]"
+    # Existing content from the symlink target is preserved
+    assert data["global"] is True
+    # Global file should be unmodified
+    assert json.loads(global_settings.read_text()) == {"global": True}
+
+
+def test_apply_settings_json_overrides_replaces_corrupt_json(tmp_path: Path) -> None:
+    """_apply_settings_json_overrides replaces corrupt settings.json with overrides only."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    settings_path = config_dir / "settings.json"
+    settings_path.write_text("not valid json{{{")
+
+    host = cast(OnlineHostInterface, FakeHost())
+    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
+    _apply_settings_json_overrides(host, config_dir, config)
+
+    # Corrupt file should be replaced with valid JSON containing only the override
+    data = json.loads(settings_path.read_text())
+    assert data["model"] == "opus[1m]"
+    assert len(data) == 1

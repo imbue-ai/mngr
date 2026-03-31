@@ -27,6 +27,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import Permission
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -45,7 +46,7 @@ def create_test_agent(
     Accepts optional agent_config and agent_type overrides for tests that
     need non-default configuration (e.g., assemble_command tests).
     """
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()
@@ -166,10 +167,11 @@ def test_is_running_true_when_tmux_session_running(
 
 
 @pytest.mark.tmux
-def test_lifecycle_state_replaced_when_different_process_exists(
+def test_lifecycle_state_running_unknown_agent_type_when_different_process_exists(
     test_agent: BaseAgent,
 ) -> None:
-    """Test that agent is REPLACED when tmux session exists with different process."""
+    """Test that agent is RUNNING_UNKNOWN_AGENT_TYPE when tmux session exists with
+    a different process and the agent type is not registered."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
 
     # Create a tmux session with a different command (cat waits for input indefinitely)
@@ -179,12 +181,14 @@ def test_lifecycle_state_replaced_when_different_process_exists(
     )
 
     try:
-        # Poll for up to 5 seconds for the state to become REPLACED
+        # The test agent has type "test" which is not registered, so with an
+        # unrecognized process running it should be RUNNING_UNKNOWN_AGENT_TYPE
+        # (not REPLACED, which is for known agent types).
         # There's a race condition where tmux spawns a shell first, then execs the command.
         # During that brief window, pane_current_command shows the shell, giving DONE.
         wait_for(
-            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.REPLACED,
-            error_message="Expected agent lifecycle state to be REPLACED",
+            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            error_message="Expected agent lifecycle state to be RUNNING_UNKNOWN_AGENT_TYPE",
         )
     finally:
         # Clean up tmux session and all its processes
