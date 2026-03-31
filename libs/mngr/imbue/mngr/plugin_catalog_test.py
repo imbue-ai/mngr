@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import patch
 
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
@@ -86,7 +87,10 @@ def test_check_signal_fails_for_missing_binary() -> None:
 
 def test_check_signal_fails_on_timeout() -> None:
     signal = SignalCheck(command=("sleep", "999"))
-    with patch("imbue.mngr.plugin_catalog.subprocess.run", side_effect=TimeoutError):
+    with patch(
+        "imbue.mngr.plugin_catalog.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="sleep", timeout=10),
+    ):
         assert check_signal(signal) is False
 
 
