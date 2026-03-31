@@ -41,6 +41,7 @@ class CatalogEntry(FrozenModel):
     description: str = Field(description="Human-readable description")
     tier: PluginTier = Field(description="BASIC (preselected when signal passes) or EXTRA (manual opt-in)")
     signal: str | None = Field(default=None, description="Key into SIGNAL_CHECKS, or None")
+    is_recommended: bool = Field(default=False, description="Whether this plugin is recommended for most users")
 
 
 # Descriptions sourced from each plugin's pyproject.toml.
@@ -52,6 +53,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Claude agent type plugin for mngr",
         tier=PluginTier.BASIC,
         signal="claude",
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="opencode",
@@ -59,6 +61,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="OpenCode agent type plugin for mngr",
         tier=PluginTier.BASIC,
         signal="opencode",
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="pi_coding",
@@ -80,12 +83,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Modal provider backend plugin for mngr",
         tier=PluginTier.BASIC,
         signal="modal",
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="tutor",
         package_name="imbue-mngr-tutor",
         description="Interactive tutorial plugin for mngr",
         tier=PluginTier.BASIC,
+        is_recommended=True,
     ),
     # --- EXTRA tier with signal ---
     CatalogEntry(
@@ -172,6 +177,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-pair",
         description="Pair command plugin for mngr - continuous file sync between agent and local directory",
         tier=PluginTier.EXTRA,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="recursive",
