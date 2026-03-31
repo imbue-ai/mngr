@@ -1,6 +1,6 @@
 """Interactive plugin install wizard for mngr.
 
-Presents recommended plugins in a TUI and lets the user select which
+Presents available plugins in a TUI and lets the user select which
 ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
@@ -134,7 +134,7 @@ def _run_install_wizard(plugins: tuple[CatalogEntry, ...]) -> list[str]:
         [
             AttrMap(Text("Plugin Install Wizard", align="center"), "header"),
             Divider(),
-            Text("mngr has a flexible plugin architecture. Here are some recommended\nplugins for you to install:"),
+            Text("mngr has a flexible plugin architecture. Here are some available\nplugins for you to install:"),
             Divider(),
         ]
     )
@@ -237,7 +237,7 @@ def install_wizard(ctx: click.Context, **kwargs: Any) -> None:
 
 CommandHelpMetadata(
     key="plugin.install-wizard",
-    one_line_description="Interactive wizard to install recommended plugins",
+    one_line_description="Interactive wizard to install available plugins",
     synopsis="mngr plugin install-wizard",
     description="""Presents a TUI with available plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
