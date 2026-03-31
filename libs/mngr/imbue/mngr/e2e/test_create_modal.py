@@ -50,7 +50,7 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
         comment="you can send an initial message (so you don't have to wait around)",
         timeout=600.0,
     )
-    if not result.success:
+    if result.exit_code != 0:
         # Collect diagnostics from the remote host to understand why Claude didn't start
         diag_parts = ["Create failed. Collecting diagnostics from remote host:"]
         for diag_cmd, label in [
