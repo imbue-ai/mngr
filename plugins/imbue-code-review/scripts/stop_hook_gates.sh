@@ -142,4 +142,9 @@ if [[ ${#MISSING[@]} -gt 1 ]]; then
     fi
     echo "$GUIDANCE" >&2
 fi
+# If any per-commit gate is enabled, note that gates may fire repeatedly.
+if [[ "$AUTOFIX_ENABLED" == "true" ]] || [[ "$CONVO_ENABLED" == "true" ]]; then
+    echo "" >&2
+    echo "Note: these gates may fire again after you make changes. /verify-conversation is incremental and only reviews new content. For /autofix, the default is to run the full check, but if your changes since the last autofix run are focused, you may pass instructions telling it to focus on the diff since the last run (while still providing the true base branch)." >&2
+fi
 exit 2
