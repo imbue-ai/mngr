@@ -23,15 +23,15 @@ from typing import Final
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from llm_webchat.database import create_conversation
+from llm_webchat.hookspecs import hookimpl
+from llm_webchat.models import CreateConversationRequest
+from llm_webchat.models import CreateConversationResponse
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_llm.provisioning import MIND_CONVERSATIONS_TABLE_SQL
-from llm_webchat.database import create_conversation
-from llm_webchat.hookspecs import hookimpl
-from llm_webchat.models import CreateConversationRequest
-from llm_webchat.models import CreateConversationResponse
 
 _DEFAULT_CONVERSATION_NAME_TAG: Final[str] = "(new chat)"
 
