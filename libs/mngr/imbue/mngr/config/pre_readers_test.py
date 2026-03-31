@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.pre_readers import get_local_config_name
@@ -15,6 +14,7 @@ from imbue.mngr.config.pre_readers import read_default_command
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
+from imbue.mngr.errors import ConfigParseError
 
 # =============================================================================
 # Tests for try_load_toml
@@ -31,17 +31,12 @@ def test_try_load_toml_returns_none_for_missing_file(tmp_path: Path) -> None:
     assert try_load_toml(tmp_path / "nonexistent.toml") is None
 
 
-def test_try_load_toml_warns_and_returns_none_for_malformed_toml(tmp_path: Path) -> None:
-    """try_load_toml should warn and return None when the file contains invalid TOML."""
+def test_try_load_toml_raises_on_malformed_toml(tmp_path: Path) -> None:
+    """try_load_toml should raise ConfigParseError when the file contains invalid TOML."""
     invalid_toml = tmp_path / "invalid.toml"
     invalid_toml.write_text("[invalid toml syntax")
-    messages: list[str] = []
-    sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
-    try:
-        assert try_load_toml(invalid_toml) is None
-    finally:
-        logger.remove(sink_id)
-    assert any("Failed to parse config file" in m and str(invalid_toml) in m for m in messages)
+    with pytest.raises(ConfigParseError, match="Failed to parse config file"):
+        try_load_toml(invalid_toml)
 
 
 def test_try_load_toml_parses_valid_file(tmp_path: Path) -> None:

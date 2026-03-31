@@ -243,7 +243,6 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     profiles_dir = base_dir / PROFILES_DIRNAME
     profiles_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse config once and reuse the result to avoid duplicate warnings
     config_path = base_dir / ROOT_CONFIG_FILENAME
     root_config = try_load_toml(config_path)
     if root_config is not None:
