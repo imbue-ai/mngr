@@ -409,7 +409,7 @@ optionally which host and provider) to target. The address format is:
 
 All parts are optional:
 
-  NAME                  Agent name only (local host assumed)
+  NAME                  Agent name only (searches all hosts; local in create)
   NAME@HOST             Agent on a specific existing host
   NAME@HOST.PROVIDER    Agent on a specific host with provider disambiguation
   NAME@.PROVIDER        Agent on a new host (auto-generated host name)
@@ -421,7 +421,9 @@ COMPONENTS
 
   NAME
       The agent name. Must be a valid identifier (lowercase letters, digits,
-      and hyphens). If omitted, a name is auto-generated.
+      and hyphens). If omitted, a name is auto-generated. Without a host
+      component, commands that target existing agents search across all
+      hosts and providers. In 'mngr create', it defaults to the local host.
 
   HOST
       The host name. Refers to an existing host unless --new-host is specified.
