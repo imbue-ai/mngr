@@ -148,8 +148,13 @@ class SandboxInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def tunnels(self) -> dict[int, TunnelInfo]:
-        """Get tunnel connection info for exposed ports."""
+    def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
+        """Get tunnel connection info for exposed ports.
+
+        Blocks until tunnel metadata is available or the timeout is reached.
+        If the sandbox is not ready within ``timeout`` seconds, a
+        ``SandboxTimeoutError`` is raised by the Modal backend.
+        """
         ...
 
     @abstractmethod

@@ -248,11 +248,11 @@ def test_destroy_dash_reads_agent_names(
     assert result.exit_code == 0
 
 
-def test_destroy_dash_empty_input_requires_agents(
+def test_destroy_dash_empty_input_is_noop(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that '-' with empty stdin still requires agents."""
+    """Test that '-' with empty stdin is a no-op (not an error)."""
     result = cli_runner.invoke(
         destroy,
         ["-"],
@@ -260,8 +260,7 @@ def test_destroy_dash_empty_input_requires_agents(
         obj=plugin_manager,
         catch_exceptions=True,
     )
-    assert result.exit_code != 0
-    assert "Must specify at least one agent" in result.output
+    assert result.exit_code == 0
 
 
 def test_destroy_dash_multiple_names(

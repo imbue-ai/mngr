@@ -26,6 +26,7 @@ from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -321,6 +322,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     snapshot,
     config,
     gc,
+    help_command,
     label,
     plugin_command,
     observe,

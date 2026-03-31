@@ -18,6 +18,7 @@ from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.label import label
 from imbue.mngr.cli.limit import limit
 from imbue.mngr.cli.message import message
@@ -268,6 +269,7 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (destroy, ["--help"], "destroy"),
     (exec_command, ["--help"], "exec"),
     (gc, ["--help"], "gc"),
+    (help_command, ["--help"], "help"),
     (label, ["--help"], "label"),
     (limit, ["--help"], "limit"),
     (events, ["--help"], "events"),

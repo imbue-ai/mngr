@@ -433,8 +433,8 @@ def test_stream_manager_on_discovery_stream_output_ignores_empty_lines() -> None
     assert manager.resolver.list_known_agent_ids() == ()
 
 
-def test_stream_manager_on_discovery_stream_output_ignores_non_full_events() -> None:
-    """Non-DISCOVERY_FULL events are ignored and do not update the resolver."""
+def test_stream_manager_on_discovery_stream_output_ignores_unrecognized_events() -> None:
+    """Unrecognized event types are ignored and do not update the resolver."""
     manager = _make_stream_manager()
     # Use an unrecognized event type so parse_discovery_event_line returns None
     line = json.dumps(
@@ -561,6 +561,53 @@ def _make_host_ssh_info_line(host_id: str, ssh_data: Mapping[str, object]) -> st
     )
 
 
+def _make_agent_discovered_line(agent_id: str, host_id: str, event_id: str = "evt-test-disc-001") -> str:
+    """Build an AGENT_DISCOVERED event JSON line."""
+    return json.dumps(
+        {
+            "type": "AGENT_DISCOVERED",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "event_id": event_id,
+            "source": "mngr/discovery",
+            "agent": {
+                "host_id": host_id,
+                "agent_id": agent_id,
+                "agent_name": f"agent-{agent_id[-4:]}",
+                "provider_name": "local",
+                "certified_data": {"labels": {"mind": "true"}},
+            },
+        }
+    )
+
+
+def _make_agent_destroyed_line(agent_id: str, host_id: str, event_id: str = "evt-test-destr-001") -> str:
+    """Build an AGENT_DESTROYED event JSON line."""
+    return json.dumps(
+        {
+            "type": "AGENT_DESTROYED",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "event_id": event_id,
+            "source": "mngr/discovery",
+            "agent_id": agent_id,
+            "host_id": host_id,
+        }
+    )
+
+
+def _make_host_destroyed_line(host_id: str, agent_ids: list[str]) -> str:
+    """Build a HOST_DESTROYED event JSON line."""
+    return json.dumps(
+        {
+            "type": "HOST_DESTROYED",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "event_id": "evt-test-hdestr-001",
+            "source": "mngr/discovery",
+            "host_id": host_id,
+            "agent_ids": agent_ids,
+        }
+    )
+
+
 def test_stream_manager_full_snapshot_updates_agent_ids() -> None:
     """DISCOVERY_FULL events update the agent list in the resolver."""
     manager = _make_stream_manager()
@@ -680,3 +727,150 @@ def test_stream_manager_ssh_info_before_full_snapshot() -> None:
     ssh_info = manager.resolver.get_ssh_info(_AGENT_A)
     assert ssh_info is not None
     assert ssh_info.host == "remote.example.com"
+
+
+# -- AGENT_DISCOVERED incremental event tests --
+
+
+def test_stream_manager_agent_discovered_adds_agent() -> None:
+    """An AGENT_DISCOVERED event incrementally adds the agent to the resolver."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    with manager._cg:
+        line = _make_agent_discovered_line(str(_AGENT_A), host_id)
+        manager._handle_discovery_line(line)
+
+    ids = manager.resolver.list_known_agent_ids()
+    assert _AGENT_A in ids
+
+
+def test_stream_manager_agent_discovered_updates_existing_agent() -> None:
+    """A second AGENT_DISCOVERED for the same agent updates rather than duplicates."""
+    manager = _make_stream_manager()
+    host_id_1 = "host-00000000000000000000000000000001"
+    host_id_2 = "host-00000000000000000000000000000002"
+
+    with manager._cg:
+        manager._handle_discovery_line(
+            _make_agent_discovered_line(str(_AGENT_A), host_id_1, event_id="evt-1")
+        )
+        manager._handle_discovery_line(
+            _make_agent_discovered_line(str(_AGENT_A), host_id_2, event_id="evt-2")
+        )
+
+    ids = manager.resolver.list_known_agent_ids()
+    # Should appear exactly once
+    assert ids.count(_AGENT_A) == 1
+
+
+# -- AGENT_DESTROYED incremental event tests --
+
+
+def test_stream_manager_agent_destroyed_removes_agent() -> None:
+    """An AGENT_DESTROYED event removes the agent from the resolver."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    with manager._cg:
+        # First discover the agent
+        full_line = _make_discovery_full_line(
+            agents=[(str(_AGENT_A), host_id), (str(_AGENT_B), host_id)],
+            hosts=[host_id],
+        )
+        manager._handle_discovery_line(full_line)
+        assert _AGENT_A in manager.resolver.list_known_agent_ids()
+        assert _AGENT_B in manager.resolver.list_known_agent_ids()
+
+        # Destroy agent A
+        destroy_line = _make_agent_destroyed_line(str(_AGENT_A), host_id)
+        manager._handle_discovery_line(destroy_line)
+
+    ids = manager.resolver.list_known_agent_ids()
+    assert _AGENT_A not in ids
+    assert _AGENT_B in ids
+
+
+def test_stream_manager_agent_destroyed_clears_servers() -> None:
+    """An AGENT_DESTROYED event clears the server URLs for that agent."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    with manager._cg:
+        full_line = _make_discovery_full_line(
+            agents=[(str(_AGENT_A), host_id)],
+            hosts=[host_id],
+        )
+        manager._handle_discovery_line(full_line)
+
+        # Add server data
+        server_line = json.dumps({"server": "web", "url": "http://127.0.0.1:9100"})
+        manager._on_events_stream_output(server_line, is_stdout=True, agent_id=_AGENT_A)
+        assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) == "http://127.0.0.1:9100"
+
+        # Destroy the agent
+        destroy_line = _make_agent_destroyed_line(str(_AGENT_A), host_id)
+        manager._handle_discovery_line(destroy_line)
+
+    assert manager.resolver.get_backend_url(_AGENT_A, _SERVER_WEB) is None
+
+
+def test_stream_manager_agent_destroyed_for_unknown_agent_is_harmless() -> None:
+    """AGENT_DESTROYED for an unknown agent does not crash."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    destroy_line = _make_agent_destroyed_line(str(_AGENT_A), host_id)
+    manager._handle_discovery_line(destroy_line)
+
+    assert manager.resolver.list_known_agent_ids() == ()
+
+
+def test_stream_manager_full_snapshot_then_destroy_removes_agent() -> None:
+    """Replaying a stale DISCOVERY_FULL followed by AGENT_DESTROYED correctly removes the agent.
+
+    This is the exact scenario that causes the forwarding server to get stuck
+    on a destroyed agent: the events file contains a stale DISCOVERY_FULL snapshot
+    (still listing the agent) followed by an AGENT_DESTROYED event. Both events
+    must be processed in order.
+    """
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    with manager._cg:
+        # Stale snapshot includes the agent
+        full_line = _make_discovery_full_line(
+            agents=[(str(_AGENT_A), host_id)],
+            hosts=[host_id],
+        )
+        manager._handle_discovery_line(full_line)
+        assert _AGENT_A in manager.resolver.list_known_agent_ids()
+
+        # Then the destroy event arrives
+        destroy_line = _make_agent_destroyed_line(str(_AGENT_A), host_id)
+        manager._handle_discovery_line(destroy_line)
+
+    assert _AGENT_A not in manager.resolver.list_known_agent_ids()
+
+
+# -- HOST_DESTROYED incremental event tests --
+
+
+def test_stream_manager_host_destroyed_removes_all_agents_on_host() -> None:
+    """A HOST_DESTROYED event removes all agents that were on that host."""
+    manager = _make_stream_manager()
+    host_id = "host-00000000000000000000000000000001"
+
+    with manager._cg:
+        full_line = _make_discovery_full_line(
+            agents=[(str(_AGENT_A), host_id), (str(_AGENT_B), host_id)],
+            hosts=[host_id],
+        )
+        manager._handle_discovery_line(full_line)
+        assert len(manager.resolver.list_known_agent_ids()) == 2
+
+        # Destroy the host with both agents
+        destroy_line = _make_host_destroyed_line(host_id, [str(_AGENT_A), str(_AGENT_B)])
+        manager._handle_discovery_line(destroy_line)
+
+    assert manager.resolver.list_known_agent_ids() == ()

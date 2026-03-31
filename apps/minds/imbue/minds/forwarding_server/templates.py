@@ -161,17 +161,34 @@ _CREATING_PAGE_TEMPLATE: Final[str] = (
     const statusEl = document.getElementById('status');
     const source = new EventSource('/api/create-agent/' + agentId + '/logs');
 
+    var pendingLines = [];
+    var flushScheduled = false;
+
+    function flushLogs() {
+      flushScheduled = false;
+      if (pendingLines.length === 0) return;
+      var fragment = document.createDocumentFragment();
+      fragment.appendChild(document.createTextNode(pendingLines.join('\\n') + '\\n'));
+      pendingLines = [];
+      logsEl.appendChild(fragment);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
     source.onmessage = function(event) {
-      const data = JSON.parse(event.data);
+      var data = JSON.parse(event.data);
       if (data.log) {
-        logsEl.textContent += data.log + '\\n';
-        logsEl.scrollTop = logsEl.scrollHeight;
+        pendingLines.push(data.log);
+        if (!flushScheduled) {
+          flushScheduled = true;
+          requestAnimationFrame(flushLogs);
+        }
       }
     };
 
     source.addEventListener('done', function(event) {
       source.close();
-      const data = JSON.parse(event.data);
+      flushLogs();
+      var data = JSON.parse(event.data);
       if (data.status === 'DONE' && data.redirect_url) {
         statusEl.textContent = 'Done! Redirecting...';
         window.location.href = data.redirect_url;

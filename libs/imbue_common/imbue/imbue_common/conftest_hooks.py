@@ -69,13 +69,13 @@ from imbue.resource_guards.resource_guards import stop_resource_guards
 _original_entry_points = importlib.metadata.entry_points
 _entry_points_cache: dict[
     tuple[tuple[str, Any], ...],
-    importlib.metadata.EntryPoints | importlib.metadata.SelectableGroups,
+    Any,
 ] = {}
 
 
 def _cached_entry_points(
     **params: Any,
-) -> importlib.metadata.EntryPoints | importlib.metadata.SelectableGroups:
+) -> Any:
     """Caching wrapper around importlib.metadata.entry_points().
 
     Converts the keyword arguments to a hashable key (frozenset of items) and
@@ -497,6 +497,8 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
     By acquiring the lock here, we ensure the controller holds it for the entire session.
 
     xdist workers skip lock acquisition since the controller already holds it.
+    ``--collect-only`` sessions also skip the lock since they only discover tests
+    without running them.
 
     IMPORTANT: The start_time is set AFTER the lock is acquired so that time spent
     waiting for the lock is not counted against the test suite time limit.

@@ -788,6 +788,35 @@ def _has_api_credentials_available(
     return False
 
 
+def _check_settings_local_gitignored(host: OnlineHostInterface, repo_path: Path) -> None:
+    """Verify .claude/settings.local.json is gitignored in the given repo path.
+
+    Raises PluginMngrError if the file is not gitignored. Silently returns
+    if the path is not a git repository.
+    """
+    settings_relative = Path(".claude") / "settings.local.json"
+
+    is_git_repo = host.execute_idempotent_command(
+        "git rev-parse --is-inside-work-tree",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not is_git_repo.success:
+        return
+
+    result = host.execute_idempotent_command(
+        f"git check-ignore -q {shlex.quote(str(settings_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not result.success:
+        raise PluginMngrError(
+            f".claude/settings.local.json is not gitignored in {repo_path}.\n"
+            "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
+            f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
+        )
+
+
 class DialogIndicator(FrozenModel, ABC):
     """Base class for dialog indicators that can block agent input."""
 
@@ -885,6 +914,23 @@ class CostThresholdDialogIndicator(DialogIndicator):
 
 class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     """Agent implementation for Claude with session resumption support."""
+
+    @classmethod
+    def preflight_check(
+        cls,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        agent_options: CreateAgentOptions,
+        agent_config: AgentTypeConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Validate that .claude/settings.local.json is gitignored in the source repo.
+
+        mngr writes readiness hooks to this file during provisioning. If it's not
+        gitignored, it would appear as an unstaged change. Checking early avoids
+        wasting time on host creation and work_dir setup before surfacing this error.
+        """
+        _check_settings_local_gitignored(source_host, source_path)
 
     def get_claude_config_dir(self) -> Path:
         """Return the per-agent Claude config directory path.
@@ -1182,25 +1228,9 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         settings_relative = Path(".claude") / "settings.local.json"
         settings_path = self.work_dir / settings_relative
 
-        # Only check gitignore if git is available and this is a git repository
-        is_git_repo = host.execute_idempotent_command(
-            "git rev-parse --is-inside-work-tree",
-            cwd=self.work_dir,
-            timeout_seconds=5.0,
-        )
-        if is_git_repo.success:
-            # Verify .claude/settings.local.json is gitignored to avoid unstaged changes
-            result = host.execute_idempotent_command(
-                f"git check-ignore -q {shlex.quote(str(settings_relative))}",
-                cwd=self.work_dir,
-                timeout_seconds=5.0,
-            )
-            if not result.success:
-                raise PluginMngrError(
-                    f".claude/settings.local.json is not gitignored in {self.work_dir}.\n"
-                    "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
-                    f"Add '.claude/settings.local.json' to your .gitignore and try again. (original error: {result.stderr})"
-                )
+        # Check gitignore. During create(), preflight_check already verified
+        # this on the source, but this covers other code paths (e.g. mngr provision).
+        _check_settings_local_gitignored(host, self.work_dir)
 
         hooks_config = build_readiness_hooks_config()
 
@@ -1689,13 +1719,22 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
+_MKDIR_BATCH_SIZE: Final[int] = 50
+
+
 def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    remote_folders: list[str] = []
-    for dest_path, _dest_contents in transfers:
-        remote_folders.append(shlex.quote(str(dest_path.parent)))
-    mkdir_result = host.execute_idempotent_command(f"mkdir -p {' '.join(remote_folders)}")
-    if not mkdir_result.success:
-        raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
+    # Deduplicate parent directories -- many files share the same parent, and
+    # sending all 1000+ paths in a single mkdir command can exceed the OS
+    # argument length limit ("/bin/bash: File name too long").
+    unique_dirs = sorted({str(dest_path.parent) for dest_path, _ in transfers})
+
+    # Batch mkdir calls so no single command exceeds OS argument limits.
+    for i in range(0, len(unique_dirs), _MKDIR_BATCH_SIZE):
+        batch = unique_dirs[i : i + _MKDIR_BATCH_SIZE]
+        args = " ".join(shlex.quote(d) for d in batch)
+        mkdir_result = host.execute_idempotent_command(f"mkdir -p {args}")
+        if not mkdir_result.success:
+            raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
 
     # then upload them all in parallel
     count = 0

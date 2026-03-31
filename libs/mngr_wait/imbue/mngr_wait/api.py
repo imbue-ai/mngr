@@ -1,12 +1,14 @@
 import time
 from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.find import resolve_agent_reference
 from imbue.mngr.api.find import resolve_host_reference
 from imbue.mngr.api.providers import get_provider_instance
@@ -45,32 +47,30 @@ def resolve_wait_target(
 ) -> ResolvedTarget:
     """Resolve a target identifier to provider, host, and optional agent references.
 
+    Supports agent address syntax: NAME[@[HOST][.PROVIDER]].
+
     Uses the existing find.py resolution functions for agent/host lookup.
     """
     with log_span("Discovering hosts and agents"):
-        agents_by_host, _providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(identifier,),
-            include_destroyed=False,
-            reset_caches=False,
+        plain_id, filtered_agents_by_host, _providers = discover_by_address(
+            identifier, mngr_ctx, include_destroyed=False
         )
 
-    all_hosts = list(agents_by_host.keys())
+    all_hosts = list(filtered_agents_by_host.keys())
 
     # Determine target type from identifier format
-    if identifier.startswith("agent-"):
-        return _build_agent_resolved_target(identifier, agents_by_host, mngr_ctx)
-    elif identifier.startswith("host-"):
-        return _build_host_resolved_target(identifier, all_hosts, mngr_ctx)
+    if plain_id.startswith("agent-"):
+        return _build_agent_resolved_target(plain_id, filtered_agents_by_host, mngr_ctx)
+    elif plain_id.startswith("host-"):
+        return _build_host_resolved_target(plain_id, all_hosts, mngr_ctx)
     else:
         # Ambiguous name -- try agent first, then host, error on ambiguity
-        return _resolve_by_name(identifier, agents_by_host, all_hosts, mngr_ctx)
+        return _resolve_by_name(plain_id, filtered_agents_by_host, all_hosts, mngr_ctx)
 
 
 def _build_agent_resolved_target(
     identifier: str,
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
 ) -> ResolvedTarget:
     """Build a ResolvedTarget for an agent identifier using find.py's resolve_agent_reference.
@@ -113,7 +113,7 @@ def _build_host_resolved_target(
 
 def _resolve_by_name(
     identifier: str,
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     all_hosts: list[DiscoveredHost],
     mngr_ctx: MngrContext,
 ) -> ResolvedTarget:

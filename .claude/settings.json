@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/claude_prevent_commit_rewrite.sh"
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_prevent_commit_rewrite.sh"
           }
         ]
       }
@@ -49,6 +49,6 @@
   "effortLevel": "high",
   "statusLine": {
     "type": "command",
-    "command": "./scripts/claude_status_line.sh"
+    "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_status_line.sh"
   }
 }

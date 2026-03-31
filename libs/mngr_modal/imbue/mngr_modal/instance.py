@@ -1155,10 +1155,15 @@ class ModalProviderInstance(BaseProviderInstance):
                 stderr=StreamType.DEVNULL,
             )
 
-    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface) -> tuple[str, int]:
-        """Extract SSH connection info from a running sandbox."""
+    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int = 50) -> tuple[str, int]:
+        """Extract SSH connection info from a running sandbox.
+
+        ``tunnel_timeout`` is forwarded to the Modal SDK's ``tunnels()`` call
+        and controls how many seconds the backend will wait for the sandbox to
+        be ready before raising ``SandboxTimeoutError``.
+        """
         try:
-            tunnels = sandbox.tunnels()
+            tunnels = sandbox.tunnels(timeout=tunnel_timeout)
         except ModalProxyError as e:
             if _is_sandbox_timeout(e):
                 raise ModalSandboxTimeoutMngrError("Sandbox failed to come online fast enough") from e
@@ -1255,8 +1260,10 @@ class ModalProviderInstance(BaseProviderInstance):
                         ),
                     )
 
-            # Get SSH connection info
-            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
+            # Get SSH connection info.
+            # Use the sandbox timeout as the tunnel timeout so that the tunnel
+            # request waits long enough for image builds and container startup.
+            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox, tunnel_timeout=config.timeout)
             logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
 
             # Get SSH keypairs
