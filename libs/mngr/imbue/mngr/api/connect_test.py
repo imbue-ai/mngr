@@ -485,16 +485,17 @@ def test_ssh_wrapper_script_is_correctly_quoted_for_bash_c() -> None:
 
 
 def test_build_ssh_activity_wrapper_script_sends_sigwinch_via_pane_pid() -> None:
-    """Test that the wrapper sends SIGWINCH to pane PIDs instead of using pkill.
+    """Test that the wrapper sends SIGWINCH to pane process groups instead of using pkill.
 
-    Using tmux list-panes to get the actual pane PID is more reliable than
-    pkill -f pattern matching, which can fail when the process command line
-    doesn't contain the expected agent name.
+    Uses tmux list-panes to get the actual pane PID, then sends SIGWINCH to the
+    negative PID (process group) so that child processes like Claude also receive
+    the signal, not just the initial bash shell in the pane.
     """
     script = _build_ssh_activity_wrapper_script("mngr-test", Path("/mngr"))
 
     assert "tmux list-panes -t 'mngr-test'" in script
-    assert "kill -WINCH" in script
+    # Sends to process group via negative PID
+    assert "kill -WINCH -{}" in script
     # Should not use pkill
     assert "pkill" not in script
 

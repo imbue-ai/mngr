@@ -53,11 +53,12 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         # After attaching, resize all tmux windows to match the client and send
         # SIGWINCH to the pane processes so they redraw at the correct size.
         # Uses ';' (not '&&') so the SIGWINCH is sent even if resize-window is
-        # a no-op. Targets the pane PID directly instead of pkill -f to avoid
-        # pattern-matching failures with complex command lines.
+        # a no-op. Sends SIGWINCH to the negative PID (process group) so that
+        # child processes like Claude also receive the signal, not just the
+        # initial bash shell in the pane.
         f"(sleep 3 && tmux list-windows -t '{session_name}' -F '#I' | xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
         f"sleep 1; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | xargs -I{{}} kill -WINCH {{}}) 2>/dev/null & "
+        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | xargs -I{{}} kill -WINCH -{{}}) 2>/dev/null & "
         # actually attach
         f"tmux attach -t '{session_name}'; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "

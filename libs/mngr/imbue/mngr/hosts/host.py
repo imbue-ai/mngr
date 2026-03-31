@@ -2394,11 +2394,6 @@ class Host(BaseHost, OnlineHostInterface):
             "# Source user's default tmux config if it exists",
             "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
             "",
-            "# Size windows to the most recently attached client so that connecting",
-            "# via SSH automatically resizes the panes (and sends SIGWINCH to the",
-            "# processes inside them) to match the remote terminal dimensions.",
-            "set -g window-size latest",
-            "",
         ]
 
         if self.is_local:
