@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 from llm.cli import logs_db_path
 from llm_webchat.database import open_database
 
@@ -86,7 +87,7 @@ def test_plugin_registers_route() -> None:
     app = FastAPI()
     plugin = RegisterConversationsPlugin(db_path=Path("/tmp/fake.db"))
     plugin.endpoint(app=app)
-    post_routes = [r.path for r in app.routes if hasattr(r, "path") and hasattr(r, "methods") and "POST" in r.methods]
+    post_routes = [r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods]
     assert "/api/conversations" in post_routes
 
 

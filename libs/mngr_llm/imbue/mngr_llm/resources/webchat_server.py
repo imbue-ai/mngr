@@ -4,10 +4,10 @@ Thin wrapper around llm-webchat's ``create_application`` that allows us to
 configure it via environment variables and extend it with custom endpoints
 (e.g. the Agents page).
 
-Reads the ``WEB_SERVER_PORT`` env var for port compatibility with the
-legacy ``web_server.py`` (defaults to ``0``, i.e. OS-assigned random port).
-Registers itself in ``servers/events.jsonl`` under the ``web`` server name
-so the forwarding server can discover it.
+Reads the ``WEB_SERVER_PORT`` env var for the port (defaults to ``0``,
+i.e. OS-assigned random port). Registers itself in
+``servers/events.jsonl`` under the ``web`` server name so the forwarding
+server can discover it.
 """
 
 from __future__ import annotations
@@ -171,17 +171,16 @@ def _inject_plugin_static_files() -> None:
 def _bridge_web_server_port_env_var() -> None:
     """Bridge WEB_SERVER_PORT to LLM_WEBCHAT_PORT for backward compatibility.
 
-    The legacy web_server.py reads WEB_SERVER_PORT (defaulting to 0 for a
-    random OS-assigned port). llm-webchat reads LLM_WEBCHAT_PORT (defaulting
-    to 8000). This bridges them so callers that set WEB_SERVER_PORT get the
-    expected behavior.
+    Some callers set WEB_SERVER_PORT; llm-webchat reads LLM_WEBCHAT_PORT
+    (defaulting to 8000). This bridges them so callers that set
+    WEB_SERVER_PORT get the expected behavior.
 
     Must be called before ``load_config()``.
     """
     web_server_port = os.environ.get("WEB_SERVER_PORT")
     if web_server_port is not None and "LLM_WEBCHAT_PORT" not in os.environ:
         os.environ["LLM_WEBCHAT_PORT"] = web_server_port
-    # When neither is set, default to 0 (random port) to match legacy behavior
+    # When neither is set, default to 0 (random port)
     if "LLM_WEBCHAT_PORT" not in os.environ:
         os.environ["LLM_WEBCHAT_PORT"] = "0"
 

@@ -4,10 +4,8 @@ Assembles a system prompt from markdown files in the agent's working
 directory (``GLOBAL.md`` and ``talking/PROMPT.md``) and injects it into
 the ``llm`` CLI command via the ``modify_llm_prompt_command`` hook.
 
-This replicates the behavior of ``_build_template()`` in the legacy
-``web_server.py``, but instead of writing a template file to disk and
-passing ``-t``, it reads the files once at startup and passes the
-assembled prompt directly via ``--system``.
+Reads the files once at startup and passes the assembled prompt directly
+via ``--system``.
 """
 
 from __future__ import annotations

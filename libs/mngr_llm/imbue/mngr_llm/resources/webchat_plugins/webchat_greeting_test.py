@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from imbue.mngr_llm.conftest import create_mind_conversations_table_in_test_db
 from imbue.mngr_llm.resources.webchat_plugins.webchat_greeting import GreetingPlugin
@@ -93,7 +94,7 @@ def test_plugin_registers_route() -> None:
     app = FastAPI()
     plugin = GreetingPlugin(agent_work_dir="", llm_user_path="")
     plugin.endpoint(app=app)
-    post_routes = [r.path for r in app.routes if hasattr(r, "path") and hasattr(r, "methods") and "POST" in r.methods]
+    post_routes = [r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods]
     assert "/api/greeting-conversation" in post_routes
 
 
