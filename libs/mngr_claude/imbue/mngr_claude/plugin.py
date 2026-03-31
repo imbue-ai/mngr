@@ -638,9 +638,9 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
 
 def _rsync_claude_home_directories(
     host: OnlineHostInterface,
+    local_host: OnlineHostInterface,
     local_claude_dir: Path,
     config_dir: Path,
-    mngr_ctx: MngrContext,
 ) -> None:
     """Transfer directory items from ~/.claude/ to a remote config dir using rsync.
 
@@ -648,15 +648,12 @@ def _rsync_claude_home_directories(
     skills/, agents/, commands/, plugins/. Individual files like settings.json
     are handled separately by the caller since they require generation/merging.
     """
-    local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
-    if not isinstance(local_host_ref, OnlineHostInterface):
-        raise MngrError("Local host is not online")
     for item_name in _CLAUDE_HOME_SYNC_ITEMS:
         item_path = local_claude_dir / item_name
         if not item_path.exists() or not item_path.is_dir():
             continue
         with log_span("Rsyncing {} to per-agent config dir", item_name):
-            host.copy_directory(local_host_ref, item_path, config_dir / item_name)
+            host.copy_directory(local_host, item_path, config_dir / item_name)
 
 
 def _load_claude_resource_script(filename: str) -> str:
@@ -1318,7 +1315,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         if config.sync_home_settings:
             logger.info("Transferring claude home directory settings to per-agent config dir...")
             local_claude_dir = Path.home() / ".claude"
-            _rsync_claude_home_directories(host, local_claude_dir, config_dir, mngr_ctx)
+            local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
+            if not isinstance(local_host_ref, OnlineHostInterface):
+                raise MngrError("Local host is not online")
+            _rsync_claude_home_directories(host, local_host_ref, local_claude_dir, config_dir)
 
         # 3. Always ship .claude.json (generated content, not a direct copy)
         # Resolve the work_dir on the remote host so the trust entry matches
