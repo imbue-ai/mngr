@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.pre_readers import get_local_config_name
@@ -30,11 +31,17 @@ def test_try_load_toml_returns_none_for_missing_file(tmp_path: Path) -> None:
     assert try_load_toml(tmp_path / "nonexistent.toml") is None
 
 
-def test_try_load_toml_returns_none_for_malformed_toml(tmp_path: Path) -> None:
-    """try_load_toml should return None when the file contains invalid TOML."""
+def test_try_load_toml_warns_and_returns_none_for_malformed_toml(tmp_path: Path) -> None:
+    """try_load_toml should warn and return None when the file contains invalid TOML."""
     invalid_toml = tmp_path / "invalid.toml"
     invalid_toml.write_text("[invalid toml syntax")
-    assert try_load_toml(invalid_toml) is None
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
+    try:
+        assert try_load_toml(invalid_toml) is None
+    finally:
+        logger.remove(sink_id)
+    assert any("Failed to parse config file" in m and str(invalid_toml) in m for m in messages)
 
 
 def test_try_load_toml_parses_valid_file(tmp_path: Path) -> None:

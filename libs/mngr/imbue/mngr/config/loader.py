@@ -261,8 +261,8 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
                 profile_dir = profiles_dir / profile_id
                 profile_dir.mkdir(parents=True, exist_ok=True)
                 return profile_dir
-        except tomllib.TOMLDecodeError:
-            pass
+        except tomllib.TOMLDecodeError as e:
+            logger.warning("Failed to parse config file {}: {}", config_path, e)
 
     # No valid config.toml or no profile specified -- create a new profile
     profile_id = uuid4().hex
