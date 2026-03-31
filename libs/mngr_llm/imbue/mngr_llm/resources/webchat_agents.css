@@ -1,37 +1,76 @@
 /* Agents page plugin styles for llm-webchat. */
 
-/* ── Sidebar link ─────────────────────────────────────────── */
+/* ── Sidebar pill link (expanded) ─────────────────────────── */
 
 .agents-sidebar-link {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 8px 12px;
-  margin-top: auto;
-  font-size: 13px;
+  gap: 0.3rem;
+  margin: 0 12px 6px;
+  padding: 2px 10px;
+  font-family: var(--font-family-mono, ui-monospace, monospace);
+  font-size: 12px;
   color: var(--color-text-secondary);
   text-decoration: none;
-  border-radius: 0.4rem;
-  border-top: 1px solid var(--color-border, #e5e5e5);
+  background: var(--color-bg, #fafaf8);
+  border: 1px solid var(--color-border, #e4e3df);
+  border-radius: 10px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background-color 150ms, color 150ms;
+  transition: border-color 150ms, color 150ms;
 }
 
 .agents-sidebar-link:hover {
-  background: var(--color-surface-secondary);
-  color: var(--color-text-primary);
+  border-color: var(--color-accent, #2f6b4f);
+  color: var(--color-accent, #2f6b4f);
 }
 
 .agents-sidebar-link.active {
-  color: var(--color-text-primary);
-  font-weight: 600;
+  color: var(--color-accent, #2f6b4f);
+  background: var(--color-accent-light, #e9f2ee);
+  border-color: var(--color-accent, #2f6b4f);
+  font-weight: 500;
 }
 
 .agents-sidebar-link svg {
-  width: 1rem;
-  height: 1rem;
+  width: 12px;
+  height: 12px;
   flex-shrink: 0;
+}
+
+/* ── Sidebar icon button (collapsed) ─────────────────────── */
+
+.agents-sidebar-collapsed-button {
+  border-radius: var(--radius-base, 6px);
+  border: 1px solid var(--color-border, #e4e3df);
+  background-color: var(--color-bg, #fafaf8);
+  width: 28px;
+  height: 28px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: all 0.12s;
+  text-decoration: none;
+  padding: 0;
+}
+
+.agents-sidebar-collapsed-button:hover {
+  background-color: var(--color-accent-light, #e9f2ee);
+  border-color: var(--color-accent, #2f6b4f);
+  color: var(--color-accent, #2f6b4f);
+}
+
+.agents-sidebar-collapsed-button.active {
+  background-color: var(--color-accent-light, #e9f2ee);
+  border-color: var(--color-accent, #2f6b4f);
+  color: var(--color-accent, #2f6b4f);
+}
+
+.agents-sidebar-collapsed-button svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* ── Page layout ──────────────────────────────────────────── */
