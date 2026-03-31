@@ -2,8 +2,8 @@
  * Agents page plugin for llm-webchat.
  *
  * Registers an /agents route via $llm.registerRoute() and adds an "Agents"
- * link to the sidebar. Fetches agent data from GET /api/agents when the
- * route is visited.
+ * link to the sidebar via $llm.registerSidebarItem(). Fetches agent data
+ * from GET /api/agents when the route is visited.
  */
 
 // Defer everything until "load" so that the main app's ES module has
@@ -40,15 +40,13 @@ window.addEventListener("load", function () {
     document.head.appendChild(linkElement);
   })();
 
-  // ── SVG icons ────────────────────────────────────────────────
+  // ── SVG icon paths ───────────────────────────────────────────
 
-  var AGENTS_ICON_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  var AGENTS_ICON_PATHS =
     '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>' +
     '<circle cx="9" cy="7" r="4"/>' +
     '<path d="M23 21v-2a4 4 0 0 0-3-3.87"/>' +
-    '<path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+    '<path d="M16 3.13a4 4 0 0 1 0 7.75"/>';
 
   var BACK_ARROW_SVG =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
@@ -75,15 +73,6 @@ window.addEventListener("load", function () {
     if (lower === "stopped") return "agents-badge agents-badge-stopped";
     if (lower === "waiting") return "agents-badge agents-badge-waiting";
     return "agents-badge agents-badge-unknown";
-  }
-
-  function isAgentsRoute() {
-    var expected = basePath + AGENTS_ROUTE;
-    try {
-      return window.location.pathname === expected;
-    } catch (e) {
-      return false;
-    }
   }
 
   // ── Data fetching ────────────────────────────────────────────
@@ -257,117 +246,25 @@ window.addEventListener("load", function () {
     },
   });
 
-  // ── Sidebar link ─────────────────────────────────────────────
+  // ── Sidebar item ─────────────────────────────────────────────
 
-  function navigateToAgents() {
-    history.pushState(null, "", basePath + AGENTS_ROUTE);
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }
-
-  function updateSidebarLinkState() {
-    var active = isAgentsRoute();
-
-    var pill = document.querySelector(".agents-sidebar-link");
-    if (pill) {
-      if (active) {
-        pill.classList.add("active");
-      } else {
-        pill.classList.remove("active");
-      }
-    }
-
-    var collapsedBtn = document.querySelector(".agents-sidebar-collapsed-button");
-    if (collapsedBtn) {
-      if (active) {
-        collapsedBtn.classList.add("active");
-      } else {
-        collapsedBtn.classList.remove("active");
-      }
-    }
-  }
-
-  function injectSidebarLink() {
-    var injectedExpanded = !!document.querySelector(".agents-sidebar-link");
-    var injectedCollapsed = !!document.querySelector(".agents-sidebar-collapsed-button");
-
-    // Inject the pill into the expanded sidebar, between the
-    // branding row and the new-conversation row.
-    if (!injectedExpanded) {
-      var brandingRow = document.querySelector(
-        ".sidebar-expanded-content .sidebar-branding-row"
-      );
-      var newConvRow = document.querySelector(
-        ".sidebar-expanded-content .sidebar-new-conversation-row"
-      );
-      if (brandingRow && newConvRow && newConvRow.parentNode) {
-        var pill = document.createElement("a");
-        pill.className = "agents-sidebar-link";
-        pill.href = basePath + AGENTS_ROUTE;
-        pill.innerHTML = AGENTS_ICON_SVG + "<span>Agents</span>";
-        pill.addEventListener("click", function (event) {
-          event.preventDefault();
-          navigateToAgents();
-        });
-        newConvRow.parentNode.insertBefore(pill, newConvRow);
-        injectedExpanded = true;
-      }
-    }
-
-    // Inject an icon button into the collapsed sidebar content,
-    // before the new-conversation (+) button so the order matches
-    // the expanded sidebar (branding, agents, new-conversation).
-    if (!injectedCollapsed) {
-      var collapsedContent = document.querySelector(".sidebar-collapsed-content");
-      if (collapsedContent) {
-        var btn = document.createElement("a");
-        btn.className = "agents-sidebar-collapsed-button";
-        btn.href = basePath + AGENTS_ROUTE;
-        btn.title = "Agents";
-        btn.setAttribute("aria-label", "Agents");
-        btn.innerHTML = AGENTS_ICON_SVG;
-        btn.addEventListener("click", function (event) {
-          event.preventDefault();
-          navigateToAgents();
-        });
-
-        // The collapsed content has [expand, new-conversation].
-        // Insert before the last button (new-conversation / +).
-        var collapsedButtons = collapsedContent.querySelectorAll(".sidebar-icon-button");
-        var newConvButton = collapsedButtons.length > 1 ? collapsedButtons[collapsedButtons.length - 1] : null;
-        if (newConvButton) {
-          collapsedContent.insertBefore(btn, newConvButton);
-        } else {
-          collapsedContent.appendChild(btn);
-        }
-        injectedCollapsed = true;
-      }
-    }
-
-    updateSidebarLinkState();
-    return injectedExpanded || injectedCollapsed;
-  }
+  $llm.registerSidebarItem({
+    route: AGENTS_ROUTE,
+    name: "Agents",
+    icon: AGENTS_ICON_PATHS,
+  });
 
   // ── Initialization ───────────────────────────────────────────
 
   $llm.on("ready", function () {
-    injectSidebarLink();
     fetchAgentName();
 
-    // Re-inject after mithril re-renders (the sidebar may be
-    // re-created).  Observe the #app container rather than the
-    // sidebar element itself, because mithril may replace the
-    // entire sidebar DOM node -- which would disconnect an
-    // observer attached to it.
+    // Observe the #app container for mithril re-renders so we
+    // can re-apply the agent name branding when the sidebar is
+    // rebuilt.
     var appRoot = document.getElementById("app");
     if (appRoot) {
       var observer = new MutationObserver(function () {
-        if (
-          !document.querySelector(".agents-sidebar-link") ||
-          !document.querySelector(".agents-sidebar-collapsed-button")
-        ) {
-          injectSidebarLink();
-        }
-        updateSidebarLinkState();
         applyAgentBranding();
       });
       observer.observe(appRoot, { childList: true, subtree: true });
