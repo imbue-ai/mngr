@@ -94,7 +94,9 @@ def test_plugin_registers_route() -> None:
     app = FastAPI()
     plugin = GreetingPlugin(agent_work_dir="", llm_user_path="")
     plugin.endpoint(app=app)
-    post_routes = [r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods]
+    post_routes = [
+        r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods
+    ]
     assert "/api/greeting-conversation" in post_routes
 
 

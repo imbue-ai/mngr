@@ -7,7 +7,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.capture import capture
 from imbue.mngr.cli.cleanup import cleanup
@@ -164,40 +163,6 @@ def intercepted_execvp_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str,
         lambda program, args, env: calls.append((program, args)),
     )
     return calls
-
-
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_WORKSPACE_PACKAGES = (
-    _REPO_ROOT / "libs" / "imbue_common",
-    _REPO_ROOT / "libs" / "concurrency_group",
-    _REPO_ROOT / "libs" / "mngr",
-)
-
-
-@pytest.fixture
-def isolated_mngr_venv(tmp_path: Path) -> Path:
-    """Create a temporary venv with mngr installed for subprocess-based tests.
-
-    Returns the venv directory. Use `venv / "bin" / "mngr"` to run mngr
-    commands, or `venv / "bin" / "python"` for the interpreter.
-
-    This fixture is useful for tests that install/uninstall packages and
-    need full isolation from the main workspace venv.
-    """
-    venv_dir = tmp_path / "isolated-venv"
-
-    install_args: list[str] = []
-    for pkg in _WORKSPACE_PACKAGES:
-        install_args.extend(["-e", str(pkg)])
-
-    cg = ConcurrencyGroup(name="isolated-venv-setup")
-    with cg:
-        cg.run_process_to_completion(("uv", "venv", str(venv_dir)))
-        cg.run_process_to_completion(
-            ("uv", "pip", "install", "--python", str(venv_dir / "bin" / "python"), *install_args)
-        )
-
-    return venv_dir
 
 
 def _create_and_track_test_agent(

@@ -1667,7 +1667,9 @@ def test_main_delivers_events_from_subprocess(tmp_path: Path, monkeypatch: pytes
 
     call_count = 0
 
-    def fake_start_subprocess(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def fake_start_subprocess(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1734,7 +1736,9 @@ def test_main_restarts_subprocess_on_exit(tmp_path: Path, monkeypatch: pytest.Mo
 
     call_count = 0
 
-    def counting_factory(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def counting_factory(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count >= 2:
@@ -1766,7 +1770,9 @@ def test_main_stops_cleanly_via_stop_event(tmp_path: Path, monkeypatch: pytest.M
 
     started = threading.Event()
 
-    def factory_with_signal(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def factory_with_signal(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         started.set()
         return _FakeEventsProcess([])
 
@@ -1793,7 +1799,9 @@ def test_main_creates_required_directories(tmp_path: Path, monkeypatch: pytest.M
     agent_state_dir = _setup_main_env(tmp_path, monkeypatch)
     stop_event = threading.Event()
 
-    def immediate_stop_factory(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def immediate_stop_factory(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         stop_event.set()
         return _FakeEventsProcess([])
 
@@ -2934,7 +2942,9 @@ def test_main_starts_synthetic_events_thread(tmp_path: Path, monkeypatch: pytest
     events = [_make_event_line("evt-trigger", timestamp="2026-03-01T12:00:00Z")]
     call_count = 0
 
-    def fake_start_subprocess(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def fake_start_subprocess(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -2981,7 +2991,9 @@ def test_main_delivers_subprocess_events_through_reader_thread(
 
     call_count = 0
 
-    def fake_start_subprocess(agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]) -> Any:
+    def fake_start_subprocess(
+        agent_id: str, cel_include_filters: tuple[str, ...], cel_exclude_filters: tuple[str, ...]
+    ) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
