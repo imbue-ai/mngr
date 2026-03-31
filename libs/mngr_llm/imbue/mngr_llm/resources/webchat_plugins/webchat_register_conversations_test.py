@@ -8,13 +8,15 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.routing import Route
 from llm.cli import logs_db_path
 from llm_webchat.database import open_database
+from starlette.routing import Route
 
 from imbue.mngr_llm.conftest import create_mind_conversations_table_in_test_db
 from imbue.mngr_llm.resources.webchat_plugins.webchat_register_conversations import RegisterConversationsPlugin
-from imbue.mngr_llm.resources.webchat_plugins.webchat_register_conversations import _register_conversation_in_mind_table
+from imbue.mngr_llm.resources.webchat_plugins.webchat_register_conversations import (
+    _register_conversation_in_mind_table,
+)
 
 
 def _create_app_with_plugin(db_path: Path) -> FastAPI:
@@ -87,7 +89,9 @@ def test_plugin_registers_route() -> None:
     app = FastAPI()
     plugin = RegisterConversationsPlugin(db_path=Path("/tmp/fake.db"))
     plugin.endpoint(app=app)
-    post_routes = [r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods]
+    post_routes = [
+        r.path for r in app.routes if isinstance(r, Route) and r.methods is not None and "POST" in r.methods
+    ]
     assert "/api/conversations" in post_routes
 
 

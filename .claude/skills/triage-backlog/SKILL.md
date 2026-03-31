@@ -154,16 +154,18 @@ Also consider whether `good first issue` applies (small, self-contained, well-de
 
 <What is broken or missing, stated clearly and specifically. Include:
 - The exact behavior observed (or the gap)
-- Where in the code this happens (file paths, line numbers, function names)
+- The conceptual location in the code (name the relevant functions, classes, or modules -- but NOT file paths or line numbers, as those go stale during refactoring)
 - Why this matters (what goes wrong for the user)>
 
 ## Solution
 
 <A single, concrete, fully-defined approach. Include:
-- What specifically needs to change (which files, which logic)
+- What specifically needs to change (which functions, classes, or modules -- NOT file paths or line numbers)
 - How the fix works (not just "fix it" -- describe the mechanism)
 - Any edge cases or considerations the implementer should be aware of>
 ```
+
+**CRITICAL: Do NOT include file paths or line numbers in issue bodies.** These go stale as soon as any refactoring happens. Instead, reference functions, classes, and modules by name. The implementer can find them with grep. Describe the problem and solution at the conceptual level.
 
 **CRITICAL: The Solution section must describe exactly ONE approach.** No "or" alternatives, no "either X or Y", no "Option A / Option B", no "we could do X, or alternatively Y". The implementer should be able to read the Solution and know exactly what to do without making any design decisions themselves. If you find yourself wanting to write "or", STOP -- you have not yet decided on the solution. Use the "investigate ambiguous entries" flow (Step 2a) to resolve the ambiguity with the user BEFORE drafting the ticket. This is the single most important rule for issue quality.
 
@@ -195,9 +197,11 @@ Present the preview and wait for the user to respond. Always present options as 
 
 While the sub-agent runs, immediately move on to the next entry in the queue. When the sub-agent completes (you will be notified), do NOT immediately present its findings. Instead, queue the results and only present them after the user has fully resolved the current entry (i.e., after they approve, skip, or stop on whatever entry is currently being discussed). Never present findings from a background agent while the user is in the middle of deciding on a different entry -- only one entry should be under discussion at a time.
 
+**CRITICAL: Never create an issue without explicit user approval.** The user must respond with `a` before any `gh issue create` or `gh issue edit` command is run. Do not auto-approve, do not create issues while processing background agent results, do not create issues as part of moving to the next entry. If in doubt, ask again.
+
 #### Step 5: Create and Clean Up
 
-Once approved:
+Once the user has explicitly approved with `a`:
 
 1. **If merging into an existing issue:** Update that issue with `gh issue edit <number>` to incorporate the new information. Show the user the updated issue.
 2. **If creating a new issue:** Run:

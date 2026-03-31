@@ -536,8 +536,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
-                            + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                            "command": _SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
                 }
