@@ -217,7 +217,7 @@ window.addEventListener("load", function () {
       '<div class="agents-page-header">' +
       '<a class="agents-back-link" href="' + basePath + '/">' +
       BACK_ARROW_SVG +
-      "Conversations" +
+      "Back" +
       "</a>" +
       '<span class="agents-page-title">Agents</span>' +
       "</div>" +
