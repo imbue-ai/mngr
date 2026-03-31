@@ -214,7 +214,6 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
     expect(result).to_succeed()
 
 
-@pytest.mark.rsync
 def test_create_modal_snapshot(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use an existing snapshot instead of building a new host from scratch:
