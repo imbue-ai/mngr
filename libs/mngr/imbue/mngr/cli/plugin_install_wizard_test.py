@@ -6,35 +6,8 @@ from imbue.mngr.cli.plugin_install_wizard import _filter_already_installed
 from imbue.mngr.cli.plugin_install_wizard import _get_selected_package_names
 from imbue.mngr.cli.plugin_install_wizard import _should_preselect
 from imbue.mngr.plugin_catalog import CatalogEntry
-from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.plugin_catalog import SignalCheck
 from imbue.mngr.primitives import PluginTier
-
-# =============================================================================
-# Tests for PLUGIN_CATALOG
-# =============================================================================
-
-
-def test_catalog_contains_expected_basic_entry_points() -> None:
-    """PLUGIN_CATALOG should include the main agent-type plugins as BASIC tier."""
-    basic_names = {e.entry_point_name for e in PLUGIN_CATALOG if e.tier == PluginTier.BASIC}
-    assert "claude" in basic_names
-    assert "opencode" in basic_names
-    assert "llm" in basic_names
-
-
-def test_catalog_basic_entries_have_signals() -> None:
-    """Every BASIC-tier entry should have a signal key."""
-    for entry in PLUGIN_CATALOG:
-        if entry.tier == PluginTier.BASIC:
-            assert entry.signal is not None, f"BASIC entry {entry.entry_point_name} has no signal"
-
-
-def test_catalog_all_have_descriptions() -> None:
-    """Every catalog entry should have a non-empty description."""
-    for entry in PLUGIN_CATALOG:
-        assert entry.description, f"{entry.entry_point_name} has no description"
-
 
 # =============================================================================
 # Tests for _should_preselect

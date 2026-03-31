@@ -32,6 +32,14 @@ def test_catalog_all_signals_reference_valid_keys() -> None:
             )
 
 
+def test_catalog_contains_expected_basic_entry_points() -> None:
+    """PLUGIN_CATALOG should include the main agent-type plugins as BASIC tier."""
+    basic_names = {e.entry_point_name for e in PLUGIN_CATALOG if e.tier == PluginTier.BASIC}
+    assert "claude" in basic_names
+    assert "opencode" in basic_names
+    assert "llm" in basic_names
+
+
 def test_catalog_basic_entries_have_signals() -> None:
     for entry in PLUGIN_CATALOG:
         if entry.tier == PluginTier.BASIC:
