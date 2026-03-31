@@ -450,9 +450,9 @@ def resolve_provider_names_for_identifiers(
     # Find the latest full snapshot and replay from there
     offset = find_latest_full_snapshot_offset(events_path)
 
-    # Maps for resolution
-    providers_by_agent_name: dict[str, set[str]] = {}
+    # Maps for resolution: track per-agent-id data so destroyed agents can be fully removed
     provider_by_agent_id: dict[str, str] = {}
+    name_by_agent_id: dict[str, str] = {}
     destroyed_agent_ids: set[str] = set()
 
     try:
@@ -464,22 +464,18 @@ def resolve_provider_names_for_identifiers(
                     continue
                 if isinstance(event, FullDiscoverySnapshotEvent):
                     # Reset maps -- this snapshot supersedes everything before it
-                    providers_by_agent_name.clear()
                     provider_by_agent_id.clear()
+                    name_by_agent_id.clear()
                     destroyed_agent_ids.clear()
                     for agent in event.agents:
-                        name_str = str(agent.agent_name)
                         id_str = str(agent.agent_id)
-                        prov = str(agent.provider_name)
-                        providers_by_agent_name.setdefault(name_str, set()).add(prov)
-                        provider_by_agent_id[id_str] = prov
+                        provider_by_agent_id[id_str] = str(agent.provider_name)
+                        name_by_agent_id[id_str] = str(agent.agent_name)
                 elif isinstance(event, AgentDiscoveryEvent):
                     agent = event.agent
-                    name_str = str(agent.agent_name)
                     id_str = str(agent.agent_id)
-                    prov = str(agent.provider_name)
-                    providers_by_agent_name.setdefault(name_str, set()).add(prov)
-                    provider_by_agent_id[id_str] = prov
+                    provider_by_agent_id[id_str] = str(agent.provider_name)
+                    name_by_agent_id[id_str] = str(agent.agent_name)
                     destroyed_agent_ids.discard(id_str)
                 elif isinstance(event, AgentDestroyedEvent):
                     destroyed_agent_ids.add(str(event.agent_id))
@@ -490,9 +486,17 @@ def resolve_provider_names_for_identifiers(
         logger.trace("Failed to read discovery events for provider resolution: {}", e)
         return None
 
-    # Remove destroyed agents from the id map
+    # Remove destroyed agents from both maps
     for destroyed_id in destroyed_agent_ids:
         provider_by_agent_id.pop(destroyed_id, None)
+        name_by_agent_id.pop(destroyed_id, None)
+
+    # Build the name -> providers map from surviving agents
+    providers_by_agent_name: dict[str, set[str]] = {}
+    for id_str, prov in provider_by_agent_id.items():
+        name_str = name_by_agent_id.get(id_str)
+        if name_str is not None:
+            providers_by_agent_name.setdefault(name_str, set()).add(prov)
 
     # Resolve each identifier
     resolved_providers: set[str] = set()
