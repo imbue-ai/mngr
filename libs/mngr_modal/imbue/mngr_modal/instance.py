@@ -998,7 +998,7 @@ class ModalProviderInstance(BaseProviderInstance):
             )
             self._write_host_record(updated_host_record)
 
-    def _build_modal_image(
+    def _get_modal_image_definition(
         self,
         base_image: str | None = None,
         dockerfile: Path | None = None,
@@ -1881,20 +1881,24 @@ log "=== Shutdown script completed ==="
             )
 
         try:
+            # Get or create the Modal app (uses singleton pattern with context manager)
+            with log_span("Getting Modal app", app_name=self.app_name):
+                app = self._get_modal_app()
+
             if snapshot is not None:
                 # Use the snapshot image instead of building
                 with log_span("Loading Modal image from snapshot {}", str(snapshot)):
                     modal_image = self._modal_interface.image_from_id(str(snapshot))
             else:
-                # Build the Modal image
-                with log_span("Building Modal image..."):
-                    modal_image = self._build_modal_image(
+                # Prepare the Modal image definition (lazy -- does not trigger a remote build)
+                with log_span("Preparing Modal image definition"):
+                    modal_image = self._get_modal_image_definition(
                         base_image, dockerfile_path, context_dir_path, config.secrets, config.docker_build_args
                     )
 
-            # Get or create the Modal app (uses singleton pattern with context manager)
-            with log_span("Getting Modal app", app_name=self.app_name):
-                app = self._get_modal_app()
+                # Eagerly trigger the image build so we can measure build time separately from sandbox creation
+                with log_span("Building Modal image"):
+                    modal_image.build(app)
 
             # Create the sandbox
             # Add shutdown buffer to the timeout sent to Modal so the activity watcher can

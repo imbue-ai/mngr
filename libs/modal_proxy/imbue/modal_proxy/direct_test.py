@@ -61,6 +61,9 @@ class _FakeImage(ImageInterface):
     ) -> "ImageInterface":
         raise NotImplementedError
 
+    def build(self, app: "AppInterface") -> None:
+        raise NotImplementedError
+
 
 class _FakeVolume(VolumeInterface):
     """Non-Direct VolumeInterface for testing unwrap rejection."""
