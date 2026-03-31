@@ -106,9 +106,10 @@ test-offload-release args="":
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" --env "IS_RELEASE=1" --env "PYTEST_MAX_DURATION_SECONDS=900" || [[ $? -eq 2 ]]
 
-    # Clean up Modal test environments created during the run to prevent
-    # accumulating toward the 1000-environment limit.
-    uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 0 || true
+    # Clean up old Modal test environments to prevent accumulating toward
+    # the 1000-environment limit. Only deletes environments older than 1 hour
+    # to avoid interfering with other active test runs.
+    uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1 || true
 
 test-unit:
   uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
