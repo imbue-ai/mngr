@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agents Button Placement Mockups</title>
+<style>
+  /* -- Reset & page chrome ---------------------------------------- */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #e8e8e4;
+    color: #37352f;
+    padding: 2rem;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .page-subtitle { color: #787774; font-size: .9rem; margin-bottom: 2rem; }
+
+  /* -- Grid of mockups ------------------------------------------- */
+  .mockup-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 280px);
+    gap: 2.5rem;
+  }
+  .mockup-wrapper { display: flex; flex-direction: column; gap: .75rem; }
+  .mockup-label {
+    font-weight: 600; font-size: .85rem; color: #37352f;
+  }
+  .mockup-description { font-size: .78rem; color: #787774; line-height: 1.45; }
+
+  /* -- Simulated sidebar ----------------------------------------- */
+  .sidebar {
+    width: 250px;
+    height: 480px;
+    background: #f3f2ef;
+    border: 1px solid #e4e3df;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-size: 13px;
+  }
+
+  /* Branding row */
+  .branding-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 12px 8px;
+  }
+  .branding-title { font-weight: 600; font-size: 15px; }
+  .icon-btn {
+    width: 28px; height: 28px; border-radius: 6px;
+    border: 1px solid #e4e3df; background: #fafaf8;
+    display: flex; align-items: center; justify-content: center;
+    color: #787774; cursor: pointer; font-size: 14px;
+  }
+
+  /* New conversation row */
+  .new-conv-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 12px 8px;
+  }
+  .new-conv-label { color: #787774; font-size: 13px; }
+
+  /* Conversation list */
+  .conv-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px; }
+  .conv-item {
+    padding: 10px 12px; border-radius: 6px; margin-bottom: 2px; cursor: pointer;
+  }
+  .conv-item:hover { background: #edecea; }
+  .conv-item.active { background: #e8e6e1; }
+  .conv-item-name {
+    font-size: 13px; font-weight: 500; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px;
+  }
+  .conv-item-meta {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: #b4b4b0;
+  }
+
+  /* -- Agents link (shared base) --------------------------------- */
+  .agents-link {
+    display: flex; align-items: center; gap: .5rem;
+    padding: 8px 12px; font-size: 13px;
+    color: #787774; text-decoration: none; border-radius: 6px;
+    cursor: pointer; flex-shrink: 0;
+    transition: background 150ms, color 150ms;
+  }
+  .agents-link:hover { background: #edecea; color: #37352f; }
+  .agents-link svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+  /* Variant-specific styling */
+  .agents-link--bottom { border-top: 1px solid #e4e3df; margin-top: auto; }
+  .agents-link--top-section { margin-bottom: 4px; }
+  .agents-link--header-btn {
+    display: flex; align-items: center; gap: 0; padding: 0;
+    border: 1px solid #e4e3df; background: #fafaf8;
+    border-radius: 6px; width: 28px; height: 28px;
+    justify-content: center; color: #787774; cursor: pointer;
+  }
+  .agents-link--header-btn:hover {
+    background: #e9f2ee; border-color: #2f6b4f; color: #2f6b4f;
+  }
+  .agents-link--header-btn svg { width: 14px; height: 14px; }
+  .agents-link--new-conv-row {
+    padding: 4px 8px; font-size: 13px; color: #787774; gap: .35rem;
+    border-radius: 6px;
+  }
+  .agents-link--pill {
+    display: inline-flex; align-items: center; gap: .3rem;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px; color: #787774; background: #fafaf8;
+    border: 1px solid #e4e3df; border-radius: 10px;
+    padding: 2px 10px; cursor: pointer;
+    transition: border-color 150ms;
+  }
+  .agents-link--pill:hover { border-color: #2f6b4f; color: #2f6b4f; }
+  .agents-link--pill svg { width: 12px; height: 12px; }
+
+  /* Highlighted element marker */
+  .highlight-ring {
+    outline: 2px solid #d44; outline-offset: 2px; border-radius: 6px;
+    position: relative;
+  }
+  .highlight-ring::after {
+    content: "NEW"; position: absolute; top: -10px; right: -8px;
+    background: #d44; color: #fff; font-size: 9px; font-weight: 700;
+    padding: 1px 5px; border-radius: 4px; letter-spacing: .04em;
+  }
+
+  /* Separator line */
+  .separator { height: 1px; background: #e4e3df; margin: 4px 12px; }
+</style>
+</head>
+<body>
+
+<h1>Agents Button Placement Options</h1>
+<p class="page-subtitle">Each mockup highlights the proposed location in red. The current (baseline) placement is Option A.</p>
+
+<div class="mockup-grid">
+
+  <!-- ================================================================ -->
+  <!-- OPTION A: Current -- bottom of sidebar, pushed down with margin-top:auto -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">A &mdash; Bottom of sidebar (current)</span>
+    <div class="sidebar">
+      <div class="branding-row">
+        <span class="branding-title">LLM Webchat</span>
+        <button class="icon-btn">&#9776;</button>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <button class="icon-btn">+</button>
+      </div>
+      <div class="conv-list">
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+      <a class="agents-link agents-link--bottom highlight-ring" href="#">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Agents</span>
+      </a>
+    </div>
+    <p class="mockup-description">Pushed to the very bottom with margin-top:auto. Separated from conversations by a top border. Can feel disconnected and easy to miss.</p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- OPTION B: Between "Conversations" header and the list -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">B &mdash; Below "Conversations" header</span>
+    <div class="sidebar">
+      <div class="branding-row">
+        <span class="branding-title">LLM Webchat</span>
+        <button class="icon-btn">&#9776;</button>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <button class="icon-btn">+</button>
+      </div>
+      <div style="padding: 0 8px 4px;">
+        <a class="agents-link agents-link--top-section highlight-ring" href="#">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Agents</span>
+        </a>
+      </div>
+      <div class="separator"></div>
+      <div class="conv-list">
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+    </div>
+    <p class="mockup-description">Sits right below the "Conversations" label as a sibling navigation item, separated from the list by a thin line. Visible immediately, but takes vertical space from the conversation list.</p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- OPTION C: Icon button in the branding row (next to collapse) -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">C &mdash; Icon button in branding row</span>
+    <div class="sidebar">
+      <div class="branding-row">
+        <span class="branding-title">LLM Webchat</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <a class="agents-link--header-btn highlight-ring" href="#" title="Agents">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </a>
+          <button class="icon-btn">&#9776;</button>
+        </div>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <button class="icon-btn">+</button>
+      </div>
+      <div class="conv-list">
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+    </div>
+    <p class="mockup-description">Compact icon-only button next to the collapse toggle in the top branding row. Zero vertical cost. Relies on the icon being recognizable (tooltip on hover helps). Works well in collapsed sidebar mode too.</p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- OPTION D: Inline in the "new conversation" row -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">D &mdash; In the new-conversation row</span>
+    <div class="sidebar">
+      <div class="branding-row">
+        <span class="branding-title">LLM Webchat</span>
+        <button class="icon-btn">&#9776;</button>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <a class="agents-link--new-conv-row highlight-ring" href="#" title="Agents">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            <span>Agents</span>
+          </a>
+          <button class="icon-btn">+</button>
+        </div>
+      </div>
+      <div class="conv-list">
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+    </div>
+    <p class="mockup-description">Agents link sits alongside the "+" button in the sub-header row. Groups navigation actions together. Row can feel crowded in narrower sidebars.</p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- OPTION E: Pill badge below branding title -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">E &mdash; Pill badge under branding</span>
+    <div class="sidebar">
+      <div class="branding-row" style="flex-wrap:wrap;">
+        <span class="branding-title">LLM Webchat</span>
+        <button class="icon-btn">&#9776;</button>
+      </div>
+      <div style="padding: 0 12px 6px;">
+        <a class="agents-link--pill highlight-ring" href="#">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Agents</span>
+        </a>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <button class="icon-btn">+</button>
+      </div>
+      <div class="conv-list">
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+    </div>
+    <p class="mockup-description">A small mono-font pill (matching the model-selector style) tucked between the branding and conversation header. Feels like a first-class nav element without dominating the sidebar. Small vertical cost.</p>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- OPTION F: Styled as a conversation-list item at the top of the list -->
+  <!-- ================================================================ -->
+  <div class="mockup-wrapper">
+    <span class="mockup-label">F &mdash; Pinned list item at top of conversations</span>
+    <div class="sidebar">
+      <div class="branding-row">
+        <span class="branding-title">LLM Webchat</span>
+        <button class="icon-btn">&#9776;</button>
+      </div>
+      <div class="new-conv-row">
+        <span class="new-conv-label">Conversations</span>
+        <button class="icon-btn">+</button>
+      </div>
+      <div class="conv-list">
+        <a class="conv-item highlight-ring" href="#" style="display:flex; align-items:center; gap:.5rem; text-decoration:none; color:inherit; background:#edecea;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0;color:#787774;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <div>
+            <div class="conv-item-name" style="margin:0;">Agents</div>
+            <div class="conv-item-meta"><span style="color:#787774;">View all agents</span></div>
+          </div>
+        </a>
+        <div class="separator" style="margin:4px 0;"></div>
+        <div class="conv-item active"><div class="conv-item-name">Refactor auth module</div><div class="conv-item-meta"><span>claude-4</span><span>2m</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Debug flaky test</div><div class="conv-item-meta"><span>claude-4</span><span>1h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">Design review notes</div><div class="conv-item-meta"><span>gpt-4.1</span><span>3h</span></div></div>
+        <div class="conv-item"><div class="conv-item-name">API schema migration</div><div class="conv-item-meta"><span>claude-4</span><span>1d</span></div></div>
+      </div>
+    </div>
+    <p class="mockup-description">Looks like a pinned conversation item at the top of the scrollable list, separated by a divider. Blends into the existing list pattern; always visible since it sits above the scroll region. May confuse users who expect only conversations in the list.</p>
+  </div>
+
+</div><!-- /mockup-grid -->
+</body>
+</html>

@@ -265,38 +265,75 @@ window.addEventListener("load", function () {
   }
 
   function updateSidebarLinkState() {
-    var link = document.querySelector(".agents-sidebar-link");
-    if (link) {
-      if (isAgentsRoute()) {
-        link.classList.add("active");
+    var active = isAgentsRoute();
+
+    var pill = document.querySelector(".agents-sidebar-link");
+    if (pill) {
+      if (active) {
+        pill.classList.add("active");
       } else {
-        link.classList.remove("active");
+        pill.classList.remove("active");
+      }
+    }
+
+    var collapsedBtn = document.querySelector(".agents-sidebar-collapsed-button");
+    if (collapsedBtn) {
+      if (active) {
+        collapsedBtn.classList.add("active");
+      } else {
+        collapsedBtn.classList.remove("active");
       }
     }
   }
 
   function injectSidebarLink() {
-    // Avoid duplicate injection
-    if (document.querySelector(".agents-sidebar-link")) return true;
+    var injectedExpanded = !!document.querySelector(".agents-sidebar-link");
+    var injectedCollapsed = !!document.querySelector(".agents-sidebar-collapsed-button");
 
-    // Insert at the bottom of the sidebar, after the conversation
-    // list.  We look for the expanded content wrapper and append
-    // the link there so it sits below everything else.
-    var expandedContent = document.querySelector(".sidebar-expanded-content");
-    if (!expandedContent) return false;
+    // Inject the pill into the expanded sidebar, between the
+    // branding row and the new-conversation row.
+    if (!injectedExpanded) {
+      var brandingRow = document.querySelector(
+        ".sidebar-expanded-content .sidebar-branding-row"
+      );
+      var newConvRow = document.querySelector(
+        ".sidebar-expanded-content .sidebar-new-conversation-row"
+      );
+      if (brandingRow && newConvRow && newConvRow.parentNode) {
+        var pill = document.createElement("a");
+        pill.className = "agents-sidebar-link";
+        pill.href = basePath + AGENTS_ROUTE;
+        pill.innerHTML = AGENTS_ICON_SVG + "<span>Agents</span>";
+        pill.addEventListener("click", function (event) {
+          event.preventDefault();
+          navigateToAgents();
+        });
+        newConvRow.parentNode.insertBefore(pill, newConvRow);
+        injectedExpanded = true;
+      }
+    }
 
-    var link = document.createElement("a");
-    link.className = "agents-sidebar-link";
-    link.href = basePath + AGENTS_ROUTE;
-    link.innerHTML = AGENTS_ICON_SVG + "<span>Agents</span>";
-    link.addEventListener("click", function (event) {
-      event.preventDefault();
-      navigateToAgents();
-    });
+    // Inject an icon button into the collapsed sidebar content.
+    if (!injectedCollapsed) {
+      var collapsedContent = document.querySelector(".sidebar-collapsed-content");
+      if (collapsedContent) {
+        var btn = document.createElement("a");
+        btn.className = "agents-sidebar-collapsed-button";
+        btn.href = basePath + AGENTS_ROUTE;
+        btn.title = "Agents";
+        btn.setAttribute("aria-label", "Agents");
+        btn.innerHTML = AGENTS_ICON_SVG;
+        btn.addEventListener("click", function (event) {
+          event.preventDefault();
+          navigateToAgents();
+        });
+        collapsedContent.appendChild(btn);
+        injectedCollapsed = true;
+      }
+    }
 
-    expandedContent.appendChild(link);
     updateSidebarLinkState();
-    return true;
+    return injectedExpanded || injectedCollapsed;
   }
 
   // ── Initialization ───────────────────────────────────────────
@@ -313,7 +350,10 @@ window.addEventListener("load", function () {
     var appRoot = document.getElementById("app");
     if (appRoot) {
       var observer = new MutationObserver(function () {
-        if (!document.querySelector(".agents-sidebar-link")) {
+        if (
+          !document.querySelector(".agents-sidebar-link") ||
+          !document.querySelector(".agents-sidebar-collapsed-button")
+        ) {
           injectSidebarLink();
         }
         updateSidebarLinkState();
