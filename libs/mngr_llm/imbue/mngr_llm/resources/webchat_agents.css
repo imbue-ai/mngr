@@ -6,7 +6,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  margin: 0 12px 6px;
+  margin: 0 12px 4px;
   padding: 2px 10px;
   font-family: var(--font-family-mono, ui-monospace, monospace);
   font-size: 12px;

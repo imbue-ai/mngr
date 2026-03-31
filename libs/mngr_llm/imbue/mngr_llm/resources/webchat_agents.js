@@ -291,12 +291,15 @@ window.addEventListener("load", function () {
     var injectedCollapsed = !!document.querySelector(".agents-sidebar-collapsed-button");
 
     // Inject the pill into the expanded sidebar, between the
-    // sidebar-header slot and the conversation selector.
+    // branding row and the new-conversation row.
     if (!injectedExpanded) {
-      var sidebarHeader = document.querySelector(
-        ".sidebar-expanded-content [data-slot='sidebar-header']"
+      var brandingRow = document.querySelector(
+        ".sidebar-expanded-content .sidebar-branding-row"
       );
-      if (sidebarHeader && sidebarHeader.nextSibling) {
+      var newConvRow = document.querySelector(
+        ".sidebar-expanded-content .sidebar-new-conversation-row"
+      );
+      if (brandingRow && newConvRow && newConvRow.parentNode) {
         var pill = document.createElement("a");
         pill.className = "agents-sidebar-link";
         pill.href = basePath + AGENTS_ROUTE;
@@ -305,7 +308,7 @@ window.addEventListener("load", function () {
           event.preventDefault();
           navigateToAgents();
         });
-        sidebarHeader.parentNode.insertBefore(pill, sidebarHeader.nextSibling);
+        newConvRow.parentNode.insertBefore(pill, newConvRow);
         injectedExpanded = true;
       }
     }
