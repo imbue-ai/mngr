@@ -22,7 +22,8 @@ def _create_test_db(db_path: Path) -> None:
         "CREATE TABLE responses ("
         "id TEXT PRIMARY KEY, model TEXT, prompt TEXT, system TEXT, "
         "prompt_json TEXT, options_json TEXT, response TEXT, response_json TEXT, "
-        "conversation_id TEXT, duration_ms INTEGER, datetime_utc TEXT)"
+        "conversation_id TEXT, duration_ms INTEGER, datetime_utc TEXT, "
+        "input_tokens INTEGER, output_tokens INTEGER)"
     )
     conn.execute(
         "CREATE TABLE mind_conversations ("
@@ -53,12 +54,31 @@ def _insert_response(
     conversation_id: str,
     prompt: str,
     response: str,
+    *,
+    model: str = "test-model",
+    system: str | None = None,
+    datetime_utc: str = "2025-01-01T00:00:00Z",
+    duration_ms: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
 ) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "INSERT INTO responses (id, conversation_id, prompt, response, datetime_utc) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (response_id, conversation_id, prompt, response, "2025-01-01T00:00:00Z"),
+        "INSERT INTO responses (id, model, conversation_id, prompt, system, response, "
+        "datetime_utc, duration_ms, input_tokens, output_tokens) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            response_id,
+            model,
+            conversation_id,
+            prompt,
+            system,
+            response,
+            datetime_utc,
+            duration_ms,
+            input_tokens,
+            output_tokens,
+        ),
     )
     conn.commit()
     conn.close()
@@ -149,7 +169,11 @@ def test_poll_detects_injected_message_with_empty_prompt(tmp_path: Path) -> None
     _insert_response(db_path, "resp-1", "conv-1", "", "injected content")
 
     results, max_rowid = _poll_for_injected_messages(db_path, 0, {"conv-1"})
-    assert results == ["conv-1"]
+    assert len(results) == 1
+    assert results[0].conversation_id == "conv-1"
+    assert results[0].id == "resp-1"
+    assert results[0].response == "injected content"
+    assert results[0].prompt == ""
     assert max_rowid == 1
 
 
@@ -160,8 +184,44 @@ def test_poll_detects_injected_message_with_dots_prompt(tmp_path: Path) -> None:
     _insert_response(db_path, "resp-1", "conv-1", "...", "agent injected content")
 
     results, max_rowid = _poll_for_injected_messages(db_path, 0, {"conv-1"})
-    assert results == ["conv-1"]
+    assert len(results) == 1
+    assert results[0].conversation_id == "conv-1"
+    assert results[0].response == "agent injected content"
     assert max_rowid == 1
+
+
+def test_poll_returns_full_response_data(tmp_path: Path) -> None:
+    """Verify that all ResponseItem fields are populated from the database."""
+    db_path = tmp_path / "logs.db"
+    _create_test_db(db_path)
+    _insert_conversation(db_path, "conv-1", "Test")
+    _insert_response(
+        db_path,
+        "resp-1",
+        "conv-1",
+        "",
+        "injected content",
+        model="gpt-4",
+        system="be helpful",
+        datetime_utc="2025-06-15T12:00:00Z",
+        duration_ms=150,
+        input_tokens=10,
+        output_tokens=20,
+    )
+
+    results, _ = _poll_for_injected_messages(db_path, 0, {"conv-1"})
+    assert len(results) == 1
+    r = results[0]
+    assert r.id == "resp-1"
+    assert r.model == "gpt-4"
+    assert r.prompt == ""
+    assert r.system == "be helpful"
+    assert r.response == "injected content"
+    assert r.conversation_id == "conv-1"
+    assert r.datetime_utc == "2025-06-15T12:00:00Z"
+    assert r.duration_ms == 150
+    assert r.input_tokens == 10
+    assert r.output_tokens == 20
 
 
 def test_poll_ignores_normal_prompt_response(tmp_path: Path) -> None:
@@ -207,12 +267,14 @@ def test_poll_only_returns_messages_after_rowid(tmp_path: Path) -> None:
     _insert_response(db_path, "resp-2", "conv-1", "", "new injected")
 
     results, max_rowid = _poll_for_injected_messages(db_path, 1, {"conv-1"})
-    assert results == ["conv-1"]
+    assert len(results) == 1
+    assert results[0].id == "resp-2"
+    assert results[0].response == "new injected"
     assert max_rowid == 2
 
 
-def test_poll_deduplicates_conversation_ids(tmp_path: Path) -> None:
-    """Multiple injected messages in the same conversation produce one notification."""
+def test_poll_returns_each_injected_message_separately(tmp_path: Path) -> None:
+    """Multiple injected messages in the same conversation produce individual entries."""
     db_path = tmp_path / "logs.db"
     _create_test_db(db_path)
     _insert_conversation(db_path, "conv-1", "Test")
@@ -220,14 +282,16 @@ def test_poll_deduplicates_conversation_ids(tmp_path: Path) -> None:
     _insert_response(db_path, "resp-2", "conv-1", "", "second injected")
 
     results, max_rowid = _poll_for_injected_messages(db_path, 0, {"conv-1"})
-    assert results == ["conv-1"]
+    assert len(results) == 2
+    assert results[0].id == "resp-1"
+    assert results[1].id == "resp-2"
     assert max_rowid == 2
 
 
 # -- _run_poll_loop tests --
 
 
-def test_poll_loop_broadcasts_notification_for_injected_message(tmp_path: Path) -> None:
+def test_poll_loop_broadcasts_response_data_for_injected_message(tmp_path: Path) -> None:
     db_path = tmp_path / "logs.db"
     _create_test_db(db_path)
     _insert_conversation(db_path, "conv-1", "Test")
@@ -262,8 +326,12 @@ def test_poll_loop_broadcasts_notification_for_injected_message(tmp_path: Path) 
     assert is_received, "Timed out waiting for broadcast"
     assert len(received_calls) == 1
     assert received_calls[0][0] == "conv-1"
-    assert received_calls[0][1]["type"] == "injected_message"
-    assert received_calls[0][1]["conversation_id"] == "conv-1"
+    event = received_calls[0][1]
+    assert event["type"] == "injected_message"
+    assert event["response"]["id"] == "resp-1"
+    assert event["response"]["conversation_id"] == "conv-1"
+    assert event["response"]["response"] == "injected notification content"
+    assert event["response"]["prompt"] == ""
 
 
 def test_poll_loop_does_not_broadcast_for_normal_messages(tmp_path: Path) -> None:

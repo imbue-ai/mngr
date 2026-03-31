@@ -1,9 +1,9 @@
 """Injected-message watcher plugin for the webchat server.
 
 Polls the llm database for new responses that appear outside of the normal
-``llm prompt`` flow (e.g. via ``llm inject``) and broadcasts a lightweight
-notification event into the llm-webchat event stream so that connected
-frontends can refresh and display them.
+``llm prompt`` flow (e.g. via ``llm inject``) and broadcasts the full response
+data into the llm-webchat event stream so that connected frontends can insert
+them directly via ``$llm.insertResponse`` without a page refresh.
 
 Injected messages are detected by their prompt column: ``llm inject`` creates
 responses with an empty prompt (``""``) or ``"..."``, whereas normal ``llm
@@ -33,8 +33,27 @@ from pydantic import Field
 _POLL_INTERVAL_SECONDS: Final[float] = 2.0
 
 # Event type broadcast when an injected message is detected.
-# The frontend JS plugin listens for this and triggers a page refresh.
+# The frontend JS plugin listens for this and calls $llm.insertResponse.
 _INJECTED_MESSAGE_EVENT_TYPE: Final[str] = "injected_message"
+
+
+class InjectedResponseData(FrozenModel):
+    """Response data included in the injected_message event.
+
+    Mirrors the shape of ``llm_webchat.models.ResponseItem`` so the frontend
+    can pass it directly to ``$llm.insertResponse``.
+    """
+
+    id: str
+    model: str
+    prompt: str | None
+    system: str | None
+    response: str
+    conversation_id: str
+    datetime_utc: str
+    duration_ms: int | None
+    input_tokens: int | None
+    output_tokens: int | None
 
 
 def _is_injected_response(prompt: str | None, response: str | None) -> bool:
@@ -92,10 +111,12 @@ def _poll_for_injected_messages(
     db_path: Path,
     after_rowid: int,
     tracked_conversation_ids: set[str],
-) -> tuple[list[str], int]:
-    """Find conversation IDs that received injected messages after the given rowid.
+) -> tuple[list[InjectedResponseData], int]:
+    """Find injected responses that appeared after the given rowid.
 
-    Returns a list of conversation IDs (deduplicated) and the new max rowid.
+    Returns a list of response data objects and the new max rowid.
+    Each injected response produces its own entry (no deduplication by
+    conversation ID) so the frontend can insert each one individually.
     """
     if not db_path.is_file():
         return [], after_rowid
@@ -106,28 +127,43 @@ def _poll_for_injected_messages(
         return [], after_rowid
 
     new_max = after_rowid
-    affected_conversation_ids: list[str] = []
-    seen_ids: set[str] = set()
+    injected_responses: list[InjectedResponseData] = []
     try:
         rows = conn.execute(
-            "SELECT rowid, conversation_id, prompt, response FROM responses "
-            "WHERE rowid > ? ORDER BY rowid ASC",
+            "SELECT rowid, id, model, prompt, system, response, conversation_id, "
+            "datetime_utc, duration_ms, input_tokens, output_tokens "
+            "FROM responses WHERE rowid > ? ORDER BY rowid ASC",
             (after_rowid,),
         ).fetchall()
-        for rowid, conversation_id, prompt, response in rows:
+        for row in rows:
+            rowid = row[0]
             new_max = max(new_max, rowid)
+            conversation_id = row[6]
+            prompt = row[3]
+            response = row[5]
             if conversation_id not in tracked_conversation_ids:
                 continue
             if not _is_injected_response(prompt, response):
                 continue
-            if conversation_id not in seen_ids:
-                seen_ids.add(conversation_id)
-                affected_conversation_ids.append(conversation_id)
+            injected_responses.append(
+                InjectedResponseData(
+                    id=row[1] or "",
+                    model=row[2] or "",
+                    prompt=prompt,
+                    system=row[4],
+                    response=response or "",
+                    conversation_id=conversation_id,
+                    datetime_utc=row[7] or "",
+                    duration_ms=row[8],
+                    input_tokens=row[9],
+                    output_tokens=row[10],
+                )
+            )
     except sqlite3.Error as exc:
         logger.debug("Error polling for injected messages: {}", exc)
     finally:
         conn.close()
-    return affected_conversation_ids, new_max
+    return injected_responses, new_max
 
 
 def _run_poll_loop(
@@ -148,14 +184,20 @@ def _run_poll_loop(
         if not tracked_ids:
             continue
 
-        affected_ids, new_max = _poll_for_injected_messages(db_path, last_rowid, tracked_ids)
-        for conversation_id in affected_ids:
-            logger.debug("Detected injected message in conversation {}", conversation_id)
+        injected_responses, new_max = _poll_for_injected_messages(
+            db_path, last_rowid, tracked_ids
+        )
+        for response_data in injected_responses:
+            logger.debug(
+                "Detected injected message {} in conversation {}",
+                response_data.id,
+                response_data.conversation_id,
+            )
             broadcaster(
-                conversation_id,
+                response_data.conversation_id,
                 {
                     "type": _INJECTED_MESSAGE_EVENT_TYPE,
-                    "conversation_id": conversation_id,
+                    "response": response_data.model_dump(),
                     "buffer_behavior": BufferBehavior.IGNORE,
                 },
             )
