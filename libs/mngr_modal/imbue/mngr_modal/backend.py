@@ -484,6 +484,8 @@ Supported build arguments for the modal provider:
                 "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
                 f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
             ) from e
+        except ModalProxyError as e:
+            raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
         return ModalProviderInstance(
             name=name,
