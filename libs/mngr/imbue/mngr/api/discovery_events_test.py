@@ -614,7 +614,7 @@ def test_resolve_provider_names_replays_incremental_events(temp_config: MngrConf
     assert result == ("docker",)
 
 
-def test_resolve_provider_names_respects_destroy_events(temp_config: MngrConfig) -> None:
+def test_resolve_provider_names_respects_destroy_events_by_id(temp_config: MngrConfig) -> None:
     """Should not resolve destroyed agents by ID."""
     agent_id = AgentId.generate()
     host_id = HostId.generate()
@@ -630,6 +630,25 @@ def test_resolve_provider_names_respects_destroy_events(temp_config: MngrConfig)
 
     # By ID should fail (destroyed)
     result = resolve_provider_names_for_identifiers(temp_config, [str(agent_id)])
+    assert result is None
+
+
+def test_resolve_provider_names_respects_destroy_events_by_name(temp_config: MngrConfig) -> None:
+    """Should not resolve destroyed agents by name."""
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("destroyed-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    write_full_discovery_snapshot(temp_config, [agent], [])
+    emit_agent_destroyed(temp_config, agent_id, host_id)
+
+    # By name should also fail (destroyed)
+    result = resolve_provider_names_for_identifiers(temp_config, ["destroyed-agent"])
     assert result is None
 
 

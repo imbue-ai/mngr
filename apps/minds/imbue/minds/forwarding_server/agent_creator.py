@@ -59,7 +59,7 @@ LOG_SENTINEL: Final[str] = "__DONE__"
 
 def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
     """Create an output callback that puts lines into a queue."""
-    return lambda line, is_stdout: log_queue.put(line.rstrip("\n"))
+    return lambda line, is_stdout: logger.info(line.rstrip("\n")) or log_queue.put(line.rstrip("\n"))
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
@@ -220,10 +220,12 @@ def run_mngr_create(
             mngr_command.append("--transfer=none")
         case LaunchMode.LOCAL:
             # stick the source into some canonical location
-            mngr_command.extend([
-                "--target-path",
-                "/code/",
-            ])
+            mngr_command.extend(
+                [
+                    "--target-path",
+                    "/code/",
+                ]
+            )
             remote_data_dir = os.path.expanduser(f"~/.minds/data/{agent_id}")
             Path(remote_data_dir).mkdir(parents=True, exist_ok=True)
             mngr_command.extend(
@@ -232,6 +234,8 @@ def run_mngr_create(
                     "docker",
                     "--host-env",
                     "IS_SANDBOX=1",
+                    "--disable-plugin",
+                    "recursive",
                     "-vv",
                     "--source-path",
                     str(mind_dir),

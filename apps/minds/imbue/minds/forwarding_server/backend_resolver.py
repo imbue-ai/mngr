@@ -17,7 +17,10 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.forwarding_server.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServerName
+from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
@@ -264,8 +267,12 @@ class MngrStreamManager(MutableModel):
 
     Runs two types of long-lived subprocesses via ConcurrencyGroup:
     1. `mngr observe --discovery-only --quiet` to discover agents and hosts.
-       Parses DISCOVERY_FULL events for the agent list and agent-to-host mapping,
-       and HOST_SSH_INFO events for SSH connection details per host.
+       Handles the following discovery event types:
+       - DISCOVERY_FULL: replaces the entire agent list and agent-to-host mapping
+       - HOST_SSH_INFO: updates SSH connection details for a specific host
+       - AGENT_DISCOVERED: incrementally adds or updates a single agent
+       - AGENT_DESTROYED: incrementally removes a single agent
+       - HOST_DESTROYED: removes all agents on a destroyed host
     2. `mngr events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
        to discover each agent's servers.
     """
@@ -306,11 +313,12 @@ class MngrStreamManager(MutableModel):
     def _handle_discovery_line(self, line: str) -> None:
         """Parse a discovery event line and update state.
 
-        Handles two event types:
-        - DISCOVERY_FULL: updates agent list and agent-to-host mapping
+        Handles the following event types:
+        - DISCOVERY_FULL: replaces the entire agent list and agent-to-host mapping
         - HOST_SSH_INFO: updates SSH info for a specific host
-
-        Both event types trigger a resolver update with the current SSH mappings.
+        - AGENT_DISCOVERED: incrementally adds or updates a single agent
+        - AGENT_DESTROYED: incrementally removes a single agent
+        - HOST_DESTROYED: removes all agents that were on the destroyed host
         """
         try:
             event = parse_discovery_event_line(line)
@@ -322,10 +330,16 @@ class MngrStreamManager(MutableModel):
             self._handle_full_snapshot(event)
         elif isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
+        elif isinstance(event, AgentDiscoveryEvent):
+            self._handle_agent_discovered(event)
+        elif isinstance(event, AgentDestroyedEvent):
+            self._handle_agent_destroyed(event)
+        elif isinstance(event, HostDestroyedEvent):
+            self._handle_host_destroyed(event)
         elif event is None:
             logger.warning("Unrecognized discovery event line: {}", line[:200])
         else:
-            logger.trace("Ignoring non-snapshot discovery event: {}", type(event).__name__)
+            logger.trace("Ignoring discovery event: {}", type(event).__name__)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update agent list and agent-to-host mapping from a full snapshot."""
@@ -356,6 +370,68 @@ class MngrStreamManager(MutableModel):
             agent_ids = tuple(AgentId(agent_id) for agent_id in self._agent_host_map)
 
         self._update_resolver(agent_ids)
+
+    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
+        """Incrementally add or update a single agent in the resolver."""
+        agent = event.agent
+        aid_str = str(agent.agent_id)
+
+        with self._lock:
+            self._agent_host_map[aid_str] = str(agent.host_id)
+            # Replace existing entry or append
+            updated_agents = [a for a in self._discovered_agents if str(a.agent_id) != aid_str]
+            updated_agents.append(agent)
+            self._discovered_agents = tuple(updated_agents)
+            # Start events stream if this is a newly discovered agent
+            is_new = aid_str not in self._known_agent_ids
+            if is_new:
+                self._known_agent_ids.add(aid_str)
+                self._start_events_stream(agent.agent_id)
+            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+            discovered_agents = self._discovered_agents
+
+        self._update_resolver(agent_ids, discovered_agents)
+
+    def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
+        """Remove a destroyed agent from the resolver and stop its events stream."""
+        aid_str = str(event.agent_id)
+
+        with self._lock:
+            self._agent_host_map.pop(aid_str, None)
+            self._discovered_agents = tuple(a for a in self._discovered_agents if str(a.agent_id) != aid_str)
+            self._known_agent_ids.discard(aid_str)
+            process = self._events_processes.pop(aid_str, None)
+            if process is not None:
+                process.terminate()
+            self._events_servers.pop(aid_str, None)
+            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+            discovered_agents = self._discovered_agents
+
+        self._update_resolver(agent_ids, discovered_agents)
+        self.resolver.update_servers(event.agent_id, {})
+
+    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
+        """Remove all agents on a destroyed host from the resolver."""
+        destroyed_ids = {str(agent_id) for agent_id in event.agent_ids}
+
+        with self._lock:
+            for aid_str in destroyed_ids:
+                self._agent_host_map.pop(aid_str, None)
+                self._known_agent_ids.discard(aid_str)
+                process = self._events_processes.pop(aid_str, None)
+                if process is not None:
+                    process.terminate()
+                self._events_servers.pop(aid_str, None)
+            self._discovered_agents = tuple(
+                a for a in self._discovered_agents if str(a.agent_id) not in destroyed_ids
+            )
+            self._ssh_by_host_id.pop(str(event.host_id), None)
+            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+            discovered_agents = self._discovered_agents
+
+        self._update_resolver(agent_ids, discovered_agents)
+        for agent_id in event.agent_ids:
+            self.resolver.update_servers(agent_id, {})
 
     def _update_resolver(
         self,
