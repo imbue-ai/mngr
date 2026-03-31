@@ -26,7 +26,7 @@ _AGENT_WORK_DIR: Final[str] = os.environ.get("MNGR_AGENT_WORK_DIR", "")
 _FALLBACK_MODEL: Final[str] = "claude-haiku-4.5"
 
 
-def _read_default_chat_model(agent_work_dir: str) -> str:
+def read_default_chat_model(agent_work_dir: str) -> str:
     """Read the default chat model from minds.toml, falling back to claude-haiku-4.5."""
     if not agent_work_dir:
         return _FALLBACK_MODEL
@@ -44,7 +44,7 @@ def _read_default_chat_model(agent_work_dir: str) -> str:
 
 def _default_model_endpoint() -> JSONResponse:
     """Handler for GET /api/default-model."""
-    model_id = _read_default_chat_model(_AGENT_WORK_DIR)
+    model_id = read_default_chat_model(_AGENT_WORK_DIR)
     return JSONResponse(content={"model_id": model_id})
 
 

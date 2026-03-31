@@ -9,39 +9,39 @@ from fastapi.routing import APIRoute
 
 from imbue.mngr_llm.resources.webchat_default_model import DefaultModelPlugin
 from imbue.mngr_llm.resources.webchat_default_model import _FALLBACK_MODEL
-from imbue.mngr_llm.resources.webchat_default_model import _read_default_chat_model
+from imbue.mngr_llm.resources.webchat_default_model import read_default_chat_model
 
 
-def test_read_default_chat_model_returns_fallback_when_no_work_dir() -> None:
-    assert _read_default_chat_model("") == _FALLBACK_MODEL
+def testread_default_chat_model_returns_fallback_when_no_work_dir() -> None:
+    assert read_default_chat_model("") == _FALLBACK_MODEL
 
 
-def test_read_default_chat_model_returns_fallback_when_no_toml(tmp_path: Path) -> None:
-    assert _read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
+def testread_default_chat_model_returns_fallback_when_no_toml(tmp_path: Path) -> None:
+    assert read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
 
 
-def test_read_default_chat_model_reads_from_minds_toml(tmp_path: Path) -> None:
+def testread_default_chat_model_reads_from_minds_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "minds.toml"
     toml_path.write_text('[chat]\nmodel = "gpt-4o"\n')
-    assert _read_default_chat_model(str(tmp_path)) == "gpt-4o"
+    assert read_default_chat_model(str(tmp_path)) == "gpt-4o"
 
 
-def test_read_default_chat_model_returns_fallback_when_no_chat_section(tmp_path: Path) -> None:
+def testread_default_chat_model_returns_fallback_when_no_chat_section(tmp_path: Path) -> None:
     toml_path = tmp_path / "minds.toml"
     toml_path.write_text("[other]\nkey = 1\n")
-    assert _read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
+    assert read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
 
 
-def test_read_default_chat_model_returns_fallback_when_model_key_missing(tmp_path: Path) -> None:
+def testread_default_chat_model_returns_fallback_when_model_key_missing(tmp_path: Path) -> None:
     toml_path = tmp_path / "minds.toml"
     toml_path.write_text("[chat]\nother_key = 1\n")
-    assert _read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
+    assert read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
 
 
-def test_read_default_chat_model_returns_fallback_on_invalid_toml(tmp_path: Path) -> None:
+def testread_default_chat_model_returns_fallback_on_invalid_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "minds.toml"
     toml_path.write_text("this is not valid toml {{{{")
-    assert _read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
+    assert read_default_chat_model(str(tmp_path)) == _FALLBACK_MODEL
 
 
 def test_default_model_plugin_registers_endpoint() -> None:

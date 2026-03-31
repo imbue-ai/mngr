@@ -30,6 +30,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr_llm import resources as llm_resources
 from imbue.mngr_llm.resources.webchat_agents import AgentsPlugin
 from imbue.mngr_llm.resources.webchat_default_model import DefaultModelPlugin
+from imbue.mngr_llm.resources.webchat_greeting import GreetingPlugin
 from imbue.mngr_llm.resources.webchat_injected_messages import InjectedMessagesPlugin
 from imbue.mngr_llm.resources.webchat_register_conversations import RegisterConversationsPlugin
 from imbue.mngr_llm.resources.webchat_system_prompt import create_system_prompt_plugin
@@ -139,6 +140,16 @@ def _setup_default_model_plugin() -> None:
     get_plugin_manager().register(wrapped)
 
 
+def _setup_greeting_plugin() -> None:
+    """Create and register the greeting-conversation plugin with the llm-webchat plugin manager."""
+    greeting_plugin = GreetingPlugin(
+        agent_work_dir=_AGENT_WORK_DIR,
+        llm_user_path=_LLM_USER_PATH,
+    )
+    wrapped = types.SimpleNamespace(endpoint=greeting_plugin.endpoint)
+    get_plugin_manager().register(wrapped)
+
+
 def _inject_plugin_static_files() -> None:
     """Register JS plugins and static files (CSS) with llm-webchat.
 
@@ -149,7 +160,11 @@ def _inject_plugin_static_files() -> None:
     agents_css = _resolve_resource_path("webchat_agents.css")
     injected_messages_js = _resolve_resource_path("webchat_injected_messages.js")
     default_model_js = _resolve_resource_path("webchat_default_model.js")
-    _prepend_to_env_list("LLM_WEBCHAT_JAVASCRIPT_PLUGINS", [agents_js, injected_messages_js, default_model_js])
+    greeting_js = _resolve_resource_path("webchat_greeting.js")
+    _prepend_to_env_list(
+        "LLM_WEBCHAT_JAVASCRIPT_PLUGINS",
+        [agents_js, injected_messages_js, default_model_js, greeting_js],
+    )
     _prepend_to_env_list("LLM_WEBCHAT_STATIC_PATHS", [agents_css])
 
 
@@ -223,6 +238,7 @@ def main() -> None:
     with log_span("Starting webchat server (llm-webchat)"):
         _setup_agents_plugin()
         _setup_default_model_plugin()
+        _setup_greeting_plugin()
         _setup_injected_messages_plugin()
         _setup_register_conversations_plugin()
         _setup_system_prompt_plugin()
