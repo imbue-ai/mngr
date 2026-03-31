@@ -32,8 +32,11 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.plugin_catalog import RECOMMENDED_PLUGINS
-from imbue.mngr.plugin_catalog import RecommendedPlugin
+from imbue.mngr.plugin_catalog import CatalogEntry
+from imbue.mngr.plugin_catalog import SIGNAL_CHECKS
+from imbue.mngr.plugin_catalog import check_signal
+from imbue.mngr.plugin_catalog import get_installable_packages
+from imbue.mngr.primitives import PluginTier
 from imbue.mngr.uv_tool import build_uv_tool_install_add_many
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
@@ -45,7 +48,7 @@ class _WizardState(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     checkboxes: list[CheckBox]
-    plugins: tuple[RecommendedPlugin, ...]
+    plugins: tuple[CatalogEntry, ...]
     is_confirmed: bool = False
 
 
@@ -73,7 +76,7 @@ class _WizardInputFilter(MutableModel):
 
 @pure
 def _get_selected_package_names(
-    plugins: tuple[RecommendedPlugin, ...],
+    plugins: tuple[CatalogEntry, ...],
     checkboxes: list[CheckBox],
 ) -> list[str]:
     """Extract the package names of all checked plugins."""
@@ -82,14 +85,30 @@ def _get_selected_package_names(
 
 @pure
 def _filter_already_installed(
-    plugins: tuple[RecommendedPlugin, ...],
+    plugins: tuple[CatalogEntry, ...],
     installed_names: frozenset[str],
-) -> tuple[RecommendedPlugin, ...]:
+) -> tuple[CatalogEntry, ...]:
     """Remove plugins that are already installed."""
     return tuple(p for p in plugins if p.package_name not in installed_names)
 
 
-def _run_install_wizard(plugins: tuple[RecommendedPlugin, ...]) -> list[str]:
+def _should_preselect(entry: CatalogEntry) -> bool:
+    """Determine if a catalog entry should be preselected in the wizard.
+
+    BASIC-tier entries with a signal are preselected if the signal passes.
+    All other entries are not preselected.
+    """
+    if entry.tier != PluginTier.BASIC:
+        return False
+    if entry.signal is None:
+        return False
+    signal_check = SIGNAL_CHECKS.get(entry.signal)
+    if signal_check is None:
+        return False
+    return check_signal(signal_check)
+
+
+def _run_install_wizard(plugins: tuple[CatalogEntry, ...]) -> list[str]:
     """Run the install wizard TUI.
 
     Returns the list of selected package names, or an empty list if cancelled.
@@ -101,7 +120,7 @@ def _run_install_wizard(plugins: tuple[RecommendedPlugin, ...]) -> list[str]:
 
     for plugin in plugins:
         label = f"{plugin.package_name.ljust(name_width)}  {plugin.description}"
-        cb = CheckBox(label, state=plugin.is_preselected)
+        cb = CheckBox(label, state=_should_preselect(plugin))
         checkboxes.append(cb)
         list_items.append(AttrMap(cb, None, focus_map="reversed"))
 
@@ -175,10 +194,11 @@ def _install_wizard_impl() -> None:
 
     # Filter out already-installed plugins
     installed_names = frozenset(r.name for r in receipt.extras)
-    available = _filter_already_installed(RECOMMENDED_PLUGINS, installed_names)
+    all_packages = get_installable_packages()
+    available = _filter_already_installed(all_packages, installed_names)
 
     if not available:
-        write_human_line("All recommended plugins are already installed.")
+        write_human_line("All plugins are already installed.")
         return
 
     selected = _run_install_wizard(available)

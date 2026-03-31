@@ -4,9 +4,16 @@ These tests verify that external plugins (like mngr_opencode) are properly
 discovered and registered when installed in the same environment.
 """
 
+import pytest
+
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
+
+
+@pytest.fixture
+def enabled_plugins() -> frozenset[str]:
+    return frozenset({"opencode"})
 
 
 def test_external_plugin_agent_type_is_registered_via_entry_points() -> None:

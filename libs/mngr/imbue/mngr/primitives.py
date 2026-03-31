@@ -184,6 +184,17 @@ class ConflictMode(UpperCaseStrEnum):
     ASK = auto()
 
 
+class PluginTier(UpperCaseStrEnum):
+    """Plugin tier controlling install wizard preselection.
+
+    BASIC: preselected in the install wizard when the signal check passes.
+    EXTRA: not preselected; user opts in manually.
+    """
+
+    BASIC = auto()
+    EXTRA = auto()
+
+
 # === ID Types ===
 
 
