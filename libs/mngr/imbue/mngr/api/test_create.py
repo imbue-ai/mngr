@@ -675,9 +675,7 @@ def test_worktree_base_folder_overrides_default_worktree_location(
         worktree_path = Path(agent.work_dir)
 
         # Worktree should be placed under the custom base folder, not the default
-        assert worktree_path.parent == custom_base, (
-            f"Expected worktree under {custom_base}, got {worktree_path}"
-        )
+        assert worktree_path.parent == custom_base, f"Expected worktree under {custom_base}, got {worktree_path}"
         assert worktree_path.exists()
         assert (worktree_path / "README.md").exists()
 

@@ -24,12 +24,12 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-from loguru import logger
-
-from imbue.imbue_common.frozen_model import FrozenModel
 from llm_webchat.events import BufferBehavior
 from llm_webchat.hookspecs import hookimpl
+from loguru import logger
 from pydantic import Field
+
+from imbue.imbue_common.frozen_model import FrozenModel
 
 _POLL_INTERVAL_SECONDS: Final[float] = 2.0
 
@@ -185,9 +185,7 @@ def _run_poll_loop(
         if not tracked_ids:
             continue
 
-        injected_responses, new_max = _poll_for_injected_messages(
-            db_path, last_rowid, tracked_ids
-        )
+        injected_responses, new_max = _poll_for_injected_messages(db_path, last_rowid, tracked_ids)
         for response_data in injected_responses:
             logger.debug(
                 "Detected injected message {} in conversation {}",
