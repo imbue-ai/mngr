@@ -16,6 +16,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
@@ -28,7 +29,7 @@ def _make_headless_agent(
     agent_config: HeadlessClaudeAgentConfig | AgentTypeConfig | None = None,
 ) -> tuple[HeadlessClaude, Host]:
     """Create a HeadlessClaude agent with a real local host for testing."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     work_dir = tmp_path / f"work-{str(AgentId.generate().get_uuid())[:8]}"
     work_dir.mkdir()

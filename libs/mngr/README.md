@@ -96,7 +96,7 @@ sys     0m0.227s
 
 > time mngr list
 NAME           STATE       HOST        PROVIDER    HOST STATE  PROJECT
-local-hello    RUNNING     @local      local       RUNNING     mngr
+local-hello    RUNNING     localhost   local       RUNNING     mngr
 
 real    0m1.773s
 user    0m0.955s

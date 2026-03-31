@@ -51,6 +51,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
@@ -64,7 +65,7 @@ from imbue.mngr.utils.testing import local_sshd
 @pytest.fixture
 def host_with_temp_dir(local_provider: LocalProviderInstance) -> tuple[Host, Path]:
     """Create a Host using the local provider and its per-host directory."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
     return host, host.host_dir
 
@@ -732,7 +733,7 @@ def test_unset_vars_applied_during_agent_start(
         mngr_ctx=mngr_ctx_with_unset,
     )
 
-    host = provider_with_unset.create_host(HostName("localhost"))
+    host = provider_with_unset.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -847,7 +848,7 @@ def test_stop_agent_kills_single_pane_processes(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -905,7 +906,7 @@ def test_stop_agent_kills_multi_pane_processes(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -971,7 +972,7 @@ def test_start_agent_creates_process_group(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -1032,7 +1033,7 @@ def test_start_agent_starts_process_activity_monitor(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -1137,7 +1138,7 @@ def test_start_agent_creates_additional_tmux_windows(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -1198,7 +1199,7 @@ def test_start_agent_additional_windows_run_commands(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -2199,7 +2200,7 @@ def test_start_agent_has_access_to_env_vars(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     # Create a marker file path where the agent will write the env var value
@@ -2276,7 +2277,7 @@ def test_new_tmux_window_inherits_env_vars(
         host_dir=per_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     marker_file = temp_work_dir / "new_window_marker.txt"
@@ -2749,7 +2750,7 @@ def test_create_work_dir_cross_host_generates_unique_paths(
         host_dir=source_host_dir,
         mngr_ctx=source_mngr_ctx,
     )
-    source_host = source_provider.create_host(HostName("localhost"))
+    source_host = source_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     # Verify the two hosts have different IDs (cross-host scenario)
     assert source_host.id != target_host.id

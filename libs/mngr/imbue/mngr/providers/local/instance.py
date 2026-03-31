@@ -50,6 +50,7 @@ from imbue.mngr.utils.deps import TMUX
 from imbue.mngr.utils.file_utils import atomic_write
 
 LOCAL_PROVIDER_SUBDIR: Final[str] = "local"
+LOCAL_HOST_NAME: Final[str] = "localhost"
 HOSTS_SUBDIR: Final[str] = "hosts"
 
 # Fixed namespace for deterministic VolumeId derivation from volume directory names.
@@ -87,7 +88,7 @@ class LocalProviderInstance(BaseProviderInstance):
     """
 
     def get_host_name(self, style: HostNameStyle) -> HostName:
-        return HostName("localhost")
+        return HostName(LOCAL_HOST_NAME)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -192,7 +193,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """Create (or return) the local host.
 
         For the local provider, this always returns the same host representing
-        the local computer. The name must be "localhost". The image and
+        the local computer. The name must match LOCAL_HOST_NAME. The image and
         known_hosts parameters are ignored since the local machine uses its
         own configuration.
         """
@@ -200,8 +201,8 @@ class LocalProviderInstance(BaseProviderInstance):
         GIT.require()
         JQ.require()
 
-        if str(name) != "localhost":
-            raise UserInputError(f"Local provider only supports host name 'localhost', got '{name}'")
+        if str(name) != LOCAL_HOST_NAME:
+            raise UserInputError(f"Local provider only supports host name '{LOCAL_HOST_NAME}', got '{name}'")
         with log_span("Creating local host (provider={})", self.name):
             host = self._create_host(name, tags)
 
@@ -233,7 +234,7 @@ class LocalProviderInstance(BaseProviderInstance):
         For the local provider, this simply returns the local host since it
         is always running.
         """
-        local_host = self._create_host(HostName("localhost"))
+        local_host = self._create_host(HostName(LOCAL_HOST_NAME))
 
         return local_host
 
@@ -272,12 +273,12 @@ class LocalProviderInstance(BaseProviderInstance):
                     logger.trace("Failed to find host with id={} (local host id={})", host, host_id)
                     raise HostNotFoundError(host)
             case HostName():
-                if str(host) != "localhost":
+                if str(host) != LOCAL_HOST_NAME:
                     raise HostNotFoundError(host)
             case _ as unreachable:
                 assert_never(unreachable)
 
-        return self._create_host(HostName("localhost"))
+        return self._create_host(HostName(LOCAL_HOST_NAME))
 
     def discover_hosts(
         self,
@@ -291,7 +292,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         host_ref = DiscoveredHost(
             host_id=self.host_id,
-            host_name=HostName("localhost"),
+            host_name=HostName(LOCAL_HOST_NAME),
             provider_name=self.name,
         )
         logger.trace("Discovered hosts for local provider {}", self.name)
@@ -453,9 +454,9 @@ class LocalProviderInstance(BaseProviderInstance):
         """Rename the local host.
 
         For the local provider, this is a no-op since the host name is always
-        effectively "localhost". Returns the host unchanged.
+        effectively "local". Returns the host unchanged.
         """
-        return self._create_host(HostName("localhost"))
+        return self._create_host(HostName(LOCAL_HOST_NAME))
 
     # =========================================================================
     # Connector Method

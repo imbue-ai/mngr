@@ -24,6 +24,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import make_local_provider
@@ -47,8 +48,8 @@ def test_create_host_returns_host_with_persistent_id(temp_host_dir: Path, temp_c
     provider1 = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
     provider2 = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
 
-    host1 = provider1.create_host(HostName("localhost"))
-    host2 = provider2.create_host(HostName("localhost"))
+    host1 = provider1.create_host(HostName(LOCAL_HOST_NAME))
+    host2 = provider2.create_host(HostName(LOCAL_HOST_NAME))
 
     assert host1.id == host2.id
 
@@ -64,8 +65,8 @@ def test_create_host_generates_new_id_for_different_dirs(tmp_path: Path, mngr_te
     provider1 = make_local_provider(tmpdir1, config1)
     provider2 = make_local_provider(tmpdir2, config2)
 
-    host1 = provider1.create_host(HostName("localhost"))
-    host2 = provider2.create_host(HostName("localhost"))
+    host1 = provider1.create_host(HostName(LOCAL_HOST_NAME))
+    host2 = provider2.create_host(HostName(LOCAL_HOST_NAME))
 
     assert host1.id != host2.id
 
@@ -74,11 +75,11 @@ def test_host_id_persists_across_provider_instances(temp_host_dir: Path, temp_co
     # Use the same profile_dir for both providers to test persistence
     profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
     provider1 = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
-    host1 = provider1.create_host(HostName("localhost"))
+    host1 = provider1.create_host(HostName(LOCAL_HOST_NAME))
     host_id = host1.id
 
     provider2 = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
-    host2 = provider2.create_host(HostName("localhost"))
+    host2 = provider2.create_host(HostName(LOCAL_HOST_NAME))
 
     assert host2.id == host_id
 
@@ -90,34 +91,34 @@ def test_host_id_persists_across_provider_instances(temp_host_dir: Path, temp_co
 
 
 def test_stop_host_raises_error(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(LocalHostNotStoppableError):
         local_provider.stop_host(host)
 
 
 def test_destroy_host_raises_error(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(LocalHostNotDestroyableError):
         local_provider.destroy_host(host)
 
 
 def test_start_host_returns_host(local_provider: LocalProviderInstance) -> None:
-    host1 = local_provider.create_host(HostName("localhost"))
+    host1 = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     host2 = local_provider.start_host(host1)
 
     assert host2.id == host1.id
 
 
 def test_get_host_by_id(local_provider: LocalProviderInstance) -> None:
-    host1 = local_provider.create_host(HostName("localhost"))
+    host1 = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     host2 = local_provider.get_host(host1.id)
 
     assert host2.id == host1.id
 
 
 def test_get_host_by_name(local_provider: LocalProviderInstance) -> None:
-    host1 = local_provider.create_host(HostName("localhost"))
-    host2 = local_provider.get_host(HostName("localhost"))
+    host1 = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    host2 = local_provider.get_host(HostName(LOCAL_HOST_NAME))
 
     assert host2.id == host1.id
 
@@ -128,8 +129,8 @@ def test_get_host_with_wrong_name_raises_error(local_provider: LocalProviderInst
 
 
 def test_create_host_with_wrong_name_raises_error(local_provider: LocalProviderInstance) -> None:
-    with pytest.raises(UserInputError, match="localhost"):
-        local_provider.create_host(HostName("not-localhost"))
+    with pytest.raises(UserInputError, match=LOCAL_HOST_NAME):
+        local_provider.create_host(HostName("not-local"))
 
 
 def test_get_host_with_wrong_id_raises_error(local_provider: LocalProviderInstance) -> None:
@@ -147,7 +148,7 @@ def test_discover_hosts_returns_single_host(local_provider: LocalProviderInstanc
 
 
 def test_create_snapshot_raises_error(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(SnapshotsNotSupportedError) as exc_info:
         local_provider.create_snapshot(host)
 
@@ -155,25 +156,25 @@ def test_create_snapshot_raises_error(local_provider: LocalProviderInstance) -> 
 
 
 def test_list_snapshots_returns_empty_list(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     snapshots = local_provider.list_snapshots(host)
     assert snapshots == []
 
 
 def test_delete_snapshot_raises_error(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(SnapshotsNotSupportedError):
         local_provider.delete_snapshot(host, SnapshotId("snap-test"))
 
 
 def test_get_host_tags_empty_by_default(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     tags = local_provider.get_host_tags(host)
     assert tags == {}
 
 
 def test_set_host_tags(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     tags = {"env": "test", "team": "backend"}
 
     local_provider.set_host_tags(host, tags)
@@ -185,7 +186,7 @@ def test_set_host_tags(local_provider: LocalProviderInstance) -> None:
 
 
 def test_add_tags_to_host(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     local_provider.set_host_tags(host, {"env": "test"})
 
     local_provider.add_tags_to_host(host, {"team": "backend"})
@@ -197,7 +198,7 @@ def test_add_tags_to_host(local_provider: LocalProviderInstance) -> None:
 
 
 def test_add_tags_updates_existing_tag(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     local_provider.set_host_tags(host, {"env": "test"})
 
     local_provider.add_tags_to_host(host, {"env": "prod"})
@@ -208,7 +209,7 @@ def test_add_tags_updates_existing_tag(local_provider: LocalProviderInstance) ->
 
 
 def test_remove_tags_from_host(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     local_provider.set_host_tags(host, {"env": "test", "team": "backend"})
 
     local_provider.remove_tags_from_host(host, ["env"])
@@ -221,7 +222,7 @@ def test_remove_tags_from_host(local_provider: LocalProviderInstance) -> None:
 def test_tags_persist_to_file(temp_host_dir: Path, temp_config: MngrConfig) -> None:
     profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
     provider = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
 
     provider.set_host_tags(host, {"env": "test"})
 
@@ -238,7 +239,7 @@ def test_tags_persist_to_file(temp_host_dir: Path, temp_config: MngrConfig) -> N
 
 
 def test_create_host_with_tags(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"), tags={"env": "test"})
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME), tags={"env": "test"})
 
     retrieved_tags = local_provider.get_host_tags(host)
     assert len(retrieved_tags) == 1
@@ -246,21 +247,21 @@ def test_create_host_with_tags(local_provider: LocalProviderInstance) -> None:
 
 
 def test_rename_host_returns_host_with_same_id(local_provider: LocalProviderInstance) -> None:
-    host1 = local_provider.create_host(HostName("localhost"))
+    host1 = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     host2 = local_provider.rename_host(host1, HostName("new_name"))
 
     assert host2.id == host1.id
 
 
 def test_get_connector_returns_pyinfra_host(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     connector = local_provider.get_connector(host)
 
     assert connector.name == "@local"
 
 
 def test_get_host_resources_returns_valid_resources(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     resources = local_provider.get_host_resources(host)
 
     assert resources.cpu.count >= 1
@@ -268,7 +269,7 @@ def test_get_host_resources_returns_valid_resources(local_provider: LocalProvide
 
 
 def test_host_has_local_connector(local_provider: LocalProviderInstance) -> None:
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert host.connector.connector_cls_name == "LocalConnector"
 
 
@@ -284,7 +285,7 @@ def test_supports_volumes(local_provider: LocalProviderInstance) -> None:
 
 def test_get_volume_for_host_returns_host_volume(local_provider: LocalProviderInstance) -> None:
     """get_volume_for_host returns a HostVolume wrapping a LocalVolume."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     host_volume = local_provider.get_volume_for_host(host)
     assert host_volume is not None
     assert isinstance(host_volume, HostVolume)
@@ -293,7 +294,7 @@ def test_get_volume_for_host_returns_host_volume(local_provider: LocalProviderIn
 
 def test_get_volume_for_host_data_persists(local_provider: LocalProviderInstance) -> None:
     """Data written to a local volume persists across get_volume_for_host calls."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     host_volume = local_provider.get_volume_for_host(host)
     assert host_volume is not None
     host_volume.volume.write_files({"test.txt": b"hello"})
@@ -346,7 +347,7 @@ def test_get_host_tags_returns_empty_when_labels_file_is_empty(temp_host_dir: Pa
     """get_host_tags should return empty dict when labels file exists but is empty."""
     profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
     provider = make_local_provider(temp_host_dir, temp_config, profile_dir=profile_dir)
-    host = provider.create_host(HostName("localhost"))
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
 
     labels_path = temp_host_dir / "providers" / "local" / "labels.json"
     labels_path.parent.mkdir(parents=True, exist_ok=True)
@@ -442,7 +443,7 @@ def test_get_max_destroyed_host_persisted_seconds_provider_override_takes_preced
 def test_get_host_name_returns_localhost(local_provider: LocalProviderInstance) -> None:
     """get_host_name should always return 'localhost' regardless of style."""
     name = local_provider.get_host_name(HostNameStyle.ASTRONOMY)
-    assert name == HostName("localhost")
+    assert name == HostName(LOCAL_HOST_NAME)
 
 
 def test_supports_shutdown_hosts(local_provider: LocalProviderInstance) -> None:
@@ -452,7 +453,7 @@ def test_supports_shutdown_hosts(local_provider: LocalProviderInstance) -> None:
 
 def test_delete_host_raises(local_provider: LocalProviderInstance) -> None:
     """delete_host should raise because local hosts are never offline."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     with pytest.raises(Exception, match="delete_host should not be called"):
         local_provider.delete_host(host)
 

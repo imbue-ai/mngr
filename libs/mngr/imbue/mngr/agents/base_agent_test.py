@@ -27,6 +27,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import Permission
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -45,7 +46,7 @@ def create_test_agent(
     Accepts optional agent_config and agent_type overrides for tests that
     need non-default configuration (e.g., assemble_command tests).
     """
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent_id = AgentId.generate()

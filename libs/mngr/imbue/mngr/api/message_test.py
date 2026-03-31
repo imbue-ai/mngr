@@ -16,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -46,7 +47,7 @@ def test_agent_to_cel_context_returns_expected_fields(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that _agent_to_cel_context returns the expected fields."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -58,14 +59,14 @@ def test_agent_to_cel_context_returns_expected_fields(
         ),
     )
 
-    context = _agent_to_cel_context(agent, "localhost", "local")
+    context = _agent_to_cel_context(agent, LOCAL_HOST_NAME, "local")
 
     assert context["id"] == str(agent.id)
     assert context["name"] == "cel-test-agent"
     assert context["type"] == "generic"
     assert context["state"] == AgentLifecycleState.STOPPED.value
     assert context["host"]["provider"] == "local"
-    assert context["host"]["name"] == "localhost"
+    assert context["host"]["name"] == LOCAL_HOST_NAME
     assert context["host"]["id"] == str(agent.host_id)
 
 
@@ -91,7 +92,7 @@ def test_send_message_to_agents_calls_success_callback(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that send_message calls the success callback when message is sent."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -131,7 +132,7 @@ def test_send_message_to_agents_fails_for_stopped_agent(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that sending message to stopped agent fails."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -168,7 +169,7 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that send_message auto-starts a stopped agent when is_start_desired=True."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent = host.create_agent_state(
@@ -211,7 +212,7 @@ def test_send_message_to_agents_with_include_filter(
     local_provider: LocalProviderInstance,
 ) -> None:
     """Test that send_message respects include filters."""
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     # Create two agents
@@ -265,7 +266,7 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     to concurrent sends, the serial loop only caught MngrError, so a SendMessageError
     would propagate up and abort the entire broadcast.
     """
-    host = local_provider.create_host(HostName("localhost"))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
 
     agent1 = host.create_agent_state(
