@@ -156,16 +156,6 @@ if git rev-parse --verify "origin/$BASE_BRANCH" >/dev/null 2>&1; then
     fi
 fi
 
-# Merge the local base branch (if it exists)
-if git rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1; then
-    log_info "Merging $BASE_BRANCH..."
-    if ! git merge "$BASE_BRANCH" --no-edit; then
-        log_error "Merge conflict detected while merging $BASE_BRANCH."
-        log_error "Please resolve the merge conflicts before continuing."
-        exit 2
-    fi
-fi
-
 # Push merge commits (if any were created), setting upstream tracking if needed
 log_info "Pushing any merge commits..."
 if ! retry_command 3 git push -u origin HEAD; then
@@ -180,22 +170,22 @@ if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" ]]; then
     IS_INFORMATIONAL_ONLY=true
 else
     # Get files that have changed since the (now updated) base branch
-    CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null || echo "")
+    CHANGED_FILES=$(git diff --name-only "origin/$BASE_BRANCH"...HEAD 2>/dev/null || echo "")
     if [[ -z "$CHANGED_FILES" ]]; then
-        log_info "No files changed compared to $BASE_BRANCH - this was an informational session"
+        log_info "No files changed compared to origin/$BASE_BRANCH - this was an informational session"
         IS_INFORMATIONAL_ONLY=true
     else
         # If all changed files are .md files, consider this an informational session
         NON_MD_FILES=$(echo "$CHANGED_FILES" | grep -v '\.md$' || true)
         if [[ -z "$NON_MD_FILES" ]]; then
-            log_info "Only .md files changed compared to $BASE_BRANCH - this was an informational session"
+            log_info "Only .md files changed compared to origin/$BASE_BRANCH - this was an informational session"
             IS_INFORMATIONAL_ONLY=true
         fi
     fi
 fi
 
 if [[ "$IS_INFORMATIONAL_ONLY" == "true" ]]; then
-    log_info "No code changes detected compared to $BASE_BRANCH - this is an informational session. Exiting cleanly."
+    log_info "No code changes detected compared to origin/$BASE_BRANCH - this is an informational session. Exiting cleanly."
     _log_to_file "INFO" "Informational-only session, exiting cleanly (exit 0)"
     notify_user || echo "No notify_user function defined, skipping."
     rm -f "$MNGR_AGENT_STATE_DIR/active"
