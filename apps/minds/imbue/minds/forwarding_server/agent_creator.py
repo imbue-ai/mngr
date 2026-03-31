@@ -200,9 +200,6 @@ def run_mngr_create(
         "--id",
         str(agent_id),
         "--no-connect",
-        # stick the source into some canonical location
-        "--target-path",
-        "/code/",
         "--type",
         agent_type,
         "--host-env",
@@ -222,6 +219,11 @@ def run_mngr_create(
         case LaunchMode.DEV:
             mngr_command.append("--transfer=none")
         case LaunchMode.LOCAL:
+            # stick the source into some canonical location
+            mngr_command.extend([
+                "--target-path",
+                "/code/",
+            ])
             remote_data_dir = os.path.expanduser(f"~/.minds/data/{agent_id}")
             Path(remote_data_dir).mkdir(parents=True, exist_ok=True)
             mngr_command.extend(
