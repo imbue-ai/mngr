@@ -278,8 +278,11 @@ class CertifiedHostData(FrozenModel):
     def _handle_backwards_compatibility(cls, data: Any) -> Any:
         """Handle backward compatibility with old data.json files.
 
-        Strips deprecated idle_mode field and provides defaults for
-        created_at/updated_at when missing from old data.
+        Strips deprecated idle_mode field, provides defaults for
+        created_at/updated_at when missing from old data, and normalizes
+        the local host name to 'localhost'.  Older data stored the raw
+        pyinfra name '@local', and Host.get_name() produces 'local'
+        (after stripping the '@' prefix); both are normalized here.
         """
         if isinstance(data, dict):
             data.pop("idle_mode", None)
@@ -288,6 +291,12 @@ class CertifiedHostData(FrozenModel):
                 data["created_at"] = now - timedelta(weeks=1)
             if "updated_at" not in data:
                 data["updated_at"] = now - timedelta(days=1)
+            # Normalize local host names.  pyinfra uses '@local' internally
+            # and Host.get_name() strips that to 'local'; the canonical
+            # name is 'localhost'.
+            host_name = data.get("host_name")
+            if isinstance(host_name, str) and host_name in ("@local", "local"):
+                data["host_name"] = "localhost"
         return data
 
     @computed_field

@@ -364,10 +364,10 @@ def test_list_command_with_host_name_filter(
         assert create_result.exit_code == 0
         wait_for_agent_session(session_name)
 
-        # List with host.name filter - local host is named "@local"
+        # List with host.name filter - local host is named "localhost"
         result = cli_runner.invoke(
             list_command,
-            ["--include", 'host.name == "@local"'],
+            ["--include", 'host.name == "localhost"'],
             obj=plugin_manager,
             catch_exceptions=False,
         )
@@ -500,7 +500,6 @@ def test_list_command_with_nested_fields(
         assert "HOST" in result.output
         assert "PROVIDER" in result.output
         assert agent_name in result.output
-        assert "@local" in result.output
         assert "local" in result.output
 
 

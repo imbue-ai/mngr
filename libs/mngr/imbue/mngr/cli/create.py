@@ -89,6 +89,7 @@ from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.editor import EditorSession
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -960,7 +961,7 @@ def _resolve_source_location(
             git_root = find_git_worktree_root(None, mngr_ctx.concurrency_group)
             source_path = str(git_root) if git_root is not None else os.getcwd()
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName("localhost"))
+        host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
@@ -984,7 +985,7 @@ def _resolve_source_location(
         else:
             source_path = os.getcwd()
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName("localhost"))
+        host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return ResolvedSource(location=HostLocation(host=online_host, path=Path(source_path)))
 
@@ -1011,7 +1012,7 @@ def _resolve_target_host(
     if target_host is None:
         # No host specified, use the local provider's default host
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName("localhost"))
+        host = provider.get_host(HostName(LOCAL_HOST_NAME))
         resolved_target_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
     elif isinstance(target_host, DiscoveredHost):
         provider = get_provider_instance(target_host.provider_name, mngr_ctx)

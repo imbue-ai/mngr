@@ -49,6 +49,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 
@@ -1154,7 +1155,7 @@ def write_discovery_snapshot_to_path(
             {"host_id": f"host-{i}", "host_name": name, "provider_name": "local"} for i, name in enumerate(host_names)
         ]
     else:
-        hosts = [{"host_id": "host-1", "host_name": "localhost", "provider_name": "local"}]
+        hosts = [{"host_id": "host-1", "host_name": LOCAL_HOST_NAME, "provider_name": "local"}]
     event = {
         "timestamp": "2025-01-01T00:00:00Z",
         "type": "DISCOVERY_FULL",

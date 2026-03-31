@@ -183,7 +183,13 @@ class Host(BaseHost, OnlineHostInterface):
 
     def get_name(self) -> HostName:
         """Return the human-readable name of this host."""
-        return HostName(self.connector.name)
+        name = self.connector.name
+        # Strip the '@' prefix that pyinfra uses internally to signal local
+        # execution (via LocalConnector).  This is an implementation detail
+        # that should not leak into user-facing host names.
+        if name.startswith("@"):
+            name = name[1:]
+        return HostName(name)
 
     # =========================================================================
     # Core Primitives (pyinfra-compatible signatures)
