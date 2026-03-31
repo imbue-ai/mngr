@@ -285,6 +285,36 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
     # =========================================================================
+    # Preflight Checks (before host creation)
+    # =========================================================================
+
+    @classmethod
+    def preflight_check(
+        cls,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        agent_options: CreateAgentOptions,
+        agent_config: AgentTypeConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Called before host creation to validate early prerequisites.
+
+        This classmethod runs at the very start of create(), after
+        on_before_create hooks but before the target host is resolved.
+        Agent types can override this to perform cheap validation that
+        would otherwise only surface much later (e.g., during provisioning).
+
+        Because no agent instance exists yet, this is a classmethod that
+        receives the source location, options, and config directly.
+
+        If validation fails, raise a PluginMngrError with a clear message.
+
+        IMPORTANT: This method should only perform read-only checks on
+        the source. Do not make any changes to the source host.
+        """
+        ...
+
+    # =========================================================================
     # Provisioning Lifecycle
     # =========================================================================
 

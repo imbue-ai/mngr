@@ -24,6 +24,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -140,7 +141,9 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers:
-        raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     if opts.connect and len(agent_identifiers) > 1:
         raise click.UsageError("--connect can only be used with a single agent")

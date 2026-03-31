@@ -114,7 +114,9 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     # Validate input: must have agents specified
     if not agent_identifiers:
-        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        if not stdin_consumed:
+            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     # Read message from file if --message-file is provided
     resolved_message_content = opts.message_content

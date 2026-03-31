@@ -733,6 +733,71 @@ def test_uses_paste_detection_send_returns_true(
     assert agent.uses_paste_detection_send() is True
 
 
+def test_preflight_check_raises_when_not_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should raise when .claude/settings.local.json is not gitignored in source."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    init_git_repo(source_dir, initial_commit=False)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    with pytest.raises(PluginMngrError, match="not gitignored"):
+        ClaudeAgent.preflight_check(
+            source_host=host,
+            source_path=source_dir,
+            agent_options=options,
+            agent_config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+def test_preflight_check_passes_when_gitignored(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should pass when .claude/settings.local.json is gitignored."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _init_git_with_gitignore(source_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    # Should not raise
+    ClaudeAgent.preflight_check(
+        source_host=host,
+        source_path=source_dir,
+        agent_options=options,
+        agent_config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def test_preflight_check_skips_when_not_git_repo(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """preflight_check should skip gitignore check when source is not a git repo."""
+    host = local_provider.create_host(HostName("localhost"))
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    config = ClaudeAgentConfig(check_installation=False)
+
+    # Should not raise (no git repo, no gitignore check)
+    ClaudeAgent.preflight_check(
+        source_host=host,
+        source_path=source_dir,
+        agent_options=options,
+        agent_config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
 def test_configure_readiness_hooks_raises_when_not_gitignored(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

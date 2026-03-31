@@ -19,6 +19,7 @@ from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -108,7 +109,9 @@ def _exec_impl(ctx: click.Context, **kwargs: Any) -> None:
     agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
 
     if not agent_identifiers:
-        raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        if STDIN_PLACEHOLDER not in opts.agents:
+            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+        return
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
