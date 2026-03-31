@@ -1,15 +1,18 @@
+from typing import Any
 from typing import cast
 
 from loguru import logger
 
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -196,6 +199,22 @@ def _write_host_env_vars(
             host.set_env_vars(env_vars)
 
 
+def _apply_lifecycle_to_certified_data(
+    host: OnlineHostInterface,
+    lifecycle: HostLifecycleOptions,
+) -> None:
+    """Persist lifecycle options (idle timeout, activity sources) to the host's data.json."""
+    certified_data = host.get_certified_data()
+    updates: list[Any] = []
+    if lifecycle.idle_timeout_seconds is not None:
+        updates.append(to_update(certified_data.field_ref().idle_timeout_seconds, lifecycle.idle_timeout_seconds))
+    if lifecycle.activity_sources is not None:
+        updates.append(to_update(certified_data.field_ref().activity_sources, lifecycle.activity_sources))
+    if updates:
+        updated_data = certified_data.model_copy_update(*updates)
+        host.set_certified_data(updated_data)
+
+
 def resolve_target_host(
     target_host: OnlineHostInterface | NewHostOptions,
     mngr_ctx: MngrContext,
@@ -231,6 +250,12 @@ def resolve_target_host(
                 authorized_keys=target_host.environment.authorized_keys,
                 snapshot=target_host.build.snapshot,
             )
+
+        # Persist lifecycle options (idle_timeout, activity_sources) to host data.json.
+        # Some providers (e.g., Modal) handle this internally during create_host, but
+        # others (e.g., local) don't, so we apply it here uniformly.
+        if target_host.lifecycle is not None:
+            _apply_lifecycle_to_certified_data(new_host, target_host.lifecycle)
 
         # Write host environment variables to the host env file (if creating a new host)
         if isinstance(target_host, NewHostOptions):

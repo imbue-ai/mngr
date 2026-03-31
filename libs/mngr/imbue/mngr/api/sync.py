@@ -477,8 +477,9 @@ def sync_files(
     stash_cm = _stash_guard(git_ctx, destination_path, uncommitted_changes) if should_stash else nullcontext(False)
 
     with stash_cm:
-        # Ensure destination directory exists for push mode subdirectory targets
-        if mode == SyncMode.PUSH and not _dir_exists(host, destination_path):
+        # Ensure destination directory exists for push mode subdirectory targets.
+        # Always attempt mkdir (idempotent) to avoid TOCTOU race with _dir_exists.
+        if mode == SyncMode.PUSH:
             if host.is_local:
                 destination_path.mkdir(parents=True, exist_ok=True)
             else:
