@@ -239,7 +239,7 @@ CommandHelpMetadata(
     key="plugin.install-wizard",
     one_line_description="Interactive wizard to install recommended plugins",
     synopsis="mngr plugin install-wizard",
-    description="""Presents a TUI with available plugins and lets you select which
+    description="""Presents a TUI with recommended plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
 
 BASIC-tier plugins are pre-selected when their signal check passes

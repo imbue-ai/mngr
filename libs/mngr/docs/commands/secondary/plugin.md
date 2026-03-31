@@ -385,7 +385,7 @@ $ mngr plugin disable modal --format json
 
 Interactive wizard to install recommended plugins.
 
-Presents a TUI with available plugins and lets you select which
+Presents a TUI with recommended plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
 
 BASIC-tier plugins are pre-selected when their signal check passes
