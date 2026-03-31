@@ -383,7 +383,7 @@ $ mngr plugin disable modal --format json
 
 ## mngr plugin install-wizard
 
-Interactive wizard to install available plugins.
+Interactive wizard to install recommended plugins.
 
 Presents a TUI with available plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
