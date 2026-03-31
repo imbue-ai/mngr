@@ -212,7 +212,7 @@ def _show_help_overview(ctx: click.Context) -> None:
     if all_metadata:
         output.write("COMMANDS\n")
         for key, meta in sorted(all_metadata.items()):
-            name_str = key
+            name_str = key.replace(".", " ")
             if meta.aliases:
                 name_str += f", {', '.join(meta.aliases)}"
             output.write(f"       {name_str:<28} {meta.one_line_description}\n")
