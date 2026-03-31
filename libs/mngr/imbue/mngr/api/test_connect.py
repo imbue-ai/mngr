@@ -1,4 +1,4 @@
-"""Acceptance tests for connect-related functionality."""
+"""Integration tests for connect-related functionality."""
 
 import subprocess
 
@@ -10,7 +10,7 @@ from imbue.mngr.utils.testing import cleanup_tmux_session
 
 
 @pytest.mark.tmux
-def test_post_attach_resize_delivers_sigwinch_to_child_process(mngr_test_prefix: str, tmp_path) -> None:
+def test_post_attach_resize_delivers_sigwinch_to_pane_process(mngr_test_prefix: str, tmp_path) -> None:
     """Verify build_post_attach_resize_script delivers SIGWINCH to pane processes.
 
     When connecting to a remote agent via SSH, the tmux session may have been
@@ -27,32 +27,21 @@ def test_post_attach_resize_delivers_sigwinch_to_child_process(mngr_test_prefix:
     session_name = f"{mngr_test_prefix}sigwinch-connect"
     marker_file = tmp_path / "sigwinch_received"
 
-    # Use the SIGWINCH catcher as the session's initial command (not a child
-    # of a shell) to avoid macOS-specific pgrep timing issues.
-    catcher_cmd = (
-        f'python3 -c "'
-        f"import signal, pathlib, threading; "
-        f"signal.signal(signal.SIGWINCH, lambda s,f: pathlib.Path('{marker_file}').write_text('received')); "
-        f"threading.Event().wait()"
-        f'"'
-    )
+    # Background sleep + wait allows bash to process traps when SIGWINCH
+    # interrupts the wait builtin (plain sleep ignores SIGWINCH).
+    catcher_cmd = f"trap 'echo received > {marker_file}' WINCH; while :; do sleep 0.2 & wait; done"
 
     try:
         subprocess.run(
-            ["tmux", "new-session", "-d", "-s", session_name, "-x", "200", "-y", "50", catcher_cmd],
+            ["tmux", "new-session", "-d", "-s", session_name, "-x", "200", "-y", "50", "bash", "-c", catcher_cmd],
             check=True,
         )
 
-        # Wait for the pane process to be python3 (the catcher)
+        # Wait for the pane to be running
         wait_for(
-            lambda: "python"
-            in subprocess.run(
-                ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_current_command}"],
-                capture_output=True,
-                text=True,
-            ).stdout.lower(),
+            lambda: subprocess.run(["tmux", "has-session", "-t", session_name], capture_output=True).returncode == 0,
             timeout=5.0,
-            error_message="SIGWINCH catcher did not start in the tmux pane",
+            error_message="tmux session did not start",
         )
 
         # Run the actual resize script from connect.py
