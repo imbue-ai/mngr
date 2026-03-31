@@ -120,10 +120,9 @@ def _run_discovery(
 def _any_identifier_is_a_name(identifiers: Sequence[str]) -> bool:
     """Check if any identifier is an agent name rather than an agent ID.
 
-    Agent IDs are 32-character hex strings (UUID4). Anything that fails AgentId
-    validation is treated as a name. Name-based lookups require a full scan
-    because names can be duplicated across providers, and the event stream
-    may not know about all of them.
+    Anything that fails AgentId validation is treated as a name. Name-based
+    lookups require a full scan because names can be duplicated across
+    providers, and the event stream may not know about all of them.
     """
     for identifier in identifiers:
         try:
