@@ -1734,6 +1734,8 @@ source = { editable = "libs/mngr_llm" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-recursive" },
+    { name = "llm-live-chat" },
+    { name = "llm-matched-responses" },
     { name = "llm-webchat" },
     { name = "watchdog" },
 ]
@@ -1742,6 +1744,8 @@ dependencies = [
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-recursive", editable = "libs/mngr_recursive" },
+    { name = "llm-live-chat", specifier = ">=0.0.2" },
+    { name = "llm-matched-responses", specifier = ">=0.0.4" },
     { name = "llm-webchat", specifier = ">=2.7.0" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
@@ -2184,6 +2188,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/5a/c882d099a623f9d9d10a2718a6179aca87e541d3f60939e751d565efda87/llm-0.29.tar.gz", hash = "sha256:75256631dc8bb990253f46be315ba43f21c0350ac47b09f673024191ebcf93cc", size = 85171, upload-time = "2026-03-17T19:26:00.868Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/44/d51026c16c03e8cfbb8a50a1bf1ffcdf660fd4d74614bfc9c15627b7b390/llm-0.29-py3-none-any.whl", hash = "sha256:f04726019ce9d7ef264412c585eb286dd61621f5164ee284cecfda09b6e22f95", size = 82705, upload-time = "2026-03-17T19:25:59.501Z" },
+]
+
+[[package]]
+name = "llm-live-chat"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "llm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/70/8174ab4540e53754801a4a165256ed60ec3e72c52187f7addf3d8b945894/llm_live_chat-0.0.2.tar.gz", hash = "sha256:64179722d07efc55a11f71ba074a32874afb15c226d734d3bd7db8697a3a16ac", size = 13829, upload-time = "2026-03-01T00:58:39.522Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/99/5250aebc2cddcab89e4b16cd66acb02cfbe227d353895e0e0277be6cdefb/llm_live_chat-0.0.2-py3-none-any.whl", hash = "sha256:5eeddc240e2fb07d513097d4aa9de1e06c2225c673bda052e5aaee4aa124116a", size = 12236, upload-time = "2026-03-01T00:58:38.365Z" },
+]
+
+[[package]]
+name = "llm-matched-responses"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "llm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4f/ab/2951a9513999a87933971b65883197b3db1ec6dbed2e37bb9f887505766b/llm_matched_responses-0.0.4.tar.gz", hash = "sha256:6d0c60b6123924209d9ff10d26cc396d9fb8d3356d086e6129cd4a5e0e348975", size = 7278, upload-time = "2026-03-06T17:10:45.529Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d4/02/83608286f4c043be1769888bcb75f4570c9179235e0ec216354c3076db37/llm_matched_responses-0.0.4-py3-none-any.whl", hash = "sha256:8ea5e38f88c6050ad9f0ee6af4bd6ea47d5877e1e48d7192ebb5a9efbaf0848b", size = 8104, upload-time = "2026-03-06T17:10:44.302Z" },
 ]
 
 [[package]]
