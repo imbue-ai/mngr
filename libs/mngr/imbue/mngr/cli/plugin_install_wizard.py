@@ -238,10 +238,11 @@ CommandHelpMetadata(
     key="plugin.install-wizard",
     one_line_description="Interactive wizard to install recommended plugins",
     synopsis="mngr plugin install-wizard",
-    description="""Presents a TUI with recommended plugins and lets you select which
+    description="""Presents a TUI with available plugins and lets you select which
 ones to install. Plugins are installed in a single operation.
 
-Pre-selects imbue-mngr-tutor by default. Use Space to toggle selections,
+BASIC-tier plugins are pre-selected when their signal check passes
+(e.g. the CLI tool is found on PATH). Use Space to toggle selections,
 Enter to confirm, and q or Ctrl+C to cancel.""",
     examples=(("Launch the plugin install wizard", "mngr plugin install-wizard"),),
     see_also=(
