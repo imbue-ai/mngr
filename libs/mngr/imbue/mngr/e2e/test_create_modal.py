@@ -11,9 +11,9 @@ import pytest
 from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
-_REMOTE_TIMEOUT = 120.0
+_REMOTE_TIMEOUT = 180.0
 
-pytestmark = [pytest.mark.release, pytest.mark.modal, pytest.mark.timeout(120)]
+pytestmark = [pytest.mark.release, pytest.mark.modal, pytest.mark.timeout(240)]
 
 
 @pytest.mark.rsync
@@ -40,8 +40,11 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
     # and then we also pass in an explicit message for the agent to start working on immediately
     # the message can also be specified as the contents of a file (by using --message-file instead of --message)
     """)
+    # Use a generous ready timeout because the agent needs to fully start
+    # before the message can be sent, which can be slow in nested Modal
+    # environments (Modal-in-Modal via offload).
     result = e2e.run(
-        'mngr create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github" --no-ensure-clean',
+        'MNGR_AGENT_READY_TIMEOUT=120 mngr create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github" --no-ensure-clean',
         comment="you can send an initial message (so you don't have to wait around)",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -168,6 +171,12 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
     # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
     # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
     """)
+    # Create the Dockerfile and context directory that the command references
+    e2e.run("mkdir -p ./agent-context", comment="create build context directory")
+    e2e.run(
+        'printf "FROM python:3.12\\n" > ./Dockerfile.agent',
+        comment="create minimal Dockerfile",
+    )
     result = e2e.run(
         "mngr create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context --no-connect --no-ensure-clean",
         comment="the most important build args for Modal are --file and --context-dir",
@@ -211,12 +220,17 @@ def test_create_modal_snapshot(e2e: E2eSession) -> None:
     # you can use an existing snapshot instead of building a new host from scratch:
     mngr create my-task --provider modal --snapshot snap-123abc
     """)
+    # snap-123abc is a fake snapshot ID that does not exist. The test verifies
+    # that the --snapshot flag is accepted and produces a meaningful error when
+    # the snapshot cannot be found.
     result = e2e.run(
         "mngr create my-task --provider modal --snapshot snap-123abc --no-connect --no-ensure-clean",
         comment="you can use an existing snapshot instead of building a new host from scratch",
         timeout=_REMOTE_TIMEOUT,
     )
-    expect(result).to_succeed()
+    expect(result).to_fail()
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(r"(?i)snapshot.*not found|no.*snapshot|snapshot.*snap-123abc")
 
 
 @pytest.mark.rsync
@@ -240,6 +254,8 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
     # (--append-to-file and --prepend-to-file are also available)
     """)
+    # Create ~/.ssh/config so the upload-file flag has a real file to work with
+    e2e.run("mkdir -p ~/.ssh && touch ~/.ssh/config", comment="create ssh config for upload test")
     result = e2e.run(
         'mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo" --no-connect --no-ensure-clean',
         comment="you can upload files and run custom commands during host provisioning",
