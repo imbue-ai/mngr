@@ -4,7 +4,6 @@ Uses shared plugin test fixtures from mngr to avoid duplicating common
 fixture code across plugin libraries.
 """
 
-import subprocess
 from pathlib import Path
 
 import pluggy
@@ -79,11 +78,11 @@ def monorepo_root() -> Path:
     from the git root. We can't use cwd because isolate_home() chdir's to a
     temp directory.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=Path(__file__).parent,
-        capture_output=True,
-        text=True,
-    )
+    with ConcurrencyGroup(name="git-toplevel") as cg:
+        result = cg.run_process_to_completion(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=Path(__file__).parent,
+            is_checked_after=False,
+        )
     assert result.returncode == 0, f"git rev-parse failed: {result.stderr}"
     return Path(result.stdout.strip())
