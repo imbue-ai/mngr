@@ -282,13 +282,13 @@ def _get_focused_entry(state: _KanpanState) -> AgentBoardEntry | None:
     return state.index_to_entry.get(focus_index)
 
 
-def _run_destroy(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+def _run_destroy(agent_names: list[str]) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Run mngr destroy in a subprocess. Called from a background thread."""
     return subprocess.run(
-        ["mngr", "destroy", agent_name, "--force"],
+        ["mngr", "destroy", *agent_names, "--force"],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
 
 
@@ -377,6 +377,18 @@ def _unmark_all(state: _KanpanState) -> None:
     _update_mark_count_footer(state)
 
 
+def _prune_orphaned_marks(state: _KanpanState) -> None:
+    """Remove marks for agents that are no longer in the current snapshot."""
+    if state.snapshot is None or not state.marks:
+        return
+    current_names = {e.name for e in state.snapshot.entries}
+    orphaned = [name for name in state.marks if name not in current_names]
+    for name in orphaned:
+        del state.marks[name]
+    if orphaned:
+        _update_mark_count_footer(state)
+
+
 def _update_mark_count_footer(state: _KanpanState) -> None:
     """Update the footer to show the count of marked agents."""
     if not state.marks:
@@ -406,6 +418,15 @@ class _BatchWorkItem(FrozenModel):
     key: str
     cmd: CustomCommand
     entry: AgentBoardEntry | None
+    batch_names: tuple[AgentName, ...] = ()
+
+
+@pure
+def _batch_item_label(item: _BatchWorkItem) -> str:
+    """Format a human-readable label for a batch work item."""
+    if item.batch_names:
+        return f"{item.cmd.name} {len(item.batch_names)} agent(s)"
+    return f"{item.cmd.name} {item.name}"
 
 
 def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.CompletedProcess[str]:
@@ -422,7 +443,11 @@ def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.Complet
 
 
 def _start_batch_execution(state: _KanpanState) -> None:
-    """Begin executing all marked operations sequentially."""
+    """Begin executing all marked operations sequentially.
+
+    Delete operations are batched into a single subprocess call.
+    Other operations (push, custom commands) run individually.
+    """
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
@@ -433,11 +458,31 @@ def _start_batch_execution(state: _KanpanState) -> None:
     if state.snapshot is not None:
         entries_by_name = {e.name: e for e in state.snapshot.entries}
 
-    work: list[_BatchWorkItem] = []
+    delete_names: list[AgentName] = []
+    individual_work: list[_BatchWorkItem] = []
     for name, mark_key in state.marks.items():
         cmd = state.commands.get(mark_key)
-        if cmd is not None:
-            work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
+        if cmd is None:
+            continue
+        if mark_key == _BUILTIN_COMMAND_KEY_DELETE:
+            delete_names.append(name)
+        else:
+            individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
+
+    work: list[_BatchWorkItem] = []
+    if delete_names:
+        delete_cmd = state.commands.get(_BUILTIN_COMMAND_KEY_DELETE)
+        if delete_cmd is not None:
+            work.append(
+                _BatchWorkItem(
+                    name=delete_names[0],
+                    key=_BUILTIN_COMMAND_KEY_DELETE,
+                    cmd=delete_cmd,
+                    entry=entries_by_name.get(delete_names[0]),
+                    batch_names=tuple(delete_names),
+                )
+            )
+    work.extend(individual_work)
 
     _execute_next_in_batch(state, work, [], 0)
 
@@ -447,7 +492,8 @@ def _submit_batch_item(
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor. Returns None if the item can't be executed."""
     if item.key == _BUILTIN_COMMAND_KEY_DELETE:
-        return executor.submit(_run_destroy, str(item.name))
+        names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+        return executor.submit(_run_destroy, names)
     if item.key == _BUILTIN_COMMAND_KEY_PUSH:
         if item.entry is None or item.entry.work_dir is None:
             return None
@@ -474,11 +520,11 @@ def _execute_next_in_batch(
     assert state.executor is not None
     future = _submit_batch_item(state.executor, item)
     if future is None:
-        results.append(f"{item.cmd.name} {item.name}: skipped (not executable)")
+        results.append(f"{_batch_item_label(item)}: skipped (not executable)")
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
-    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name}...")
+    state.footer_left_text.set_text(f"{state.execute_status}{_batch_item_label(item)}...")
 
     if state.loop is not None:
         state.loop.set_alarm_in(
@@ -503,22 +549,28 @@ def _on_batch_item_poll(
     state, future, work, results, index, item = data
 
     if future.done():
+        label = _batch_item_label(item)
         try:
             result = future.result()
             if result.returncode == 0:
-                results.append(f"{item.cmd.name} {item.name}: ok")
-                state.marks.pop(item.name, None)
+                if item.batch_names:
+                    for n in item.batch_names:
+                        results.append(f"{item.cmd.name} {n}: ok")
+                        state.marks.pop(n, None)
+                else:
+                    results.append(f"{item.cmd.name} {item.name}: ok")
+                    state.marks.pop(item.name, None)
             else:
                 stderr = result.stderr.strip()
-                results.append(f"{item.cmd.name} {item.name}: failed ({stderr})")
+                results.append(f"{label}: failed ({stderr})")
         except Exception as e:
-            results.append(f"{item.cmd.name} {item.name}: failed ({e})")
+            results.append(f"{label}: failed ({e})")
 
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
     frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    state.footer_left_text.set_text(f"{state.execute_status}{item.cmd.name} {item.name} {frame_char}")
+    state.footer_left_text.set_text(f"{state.execute_status}{_batch_item_label(item)} {frame_char}")
     state.spinner_index += 1
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
 
@@ -829,6 +881,7 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
             state.last_refresh_time = time.monotonic()
 
     _refresh_display(state)
+    _prune_orphaned_marks(state)
 
     now = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
     if state.snapshot is not None:
