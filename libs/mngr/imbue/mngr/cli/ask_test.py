@@ -12,9 +12,9 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.ask import ClaudeBackendInterface
 from imbue.mngr.cli.ask import _accumulate_chunks
 from imbue.mngr.cli.ask import _build_ask_context
-from imbue.mngr.cli.ask import _load_mega_tutorial
 from imbue.mngr.cli.ask import _check_headless_claude_available
 from imbue.mngr.cli.ask import _execute_response
+from imbue.mngr.cli.ask import _load_mega_tutorial
 from imbue.mngr.cli.ask import _show_command_summary
 from imbue.mngr.cli.ask import ask
 from imbue.mngr.config.agent_class_registry import set_default_agent_class

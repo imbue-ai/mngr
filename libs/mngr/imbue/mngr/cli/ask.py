@@ -16,6 +16,7 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import add_common_options
@@ -44,7 +45,6 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr import resources as mngr_resources
 
 _QUERY_PREFIX: Final[str] = (
     "answer this question about `mngr`. "
