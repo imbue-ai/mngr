@@ -186,6 +186,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.87.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d6/8f/3281edf7c35cbac169810e5388eb9b38678c7ea9867c2d331237bd5dff08/anthropic-0.87.0.tar.gz", hash = "sha256:098fef3753cdd3c0daa86f95efb9c8d03a798d45c5170329525bb4653f6702d0", size = 588982, upload-time = "2026-03-31T17:52:41.697Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/02/99bf351933bdea0545a2b6e2d812ed878899e9a95f618351dfa3d0de0e69/anthropic-0.87.0-py3-none-any.whl", hash = "sha256:e2669b86d42c739d3df163f873c51719552e263a3d85179297180fb4fa00a236", size = 472126, upload-time = "2026-03-31T17:52:40.174Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.12.0"
 source = { registry = "https://pypi.org/simple" }
@@ -909,6 +928,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/92/df/929ee0b5d2c8bd8d713c45e71b94ab57c7e11e322130724d54f469b2cd48/dockerfile-parse-2.0.1.tar.gz", hash = "sha256:3184ccdc513221983e503ac00e1aa504a2aa8f84e5de673c46b0b6eee99ec7bc", size = 24556, upload-time = "2023-07-18T13:36:07.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7a/6c/79cd5bc1b880d8c1a9a5550aa8dacd57353fa3bb2457227e1fb47383eb49/dockerfile_parse-2.0.1-py2.py3-none-any.whl", hash = "sha256:bdffd126d2eb26acf1066acb54cb2e336682e1d72b974a40894fac76a4df17f6", size = 14845, upload-time = "2023-07-18T13:36:06.052Z" },
+]
+
+[[package]]
+name = "docstring-parser"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/9d/c3b43da9515bd270df0f80548d9944e389870713cc1fe2b8fb35fe2bcefd/docstring_parser-0.17.0.tar.gz", hash = "sha256:583de4a309722b3315439bb31d64ba3eebada841f2e2cee23b99df001434c912", size = 27442, upload-time = "2025-07-21T07:35:01.868Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/e2/2537ebcff11c1ee1ff17d8d0b6f4db75873e3b0fb32c2d4a2ee31ecb310a/docstring_parser-0.17.0-py3-none-any.whl", hash = "sha256:cf2569abd23dce8099b300f9b4fa8191e9582dda731fd533daf54c4551658708", size = 36896, upload-time = "2025-07-21T07:35:00.684Z" },
 ]
 
 [[package]]
@@ -1734,6 +1762,7 @@ source = { editable = "libs/mngr_llm" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-recursive" },
+    { name = "llm-anthropic" },
     { name = "llm-live-chat" },
     { name = "llm-matched-responses" },
     { name = "llm-webchat" },
@@ -1744,9 +1773,10 @@ dependencies = [
 requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-recursive", editable = "libs/mngr_recursive" },
+    { name = "llm-anthropic", specifier = ">=0.0.24" },
     { name = "llm-live-chat", specifier = ">=0.0.2" },
     { name = "llm-matched-responses", specifier = ">=0.0.4" },
-    { name = "llm-webchat", specifier = ">=2.7.0" },
+    { name = "llm-webchat", specifier = ">=2.7.2" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
 
@@ -2123,6 +2153,18 @@ wheels = [
 ]
 
 [[package]]
+name = "json-schema-to-pydantic"
+version = "0.4.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/d8/423895b918706c80db1cee679c13fbe810200b9a9d9a9442c7a58d35c3f2/json_schema_to_pydantic-0.4.11.tar.gz", hash = "sha256:35448ed711a28dd33396b095c8492939b4925aa30eb31942e9b8e08d04279465", size = 56597, upload-time = "2026-03-09T20:53:55.692Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/64/7cfeb8c6d2a5e73e0f8d732032aa62be9a7724c04beb461d677de0b4beb3/json_schema_to_pydantic-0.4.11-py3-none-any.whl", hash = "sha256:da2ccc39d070ee03dbcf0517d16720e3e33f7aa8d61257ace09af8c51bd46348", size = 17842, upload-time = "2026-03-09T20:53:54.576Z" },
+]
+
+[[package]]
 name = "lark"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2189,6 +2231,20 @@ wheels = [
 ]
 
 [[package]]
+name = "llm-anthropic"
+version = "0.24"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "json-schema-to-pydantic" },
+    { name = "llm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/d6/03d723b225bd90781a5e1f15856babe871aae193d2f5fb3ccd8ef0071740/llm_anthropic-0.24.tar.gz", hash = "sha256:f8380c9cb2dbd663bd2d0b0c67eba770f4d619b47145eac524b6cdf683073b29", size = 19781, upload-time = "2026-02-17T23:52:15.584Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/6f/2facc60a2ae0a2c9ae0ed5e748b5e51519de5163eae1ae91d53822fd3871/llm_anthropic-0.24-py3-none-any.whl", hash = "sha256:9d443ad10df715e8c1c51424bd410a92021c9aedb71d8ded764f2990bc47f9ed", size = 16533, upload-time = "2026-02-17T23:52:14.137Z" },
+]
+
+[[package]]
 name = "llm-live-chat"
 version = "0.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2214,7 +2270,7 @@ wheels = [
 
 [[package]]
 name = "llm-webchat"
-version = "2.7.0"
+version = "2.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -2225,9 +2281,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/05/7f/26ef3b7012d3abb71bfe91569f999d35861334be687575a9745d90083a36/llm_webchat-2.7.0.tar.gz", hash = "sha256:d92905758863f69701366ac70956931cb0e40cd66abca3263054796941b61e97", size = 302200, upload-time = "2026-03-31T13:25:48.341Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/91/8b7531d8798bd8fbec707f8e634e50502040e35a3aaa98e887fd4923b689/llm_webchat-2.7.2.tar.gz", hash = "sha256:17eabdc438f1b2b24940409d87e6095729e61f9c8e6318c74005d598d5d2366b", size = 303741, upload-time = "2026-04-01T11:11:19.736Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/f1/0a0f84bf1fa94e2685a8a01ad9c18a7f2fd061e39b223f7f593e1ebc7965/llm_webchat-2.7.0-py3-none-any.whl", hash = "sha256:3048c20045abd74bdae546792e2ed70555207808de3f8e9352a8f331d92ef7ae", size = 123233, upload-time = "2026-03-31T13:25:46.517Z" },
+    { url = "https://files.pythonhosted.org/packages/77/99/889feaffb5ed07988bab615b97ce0ae773c8cf31b9b85407166a14d181bb/llm_webchat-2.7.2-py3-none-any.whl", hash = "sha256:6a071412075255a09ffc61e47dafc2aa60b7886f1dabd3515dbb566d474adc10", size = 124154, upload-time = "2026-04-01T11:11:17.125Z" },
 ]
 
 [[package]]
