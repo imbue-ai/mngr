@@ -494,32 +494,32 @@ def test_find_sandbox_returns_none_when_not_found(
 # ---------------------------------------------------------------------------
 
 
-def test_build_modal_image_default(testing_provider: ModalProviderInstance) -> None:
-    image = testing_provider._build_modal_image()
+def test_get_modal_image_definition_default(testing_provider: ModalProviderInstance) -> None:
+    image = testing_provider._get_modal_image_definition()
     assert image.get_object_id() is not None
 
 
-def test_build_modal_image_from_registry(testing_provider: ModalProviderInstance) -> None:
-    image = testing_provider._build_modal_image(base_image="python:3.11-slim")
+def test_get_modal_image_definition_from_registry(testing_provider: ModalProviderInstance) -> None:
+    image = testing_provider._get_modal_image_definition(base_image="python:3.11-slim")
     assert "python" in image.get_object_id()
 
 
-def test_build_modal_image_from_dockerfile(
+def test_get_modal_image_definition_from_dockerfile(
     testing_provider: ModalProviderInstance,
     tmp_path: Path,
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
-    image = testing_provider._build_modal_image(dockerfile=dockerfile)
+    image = testing_provider._get_modal_image_definition(dockerfile=dockerfile)
     assert image.get_object_id() is not None
 
 
-def test_build_modal_image_with_secrets(
+def test_get_modal_image_definition_with_secrets(
     testing_provider: ModalProviderInstance,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TEST_SECRET", "secret_value")
-    image = testing_provider._build_modal_image(secrets=["TEST_SECRET"])
+    image = testing_provider._get_modal_image_definition(secrets=["TEST_SECRET"])
     assert image.get_object_id() is not None
 
 
@@ -2396,7 +2396,7 @@ def test_discover_hosts_handles_sandbox_without_valid_tags(
     assert len(discovered) == 0
 
 
-def test_build_modal_image_from_dockerfile_with_context(
+def test_get_modal_image_definition_from_dockerfile_with_context(
     testing_provider: ModalProviderInstance,
     tmp_path: Path,
 ) -> None:
@@ -2404,7 +2404,7 @@ def test_build_modal_image_from_dockerfile_with_context(
     dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
     context_dir = tmp_path / "context"
     context_dir.mkdir()
-    image = testing_provider._build_modal_image(
+    image = testing_provider._get_modal_image_definition(
         dockerfile=dockerfile,
         context_dir=context_dir,
     )
@@ -2445,17 +2445,17 @@ def test_get_host_resources_missing_record(
 
 
 # ---------------------------------------------------------------------------
-# _build_modal_image with docker_build_args Test
+# _get_modal_image_definition with docker_build_args Test
 # ---------------------------------------------------------------------------
 
 
-def test_build_modal_image_from_dockerfile_with_build_args(
+def test_get_modal_image_definition_from_dockerfile_with_build_args(
     testing_provider: ModalProviderInstance,
     tmp_path: Path,
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text('FROM debian:bookworm-slim\nARG VERSION="1.0"\nRUN echo $VERSION\n')
-    image = testing_provider._build_modal_image(
+    image = testing_provider._get_modal_image_definition(
         dockerfile=dockerfile,
         docker_build_args=["VERSION=2.0"],
     )

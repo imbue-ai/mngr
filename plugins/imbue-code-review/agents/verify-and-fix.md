@@ -19,7 +19,7 @@ git diff <base_branch>...HEAD
 3. Understand the existing codebase patterns around the changed files.
 4. Read the issue categories file whose path you were given.
 
-If the diff is empty (no changes on the branch), create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md` then stop immediately -- there is nothing to verify or fix.
+If the diff is empty (no changes on the branch), create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/$(git rev-parse HEAD)_verified.md` then stop immediately -- there is nothing to verify or fix.
 
 # Step 2: Create Issue List
 
@@ -32,7 +32,7 @@ For each potential issue, note:
 
 Then, for each potential issue, briefly check: is this actually a problem, or does it fall under one of the listed exceptions for that issue type? Drop anything that clearly isn't a real issue. Keep everything else, regardless of severity.
 
-If there are no issues, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md` then stop here. There is nothing to fix.
+If there are no issues, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/$(git rev-parse HEAD)_verified.md` then stop here. There is nothing to fix.
 
 ## Record Issues
 
@@ -84,5 +84,5 @@ If tests pass, you are done.
 
 If tests fail, fix the failures and commit the fixes. Re-run the tests. Keep fixing and re-running until tests pass. The only acceptable exception is if you can prove a failure is preexisting by running the same test on the base branch and seeing it fail there too.
 
-Once tests pass, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/verified.md`
+Once tests pass, create the verification marker by running `date -u +%Y-%m-%dT%H:%M:%SZ > .reviewer/outputs/autofix/$(git rev-parse HEAD)_verified.md`
 

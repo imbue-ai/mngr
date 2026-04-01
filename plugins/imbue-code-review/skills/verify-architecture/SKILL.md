@@ -25,7 +25,7 @@ Spawn a `validate-diff` Agent. Provide the base branch name and the problem desc
 
 Based on the agent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
-- If it reports significant unrelated changes, you MUST stop and consult the user -- do not dismiss this or proceed on your own. Unrelated changes in the diff will cause the analysis agent to waste effort on irrelevant code and produce worse results. Explain that this skill can only verify one logical change at a time. Ask which change they want to focus on (e.g. the main goal of the branch vs. an incidental fix). Then when spawning the analysis agent in Phase 3, explicitly tell it to ignore the changes that are not part of the chosen focus.
+- If it reports changes that don't belong to this branch (i.e., changes you didn't make / the implementer agent wouldn't have made), STOP and ask the user which changes should be in scope. Downstream agents review the entire diff and will act on out-of-scope code -- regardless of how the extra changes got there (wrong base branch, stale local ref, a merge, or incidental edits). Ask the user for the correct base branch or which changes to focus on, then when spawning the analysis agent in Phase 3, explicitly tell it to ignore the out-of-scope changes.
 - If it reports the work looks incomplete, flag that to the user and ask whether to proceed anyway.
 
 ## Phase 3: Spawn Analysis Agent

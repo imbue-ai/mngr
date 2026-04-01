@@ -239,6 +239,10 @@ class DirectImage(ImageInterface):
         )
         return DirectImage.model_construct(image=new_image)
 
+    @_translate_exceptions
+    def build(self, app: AppInterface) -> None:
+        self.image.build(_unwrap_app(app))
+
 
 class DirectVolume(VolumeInterface):
     """Wraps a modal.Volume with retry logic for transient errors."""

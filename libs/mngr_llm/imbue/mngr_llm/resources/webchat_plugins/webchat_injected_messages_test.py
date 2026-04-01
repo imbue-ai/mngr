@@ -91,8 +91,8 @@ def test_injected_with_empty_prompt_and_response() -> None:
     assert _is_injected_response("", "Hello world") is True
 
 
-def test_injected_with_dots_prompt() -> None:
-    assert _is_injected_response("...", "Hello world") is True
+def test_not_injected_with_dots_prompt() -> None:
+    assert _is_injected_response("...", "Hello world") is False
 
 
 def test_injected_with_none_prompt() -> None:
@@ -177,16 +177,14 @@ def test_poll_detects_injected_message_with_empty_prompt(tmp_path: Path) -> None
     assert max_rowid == 1
 
 
-def test_poll_detects_injected_message_with_dots_prompt(tmp_path: Path) -> None:
+def test_poll_does_not_detect_dots_prompt_as_injected(tmp_path: Path) -> None:
     db_path = tmp_path / "logs.db"
     _create_test_db(db_path)
     _insert_conversation(db_path, "conv-1", "Test")
-    _insert_response(db_path, "resp-1", "conv-1", "...", "agent injected content")
+    _insert_response(db_path, "resp-1", "conv-1", "...", "agent content")
 
     results, max_rowid = _poll_for_injected_messages(db_path, 0, {"conv-1"})
-    assert len(results) == 1
-    assert results[0].conversation_id == "conv-1"
-    assert results[0].response == "agent injected content"
+    assert len(results) == 0
     assert max_rowid == 1
 
 
