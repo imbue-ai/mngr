@@ -632,7 +632,7 @@ def _provision_remote_api_key(
 
 
 def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
-    """Sync user resource directories from ~/.claude/ into the per-agent config dir.
+    """Sync user resource directories from the claude home dir into the per-agent config dir.
 
     Symlinks or copies skills/, agents/, commands/, plugins/ depending on the
     ``symlink`` flag. settings.json is handled separately by
@@ -702,12 +702,12 @@ def _fixup_installed_plugins_json(host: OnlineHostInterface, source_claude_dir: 
 
 
 def _resolve_installed_plugins_sentinel(host: OnlineHostInterface) -> None:
-    """Resolve sentinel-prefixed installPaths in ~/.claude/plugins/installed_plugins.json.
+    """Resolve sentinel-prefixed installPaths in the claude home plugins directory.
 
     Deploy images have installPath values rewritten to a sentinel prefix at
     build time (because the container's home directory isn't known then). This
-    resolves them to the actual ~/.claude/ path in place, so all downstream
-    provisioning code can assume paths use ~/.claude/ as the prefix.
+    resolves them to the actual claude home path in place, so all downstream
+    provisioning code can assume paths use the real claude home as the prefix.
 
     No-op if the file doesn't exist or doesn't contain the sentinel.
     """

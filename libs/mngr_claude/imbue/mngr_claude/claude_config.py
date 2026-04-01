@@ -1,6 +1,7 @@
 import copy
 import fcntl
 import json
+import os
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -68,6 +69,18 @@ class ClaudeBypassPermissionsNotAcceptedError(ConfigError):
             "Run `mngr create` interactively (without --no-connect) to be prompted, "
             "or run Claude Code manually and dismiss the warning."
         )
+
+
+def get_claude_home_dir() -> Path:
+    """Return the Claude home directory ($CLAUDE_CONFIG_DIR or ~/.claude/).
+
+    Respects the CLAUDE_CONFIG_DIR environment variable if set, otherwise
+    falls back to ~/.claude/.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".claude"
 
 
 def get_claude_config_path() -> Path:
