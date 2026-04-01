@@ -135,7 +135,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "scripts/generate_verify_skills.py", "contrib/"]
+exclude = ["scripts/style_guide.py", "contrib/"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
