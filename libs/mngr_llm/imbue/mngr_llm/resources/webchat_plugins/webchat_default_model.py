@@ -16,11 +16,11 @@ from typing import Final
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from llm_webchat.hookspecs import hookimpl
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from llm_webchat.hookspecs import hookimpl
 
 _AGENT_WORK_DIR: Final[str] = os.environ.get("MNGR_AGENT_WORK_DIR", "")
 _FALLBACK_MODEL: Final[str] = "claude-haiku-4.5"
