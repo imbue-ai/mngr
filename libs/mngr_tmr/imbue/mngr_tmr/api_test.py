@@ -21,11 +21,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.api import CollectTestsError
-from imbue.mngr_tmr.api import _build_agent_options
-from imbue.mngr_tmr.api import _read_local_result
-from imbue.mngr_tmr.api import _sanitize_test_name_for_agent
-from imbue.mngr_tmr.api import _short_random_id
-from imbue.mngr_tmr.api import _transfer_mode_for_provider
 from imbue.mngr_tmr.api import build_current_results
 from imbue.mngr_tmr.api import collect_tests
 from imbue.mngr_tmr.api import read_integrator_result
@@ -36,68 +31,73 @@ from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import ReportSection
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
+from imbue.mngr_tmr.launching import build_agent_options as _build_agent_options
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.pulling import read_local_result as _read_local_result
 from imbue.mngr_tmr.report import report_section_of
 from imbue.mngr_tmr.testing import BLOCKED_FIX
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.testing import make_test_result
+from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
+from imbue.mngr_tmr.utils import short_random_id
+from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
 def test_short_random_id_length() -> None:
-    rid = _short_random_id()
+    rid = short_random_id()
     assert len(rid) == 6
 
 
 def test_short_random_id_is_hex() -> None:
-    rid = _short_random_id()
+    rid = short_random_id()
     int(rid, 16)
 
 
 def test_short_random_id_is_unique() -> None:
-    ids = {_short_random_id() for _ in range(100)}
+    ids = {short_random_id() for _ in range(100)}
     assert len(ids) == 100
 
 
 def test_sanitize_simple_test_name() -> None:
-    assert _sanitize_test_name_for_agent("tests/test_foo.py::test_bar") == "test-bar"
+    assert sanitize_test_name_for_agent("tests/test_foo.py::test_bar") == "test-bar"
 
 
 def test_sanitize_nested_test_name() -> None:
-    assert _sanitize_test_name_for_agent("tests/test_foo.py::TestClass::test_method") == "test-method"
+    assert sanitize_test_name_for_agent("tests/test_foo.py::TestClass::test_method") == "test-method"
 
 
 def test_sanitize_parametrized_test_name() -> None:
-    result = _sanitize_test_name_for_agent("tests/test_foo.py::test_bar[param1-param2]")
+    result = sanitize_test_name_for_agent("tests/test_foo.py::test_bar[param1-param2]")
     assert result == "test-bar-param1-param2-"[:40].rstrip("-")
 
 
 def test_sanitize_truncates_long_names() -> None:
     long_name = "tests/test_foo.py::test_" + "a" * 100
-    result = _sanitize_test_name_for_agent(long_name)
+    result = sanitize_test_name_for_agent(long_name)
     assert len(result) <= 40
 
 
 def test_sanitize_special_characters() -> None:
-    result = _sanitize_test_name_for_agent("tests/test_foo.py::test_with spaces_and___underscores")
+    result = sanitize_test_name_for_agent("tests/test_foo.py::test_with spaces_and___underscores")
     assert " " not in result
     assert "--" not in result
 
 
 def test_sanitize_single_part() -> None:
-    result = _sanitize_test_name_for_agent("simple_test")
+    result = sanitize_test_name_for_agent("simple_test")
     assert result == "simple-test"
 
 
 def test_transfer_mode_local_provider_uses_git_worktree() -> None:
-    assert _transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
+    assert transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
 
 
 def test_transfer_mode_remote_provider_uses_git_mirror() -> None:
-    assert _transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
-    assert _transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
+    assert transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
+    assert transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
 
 
 def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:

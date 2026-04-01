@@ -1,113 +1,57 @@
-"""Core logic for the test-mapreduce plugin.
+"""Core orchestration for the test-mapreduce plugin.
 
 Implements the map-reduce pattern: collect tests via pytest, launch an agent per
 test, poll for completion, gather results, and pull code changes.
+
+Sub-modules:
+- utils: shared helpers (FD diagnostics, template resolution, test collection)
+- launching: agent/host creation and launching
+- pulling: result/artifact pulling and branch management
 """
 
-import json
-import math
-import os
-import resource
-import secrets
 import threading
 import time
-from collections import Counter
 from pathlib import Path
 
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.imbue_common.model_update import to_update
-from imbue.mngr.api.create import create as api_create
-from imbue.mngr.api.create import resolve_target_host
-from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import list_agents
-from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.pull import pull_files
-from imbue.mngr.api.pull import pull_git
-from imbue.mngr.config.data_types import CreateTemplateName
-from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import HostLocation
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.interfaces.host import AgentDataOptions
-from imbue.mngr.interfaces.host import AgentGitOptions
-from imbue.mngr.interfaces.host import CreateAgentOptions
-from imbue.mngr.interfaces.host import NewHostBuildOptions
-from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
-from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotName
-from imbue.mngr.primitives import TransferMode
-from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import IntegratorResult
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TestResult
-from imbue.mngr_tmr.data_types import TestRunInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
-from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
-from imbue.mngr_tmr.prompts import build_integrator_prompt
-from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.launching import launch_agents_up_to_limit
+
+# Re-export public API used by cli.py and tests
+from imbue.mngr_tmr.launching import launch_all_test_agents as launch_all_test_agents
+from imbue.mngr_tmr.launching import launch_integrator_agent as launch_integrator_agent
+from imbue.mngr_tmr.launching import launch_test_agent as launch_test_agent
+from imbue.mngr_tmr.launching import stop_agent_on_host
+from imbue.mngr_tmr.pulling import finalize_agent
+from imbue.mngr_tmr.pulling import pull_agent_branch as pull_agent_branch
+from imbue.mngr_tmr.pulling import pull_agent_outputs as pull_agent_outputs
+from imbue.mngr_tmr.pulling import read_integrator_result as read_integrator_result
+from imbue.mngr_tmr.pulling import try_read_agent_result
+from imbue.mngr_tmr.pulling import try_read_integrator_outcome
 from imbue.mngr_tmr.report import generate_html_report
-
-
-def log_open_fds() -> None:
-    """Log a summary of all open file descriptors for debugging FD exhaustion."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    fd_dir = Path("/dev/fd")
-    if not fd_dir.exists():
-        fd_dir = Path(f"/proc/{os.getpid()}/fd")
-    try:
-        fds = list(fd_dir.iterdir())
-    except OSError:
-        logger.warning("Cannot enumerate open FDs")
-        return
-
-    fd_count = len(fds)
-    logger.warning("Open FDs: {} (soft limit: {}, hard limit: {})", fd_count, soft, hard)
-
-    categories: Counter[str] = Counter()
-    samples: dict[str, list[str]] = {}
-    for fd_path in fds:
-        try:
-            target = os.readlink(str(fd_path))
-        except OSError:
-            target = "<unreadable>"
-        if target.startswith("/"):
-            parts = Path(target).parts[:4]
-            category = str(Path(*parts)) if len(parts) > 1 else target
-        elif target.startswith("pipe:") or target.startswith("socket:"):
-            category = target.split(":")[0]
-        else:
-            category = target
-        categories[category] += 1
-        if category not in samples:
-            samples[category] = []
-        if len(samples[category]) < 3:
-            samples[category].append(target)
-
-    for category, count in categories.most_common(20):
-        sample_str = ", ".join(samples[category])
-        logger.warning("  {} x {} (e.g. {})", count, category, sample_str)
-
+from imbue.mngr_tmr.utils import CollectTestsError as CollectTestsError
+from imbue.mngr_tmr.utils import collect_tests as collect_tests
+from imbue.mngr_tmr.utils import get_base_commit as get_base_commit
+from imbue.mngr_tmr.utils import log_open_fds as log_open_fds
+from imbue.mngr_tmr.utils import resolve_templates as resolve_templates
 
 _TERMINAL_STATES = frozenset(
     {
@@ -116,8 +60,6 @@ _TERMINAL_STATES = frozenset(
         AgentLifecycleState.WAITING,
     }
 )
-
-_SHORT_ID_LENGTH = 6
 
 _MISSING_AGENT_MAX_ROUNDS = 30
 
@@ -128,47 +70,31 @@ _LIST_AGENTS_TIMEOUT_SECONDS = 60.0
 def _list_agents_thread_target(
     mngr_ctx: MngrContext,
     result_holder: list[ListResult | None],
-    error_holder: list[Exception | None],
 ) -> None:
-    """Thread target for try_list_agents. Catches all exceptions."""
+    """Target function for threaded list_agents call."""
     try:
         result_holder[0] = list_agents(
             mngr_ctx=mngr_ctx,
             is_streaming=False,
             error_behavior=ErrorBehavior.CONTINUE,
         )
-    # Human-sanctioned broad catch: thread must not propagate exceptions
-    except Exception as exc:
-        error_holder[0] = exc
+    except (MngrError, HostError, OSError):
+        result_holder[0] = None
 
 
 def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
-    """List agents, returning None on transient errors or timeout.
-
-    Runs list_agents in a daemon thread with a 60s timeout to work around
-    Modal API hangs where discover_hosts_and_agents never returns.
-
-    Human-sanctioned broad catch: polling must survive transient provider errors.
-    """
+    """List agents with a timeout to prevent hanging on unresponsive providers."""
     result_holder: list[ListResult | None] = [None]
-    error_holder: list[Exception | None] = [None]
-
     thread = threading.Thread(
         target=_list_agents_thread_target,
-        args=(mngr_ctx, result_holder, error_holder),
+        args=(mngr_ctx, result_holder),
         daemon=True,
     )
     thread.start()
     thread.join(timeout=_LIST_AGENTS_TIMEOUT_SECONDS)
-
     if thread.is_alive():
-        logger.warning("list_agents timed out after {:.0f}s (will retry next cycle)", _LIST_AGENTS_TIMEOUT_SECONDS)
+        logger.warning("list_agents timed out after {}s", _LIST_AGENTS_TIMEOUT_SECONDS)
         return None
-
-    if error_holder[0] is not None:
-        logger.warning("Polling failed (will retry next cycle): {}", error_holder[0])
-        return None
-
     return result_holder[0]
 
 
@@ -202,428 +128,6 @@ def should_pull_changes_from_result(result: TestResult) -> bool:
     return _should_pull(result.errored, result.changes, result.tests_passing_before, result.tests_passing_after)
 
 
-class CollectTestsError(MngrError, RuntimeError):
-    """Raised when pytest test collection fails."""
-
-    ...
-
-
-def get_base_commit(source_dir: Path, cg: ConcurrencyGroup) -> str:
-    """Get the current HEAD commit hash, used as the base for all agent branches."""
-    result = cg.run_process_to_completion(["git", "rev-parse", "HEAD"], cwd=source_dir)
-    return result.stdout.strip()
-
-
-def _short_random_id() -> str:
-    """Generate a short random hex suffix for agent name uniqueness."""
-    return secrets.token_hex(_SHORT_ID_LENGTH // 2)
-
-
-def collect_tests(
-    pytest_args: tuple[str, ...],
-    source_dir: Path,
-    cg: ConcurrencyGroup,
-) -> list[str]:
-    """Run pytest --collect-only -q and return the list of test node IDs."""
-    cmd = ["python", "-m", "pytest", "--collect-only", "-q", *pytest_args]
-    logger.info("Collecting tests: {}", " ".join(cmd))
-    result = cg.run_process_to_completion(cmd, cwd=source_dir, timeout=60.0, is_checked_after=False)
-    if result.returncode != 0:
-        raise CollectTestsError(f"pytest --collect-only failed (exit code {result.returncode}):\n{result.stderr}")
-
-    test_ids: list[str] = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped and "::" in stripped and not stripped.startswith("="):
-            test_ids.append(stripped)
-
-    if not test_ids:
-        raise CollectTestsError("pytest --collect-only returned no tests")
-
-    logger.info("Collected {} test(s)", len(test_ids))
-    return test_ids
-
-
-def _sanitize_test_name_for_agent(test_node_id: str) -> str:
-    """Convert a pytest node ID into a valid agent name suffix.
-
-    Strips the file path prefix and replaces characters that are not valid in
-    agent names.
-    """
-    parts = test_node_id.split("::")
-    short_name = parts[-1] if parts else test_node_id
-    cleaned = ""
-    for ch in short_name:
-        if ch.isalnum() or ch == "-":
-            cleaned += ch
-        else:
-            cleaned += "-"
-    sanitized = ""
-    for ch in cleaned:
-        if ch == "-" and sanitized.endswith("-"):
-            continue
-        sanitized += ch
-    return sanitized.strip("-").lower()[:40]
-
-
-def _transfer_mode_for_provider(provider_name: ProviderInstanceName) -> TransferMode:
-    """Determine the transfer mode based on the provider.
-
-    GIT_WORKTREE only works when source and target are on the same host, so it is
-    only usable with the local provider. Remote providers (docker, modal, etc.)
-    use GIT_MIRROR to transfer git history efficiently.
-    """
-    is_local = provider_name.lower() == LOCAL_PROVIDER_NAME
-    return TransferMode.GIT_WORKTREE if is_local else TransferMode.GIT_MIRROR
-
-
-def resolve_templates(
-    template_names: tuple[str, ...],
-    config: MngrConfig,
-) -> dict[str, object]:
-    """Resolve create templates by name and merge their options.
-
-    Later templates override earlier ones for the same key.
-    Returns a merged dict of template option values.
-    """
-    merged: dict[str, object] = {}
-    for template_name in template_names:
-        key = CreateTemplateName(template_name)
-        if key not in config.create_templates:
-            available = [str(t) for t in config.create_templates]
-            avail_str = f" Available: {', '.join(available)}" if available else ""
-            raise MngrError(f"Template '{template_name}' not found.{avail_str}")
-        for k, v in config.create_templates[key].options.items():
-            if v is not None:
-                merged[k] = v
-    return merged
-
-
-def _build_agent_options(
-    agent_name: AgentName,
-    branch_name: str,
-    config: TmrLaunchConfig,
-    initial_message: str | None = None,
-) -> CreateAgentOptions:
-    """Build CreateAgentOptions for a tmr agent."""
-    transfer_mode = _transfer_mode_for_provider(config.provider_name)
-    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-    return CreateAgentOptions(
-        agent_type=config.agent_type,
-        name=agent_name,
-        initial_message=initial_message,
-        transfer_mode=transfer_mode,
-        git=AgentGitOptions(
-            new_branch_name=branch_name,
-        ),
-        data_options=AgentDataOptions(is_rsync_enabled=False),
-        environment=config.env_options,
-        label_options=config.label_options,
-        ready_timeout_seconds=60.0 if is_remote else 10.0,
-    )
-
-
-def _create_tmr_agent(
-    agent_name: AgentName,
-    branch_name: str,
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    initial_message: str | None = None,
-    existing_host: OnlineHostInterface | None = None,
-    host_name: HostName | None = None,
-) -> CreateAgentResult:
-    """Create an agent on the configured provider with an optional initial message.
-
-    If existing_host is provided, the agent is placed on that host instead of
-    creating a new one (used for host sharing in remote providers).
-
-    The initial_message is passed via CreateAgentOptions so it is delivered
-    during agent creation (more reliable than sending after creation).
-    """
-    agent_options = _build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
-    source_location = HostLocation(host=config.source_host, path=config.source_dir)
-
-    if existing_host is not None:
-        target_host: OnlineHostInterface | NewHostOptions = existing_host
-    else:
-        # Resolve template options for host build configuration
-        tmpl = resolve_templates(config.templates, mngr_ctx.config) if config.templates else {}
-        snapshot = config.snapshot
-        raw_build_args = tmpl.get("build_args", ())
-        raw_start_args = tmpl.get("start_args", ())
-        build_args = tuple(str(a) for a in raw_build_args) if isinstance(raw_build_args, (list, tuple)) else ()
-        start_args = tuple(str(a) for a in raw_start_args) if isinstance(raw_start_args, (list, tuple)) else ()
-        build = NewHostBuildOptions(snapshot=snapshot, build_args=build_args, start_args=start_args)
-        is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
-        resolved_host_name = None if is_local else host_name
-        target_host = NewHostOptions(provider=config.provider_name, name=resolved_host_name, build=build)
-
-    return api_create(
-        source_location=source_location,
-        target_host=target_host,
-        agent_options=agent_options,
-        mngr_ctx=mngr_ctx,
-    )
-
-
-def launch_test_agent(
-    test_node_id: str,
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str = "",
-    existing_host: OnlineHostInterface | None = None,
-    host_name: HostName | None = None,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test."""
-    agent_name_suffix = _sanitize_test_name_for_agent(test_node_id)
-    short_id = _short_random_id()
-    agent_name = AgentName(f"tmr-{agent_name_suffix}-{short_id}")
-
-    logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
-    create_result = _create_tmr_agent(
-        agent_name=agent_name,
-        branch_name=f"mngr-tmr/{agent_name_suffix}-{short_id}",
-        config=config,
-        mngr_ctx=mngr_ctx,
-        initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
-        existing_host=existing_host,
-        host_name=host_name,
-    )
-
-    branch = f"mngr-tmr/{agent_name_suffix}-{short_id}"
-    return (
-        TestAgentInfo(
-            test_node_id=test_node_id,
-            agent_id=create_result.agent.id,
-            agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
-            branch_name=branch,
-            created_at=time.monotonic(),
-        ),
-        create_result.host,
-    )
-
-
-def _create_snapshot_host(
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-) -> SnapshotName:
-    """Launch a dedicated snapshotter agent, snapshot its host, then stop it.
-
-    Creates a headless agent (no initial message) purely to trigger host
-    provisioning, snapshots the resulting host, and immediately stops the
-    agent. All real test agents are then launched from the snapshot.
-    """
-    short_id = _short_random_id()
-    agent_name = AgentName(f"tmr-snapshotter-{short_id}")
-
-    logger.info("Launching snapshotter agent '{}' for provisioning...", agent_name)
-    create_result = _create_tmr_agent(
-        agent_name=agent_name,
-        branch_name=f"mngr-tmr/snapshotter-{short_id}",
-        config=config,
-        mngr_ctx=mngr_ctx,
-    )
-
-    snapshotter_host = create_result.host
-    snapshotter_agent_id = create_result.agent.id
-
-    try:
-        provider = get_provider_instance(config.provider_name, mngr_ctx)
-        snapshot_id = provider.create_snapshot(snapshotter_host)
-        snapshot_name = SnapshotName(str(snapshot_id))
-        logger.info("Created snapshot '{}' from snapshotter host", snapshot_name)
-        return snapshot_name
-    finally:
-        _stop_agent_on_host(snapshotter_host, snapshotter_agent_id, agent_name)
-
-
-def _create_host_pool(
-    host_count: int,
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    run_name: str,
-    max_parallel: int,
-) -> list[OnlineHostInterface]:
-    """Pre-create a pool of hosts for remote agent placement.
-
-    Host names follow the pattern {run_name}-host-{seq} (0-indexed).
-    Returns the successfully created hosts (may be fewer than host_count on errors).
-    """
-    hosts: list[OnlineHostInterface] = []
-    tmpl = resolve_templates(config.templates, mngr_ctx.config) if config.templates else {}
-    snapshot = config.snapshot
-    raw_build_args = tmpl.get("build_args", ())
-    raw_start_args = tmpl.get("start_args", ())
-    build_args = tuple(str(a) for a in raw_build_args) if isinstance(raw_build_args, (list, tuple)) else ()
-    start_args = tuple(str(a) for a in raw_start_args) if isinstance(raw_start_args, (list, tuple)) else ()
-    build = NewHostBuildOptions(snapshot=snapshot, build_args=build_args, start_args=start_args)
-
-    with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group,
-        name="tmr_create_hosts",
-        max_workers=max_parallel,
-    ) as executor:
-        futures = []
-        for i in range(host_count):
-            host_name = HostName(f"{run_name}-host-{i}")
-            new_host_opts = NewHostOptions(provider=config.provider_name, name=host_name, build=build)
-            futures.append(executor.submit(resolve_target_host, new_host_opts, mngr_ctx))
-        for future in futures:
-            try:
-                hosts.append(future.result())
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to create host: {}", exc)
-
-    logger.info("Created {} host(s) for agent placement", len(hosts))
-    return hosts
-
-
-def launch_all_test_agents(
-    test_node_ids: list[str],
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str = "",
-    use_snapshot: bool = False,
-    max_parallel: int = 4,
-    launch_delay_seconds: float = 2.0,
-    agents_per_host: int = 4,
-    run_name: str = "tmr",
-) -> tuple[list[TestAgentInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
-    """Launch agents for all collected tests.
-
-    Returns (agent_infos, agent_hosts, snapshot_name) where agent_hosts maps
-    agent_id strings to the host each agent was created on, and snapshot_name
-    is the snapshot used (if use_snapshot was True and the provider supports it).
-
-    When use_snapshot is True, a dedicated snapshotter agent is launched first
-    (without an initial message) purely to trigger provisioning. Its host is
-    snapshotted and the snapshotter is stopped. All test agents are then
-    launched from the snapshot for faster startup.
-
-    For remote providers, agents_per_host controls how many agents share a single
-    host. Hosts are pre-created in a pool and agents are assigned round-robin.
-    For local providers, this setting is ignored (all agents share localhost).
-    """
-    agents: list[TestAgentInfo] = []
-    agent_hosts: dict[str, OnlineHostInterface] = {}
-
-    # Optionally create a snapshot before launching any test agents
-    launch_config = config
-    if use_snapshot:
-        provider = get_provider_instance(config.provider_name, mngr_ctx)
-        if provider.supports_snapshots:
-            try:
-                snapshot_name = _create_snapshot_host(config, mngr_ctx)
-                launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
-        else:
-            logger.warning(
-                "Provider '{}' does not support snapshots, launching all agents without snapshot",
-                config.provider_name,
-            )
-
-    # For remote providers, pre-create a pool of shared hosts
-    is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
-    host_pool: list[OnlineHostInterface] = []
-    if not is_local and agents_per_host > 0:
-        host_count = math.ceil(len(test_node_ids) / agents_per_host)
-        if host_count > 0:
-            host_pool = _create_host_pool(host_count, launch_config, mngr_ctx, run_name, max_parallel)
-
-    # Launch all test agents with staggered submissions to avoid rate limits
-    with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group,
-        name="tmr_launch",
-        max_workers=max_parallel,
-    ) as executor:
-        futures = []
-        for i, test_node_id in enumerate(test_node_ids):
-            if i > 0 and launch_delay_seconds > 0:
-                time.sleep(launch_delay_seconds)
-            # Assign to a host from the pool (round-robin), or create a new one
-            existing_host = host_pool[i % len(host_pool)] if host_pool else None
-            host_name = HostName(f"{run_name}-host-{i}") if not is_local and not host_pool else None
-            futures.append(
-                executor.submit(
-                    launch_test_agent,
-                    test_node_id,
-                    launch_config,
-                    mngr_ctx,
-                    pytest_flags,
-                    prompt_suffix,
-                    existing_host,
-                    host_name,
-                )
-            )
-        for future in futures:
-            try:
-                info, host = future.result()
-                agents.append(info)
-                agent_hosts[str(info.agent_id)] = host
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to launch agent: {}", exc)
-                if "Too many open files" in str(exc):
-                    log_open_fds()
-
-    logger.info("Launched {} agent(s)", len(agents))
-    return agents, agent_hosts, launch_config.snapshot
-
-
-_AGENT_CREATION_TIMEOUT_SECONDS = 600.0
-
-
-def _launch_with_timeout(
-    test_node_id: str,
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a test agent with a timeout. Raises TimeoutError if creation takes too long."""
-    with ConcurrencyGroupExecutor(mngr_ctx.concurrency_group, name="launch-agent", max_workers=1) as executor:
-        future = executor.submit(launch_test_agent, test_node_id, config, mngr_ctx, pytest_flags, prompt_suffix)
-        return future.result(timeout=_AGENT_CREATION_TIMEOUT_SECONDS)
-
-
-def _launch_agents_up_to_limit(
-    remaining_tests: list[str],
-    pending_ids: set[str],
-    max_agents: int,
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str,
-    all_agents: list[TestAgentInfo],
-    all_hosts: dict[str, OnlineHostInterface],
-    agent_id_to_info: dict[str, TestAgentInfo],
-) -> None:
-    """Launch agents from remaining_tests until we hit max_agents running.
-
-    Mutates remaining_tests (pops from front), pending_ids, all_agents,
-    all_hosts, and agent_id_to_info in place.
-    """
-    while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
-        test_node_id = remaining_tests.pop(0)
-        try:
-            info, host = _launch_with_timeout(test_node_id, config, mngr_ctx, pytest_flags, prompt_suffix)
-        except TimeoutError:
-            logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
-            continue
-        except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-            logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
-            if "Too many open files" in str(exc):
-                log_open_fds()
-            continue
-        all_agents.append(info)
-        all_hosts[str(info.agent_id)] = host
-        agent_id_to_info[str(info.agent_id)] = info
-        pending_ids.add(str(info.agent_id))
-
-
 def launch_and_poll_agents(
     test_node_ids: list[str],
     config: TmrLaunchConfig,
@@ -654,9 +158,7 @@ def launch_and_poll_agents(
     are tracked from the start, and newly launched agents are appended during
     execution.
 
-    Returns (final_details, timed_out_ids) where final_details maps agent_id
-    strings to AgentDetails, and timed_out_ids is the set of agent_id strings
-    that were stopped because they exceeded agent_timeout_seconds.
+    Returns (final_details, timed_out_ids, cached_results).
     """
     remaining_tests = list(test_node_ids)
     pending_ids: set[str] = set()
@@ -664,20 +166,15 @@ def launch_and_poll_agents(
     final_details: dict[str, AgentDetails] = {}
     timed_out_ids: set[str] = set()
     missing_rounds: dict[str, int] = {}
-    # Results pre-read during finalization (before stopping) to avoid connection issues
     cached_results: dict[str, TestResult] = {}
-    # Track when we last attempted to read each agent's result file directly.
-    # Initialized to created_at so the first check happens result_check_interval_seconds later.
     last_result_check: dict[str, float] = {}
 
-    # Initialize tracking from any pre-launched agents already in all_agents
     for info in all_agents:
         agent_id_str = str(info.agent_id)
         agent_id_to_info[agent_id_str] = info
         pending_ids.add(agent_id_str)
         last_result_check[agent_id_str] = info.created_at
 
-    # Shared kwargs for _launch_agents_up_to_limit (avoids fragile *args tuple)
     launch_kwargs: dict = {
         "remaining_tests": remaining_tests,
         "pending_ids": pending_ids,
@@ -691,8 +188,7 @@ def launch_and_poll_agents(
         "agent_id_to_info": agent_id_to_info,
     }
 
-    # Launch initial batch (no-op when remaining_tests is empty)
-    _launch_agents_up_to_limit(**launch_kwargs)
+    launch_agents_up_to_limit(**launch_kwargs)
     for aid in pending_ids:
         if aid not in last_result_check:
             last_result_check[aid] = agent_id_to_info[aid].created_at
@@ -702,14 +198,12 @@ def launch_and_poll_agents(
         generate_html_report(current_results, report_path, test_artifacts_dir=artifact_output_dir)
 
     while pending_ids or remaining_tests:
-        # Check per-agent timeouts
         now = time.monotonic()
         timed_out_this_round = False
         for agent_id_str in list(pending_ids):
             info = agent_id_to_info[agent_id_str]
             elapsed = now - info.created_at
             if elapsed >= agent_timeout_seconds:
-                # Before stopping, try to read the result file -- the agent may have finished
                 result = try_read_agent_result(info.work_dir, all_hosts[agent_id_str])
                 if result is not None:
                     logger.info(
@@ -718,13 +212,12 @@ def launch_and_poll_agents(
                     pending_ids.discard(agent_id_str)
                     continue
                 logger.warning("Agent '{}' timed out after {:.0f}s, stopping", info.agent_name, elapsed)
-                _stop_agent_on_host(all_hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
+                stop_agent_on_host(all_hosts[agent_id_str], AgentId(agent_id_str), info.agent_name)
                 pending_ids.discard(agent_id_str)
                 timed_out_ids.add(agent_id_str)
                 timed_out_this_round = True
 
-        # Launch new agents if capacity opened up
-        _launch_agents_up_to_limit(**launch_kwargs)
+        launch_agents_up_to_limit(**launch_kwargs)
         for aid in pending_ids:
             if aid not in last_result_check:
                 last_result_check[aid] = agent_id_to_info[aid].created_at
@@ -768,7 +261,7 @@ def launch_and_poll_agents(
             missing_rounds.pop(agent_id_str, None)
             changed = True
 
-            pre_read = _finalize_agent(
+            pre_read = finalize_agent(
                 agent_id=agent_detail.id,
                 agent_name=agent_detail.name,
                 host=all_hosts[agent_id_str],
@@ -798,13 +291,11 @@ def launch_and_poll_agents(
                     pending_ids.discard(agent_id_str)
                     changed = True
 
-        # Launch new agents if capacity opened up from finished agents
-        _launch_agents_up_to_limit(**launch_kwargs)
+        launch_agents_up_to_limit(**launch_kwargs)
         for aid in pending_ids:
             if aid not in last_result_check:
                 last_result_check[aid] = agent_id_to_info[aid].created_at
 
-        # Periodically check result files directly for agents whose status may be stale
         for agent_id_str in list(pending_ids):
             if now - last_result_check[agent_id_str] >= result_check_interval_seconds:
                 last_result_check[agent_id_str] = now
@@ -815,7 +306,7 @@ def launch_and_poll_agents(
                         "Agent '{}' has result file (detected via direct check), treating as done",
                         info.agent_name,
                     )
-                    pre_read = _finalize_agent(
+                    pre_read = finalize_agent(
                         agent_id=AgentId(agent_id_str),
                         agent_name=info.agent_name,
                         host=all_hosts[agent_id_str],
@@ -852,287 +343,6 @@ def launch_and_poll_agents(
     return final_details, timed_out_ids, cached_results
 
 
-def _parse_result_json(raw: str) -> TestResult:
-    """Parse an outcome JSON string into a TestResult.
-
-    Raises json.JSONDecodeError, KeyError, or ValueError on invalid data.
-    """
-    data = json.loads(raw)
-    raw_changes = data.get("changes", {})
-    changes: dict[ChangeKind, Change] = {
-        ChangeKind(kind_str): Change(
-            status=ChangeStatus(entry["status"]),
-            summary_markdown=entry.get("summary_markdown", entry.get("summary", "")),
-        )
-        for kind_str, entry in raw_changes.items()
-    }
-    raw_runs = data.get("test_runs", [])
-    test_runs = tuple(
-        TestRunInfo(
-            run_name=run_entry.get("run_name", ""),
-            description_markdown=run_entry.get("description_markdown", ""),
-        )
-        for run_entry in raw_runs
-    )
-    return TestResult(
-        changes=changes,
-        errored=data.get("errored", False),
-        tests_passing_before=data.get("tests_passing_before"),
-        tests_passing_after=data.get("tests_passing_after"),
-        summary_markdown=data.get("summary_markdown", ""),
-        test_runs=test_runs,
-    )
-
-
-def try_read_agent_result(
-    work_dir: Path,
-    host: OnlineHostInterface,
-) -> TestResult | None:
-    """Try to read an agent's outcome file remotely, returning None if not found.
-
-    Used to detect agents that have finished writing their result but whose
-    lifecycle status has not yet updated to a terminal state.
-    """
-    result_path = work_dir / ".test_output" / TESTING_AGENT_OUTCOME_FILENAME
-    try:
-        raw = host.read_text_file(result_path)
-        return _parse_result_json(raw)
-    except (HostError, FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError):
-        return None
-
-
-def _stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name: AgentName) -> None:
-    """Stop a single agent on the host."""
-    try:
-        host.stop_agents([agent_id])
-        logger.info("Stopped agent '{}'", agent_name)
-    except (MngrError, HostError) as exc:
-        logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
-
-
-def pull_agent_outputs(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    host: OnlineHostInterface,
-    destination_dir: Path,
-    cg: ConcurrencyGroup,
-) -> TestResult | None:
-    """Pull .test_output (artifacts + result.json) from an agent via rsync, then read result locally.
-
-    Returns the parsed TestResult if result.json was found in the pulled output,
-    or None if pulling failed or result.json is missing/unparseable.
-    """
-    try:
-        agent = _get_agent_from_host(host, agent_id)
-    except (MngrError, HostError, AgentNotFoundOnHostError) as exc:
-        logger.warning("Could not find agent '{}' on host to pull outputs: {}", agent_name, exc)
-        return None
-
-    local_dest = destination_dir / str(agent_name)
-    local_dest.mkdir(parents=True, exist_ok=True)
-
-    try:
-        pull_files(
-            agent=agent,
-            host=host,
-            destination=local_dest,
-            source_path=agent.work_dir / ".test_output",
-            is_dry_run=False,
-            is_delete=False,
-            uncommitted_changes=UncommittedChangesMode.CLOBBER,
-            cg=cg,
-        )
-        logger.info("Pulled .test_output from agent '{}' to {}", agent_name, local_dest)
-    except (MngrError, HostError, OSError) as exc:
-        logger.warning("Failed to pull .test_output from agent '{}': {}", agent_name, exc)
-        return None
-
-    return _read_local_result(local_dest, agent_name)
-
-
-def _read_local_result(local_dir: Path, agent_name: AgentName) -> TestResult | None:
-    """Read and parse the testing agent outcome from a locally-pulled output directory."""
-    result_path = local_dir / TESTING_AGENT_OUTCOME_FILENAME
-    try:
-        raw = result_path.read_text()
-        return _parse_result_json(raw)
-    except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-        logger.warning("Failed to read local result for agent '{}': {}", agent_name, exc)
-        return None
-
-
-def _finalize_agent(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    host: OnlineHostInterface,
-    artifact_output_dir: Path | None,
-    cg: ConcurrencyGroup,
-    should_stop: bool,
-) -> TestResult | None:
-    """Pull outputs and read result from a finished agent, then optionally stop it.
-
-    Uses rsync via pull_files to pull .test_output (which contains both artifacts
-    and result.json) in a single operation, then reads result.json locally.
-    The pull is done BEFORE stopping the agent to avoid connection issues with
-    remote hosts that get torn down on stop.
-    """
-    pre_read: TestResult | None = None
-    if artifact_output_dir is not None:
-        pre_read = pull_agent_outputs(agent_id, agent_name, host, artifact_output_dir, cg)
-    if should_stop:
-        _stop_agent_on_host(host, agent_id, agent_name)
-    return pre_read
-
-
-def _pull_integrator_outputs(
-    agent_detail: AgentDetails,
-    host: OnlineHostInterface,
-    destination_dir: Path,
-    cg: ConcurrencyGroup,
-) -> bool:
-    """Pull the integrator agent's .test_output via rsync. Returns True on success."""
-    try:
-        agent = _get_agent_from_host(host, agent_detail.id)
-    except (MngrError, HostError, AgentNotFoundOnHostError) as exc:
-        logger.warning("Could not find integrator agent on host: {}", exc)
-        return False
-
-    local_dest = destination_dir / str(agent_detail.name)
-    local_dest.mkdir(parents=True, exist_ok=True)
-    try:
-        pull_files(
-            agent=agent,
-            host=host,
-            destination=local_dest,
-            source_path=agent.work_dir / ".test_output",
-            is_dry_run=False,
-            is_delete=False,
-            uncommitted_changes=UncommittedChangesMode.CLOBBER,
-            cg=cg,
-        )
-        return True
-    except (MngrError, HostError, OSError) as exc:
-        logger.warning("Failed to pull integrator outputs: {}", exc)
-        return False
-
-
-def read_integrator_result(
-    agent_detail: AgentDetails,
-    host: OnlineHostInterface,
-    branch_name: str | None,
-    destination_dir: Path | None,
-    cg: ConcurrencyGroup,
-) -> IntegratorResult:
-    """Pull the integrator agent's .test_output and read result.json."""
-    empty = IntegratorResult(agent_name=agent_detail.name, branch_name=branch_name)
-
-    # Try to pull outputs locally first, then read the local file
-    if destination_dir is not None:
-        _pull_integrator_outputs(agent_detail, host, destination_dir, cg)
-        local_result = destination_dir / str(agent_detail.name) / INTEGRATOR_OUTCOME_FILENAME
-        try:
-            data = json.loads(local_result.read_text())
-        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to read integrator result locally: {}", exc)
-            return empty
-    else:
-        # Fallback: read result.json directly from the agent's work_dir
-        result_path = agent_detail.work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
-        try:
-            data = json.loads(host.read_text_file(result_path))
-        except (HostError, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
-            logger.warning("Failed to read integrator result: {}", exc)
-            return empty
-
-    return IntegratorResult(
-        agent_name=agent_detail.name,
-        squashed_branches=tuple(data.get("squashed_branches", ())),
-        squashed_commit_hash=data.get("squashed_commit_hash"),
-        impl_priority=tuple(data.get("impl_priority", ())),
-        impl_commit_hashes=data.get("impl_commit_hashes", {}),
-        failed=tuple(data.get("failed", ())),
-        branch_name=branch_name,
-    )
-
-
-def pull_agent_branch(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    branch_name: str | None,
-    host: OnlineHostInterface,
-    destination: Path,
-    cg: ConcurrencyGroup,
-    base_commit: str | None = None,
-) -> str | None:
-    """Pull the agent's git branch into the local repo.
-
-    If base_commit is provided, a new local branch is created from that commit
-    before pulling. This is needed for remote agents where the branch doesn't
-    exist locally yet.
-
-    Returns the branch name if successful, None otherwise.
-    """
-    if branch_name is None:
-        logger.warning("Agent '{}' has no branch to pull", agent_name)
-        return None
-
-    try:
-        if base_commit is not None:
-            _create_local_branch(destination, branch_name, base_commit, cg)
-
-        pull_git(
-            agent=_get_agent_from_host(host, agent_id),
-            host=host,
-            destination=destination,
-            source_branch=branch_name,
-            target_branch=branch_name,
-            is_dry_run=False,
-            uncommitted_changes=UncommittedChangesMode.STASH,
-            cg=cg,
-        )
-        logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_name)
-        return branch_name
-    except HostError as exc:
-        logger.warning("Connection lost while pulling branch from agent '{}': {}", agent_name, exc)
-        return None
-    except (MngrError, ProcessError) as exc:
-        logger.warning("Failed to pull branch from agent '{}': {}", agent_name, exc)
-        return None
-
-
-def _create_local_branch(destination: Path, branch_name: str, base_commit: str, cg: ConcurrencyGroup) -> None:
-    """Create a local git branch from a base commit (without checking it out).
-
-    If the branch already exists (e.g. from a previous run), it is reused.
-    The branch is not checked out -- pull_git / _fetch_and_merge handles
-    checkout and restores the original branch afterward.
-    """
-    result = cg.run_process_to_completion(
-        ["git", "branch", branch_name, base_commit],
-        cwd=destination,
-        is_checked_after=False,
-    )
-    if result.returncode == 0:
-        logger.info("Created local branch '{}' from commit {}", branch_name, base_commit[:8])
-    else:
-        logger.info("Branch '{}' already exists, reusing it", branch_name)
-
-
-def _get_agent_from_host(
-    host: OnlineHostInterface,
-    agent_id: AgentId,
-) -> AgentInterface:
-    """Look up an agent on a host by ID.
-
-    Raises AgentNotFoundOnHostError if not found, or HostError if the host
-    is unreachable (callers should catch both).
-    """
-    for agent in host.get_agents():
-        if agent.id == agent_id:
-            return agent
-    raise AgentNotFoundOnHostError(agent_id, host.id)
-
-
 def _collect_agent_results(
     agents: list[TestAgentInfo],
     final_details: dict[str, AgentDetails],
@@ -1142,12 +352,7 @@ def _collect_agent_results(
     missing_detail_summary: str,
     cached_results: dict[str, TestResult] | None = None,
 ) -> list[TestMapReduceResult]:
-    """Shared iteration over agents to build result list.
-
-    Each agent is classified as timed-out, missing (with the caller-specified
-    errored flag and summary), or finished (result read from the agent's state
-    directory). The hosts dict maps agent_id strings to their respective hosts.
-    """
+    """Shared iteration over agents to build result list."""
     cached_results = cached_results or {}
     results: list[TestMapReduceResult] = []
 
@@ -1168,8 +373,6 @@ def _collect_agent_results(
         detail = final_details.get(agent_id_str)
 
         if detail is None:
-            # Agent may have been detected as done via direct result file check
-            # (without going through list_agents). Try reading result directly.
             if agent_id_str in hosts:
                 direct_result = cached_results.get(agent_id_str) or try_read_agent_result(
                     agent_info.work_dir, hosts[agent_id_str]
@@ -1240,13 +443,7 @@ def gather_results(
     base_commit: str | None = None,
     cached_results: dict[str, TestResult] | None = None,
 ) -> list[TestMapReduceResult]:
-    """Gather results from all finished agents, pulling branches where appropriate.
-
-    If base_commit is provided (remote providers), a local branch is created from
-    that commit before pulling each agent's changes. For local providers,
-    base_commit should be None and branches are not pulled (they already exist
-    as git worktrees).
-    """
+    """Gather results from all finished agents, pulling branches where appropriate."""
     results = _collect_agent_results(
         agents=agents,
         final_details=final_details,
@@ -1258,10 +455,8 @@ def gather_results(
     )
 
     # Pull branches from remote agents whose changes should be kept.
-    # For local agents (base_commit is None), branches already exist as worktrees.
     # In the main polling flow, branches are pulled during finalization (before
-    # stopping agents). This loop serves as a fallback for the reintegrate flow
-    # where agents may already be stopped.
+    # stopping agents). This loop serves as a fallback for the reintegrate flow.
     if base_commit is not None:
         for result in results:
             if should_pull_changes(result):
@@ -1298,48 +493,6 @@ def build_current_results(
     )
 
 
-def launch_integrator_agent(
-    fix_branches: list[str],
-    config: TmrLaunchConfig,
-    mngr_ctx: MngrContext,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
-    short_id = _short_random_id()
-    agent_name = AgentName(f"tmr-integrator-{short_id}")
-    prompt = build_integrator_prompt(fix_branches)
-
-    logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
-    create_result = _create_tmr_agent(
-        agent_name=agent_name,
-        branch_name=f"mngr-tmr/integrated-{short_id}",
-        config=config,
-        mngr_ctx=mngr_ctx,
-        initial_message=prompt,
-    )
-
-    return (
-        TestAgentInfo(
-            test_node_id="integrator",
-            agent_id=create_result.agent.id,
-            agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
-            branch_name=f"mngr-tmr/integrated-{short_id}",
-            created_at=time.monotonic(),
-        ),
-        create_result.host,
-    )
-
-
-def _try_read_integrator_outcome(work_dir: Path, host: OnlineHostInterface) -> bool:
-    """Check if the integrator's outcome file exists on the remote host."""
-    result_path = work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
-    try:
-        host.read_text_file(result_path)
-        return True
-    except (HostError, FileNotFoundError, OSError):
-        return False
-
-
 def wait_for_integrator(
     integrator: TestAgentInfo,
     mngr_ctx: MngrContext,
@@ -1347,11 +500,7 @@ def wait_for_integrator(
     host: OnlineHostInterface,
     deadline: float,
 ) -> str | None:
-    """Poll the integrator agent until it finishes or times out.
-
-    Returns the integrator's branch name if it finished successfully,
-    None if it timed out or errored.
-    """
+    """Poll the integrator agent until it finishes or times out."""
     agent_id_str = str(integrator.agent_id)
 
     while time.monotonic() < deadline:
@@ -1365,21 +514,19 @@ def wait_for_integrator(
                 continue
 
             if agent_detail.state == AgentLifecycleState.WAITING:
-                _stop_agent_on_host(host, agent_detail.id, agent_detail.name)
+                stop_agent_on_host(host, agent_detail.id, agent_detail.name)
                 return agent_detail.initial_branch
 
             if agent_detail.state in _TERMINAL_STATES:
                 logger.info("Integrator agent finished (state={})", agent_detail.state)
                 return agent_detail.initial_branch
 
-        # Check outcome file directly -- the integrator may have finished writing
-        # before its lifecycle status updates.
-        if _try_read_integrator_outcome(integrator.work_dir, host):
+        if try_read_integrator_outcome(integrator.work_dir, host):
             logger.info("Integrator outcome file detected, treating as done")
             return integrator.branch_name
 
         time.sleep(poll_interval_seconds)
 
     logger.warning("Integrator agent timed out, stopping it")
-    _stop_agent_on_host(host, AgentId(agent_id_str), integrator.agent_name)
+    stop_agent_on_host(host, AgentId(agent_id_str), integrator.agent_name)
     return None
