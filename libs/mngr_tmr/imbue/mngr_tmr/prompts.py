@@ -143,6 +143,14 @@ Fields:
 - test_runs: list of objects, one per test run, in order. Each has run_name
   (matching the --mngr-e2e-run-name used) and description_markdown (brief
   description of what this run was for).
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If something is unclear or you are blocked, produce a result
+with the appropriate change status set to "BLOCKED" and explain in the
+summary_markdown. If the user sends follow-up messages later, you may ask them
+questions at that point.
 """
     if prompt_suffix:
         prompt += f"\n{prompt_suffix}\n"
@@ -198,4 +206,11 @@ branch with a flat list of commits that is easy to review.
 - impl_priority: list of impl branch names in priority order (highest first)
 - impl_commit_hashes: mapping of each impl branch name to its commit hash on the integrated branch
 - failed: list of branch names that could not be integrated
+
+# Important: do not ask for user input
+
+For this initial request, do NOT ask the user for any input or clarification.
+Work autonomously. If a cherry-pick has conflicts you cannot resolve, skip that
+branch and record it as failed. If the user sends follow-up messages later, you
+may ask them questions at that point.
 """

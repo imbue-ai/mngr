@@ -68,6 +68,7 @@ class TmrCliOptions(CommonCliOptions):
     pytest_args: tuple[str, ...]
     testing_flags: tuple[str, ...]
     agent_type: str
+    integrator_type: str
     provider: str
     integrator_provider: str
     env: tuple[str, ...]
@@ -267,10 +268,11 @@ def _run_reintegrate(
     # Run integrator
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     label_options = resolve_labels(opts.label)
+    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
-        agent_type=AgentTypeName(opts.agent_type),
+        agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
         label_options=label_options,
@@ -364,6 +366,11 @@ def _run_integrator_phase(
     default="claude",
     show_default=True,
     help="Type of agent to launch for each test",
+)
+@click.option(
+    "--integrator-type",
+    default=None,
+    help="Type of agent for the integrator (defaults to --agent-type)",
 )
 @click.option(
     "--provider",
@@ -649,10 +656,11 @@ def _run_tmr_pipeline(
     generate_html_report(results, html_path, test_artifacts_dir=output_dir)
 
     # Step 10: Build integrator config (defaults to local provider) and integrate
+    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
-        agent_type=AgentTypeName(opts.agent_type),
+        agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
         label_options=label_options,
