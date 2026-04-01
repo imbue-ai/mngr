@@ -1,4 +1,5 @@
 import bdb
+import os
 import sys
 from typing import Any
 
@@ -262,7 +263,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     # Block plugins that are disabled in config files. This must happen before
     # load_setuptools_entrypoints so disabled plugins are never registered.
-    block_disabled_plugins(pm, read_disabled_plugins())
+    # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
+    # can produce output that reflects all providers regardless of local config.
+    if not os.environ.get("MNGR_LOAD_ALL_PLUGINS"):
+        block_disabled_plugins(pm, read_disabled_plugins())
 
     # Automatically discover and load plugins registered via setuptools entry points.
     # External packages can register hooks by adding an entry point for the "mngr" group.

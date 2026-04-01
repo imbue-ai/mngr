@@ -16,8 +16,14 @@ All content comes from two sources:
 - CommandHelpMetadata (description, synopsis, examples, see also, etc.)
 """
 
+import os
 import re
 from pathlib import Path
+
+# Force all plugins to load regardless of local config so generated docs
+# always reflect every provider (docker, modal, etc.).  Must be set before
+# importing main, which triggers plugin-manager creation at import time.
+os.environ["MNGR_LOAD_ALL_PLUGINS"] = "1"
 
 import click
 from click_option_group import GroupedOption
