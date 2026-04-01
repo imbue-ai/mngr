@@ -6,9 +6,9 @@ data into the llm-webchat event stream so that connected frontends can insert
 them directly via ``$llm.insertResponse`` without a page refresh.
 
 Injected messages are detected by their prompt column: ``llm inject`` creates
-responses with an empty prompt (``""``) or ``"..."``, whereas normal ``llm
-prompt`` always has a non-empty user prompt. Preliminary rows from ``llm
-live-chat`` (``response=""``) are ignored.
+responses with an empty prompt (``""``), whereas normal ``llm prompt`` always
+has a non-empty user prompt. Preliminary rows from ``llm live-chat``
+(``response=""``) are ignored.
 
 Designed to be registered on the llm-webchat application via the pluggy
 ``register_event_broadcaster`` hook.
@@ -60,12 +60,12 @@ class InjectedResponseData(FrozenModel):
 def _is_injected_response(prompt: str | None, response: str | None) -> bool:
     """Return True if a response row looks like it was created by ``llm inject``.
 
-    Heuristic: ``llm inject`` creates responses with an empty or ``"..."``
-    prompt and a non-empty response. Normal ``llm prompt`` always has a
-    non-empty user prompt. Preliminary rows from ``llm live-chat`` have
-    ``response=""``, so those are excluded.
+    Heuristic: ``llm inject`` creates responses with an empty prompt and a
+    non-empty response. Normal ``llm prompt`` always has a non-empty user
+    prompt. Preliminary rows from ``llm live-chat`` have ``response=""``,
+    so those are excluded.
     """
-    is_prompt_empty = not prompt or prompt.strip() == "" or prompt.strip() == "..."
+    is_prompt_empty = not prompt or prompt.strip() == ""
     is_response_present = bool(response and response.strip())
     return is_prompt_empty and is_response_present
 

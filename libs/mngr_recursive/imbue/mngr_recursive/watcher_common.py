@@ -71,6 +71,8 @@ DEFAULT_CEL_EXCLUDE_FILTERS: Final[tuple[str, ...]] = (
     'source == "mngr/agents"',
     # mngr/agent_states events for non-mind agents
     """source == 'mngr/agent_states' && !(has(agent.labels.mind))""",
+    # server_registered events are infrastructure used by the forwarding server for backend discovery
+    'source == "servers"',
 )
 
 

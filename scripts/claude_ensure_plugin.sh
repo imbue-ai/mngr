@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLUGIN_ID="imbue-code-review@imbue-mngr"
-MARKETPLACE_NAME="imbue-mngr"
-MARKETPLACE_REPO="imbue-ai/mngr"
+PLUGIN_ID="imbue-code-guardian@imbue-code-guardian"
+MARKETPLACE_NAME="imbue-code-guardian"
+MARKETPLACE_REPO="imbue-ai/code-guardian"
 
 # Check if claude CLI is available
 if ! command -v claude &>/dev/null; then
