@@ -14,7 +14,6 @@ from loguru import logger
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
-from imbue.mngr.api.discover import _any_identifier_is_a_name
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
@@ -738,40 +737,6 @@ def test_all_identifiers_found_returns_false_when_missing() -> None:
 
 def test_all_identifiers_found_returns_true_for_empty_identifiers() -> None:
     assert _all_identifiers_found([], {})
-
-
-# =============================================================================
-# _any_identifier_is_a_name Tests
-# =============================================================================
-
-
-def test_any_identifier_is_a_name_returns_true_for_name() -> None:
-    """Agent names (non-hex strings) should be detected as names."""
-    assert _any_identifier_is_a_name(["my-agent"]) is True
-
-
-def test_any_identifier_is_a_name_returns_false_for_id() -> None:
-    """Valid agent IDs (32-char hex) should not be detected as names."""
-    agent_id = AgentId.generate()
-    assert _any_identifier_is_a_name([str(agent_id)]) is False
-
-
-def test_any_identifier_is_a_name_returns_true_for_mixed() -> None:
-    """If any identifier is a name, return True even if others are IDs."""
-    agent_id = AgentId.generate()
-    assert _any_identifier_is_a_name([str(agent_id), "my-agent"]) is True
-
-
-def test_any_identifier_is_a_name_returns_false_for_all_ids() -> None:
-    """If all identifiers are valid IDs, return False."""
-    id1 = AgentId.generate()
-    id2 = AgentId.generate()
-    assert _any_identifier_is_a_name([str(id1), str(id2)]) is False
-
-
-def test_any_identifier_is_a_name_returns_false_for_empty() -> None:
-    """Empty list should return False."""
-    assert _any_identifier_is_a_name([]) is False
 
 
 # =============================================================================

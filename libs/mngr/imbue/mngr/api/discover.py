@@ -12,7 +12,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -117,22 +116,6 @@ def _run_discovery(
 
 
 @pure
-def _any_identifier_is_a_name(identifiers: Sequence[str]) -> bool:
-    """Check if any identifier is an agent name rather than an agent ID.
-
-    Anything that fails AgentId validation is treated as a name. Name-based
-    lookups require a full scan because names can be duplicated across
-    providers, and the event stream may not know about all of them.
-    """
-    for identifier in identifiers:
-        try:
-            AgentId(identifier)
-        except ValueError:
-            return True
-    return False
-
-
-@pure
 def _all_identifiers_found(
     identifiers: Sequence[str],
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
@@ -165,10 +148,6 @@ def discover_hosts_and_agents(
     event stream to resolve identifiers to provider names and queries only those providers.
     Falls back to a full scan if the event stream is stale or missing.
 
-    Name-based identifiers always trigger a full scan because names can be duplicated
-    across providers. The event stream optimization is only used for ID-based lookups,
-    where global uniqueness is guaranteed.
-
     When provider_names is explicitly provided, agent_identifiers is ignored (the caller
     already knows which providers to query).
     """
@@ -177,13 +156,6 @@ def discover_hosts_and_agents(
         # or safe mode is enabled, skip the optimization
         if provider_names is not None or agent_identifiers is None or mngr_ctx.is_full_discovery:
             return _run_discovery(mngr_ctx, provider_names, include_destroyed, reset_caches)
-
-        # Name-based lookups require a full scan to detect same-named agents
-        # across different providers. The event stream may be stale and not know
-        # about agents created on other providers since the last snapshot.
-        # ID-based lookups are safe because IDs are globally unique.
-        if _any_identifier_is_a_name(agent_identifiers):
-            return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
 
         # Try to resolve identifiers to provider names from the event stream
         resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx.config, agent_identifiers)

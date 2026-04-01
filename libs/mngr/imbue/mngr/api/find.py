@@ -452,11 +452,21 @@ def find_and_maybe_start_agent_by_name_or_id(
                     host, is_start_desired=is_start_desired, provider=provider
                 )
                 # Find the specific agent by ID (not name, to avoid duplicates)
+                found_on_host = False
                 for agent in online_host.get_agents():
                     if agent.id == agent_ref.agent_id:
                         matching.append((agent, online_host))
                         match_display_info.append((agent_ref.agent_id, host_ref.host_name, host_ref.provider_name))
+                        found_on_host = True
                         break
+                if not found_on_host:
+                    logger.warning(
+                        "Agent {} ({}) was discovered on host {} but not found via get_agents(). "
+                        "This may indicate a stale discovery cache or host state inconsistency.",
+                        agent_ref.agent_name,
+                        agent_ref.agent_id,
+                        host_ref.host_name,
+                    )
 
     if not matching:
         raise UserInputError(f"No agent found with name or ID: {agent_str}")
