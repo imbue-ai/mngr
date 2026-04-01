@@ -6,9 +6,12 @@ test, poll for completion, gather results, and pull code changes.
 
 import json
 import math
+import os
+import resource
 import secrets
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 from loguru import logger
@@ -64,6 +67,47 @@ from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import generate_html_report
+
+
+def log_open_fds() -> None:
+    """Log a summary of all open file descriptors for debugging FD exhaustion."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    fd_dir = Path("/dev/fd")
+    if not fd_dir.exists():
+        fd_dir = Path(f"/proc/{os.getpid()}/fd")
+    try:
+        fds = list(fd_dir.iterdir())
+    except OSError:
+        logger.warning("Cannot enumerate open FDs")
+        return
+
+    fd_count = len(fds)
+    logger.warning("Open FDs: {} (soft limit: {}, hard limit: {})", fd_count, soft, hard)
+
+    categories: Counter[str] = Counter()
+    samples: dict[str, list[str]] = {}
+    for fd_path in fds:
+        try:
+            target = os.readlink(str(fd_path))
+        except OSError:
+            target = "<unreadable>"
+        if target.startswith("/"):
+            parts = Path(target).parts[:4]
+            category = str(Path(*parts)) if len(parts) > 1 else target
+        elif target.startswith("pipe:") or target.startswith("socket:"):
+            category = target.split(":")[0]
+        else:
+            category = target
+        categories[category] += 1
+        if category not in samples:
+            samples[category] = []
+        if len(samples[category]) < 3:
+            samples[category].append(target)
+
+    for category, count in categories.most_common(20):
+        sample_str = ", ".join(samples[category])
+        logger.warning("  {} x {} (e.g. {})", count, category, sample_str)
+
 
 _TERMINAL_STATES = frozenset(
     {
@@ -522,6 +566,8 @@ def launch_all_test_agents(
                 agent_hosts[str(info.agent_id)] = host
             except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent: {}", exc)
+                if "Too many open files" in str(exc):
+                    log_open_fds()
 
     logger.info("Launched {} agent(s)", len(agents))
     return agents, agent_hosts, launch_config.snapshot
@@ -569,6 +615,8 @@ def _launch_agents_up_to_limit(
             continue
         except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
+            if "Too many open files" in str(exc):
+                log_open_fds()
             continue
         all_agents.append(info)
         all_hosts[str(info.agent_id)] = host
