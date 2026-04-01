@@ -56,7 +56,7 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
         for diag_cmd, label in [
             ("mngr exec my-task 'tmux list-sessions 2>&1'", "tmux sessions"),
             (
-                "mngr exec my-task 'tmux capture-pane -p -t mngr-my-task:claude 2>&1 || tmux list-windows -t mngr-my-task 2>&1 || echo no-session'",
+                'mngr exec my-task \'SESSION=$(tmux list-sessions -F "#{session_name}" 2>/dev/null | head -1); tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
                 "claude pane",
             ),
             (
@@ -66,6 +66,14 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
             (
                 "mngr exec my-task 'ps aux | grep -E \"claude|node\" | grep -v grep || echo no-claude-process'",
                 "processes",
+            ),
+            (
+                "mngr exec my-task 'cat /mngr/agents/*/.claude/settings.local.json 2>/dev/null || echo no-settings-local'",
+                "claude hooks config",
+            ),
+            (
+                "mngr exec my-task 'ls -la /mngr/agents/*/.claude/ 2>/dev/null || echo no-claude-dir'",
+                "claude config dir",
             ),
         ]:
             diag = e2e.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
