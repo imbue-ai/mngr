@@ -457,8 +457,8 @@ def _destroy_single_offline_host(
     destroyed_agents: list[AgentName],
 ) -> None:
     """Destroy a single offline host and all its agents. Thread-safe."""
+    host_name = offline.host.get_name()
     try:
-        host_name = offline.host.get_name()
         _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
         mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host)
         offline.provider.destroy_host(offline.host)
