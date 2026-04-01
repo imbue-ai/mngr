@@ -37,17 +37,11 @@ If no script block is even a close match, the block was removed from the script 
 
 ## Step 4: Add tests for remaining unmatched script blocks
 
-After step 3, some script blocks may still lack tests. **Use subagents to write the tests in parallel.**
+After step 3, some script blocks may still lack tests.
 
-Group the unmatched blocks into batches of 3-5 related blocks (e.g., by section in the tutorial). For each batch, launch a subagent with a prompt that includes:
+The priority is coverage, not perfection -- a separate step will improve test quality later. What matters is that each tutorial block has a corresponding test function with the correct `write_tutorial_block()` call and at least a basic assertion.
 
-- The full text of the script blocks to cover
-- The path to the test file to write to (use a new file per batch if the blocks belong to a distinct section, e.g., `test_create_remote.py` for "CREATING AGENTS REMOTELY" blocks)
-- The existing test file(s) as examples of the conventions to follow
-- The conftest.py so the agent knows the available fixtures
-- All the guidelines below
-
-Each subagent writes its tests and returns the result. After all subagents finish, review the output and commit.
+Add tests to the appropriate existing test file, or create a new file if the blocks belong to a distinct section (e.g., `test_create_remote.py` for "CREATING AGENTS REMOTELY" blocks).
 
 ### Guidelines for each test function
 
