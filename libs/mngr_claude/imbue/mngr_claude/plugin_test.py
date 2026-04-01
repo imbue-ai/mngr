@@ -54,7 +54,6 @@ from imbue.mngr_claude.plugin import _apply_settings_json_overrides
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json_content
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
-from imbue.mngr_claude.plugin import _collect_claude_home_files_content
 from imbue.mngr_claude.plugin import _fixup_installed_plugins_json
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
@@ -2774,50 +2773,6 @@ def test_rewrite_installed_plugins_paths_does_not_match_similar_prefix() -> None
     assert (
         result["plugins"]["plugin@org"][0]["installPath"] == "/Users/testuser/.claude2/plugins/cache/org/plugin/1.0.0"
     )
-
-
-# =============================================================================
-# _collect_claude_home_files_content Tests
-# =============================================================================
-
-
-def test_collect_claude_home_files_content_includes_rebuilt_settings(tmp_path: Path) -> None:
-    """settings.json is rebuilt with skipDangerousModePermissionPrompt, not copied verbatim."""
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
-    (claude_dir / "settings.json").write_text('{"custom": true}')
-
-    with patch("imbue.mngr_claude.plugin.Path.home", return_value=tmp_path):
-        result = _collect_claude_home_files_content(claude_dir, sync_local_settings=True)
-
-    assert Path("settings.json") in result
-    settings = json.loads(result[Path("settings.json")])
-    assert settings["skipDangerousModePermissionPrompt"] is True
-    assert settings["custom"] is True
-
-
-def test_collect_claude_home_files_content_reads_other_files(tmp_path: Path) -> None:
-    """Non-settings files are read as text content."""
-    claude_dir = tmp_path / ".claude"
-    skills_dir = claude_dir / "skills" / "test-skill"
-    skills_dir.mkdir(parents=True)
-    (skills_dir / "SKILL.md").write_text("# Test Skill")
-
-    result = _collect_claude_home_files_content(claude_dir, sync_local_settings=False)
-
-    assert result[Path("skills/test-skill/SKILL.md")] == "# Test Skill"
-
-
-def test_collect_claude_home_files_content_generated_defaults_when_no_settings(tmp_path: Path) -> None:
-    """When sync_local_settings is False or settings.json absent, uses generated defaults."""
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
-
-    result = _collect_claude_home_files_content(claude_dir, sync_local_settings=False)
-
-    assert Path("settings.json") in result
-    settings = json.loads(result[Path("settings.json")])
-    assert settings["skipDangerousModePermissionPrompt"] is True
 
 
 # =============================================================================

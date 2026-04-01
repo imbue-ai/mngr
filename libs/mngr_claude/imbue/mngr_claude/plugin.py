@@ -235,53 +235,6 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
 
 
-def _collect_claude_home_dir_files(claude_dir: Path) -> dict[Path, Path]:
-    """Collect files from ~/.claude/ directory items for deployment.
-
-    Returns dict mapping relative paths (e.g., Path("settings.json"),
-    Path("skills/my-skill/SKILL.md")) to local source paths. Iterates over
-    _CLAUDE_HOME_SYNC_FILES and _CLAUDE_HOME_SYNC_DIRS to collect
-    files and directory contents (recursively).
-    """
-    files: dict[Path, Path] = {}
-    for file_name in _CLAUDE_HOME_SYNC_FILES:
-        file_path = claude_dir / file_name
-        if file_path.exists():
-            files[Path(file_name)] = file_path
-    for dir_name in _CLAUDE_HOME_SYNC_DIRS:
-        dir_path = claude_dir / dir_name
-        if not dir_path.exists():
-            continue
-        for file_path in dir_path.rglob("*"):
-            if file_path.is_file():
-                files[file_path.relative_to(claude_dir)] = file_path
-    return files
-
-
-def _collect_claude_home_files_content(
-    claude_dir: Path,
-    *,
-    sync_local_settings: bool,
-) -> dict[Path, str]:
-    """Collect files from ~/.claude/ as content strings for remote/deploy use.
-
-    Returns dict mapping relative paths (e.g., Path("settings.json"),
-    Path("skills/my-skill/SKILL.md")) to their string content.
-
-    settings.json is always rebuilt via _build_settings_json_content to
-    force skipDangerousModePermissionPrompt and disable fastMode. All other
-    files in _CLAUDE_HOME_SYNC_DIRS are read as-is. Callers are responsible
-    for any further transforms (e.g., installPath rewriting).
-    """
-    files: dict[Path, str] = {}
-    files[Path("settings.json")] = _build_settings_json_content(sync_local_settings)
-    for relative_path, source_path in _collect_claude_home_dir_files(claude_dir).items():
-        if relative_path == Path("settings.json"):
-            continue
-        files[relative_path] = source_path.read_text()
-    return files
-
-
 @pure
 def _rewrite_installed_plugins_paths(content: str, local_claude_dir: Path, target_config_dir: Path) -> str:
     """Rewrite installPath values in installed_plugins.json for a target config dir.
@@ -1979,16 +1932,23 @@ def get_files_for_deploy(
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
     if include_user_settings:
-        home_files = _collect_claude_home_files_content(local_claude_dir, sync_local_settings=include_user_settings)
-        home_files.pop(Path("settings.json"), None)
-        for relative_path, content in home_files.items():
-            # Rewrite installPath values at build time to use the sentinel prefix,
-            # so the runtime fixup doesn't need to know the build machine's home dir
-            if relative_path == _INSTALLED_PLUGINS_RELATIVE_PATH:
-                content = _rewrite_installed_plugins_paths(
-                    content, local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
-                )
-            files[Path("~/.claude") / relative_path] = content
+        # Collect directory contents (skills, agents, commands, plugins)
+        for dir_name in _CLAUDE_HOME_SYNC_DIRS:
+            dir_path = local_claude_dir / dir_name
+            if not dir_path.exists():
+                continue
+            for file_path in dir_path.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                relative_path = file_path.relative_to(local_claude_dir)
+                content = file_path.read_text()
+                # Rewrite installPath values at build time to use the sentinel prefix,
+                # so the runtime fixup doesn't need to know the build machine's home dir
+                if relative_path == _INSTALLED_PLUGINS_RELATIVE_PATH:
+                    content = _rewrite_installed_plugins_paths(
+                        content, local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
+                    )
+                files[Path("~/.claude") / relative_path] = content
 
         # ~/.claude/.credentials.json (OAuth tokens)
         credentials = local_claude_dir / ".credentials.json"
