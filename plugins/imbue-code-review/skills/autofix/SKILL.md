@@ -33,7 +33,7 @@ Spawn a `validate-diff` Agent. Provide the base branch name and the problem desc
 
 Based on the agent's response:
 - If the diff is empty, STOP and ask the user whether the work has been committed yet or whether the base branch is wrong.
-- If it reports significant unrelated changes, STOP and ask the user what the correct base branch is.
+- If it reports changes that don't belong to this branch (i.e., changes you didn't make / the implementer agent wouldn't have made), STOP and ask the user which changes should be in scope. Downstream agents review the entire diff and will act on out-of-scope code -- regardless of how the extra changes got there (wrong base branch, stale local ref, a merge, or incidental edits). Ask the user for the correct base branch or which changes to focus on, then when spawning the verify-and-fix agent in Phase 3, explicitly tell it to ignore the out-of-scope changes.
 - If it reports the work looks incomplete, note this but proceed -- autofix works on whatever is there.
 
 ### Phase 3: Fix Loop

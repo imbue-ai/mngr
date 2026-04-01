@@ -85,7 +85,7 @@ AUTOFIX_NEEDED=false
 CONVO_NEEDED=false
 ARCH_NEEDED=false
 
-if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/verified.md" ]]; then
+if [[ "$AUTOFIX_ENABLED" == "true" ]] && [[ ! -f ".reviewer/outputs/autofix/${HASH}_verified.md" ]]; then
     AUTOFIX_NEEDED=true
 fi
 

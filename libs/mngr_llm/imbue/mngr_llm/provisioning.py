@@ -335,7 +335,7 @@ def _update_conversation_name(
 
     The llm library sets conversation names based on the prompt text, which
     produces poor names for conversations created via ``llm inject`` (e.g.
-    empty string or ``...``). This updates the name to something meaningful
+    empty string). This updates the name to something meaningful
     so that llm-webchat displays it properly.
     """
     sql = f"UPDATE conversations SET name = {_sql_quote(name)} WHERE id = {_sql_quote(conversation_id)}"

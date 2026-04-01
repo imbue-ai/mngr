@@ -38,9 +38,7 @@ def _make_certified_data(host_id: HostId) -> CertifiedHostData:
     )
 
 
-def _make_agent_ref(
-    host_id: HostId, agent_id: AgentId, provider_name: ProviderInstanceName
-) -> DiscoveredAgent:
+def _make_agent_ref(host_id: HostId, agent_id: AgentId, provider_name: ProviderInstanceName) -> DiscoveredAgent:
     return DiscoveredAgent(
         host_id=host_id,
         agent_id=agent_id,
@@ -54,9 +52,7 @@ def _make_agent_ref(
     )
 
 
-def _make_offline_host(
-    host_id: HostId, provider: MockProviderInstance, mngr_ctx: MngrContext
-) -> OfflineHost:
+def _make_offline_host(host_id: HostId, provider: MockProviderInstance, mngr_ctx: MngrContext) -> OfflineHost:
     return OfflineHost(
         id=host_id,
         certified_host_data=_make_certified_data(host_id),

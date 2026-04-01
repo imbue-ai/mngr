@@ -752,12 +752,8 @@ def test_stream_manager_agent_discovered_updates_existing_agent() -> None:
     host_id_2 = "host-00000000000000000000000000000002"
 
     with manager._cg:
-        manager._handle_discovery_line(
-            _make_agent_discovered_line(str(_AGENT_A), host_id_1, event_id="evt-1")
-        )
-        manager._handle_discovery_line(
-            _make_agent_discovered_line(str(_AGENT_A), host_id_2, event_id="evt-2")
-        )
+        manager._handle_discovery_line(_make_agent_discovered_line(str(_AGENT_A), host_id_1, event_id="evt-1"))
+        manager._handle_discovery_line(_make_agent_discovered_line(str(_AGENT_A), host_id_2, event_id="evt-2"))
 
     ids = manager.resolver.list_known_agent_ids()
     # Should appear exactly once

@@ -1280,9 +1280,7 @@ def _parse_agent_opts(
     is_clone = opts.source_agent is not None
 
     # Parse worktree base folder
-    parsed_worktree_base_folder = (
-        Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
-    )
+    parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,

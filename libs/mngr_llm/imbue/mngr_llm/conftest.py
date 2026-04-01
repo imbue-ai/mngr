@@ -106,6 +106,3 @@ def write_conversation_to_db(
             (conversation_id, conversation_id, model),
         )
         conn.commit()
-
-
-

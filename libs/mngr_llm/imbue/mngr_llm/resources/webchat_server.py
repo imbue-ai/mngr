@@ -24,20 +24,19 @@ from pathlib import Path
 from typing import Final
 
 import uvicorn
+from llm_webchat.config import Config
+from llm_webchat.config import load_config
+from llm_webchat.plugins import get_plugin_manager
+from llm_webchat.server import create_application
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr_llm.resources import webchat_plugins as llm_webchat_plugins
 from imbue.mngr_llm.resources.webchat_plugins.webchat_agents import AgentsPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_default_model import DefaultModelPlugin
-from imbue.mngr_llm.resources.webchat_plugins.webchat_greeting import GreetingPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_injected_messages import InjectedMessagesPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_register_conversations import RegisterConversationsPlugin
 from imbue.mngr_llm.resources.webchat_plugins.webchat_system_prompt import create_system_prompt_plugin
-from llm_webchat.config import Config
-from llm_webchat.config import load_config
-from llm_webchat.plugins import get_plugin_manager
-from llm_webchat.server import create_application
 
 _HOST_NAME: Final[str] = os.environ.get("MNG_HOST_NAME", "")
 _AGENT_STATE_DIR: Final[str] = os.environ.get("MNGR_AGENT_STATE_DIR", "")
@@ -140,16 +139,6 @@ def _setup_default_model_plugin() -> None:
     get_plugin_manager().register(wrapped)
 
 
-def _setup_greeting_plugin() -> None:
-    """Create and register the greeting-conversation plugin with the llm-webchat plugin manager."""
-    greeting_plugin = GreetingPlugin(
-        agent_work_dir=_AGENT_WORK_DIR,
-        llm_user_path=_LLM_USER_PATH,
-    )
-    wrapped = types.SimpleNamespace(endpoint=greeting_plugin.endpoint)
-    get_plugin_manager().register(wrapped)
-
-
 def _inject_plugin_static_files() -> None:
     """Register JS plugins and static files (CSS) with llm-webchat.
 
@@ -160,10 +149,9 @@ def _inject_plugin_static_files() -> None:
     agents_css = _resolve_resource_path("webchat_agents.css")
     injected_messages_js = _resolve_resource_path("webchat_injected_messages.js")
     default_model_js = _resolve_resource_path("webchat_default_model.js")
-    greeting_js = _resolve_resource_path("webchat_greeting.js")
     _prepend_to_env_list(
         "LLM_WEBCHAT_JAVASCRIPT_PLUGINS",
-        [agents_js, injected_messages_js, default_model_js, greeting_js],
+        [agents_js, injected_messages_js, default_model_js],
     )
     _prepend_to_env_list("LLM_WEBCHAT_STATIC_PATHS", [agents_css])
 
@@ -237,7 +225,6 @@ def main() -> None:
     with log_span("Starting webchat server (llm-webchat)"):
         _setup_agents_plugin()
         _setup_default_model_plugin()
-        _setup_greeting_plugin()
         _setup_injected_messages_plugin()
         _setup_register_conversations_plugin()
         _setup_system_prompt_plugin()

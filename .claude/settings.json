@@ -9,6 +9,10 @@
           {
             "type": "command",
             "command": "uv sync --all-packages"
+          },
+          {
+            "type": "command",
+            "command": "./scripts/claude_ensure_plugin.sh"
           }
         ]
       }

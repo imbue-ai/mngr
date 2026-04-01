@@ -203,7 +203,7 @@ new_conversation() {
         if [ "$as_agent" = true ]; then
             if [ -n "$message" ]; then
                 log "Injecting agent message into existing conversation $existing_id"
-                llm inject --cid "$existing_id" -m "$model" "$message"
+                llm inject --cid "$existing_id" -m "$model" --prompt "" "$message"
                 log "Agent message injected successfully"
                 local message_id
                 message_id=$(get_last_response_id "$existing_id")
@@ -230,7 +230,7 @@ new_conversation() {
         if [ -n "$message" ]; then
             log "Creating new conversation via llm inject (no --cid)"
             local inject_output
-            inject_output=$(llm inject -m "$model" "$message")
+            inject_output=$(llm inject -m "$model" --prompt "" "$message")
             log "llm inject output: $inject_output"
 
             # Parse conversation ID from "Injected message into conversation <id>"
@@ -348,7 +348,7 @@ reply_to_conversation() {
 
     log "reply_to_conversation: conversation_id=$conversation_id model=$model message_len=${#message}"
 
-    llm inject --cid "$conversation_id" -m "$model" "$message"
+    llm inject --cid "$conversation_id" -m "$model" --prompt "" "$message"
     log "Reply injected successfully"
 
     local message_id
