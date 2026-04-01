@@ -62,6 +62,31 @@ If you make improvements, record a change under the key "IMPROVE_TEST". If you
 identify an improvement that needs a larger-scale intervention, use status
 "BLOCKED". If no improvements are needed, leave the changes object empty.
 
+# Guidelines for test quality
+
+When writing or improving tests, follow these principles:
+
+**Run the actual commands from the script block.** The test must run commands that
+match the script block as closely as possible. For example, if the script block
+demonstrates `mngr create --foo`, the test must run `mngr create --foo` (with
+optional extra flags) -- it must NOT simply run `mngr create --help` and verify
+that `--foo` is a supported flag. The test fixture already sets up an isolated
+environment, so using hardcoded agent names is fine.
+
+**Verify the actual behavior, not just surface-level output.** The script blocks
+usually don't contain verification code, but the test must verify the exact
+desired behavior as thoroughly as possible. For example, if a script block creates
+an agent in a specific directory, it is not sufficient to only verify that the
+agent appears in the result of `mngr list` -- you must also verify that the agent
+is running in that directory, e.g. by running `mngr exec $agent_name pwd` and
+checking its output. Think about what the command is supposed to accomplish and
+assert on the concrete effects.
+
+**Add comments to transcript commands.** The `e2e.run()` method accepts an
+optional `comment` parameter that is recorded in the transcript above the command
+(as `# ...` lines). Use this to annotate each command with a brief description of
+what it does. Reuse comments from the tutorial script block where available.
+
 # Examining the CLI transcript
 
 After each test run, examine the generated CLI transcript (in the test output
