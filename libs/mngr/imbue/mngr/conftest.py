@@ -377,6 +377,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _WORKSPACE_PACKAGES = (
     _REPO_ROOT / "libs" / "imbue_common",
     _REPO_ROOT / "libs" / "concurrency_group",
+    _REPO_ROOT / "libs" / "resource_guards",
     _REPO_ROOT / "libs" / "mngr",
 )
 
@@ -411,7 +412,7 @@ def isolated_mngr_venv(tmp_path: Path) -> Path:
     with cg:
         # Export mngr's pinned transitive deps from the lockfile (no editable/comment lines)
         export_result = cg.run_process_to_completion(
-            ("uv", "export", "--package", "mngr", "--no-hashes", "--frozen"),
+            ("uv", "export", "--package", "imbue-mngr", "--no-hashes", "--frozen"),
             cwd=_REPO_ROOT,
         )
         reqs_file = tmp_path / "pinned-deps.txt"
