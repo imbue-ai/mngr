@@ -669,14 +669,21 @@ def _rsync_claude_home_directories(
 
 
 def _fixup_installed_plugins_json(host: OnlineHostInterface, config_dir: Path) -> None:
-    """Rewrite installPath values in the per-agent installed_plugins.json.
+    """Rewrite installPath values in installed_plugins.json from their
+    original prefix to the per-agent config_dir.
+
+    installed_plugins.json contains absolute paths (e.g.
+    /Users/ev/.claude/plugins/cache/...) that won't resolve on a
+    different machine or in a different config dir. This rewrites them
+    to point to config_dir/plugins/cache/... so Claude Code can find
+    the plugin files.
 
     Called after rsync (remote) or copy (local) has placed the file in
-    config_dir. Reads via host.read_text_file so it works transparently
-    for both local and remote hosts.
+    config_dir. Works transparently for local and remote hosts via
+    host.read_text_file / host.write_text_file.
 
-    Handles three source path cases:
-    - Deploy runtime: paths use the sentinel prefix (written by get_files_for_deploy)
+    Source prefix detection:
+    - Deploy: paths use the sentinel prefix (rewritten at build time by get_files_for_deploy)
     - Remote/local: paths use the current machine's ~/.claude/
     """
     installed_plugins_path = config_dir / _INSTALLED_PLUGINS_RELATIVE_PATH
@@ -706,28 +713,20 @@ def _setup_local_settings_json(
 ) -> None:
     """Set up settings.json in the per-agent config dir on a local host.
 
-    When no overrides are needed, symlinks to ~/.claude/settings.json.
-    When overrides (model, is_fast) are present, reads the user's settings
-    as a base and writes a modified copy with overrides applied.
+    Reads the user's ~/.claude/settings.json as a base (or uses defaults),
+    applies any per-agent overrides (model, is_fast), and writes the result.
+    Always writes a copy rather than symlinking to avoid modifying the
+    user's global settings.
     """
     settings_path = config_dir / "settings.json"
     source = Path.home() / ".claude" / "settings.json"
 
-    if config.model is None and not config.is_fast:
-        # No overrides -- symlink to the user's settings
-        if source.exists():
-            host.execute_idempotent_command(
-                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(settings_path))}", timeout_seconds=5.0
-            )
-        return
-
-    # Overrides needed -- read source as base, apply overrides, write a regular file
     data: dict[str, Any] = {}
     if source.exists():
         try:
             data = json.loads(source.read_text())
         except json.JSONDecodeError:
-            logger.warning("Corrupt settings.json, replacing with overrides only")
+            logger.warning("Corrupt settings.json, using defaults")
 
     if config.model is not None:
         data["model"] = config.model
@@ -1408,6 +1407,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         if config.sync_home_settings:
             _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             if not config.symlink_user_resources:
+                # In copy mode, rewrite installPath values from ~/.claude/ to config_dir
+                # (in symlink mode the original paths resolve correctly through the symlinks)
                 _fixup_installed_plugins_json(host, config_dir)
 
         _setup_local_settings_json(host, config_dir, config)
@@ -1441,7 +1442,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         )
 
         # 2. Rsync directory items (skills, agents, commands, plugins) in bulk,
-        # then fix up installed_plugins.json paths for the remote host
+        # then rewrite installPath values in installed_plugins.json from the
+        # local ~/.claude/ prefix to the remote config_dir prefix
         if config.sync_home_settings:
             logger.info("Transferring claude home directory settings to per-agent config dir...")
             local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
@@ -1933,14 +1935,16 @@ def get_files_for_deploy(
                 if not file_path.is_file():
                     continue
                 relative_path = file_path.relative_to(local_claude_dir)
-                content = file_path.read_text()
                 # Rewrite installPath values at build time to use the sentinel prefix,
-                # so the runtime fixup doesn't need to know the build machine's home dir
+                # so the runtime fixup can rewrite them to the actual config_dir
+                # without needing to know the build machine's home directory
                 if relative_path == _INSTALLED_PLUGINS_RELATIVE_PATH:
                     content = _rewrite_installed_plugins_paths(
-                        content, local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
+                        file_path.read_text(), local_claude_dir, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX)
                     )
-                files[Path("~/.claude") / relative_path] = content
+                    files[Path("~/.claude") / relative_path] = content
+                else:
+                    files[Path("~/.claude") / relative_path] = file_path
 
         # ~/.claude/.credentials.json (OAuth tokens)
         credentials = local_claude_dir / ".credentials.json"

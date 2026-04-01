@@ -2112,7 +2112,7 @@ def test_get_files_for_deploy_includes_skills_directory(temp_mngr_ctx: MngrConte
     )
 
     assert Path("~/.claude/skills/my-skill/SKILL.md") in result
-    assert result[Path("~/.claude/skills/my-skill/SKILL.md")] == "# My Skill"
+    assert result[Path("~/.claude/skills/my-skill/SKILL.md")] == skill_file
 
 
 def test_get_files_for_deploy_includes_commands_directory(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -2128,7 +2128,7 @@ def test_get_files_for_deploy_includes_commands_directory(temp_mngr_ctx: MngrCon
     )
 
     assert Path("~/.claude/commands/my-command.md") in result
-    assert result[Path("~/.claude/commands/my-command.md")] == "# Command"
+    assert result[Path("~/.claude/commands/my-command.md")] == cmd_file
 
 
 def test_get_files_for_deploy_includes_agents_directory(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -2144,7 +2144,7 @@ def test_get_files_for_deploy_includes_agents_directory(temp_mngr_ctx: MngrConte
     )
 
     assert Path("~/.claude/agents/my-agent.json") in result
-    assert result[Path("~/.claude/agents/my-agent.json")] == '{"agent": true}'
+    assert result[Path("~/.claude/agents/my-agent.json")] == agent_file
 
 
 def test_get_files_for_deploy_includes_credentials(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -2961,28 +2961,18 @@ def test_build_settings_json_content_disables_local_is_fast_when_config_does_not
 # =============================================================================
 
 
-def test_setup_local_settings_json_symlinks_when_no_overrides(tmp_path: Path) -> None:
-    """_setup_local_settings_json symlinks to ~/.claude/settings.json when no overrides."""
+def test_setup_local_settings_json_copies_when_no_overrides(tmp_path: Path) -> None:
+    """_setup_local_settings_json writes a copy (not a symlink) even with no overrides."""
     config_dir = tmp_path / "config"
     config_dir.mkdir()
 
     host = cast(OnlineHostInterface, FakeHost())
     config = ClaudeAgentConfig(check_installation=False)
-
-    # Create a source settings.json at the real ~/.claude/ location
-    source = Path.home() / ".claude" / "settings.json"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source_existed = source.exists()
-
     _setup_local_settings_json(host, config_dir, config)
 
     settings_path = config_dir / "settings.json"
-    if source_existed:
-        # Should be a symlink to the source
-        assert settings_path.is_symlink()
-    else:
-        # No source to symlink to -- settings.json not created
-        assert not settings_path.exists()
+    assert settings_path.exists()
+    assert not settings_path.is_symlink()
 
 
 def test_setup_local_settings_json_creates_file_with_model(tmp_path: Path) -> None:
