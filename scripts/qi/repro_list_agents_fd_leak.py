@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -18,12 +19,55 @@ from imbue.mngr.primitives import ErrorBehavior
 
 def count_open_fds() -> int:
     fd_dir = Path("/dev/fd")
-    if not fd_dir.exists():
-        fd_dir = Path(f"/proc/{os.getpid()}/fd")
     try:
         return len(list(fd_dir.iterdir()))
     except OSError:
         return -1
+
+
+def describe_new_fds(baseline_fds: set[int]) -> str:
+    """Describe FDs that are open now but weren't in the baseline."""
+    current_fds: set[int] = set()
+    for entry in Path("/dev/fd").iterdir():
+        try:
+            current_fds.add(int(entry.name))
+        except ValueError:
+            pass
+
+    new_fds = sorted(current_fds - baseline_fds)
+    if not new_fds:
+        return "no new FDs"
+
+    descriptions = []
+    for fd in new_fds[:10]:
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISFIFO(st.st_mode):
+                desc = "pipe"
+            elif stat.S_ISSOCK(st.st_mode):
+                desc = "socket"
+            elif stat.S_ISREG(st.st_mode):
+                desc = "file"
+            elif stat.S_ISCHR(st.st_mode):
+                desc = "chr"
+            else:
+                desc = f"mode={oct(st.st_mode)}"
+        except OSError:
+            desc = "closed?"
+        descriptions.append(f"{fd}={desc}")
+
+    suffix = f" (+{len(new_fds) - 10} more)" if len(new_fds) > 10 else ""
+    return ", ".join(descriptions) + suffix
+
+
+def get_fd_set() -> set[int]:
+    fds: set[int] = set()
+    for entry in Path("/dev/fd").iterdir():
+        try:
+            fds.add(int(entry.name))
+        except ValueError:
+            pass
+    return fds
 
 
 def main() -> None:
@@ -38,9 +82,11 @@ def main() -> None:
         mngr_ctx = load_config(pm, cg)
 
         initial_fds = count_open_fds()
+        baseline = get_fd_set()
         print(f"Initial FDs: {initial_fds}")
 
         for i in range(1, args.iterations + 1):
+            pre_fds = get_fd_set()
             try:
                 result = list_agents(
                     mngr_ctx=mngr_ctx,
@@ -54,13 +100,15 @@ def main() -> None:
 
             current_fds = count_open_fds()
             delta = current_fds - initial_fds
-            print(f"[{i:3d}] FDs: {current_fds} (delta: {delta:+d}, agents: {agent_count})")
+            new_this_iter = describe_new_fds(pre_fds)
+            print(f"[{i:3d}] FDs: {current_fds} (delta: {delta:+d}, agents: {agent_count})  new: {new_this_iter}")
 
             if i < args.iterations:
                 time.sleep(args.interval)
 
     final_fds = count_open_fds()
     print(f"\nFinal FDs: {final_fds} (total delta: {final_fds - initial_fds:+d})")
+    print(f"All leaked: {describe_new_fds(baseline)}")
 
 
 if __name__ == "__main__":
