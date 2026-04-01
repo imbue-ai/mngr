@@ -20,8 +20,8 @@ def set_default_on_thread_exit(callback: Callable[[], None] | None) -> None:
 
     This is intended to be called once at application startup. The callback
     is invoked in each worker thread after its submitted callable completes,
-    and should clean up any thread-local resources (e.g. asyncio event loops,
-    gevent Hubs) that hold OS-level file descriptors.
+    and should clean up any thread-local resources (e.g. gevent Hubs) that
+    hold OS-level file descriptors.
     """
     global _default_on_thread_exit
     _default_on_thread_exit = callback
@@ -32,8 +32,7 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
 
     After each submitted callable completes, the global default thread-exit
     callback (set via ``set_default_on_thread_exit``) is invoked to clean up
-    thread-local resources. An additional per-executor callback can be
-    provided via ``on_thread_exit``.
+    thread-local resources.
     """
 
     def __init__(
@@ -41,13 +40,11 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
         parent_cg: ConcurrencyGroup,
         name: str,
         max_workers: int,
-        on_thread_exit: Callable[[], None] | None = None,
     ) -> None:
         self._parent_cg = parent_cg
         self._name = name
         self._semaphore = threading.BoundedSemaphore(max_workers)
         self._cg: ConcurrencyGroup | None = None
-        self._on_thread_exit = on_thread_exit
 
     def __enter__(self) -> "ConcurrencyGroupExecutor":
         self._cg = self._parent_cg.make_concurrency_group(
@@ -65,7 +62,6 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
         """Submit a callable for concurrent execution."""
         assert self._cg is not None
         future: Future[T] = Future()
-        on_thread_exit = self._on_thread_exit
 
         def _run() -> None:
             with self._semaphore:
@@ -76,8 +72,6 @@ class ConcurrencyGroupExecutor(AbstractContextManager):
                 else:
                     future.set_result(result)
                 finally:
-                    if on_thread_exit is not None:
-                        on_thread_exit()
                     if _default_on_thread_exit is not None:
                         _default_on_thread_exit()
 
