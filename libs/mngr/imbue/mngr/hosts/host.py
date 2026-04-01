@@ -1417,13 +1417,6 @@ class Host(BaseHost, OnlineHostInterface):
             quoted_git_dir = shlex.quote(str(target_path / ".git"))
             quoted_target = shlex.quote(str(target_path))
             init_parts = [f"mkdir -p {quoted_target}", f"git init --bare {quoted_git_dir}"]
-            # When the target .git was seeded from an image that already
-            # contains the repo (e.g. Modal), refs/remotes/origin/HEAD may
-            # be a stale symref whose target is deleted by --mirror push,
-            # causing "inconsistent aliased update" errors. Remove it.
-            init_parts.append(
-                f"git -C {quoted_git_dir} symbolic-ref --delete refs/remotes/origin/HEAD 2>/dev/null || true"
-            )
             if not self.is_local:
                 init_parts.append(f"git config --global --add safe.directory {quoted_target}")
             init_cmd = " && ".join(init_parts)
