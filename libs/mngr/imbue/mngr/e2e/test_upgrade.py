@@ -12,22 +12,45 @@ from imbue.mngr.e2e.conftest import MinimalInstallEnv
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_config_with_unknown_keys(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr should handle config files with unknown keys gracefully.
-
-    When a user upgrades mngr, old config files may contain keys that no longer
-    exist, or a config from a newer version may have keys the current version
-    doesn't recognize. The CLI should not crash.
-    """
+def test_config_with_unknown_keys_strict(minimal_install_env: MinimalInstallEnv) -> None:
+    """In strict mode (the default), unknown config keys should produce a clear error."""
     config_dir = minimal_install_env.repo_dir / f".{minimal_install_env.env['MNGR_ROOT_NAME']}"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "settings.toml"
-    config_file.write_text("future_feature = true\nanother_unknown_key = 42\nheadless = true\n")
+    config_file.write_text("future_feature = true\nheadless = true\n")
 
     result = minimal_install_env.run_mngr(["list"])
-    assert result.returncode == 0, (
-        f"mngr list failed with unknown config keys (exit {result.returncode}):\n"
+    assert result.returncode != 0, (
+        f"Expected mngr to fail with unknown config keys in strict mode, but it succeeded:\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    combined = result.stdout + result.stderr
+    assert "future_feature" in combined.lower() or "unknown" in combined.lower(), (
+        f"Error should mention the unknown field:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+@pytest.mark.release
+@pytest.mark.timeout(60)
+def test_config_with_unknown_keys_non_strict(minimal_install_env: MinimalInstallEnv) -> None:
+    """With MNGR_ALLOW_UNKNOWN_CONFIG, unknown keys should be warned but not fatal."""
+    config_dir = minimal_install_env.repo_dir / f".{minimal_install_env.env['MNGR_ROOT_NAME']}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "settings.toml"
+    config_file.write_text("future_feature = true\nheadless = true\n")
+
+    env = {**minimal_install_env.env, "MNGR_ALLOW_UNKNOWN_CONFIG": "1"}
+    mngr_bin = str(minimal_install_env.venv_dir / "bin" / "mngr")
+    result = subprocess.run(
+        [mngr_bin, "list"],
+        capture_output=True,
+        text=True,
+        cwd=minimal_install_env.repo_dir,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"mngr list should succeed with MNGR_ALLOW_UNKNOWN_CONFIG=1:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
