@@ -9,6 +9,7 @@ This module provides a cleanup function registered as the global default
 """
 
 import gevent
+import gevent.exceptions
 
 
 def cleanup_thread_local_resources() -> None:

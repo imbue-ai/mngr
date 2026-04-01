@@ -45,6 +45,7 @@ def run_popen_in_thread() -> None:
     p = subprocess.Popen(
         "echo hello", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE
     )
+    assert p.stdin is not None and p.stdout is not None and p.stderr is not None
     p.stdin.close()
     p.wait()
     p.stdout.close()
