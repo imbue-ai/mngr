@@ -22,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xxd \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Docker CLI (static binary, no daemon/systemd required)
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-27.5.1.tgz" \
+    | tar xz --strip-components=1 -C /usr/local/bin/ docker/docker
+
 # Install ttyd binary from GitHub releases (not available via apt)
 RUN ARCH=$(uname -m) && \
     curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH}" \

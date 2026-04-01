@@ -63,6 +63,27 @@ test-offload-acceptance args="":
     # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
     offload -c offload-modal-acceptance.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" || [[ $? -eq 2 ]]
 
+# Run release tests on Modal via Offload (requires Docker-in-Docker)
+test-offload-release args="":
+    #!/bin/bash
+    set -ueo pipefail
+    HEAD_COMMIT=$(git rev-parse HEAD)
+    tmpdir=$(mktemp -d)
+    trap "rm -rf $tmpdir" EXIT
+
+    ./scripts/make_tar_of_repo.sh $HEAD_COMMIT $tmpdir
+    export OFFLOAD_PATCH_UUID=`uv run python -c"import uuid;print(uuid.uuid4())"`
+    mkdir -p /tmp/$OFFLOAD_PATCH_UUID
+    trap "rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
+
+    ./scripts/generate_patch_for_offload.sh $HEAD_COMMIT > /tmp/$OFFLOAD_PATCH_UUID/patch
+    cp $tmpdir/current.tar.gz .
+    trap "rm -f current.tar.gz; rm -rf /tmp/$OFFLOAD_PATCH_UUID; rm -rf $tmpdir" EXIT
+
+    # Run offload, and make sure to specifically permit error code 2 (flaky tests). Any other error code is a failure.
+    # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
+    MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml {{args}} run --copy-dir="/tmp/$OFFLOAD_PATCH_UUID:/offload-upload" || [[ $? -eq 2 ]]
+
 test-unit:
   uv run pytest --ignore-glob="**/test_*.py" --cov-fail-under=36
 
@@ -87,6 +108,10 @@ test-release:
 test-timings:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
   PYTEST_MAX_DURATION_SECONDS=6000 uv run pytest --override-ini='cov-fail-under=0' --no-cov -n 0 -m "acceptance or not acceptance" --store-durations
+
+# Minimal repro: verify that Modal's enable_docker=True provisions a Docker daemon
+test-docker-sandbox:
+  MODAL_IMAGE_BUILDER_VERSION=2025.06 uv run python test_docker_sandbox.py
 
 # useful for running against a single test, regardless of how it is marked
 test target:
