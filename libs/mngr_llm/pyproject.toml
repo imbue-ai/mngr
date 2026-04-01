@@ -9,7 +9,7 @@ dependencies = [
     "imbue-mngr-recursive==0.1.0",
     "llm-live-chat>=0.0.2",
     "llm-matched-responses>=0.0.4",
-    "llm-webchat>=2.7.0",
+    "llm-webchat>=2.7.1",
     "watchdog>=4.0",
 ]
 
