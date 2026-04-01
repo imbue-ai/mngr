@@ -635,17 +635,32 @@ def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, s
     """Sync user resource directories from the claude home dir into the per-agent config dir.
 
     Symlinks or copies skills/, agents/, commands/, plugins/ depending on the
-    ``symlink`` flag. settings.json is handled separately by
-    _setup_local_settings_json.
+    ``symlink`` flag. In symlink mode, plugins/ uses child-level symlinks
+    (not a dir-level symlink) so that installed_plugins.json can be rewritten
+    in place without modifying the source. settings.json is handled separately
+    by _setup_local_settings_json.
     """
     home_claude = Path.home() / ".claude"
-    link_or_copy_dir = "ln -sf" if symlink else "cp -r"
     for dir_name in _CLAUDE_HOME_SYNC_DIRS:
         source = home_claude / dir_name
-        if source.exists():
+        if not source.exists():
+            continue
+        dest = config_dir / dir_name
+        if not symlink:
             host.execute_idempotent_command(
-                f"{link_or_copy_dir} {shlex.quote(str(source))} {shlex.quote(str(config_dir / dir_name))}",
-                timeout_seconds=5.0,
+                f"cp -r {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
+            )
+        elif dir_name == "plugins":
+            # Child-level symlinks so installed_plugins.json can be overwritten
+            host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(dest))}", timeout_seconds=5.0)
+            for child in source.iterdir():
+                host.execute_idempotent_command(
+                    f"ln -sf {shlex.quote(str(child))} {shlex.quote(str(dest / child.name))}",
+                    timeout_seconds=5.0,
+                )
+        else:
+            host.execute_idempotent_command(
+                f"ln -sf {shlex.quote(str(source))} {shlex.quote(str(dest))}", timeout_seconds=5.0
             )
 
 
@@ -1422,10 +1437,10 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         if config.sync_home_settings:
             _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
-            if not config.symlink_user_resources:
-                # In copy mode, rewrite installPath values from ~/.claude/ to config_dir
-                # (in symlink mode the original paths resolve correctly through the symlinks)
-                _fixup_installed_plugins_json(host, Path.home() / ".claude", config_dir)
+            # Rewrite installPath values from ~/.claude/ to config_dir so Claude Code
+            # finds plugins in the per-agent dir (plugins/ uses child-level symlinks
+            # in symlink mode, so this write doesn't modify the source)
+            _fixup_installed_plugins_json(host, Path.home() / ".claude", config_dir)
 
         _setup_local_settings_json(host, config_dir, config)
 
