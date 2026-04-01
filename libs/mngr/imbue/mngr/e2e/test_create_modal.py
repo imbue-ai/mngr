@@ -68,12 +68,20 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
                 "processes",
             ),
             (
-                "mngr exec my-task 'cat /mngr/agents/*/.claude/settings.local.json 2>/dev/null || echo no-settings-local'",
-                "claude hooks config",
+                "mngr exec my-task 'find /mngr -name settings.local.json -type f 2>/dev/null || echo no-settings-local-anywhere'",
+                "find settings.local.json",
             ),
             (
-                "mngr exec my-task 'ls -la /mngr/agents/*/.claude/ 2>/dev/null || echo no-claude-dir'",
-                "claude config dir",
+                "mngr exec my-task 'cat /mngr/projects/*/.claude/settings.local.json 2>/dev/null || echo no-settings-local-in-projects'",
+                "hooks config (projects)",
+            ),
+            (
+                "mngr exec my-task 'ls -la /mngr/projects/*/.claude/ 2>/dev/null; ls -la /mngr/agents/*/.claude/ 2>/dev/null; echo done'",
+                "claude dirs",
+            ),
+            (
+                "mngr exec my-task 'env | grep -i CLAUDE_CONFIG 2>/dev/null || echo no-claude-config-env'",
+                "CLAUDE_CONFIG_DIR env",
             ),
         ]:
             diag = e2e.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
