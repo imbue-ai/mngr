@@ -945,6 +945,24 @@ def _try_reuse_existing_agent(
     return agent, online_host
 
 
+def _check_source_does_not_contain_state_dir(source_path: Path, mngr_ctx: MngrContext) -> None:
+    """Raise if the source directory contains the mngr state directory.
+
+    Agent work directories are created inside the state dir (e.g. ~/.mngr/copies/).
+    If the source directory contains the state dir, rsync would copy the source
+    into a subdirectory of itself, creating an infinite recursive copy.
+    """
+    state_dir = mngr_ctx.config.default_host_dir.expanduser().resolve()
+    resolved_source = source_path.resolve()
+    if state_dir == resolved_source or state_dir.is_relative_to(resolved_source):
+        raise UserInputError(
+            f"Source directory '{source_path}' contains the mngr state directory "
+            f"('{state_dir}'). Copying this directory would recursively copy agent "
+            f"data (including the copy destination itself). "
+            f"Use --source-path to specify a more specific directory."
+        )
+
+
 def _resolve_source_location(
     opts: CreateCliOptions,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
@@ -959,7 +977,14 @@ def _resolve_source_location(
         source_path = opts.source_path
         if source_path is None:
             git_root = find_git_worktree_root(None, mngr_ctx.concurrency_group)
-            source_path = str(git_root) if git_root is not None else os.getcwd()
+            if git_root is not None:
+                source_path = str(git_root)
+            else:
+                raise UserInputError(
+                    "Not inside a git repository. Either run from within a git repo, "
+                    "or specify --source-path to set the source directory explicitly."
+                )
+        _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
@@ -984,6 +1009,7 @@ def _resolve_source_location(
             source_path = opts.source_path
         else:
             source_path = os.getcwd()
+        _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
