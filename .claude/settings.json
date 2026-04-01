@@ -12,7 +12,7 @@
           },
           {
             "type": "command",
-            "command": "./scripts/claude_ensure_plugin.sh"
+            "command": "./scripts/claude_update_plugin.sh"
           }
         ]
       }
