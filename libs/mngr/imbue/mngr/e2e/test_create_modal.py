@@ -83,6 +83,10 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
                 "mngr exec my-task 'env | grep -i CLAUDE_CONFIG 2>/dev/null || echo no-claude-config-env'",
                 "CLAUDE_CONFIG_DIR env",
             ),
+            (
+                'mngr exec my-task \'cat /mngr/agents/*/plugin/claude/anthropic/.claude.json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({k:d[k] for k in [\\"hasCompletedOnboarding\\",\\"lastOnboardingVersion\\",\\"theme\\"] if k in d}))" 2>/dev/null || echo no-claude-json\'',
+                "claude.json onboarding fields",
+            ),
         ]:
             diag = e2e.run(diag_cmd, comment=f"diagnostic: {label}", timeout=15.0)
             diag_parts.append(f"\n[{label}] stdout: {diag.stdout}\n[{label}] stderr: {diag.stderr}")
