@@ -61,7 +61,7 @@ RUN mkdir -p /code/mngr/ && tar -xzf /code/current.tar.gz -C /code/mngr/ && rm /
 WORKDIR /code/mngr/
 
 # install python dependencies
-RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mngr/libs/mngr && uv tool install modal
+RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mngr/libs/mngr --with imbue-mngr-modal --with imbue-mngr-schedule && uv tool install modal
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
