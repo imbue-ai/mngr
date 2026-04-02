@@ -260,9 +260,7 @@ def _list_agents_batch(
     # Process each host and its agents in parallel
     futures: list[Future[None]] = []
     with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group,
-        name="list_agents_process_hosts",
-        max_workers=32,
+        parent_cg=mngr_ctx.concurrency_group, name="list_agents_process_hosts", max_workers=32
     ) as executor:
         for host_ref, agent_refs in agents_by_host.items():
             if not agent_refs:
@@ -314,9 +312,7 @@ def _list_agents_streaming(
         logger.trace("Found {} provider instances", len(providers))
 
         with ConcurrencyGroupExecutor(
-            parent_cg=mngr_ctx.concurrency_group,
-            name="list_agents_streaming",
-            max_workers=32,
+            parent_cg=mngr_ctx.concurrency_group, name="list_agents_streaming", max_workers=32
         ) as executor:
             streaming_futures: list[Future[None]] = []
             for provider in providers:
@@ -358,11 +354,7 @@ def _discover_and_emit_details_for_provider(
 
         # Phase 2: immediately process hosts (fire on_agent for this provider)
         host_futures: list[Future[None]] = []
-        with ConcurrencyGroupExecutor(
-            parent_cg=cg,
-            name=f"stream_hosts_{provider.name}",
-            max_workers=32,
-        ) as executor:
+        with ConcurrencyGroupExecutor(parent_cg=cg, name=f"stream_hosts_{provider.name}", max_workers=32) as executor:
             for host_ref, agent_refs in provider_results.items():
                 if not agent_refs:
                     continue
