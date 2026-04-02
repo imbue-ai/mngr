@@ -1,6 +1,6 @@
-# mngr
+# mngr: CLI for managing agents
 
-Run 100s of coding agents in parallel. Each in its own container. Each one debuggable.
+Programmatically manage 100s of coding agent sessions in parallel.
 
 [![GitHub Stars](https://img.shields.io/github/stars/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr)
 [![PyPI](https://img.shields.io/pypi/v/imbue-mngr?style=flat-square)](https://pypi.org/project/imbue-mngr/)
@@ -8,12 +8,20 @@ Run 100s of coding agents in parallel. Each in its own container. Each one debug
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![Open Issues](https://img.shields.io/github/issues/imbue-ai/mngr?style=flat-square)](https://github.com/imbue-ai/mngr/issues)
 
-*Built on SSH, git, and tmux. No managed service required.*
+Agents are composable into whatever workflow your team actually needs. Do things like:
+- For each open GitHub issue, create a PR
+- For each flaky test in the past week, fix it
+- For each rule in the style guide, scan my codebase and fix all instances
 
-> **Why mngr?** Most teams cap out at a handful of parallel agents. mngr removes that ceiling.
-> Run 1 or 100s — same commands. Agents run in isolated containers you own, over SSH you can
-> inspect, on compute that shuts down when idle. Composable into whatever workflow your team
-> actually needs.
+We live in `mngr`, so we try to make everything Just Work<sup>TM</sup>:
+- See all your agents, and if they're blocked on you
+- Connect to any agent live mid-task to ask a question or unblock it
+- Agent sandboxes auto-snapshot and shut down when idle
+
+Run any agent: Claude Code, Codex, OpenCode, etc.
+
+Run on any compute: local, Docker, Modal, or anything you can SSH into.
+
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
