@@ -364,21 +364,15 @@ def _has_disabled_ancestor(
     disabled_plugins: frozenset[str],
 ) -> bool:
     """Check if an agent type or any ancestor in its parent chain is disabled."""
-    current = name
+    current: str | None = name
     seen: set[str] = set()
-    while True:
+    while current is not None and current not in seen:
         if current in disabled_plugins:
             return True
-        if current in seen:
-            return False
         seen.add(current)
         raw = raw_types.get(current)
-        if raw is None:
-            return False
-        parent = raw.get("parent_type")
-        if parent is None:
-            return False
-        current = parent
+        current = raw.get("parent_type") if raw is not None else None
+    return False
 
 
 def _parse_agent_types(
