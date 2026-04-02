@@ -358,8 +358,9 @@ def _build_claude_json(
     # Copy project config from source (worktree mode)
     if ctx.copy_project_config_from is not None:
         source_path = ctx.copy_project_config_from.resolve()
-        global_projects = read_claude_config(get_claude_config_path()).get("projects", {}) if sync_local else {}
-        source_config = find_project_config(global_projects, source_path)
+        # When sync_local=True, `projects` already holds the global projects (loaded above).
+        # When sync_local=False, there are no global projects to search.
+        source_config = find_project_config(projects if sync_local else {}, source_path)
         if source_config is not None:
             projects[str(source_path)] = source_config
             worktree_path_str = str(work_dir.resolve())
