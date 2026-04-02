@@ -11,6 +11,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -25,6 +26,23 @@ class CliError(MngrError):
 _LIST_AGENTS_TIMEOUT_SECONDS = 60.0
 
 
+def _run_mngr_raw(
+    args: list[str],
+    cg: ConcurrencyGroup,
+    timeout: float,
+) -> FinishedProcess:
+    """Run a mngr CLI command and return the raw result.
+
+    Raises CliError when the process times out.
+    """
+    cmd = ["mngr", *args]
+    logger.debug("Running CLI: {}", " ".join(cmd))
+    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
+    if result.is_timed_out:
+        raise CliError("mngr {} timed out after {:.0f}s".format(args[0] if args else "unknown", timeout))
+    return result
+
+
 def _run_mngr(
     args: list[str],
     cg: ConcurrencyGroup,
@@ -32,11 +50,9 @@ def _run_mngr(
 ) -> str:
     """Run a mngr CLI command and return its stdout.
 
-    Raises CliError when the command exits with a non-zero return code.
+    Raises CliError when the command times out or exits with a non-zero return code.
     """
-    cmd = ["mngr", *args]
-    logger.debug("Running CLI: {}", " ".join(cmd))
-    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
+    result = _run_mngr_raw(args, cg, timeout)
     if result.returncode != 0:
         raise CliError(
             "mngr {} failed (exit code {}): {}".format(
@@ -75,9 +91,7 @@ def list_agents(
     We parse the JSON output regardless of the exit code and only raise
     when the output cannot be parsed at all.
     """
-    cmd = ["mngr", "list", "--format", "json"]
-    logger.debug("Running CLI: {}", " ".join(cmd))
-    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
+    result = _run_mngr_raw(["list", "--format", "json"], cg, timeout)
     if result.stdout.strip():
         return _parse_list_json(result.stdout)
     if result.returncode != 0:
