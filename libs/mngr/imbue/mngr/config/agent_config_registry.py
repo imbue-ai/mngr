@@ -71,7 +71,7 @@ def _apply_custom_overrides_to_parent_config(
     (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
     concrete class with the base fields overridden. Iterates over all fields
     that were explicitly set in the custom config (including subclass-specific
-    fields like trust_working_directory).
+    fields like auto_dismiss_dialogs).
     """
     explicitly_set_fields = custom_config.model_fields_set
     if not explicitly_set_fields - {"parent_type"}:

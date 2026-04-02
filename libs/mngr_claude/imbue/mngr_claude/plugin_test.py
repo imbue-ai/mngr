@@ -50,18 +50,18 @@ from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
+from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import WaitingReason
 from imbue.mngr_claude.plugin import _build_install_command_hint
-from imbue.mngr_claude.plugin import _build_settings_json_content
+from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
-from imbue.mngr_claude.plugin import _fixup_installed_plugins_json
+from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
-from imbue.mngr_claude.plugin import _setup_local_settings_json
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
@@ -1107,8 +1107,8 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
 def test_provision_trusts_working_directory_when_enabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should add trust for work_dir when trust_working_directory is True."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    """provision should add trust for work_dir when auto_dismiss_dialogs is True."""
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
@@ -1122,10 +1122,10 @@ def test_provision_trusts_working_directory_when_enabled(
     assert claude_config["effortCalloutDismissed"] is True
 
 
-def test_provision_does_not_trust_working_directory_when_disabled(
+def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should not add trust when trust_working_directory is False (default)."""
+    """provision should not add trust when auto_dismiss_dialogs is False (default)."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     _write_all_dialogs_dismissed(agent.work_dir)
 
@@ -1134,16 +1134,16 @@ def test_provision_does_not_trust_working_directory_when_disabled(
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     # The global config should only contain what _write_all_dialogs_dismissed wrote.
-    # trust_working_directory=False (default) means no additional trust was added.
+    # auto_dismiss_dialogs=False (default) means no additional trust was added.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
     assert str(agent.work_dir.resolve()) in config["projects"]
 
 
-def test_trust_working_directory_defaults_to_false() -> None:
-    """Verify that trust_working_directory defaults to False for ClaudeAgentConfig."""
+def test_auto_dismiss_dialogs_defaults_to_false() -> None:
+    """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
     config = ClaudeAgentConfig()
-    assert config.trust_working_directory is False
+    assert config.auto_dismiss_dialogs is False
 
 
 def test_on_before_provisioning_raises_for_worktree_on_remote_host(
@@ -2427,7 +2427,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should find session by ID, copy project dir, and write session ID."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2499,7 +2499,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """Session lookup should find sessions in ~/.claude/ even when CLAUDE_CONFIG_DIR points elsewhere."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2538,7 +2538,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_after_provisioning should accept a .jsonl file path and extract the session ID."""
-    config = ClaudeAgentConfig(check_installation=False, trust_working_directory=True)
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
     _init_git_with_gitignore(agent.work_dir)
 
@@ -2769,27 +2769,25 @@ def test_rewrite_installed_plugins_paths_raises_on_similar_prefix() -> None:
 
 
 # =============================================================================
-# _fixup_installed_plugins_json Tests
+# _generate_installed_plugins_content Tests
 # =============================================================================
 
 
-def test_fixup_installed_plugins_json_rewrites_paths(tmp_path: Path) -> None:
-    """Fixup rewrites installPaths from ~/.claude/ to config_dir/."""
-    host = cast(OnlineHostInterface, FakeHost())
-    config_dir = tmp_path / "config"
-    plugins_dir = config_dir / "plugins"
+def test_generate_installed_plugins_content_rewrites_paths(tmp_path: Path) -> None:
+    """_generate_installed_plugins_content rewrites installPaths from source to target."""
+    source_claude_dir = tmp_path / "source_claude"
+    plugins_dir = source_claude_dir / "plugins"
     plugins_dir.mkdir(parents=True)
+    target_config_dir = tmp_path / "target"
 
-    local_claude_dir = Path.home() / ".claude"
-    installed_plugins = plugins_dir / "installed_plugins.json"
-    installed_plugins.write_text(
+    (plugins_dir / "installed_plugins.json").write_text(
         json.dumps(
             {
                 "version": 2,
                 "plugins": {
                     "test@org": [
                         {
-                            "installPath": f"{local_claude_dir}/plugins/cache/org/test/1.0.0",
+                            "installPath": f"{source_claude_dir}/plugins/cache/org/test/1.0.0",
                             "version": "1.0.0",
                         }
                     ]
@@ -2798,22 +2796,23 @@ def test_fixup_installed_plugins_json_rewrites_paths(tmp_path: Path) -> None:
         )
     )
 
-    _fixup_installed_plugins_json(host, local_claude_dir, config_dir)
+    content = _generate_installed_plugins_content(source_claude_dir, target_config_dir)
 
-    result = json.loads(installed_plugins.read_text())
+    assert content is not None
+    result = json.loads(content)
     assert result["plugins"]["test@org"][0]["installPath"] == str(
-        config_dir / "plugins" / "cache" / "org" / "test" / "1.0.0"
+        target_config_dir / "plugins" / "cache" / "org" / "test" / "1.0.0"
     )
 
 
-def test_fixup_installed_plugins_json_noop_when_no_file(tmp_path: Path) -> None:
-    """Fixup is a no-op when installed_plugins.json does not exist."""
-    host = cast(OnlineHostInterface, FakeHost())
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
+def test_generate_installed_plugins_content_returns_none_when_no_file(tmp_path: Path) -> None:
+    """_generate_installed_plugins_content returns None when file does not exist."""
+    source_claude_dir = tmp_path / "source_claude"
+    source_claude_dir.mkdir()
+    target_config_dir = tmp_path / "target"
 
-    # Should not raise
-    _fixup_installed_plugins_json(host, Path.home() / ".claude", config_dir)
+    result = _generate_installed_plugins_content(source_claude_dir, target_config_dir)
+    assert result is None
 
 
 # =============================================================================
@@ -2858,121 +2857,84 @@ def test_get_files_for_deploy_rewrites_install_paths_to_sentinel(temp_mngr_ctx: 
 
 
 # =============================================================================
-# _build_settings_json_content tests
+# _build_settings_json tests
 # =============================================================================
 
 
-def test_build_settings_json_content_defaults() -> None:
-    """_build_settings_json_content with no overrides returns base settings."""
-    content = _build_settings_json_content(sync_local=False)
+def test_build_settings_json_unattended_defaults() -> None:
+    """_build_settings_json with unattended context returns base settings with unattended flags."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["skipDangerousModePermissionPrompt"] is True
     assert "model" not in data
-    assert data.get("fastMode") is not True
+    assert data["fastMode"] is False
 
 
-def test_build_settings_json_content_sets_model() -> None:
-    """_build_settings_json_content with model sets the model field."""
-    content = _build_settings_json_content(sync_local=False, model="opus[1m]")
+def test_build_settings_json_settings_overrides_model() -> None:
+    """_build_settings_json with settings_overrides sets the model field."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "opus[1m]"})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["model"] == "opus[1m]"
 
 
-def test_build_settings_json_content_sets_is_fast() -> None:
-    """_build_settings_json_content with is_fast=True sets fastMode."""
-    content = _build_settings_json_content(sync_local=False, is_fast=True)
+def test_build_settings_json_settings_overrides_fast_mode() -> None:
+    """_build_settings_json with settings_overrides fastMode=True sets fastMode."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"fastMode": True})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_sets_model_and_is_fast() -> None:
-    """_build_settings_json_content with both model and is_fast sets both."""
-    content = _build_settings_json_content(sync_local=False, model="sonnet", is_fast=True)
+def test_build_settings_json_settings_overrides_model_and_fast() -> None:
+    """_build_settings_json with both model and fastMode in overrides."""
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "sonnet", "fastMode": True})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
     data = json.loads(content)
     assert data["model"] == "sonnet"
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_preserves_local_is_fast_when_config_enables_it() -> None:
-    """When is_fast=True, local fastMode is not disabled even if sync_local is True."""
+def test_build_settings_json_overrides_win_over_local() -> None:
+    """settings_overrides take precedence over local settings."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True}))
 
-    content = _build_settings_json_content(sync_local=True, is_fast=True)
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"fastMode": True})
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
     data = json.loads(content)
     assert data["fastMode"] is True
 
 
-def test_build_settings_json_content_disables_local_is_fast_when_config_does_not_enable_it() -> None:
-    """When is_fast=False, local fastMode is disabled with a warning."""
+def test_build_settings_json_unattended_disables_fast_by_default() -> None:
+    """Unattended context disables fastMode by default (API limitation)."""
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "settings.json").write_text(json.dumps({"fastMode": True, "other": "value"}))
 
-    content = _build_settings_json_content(sync_local=True, is_fast=False)
+    ctx = ProvisioningContext(is_unattended=True)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
     data = json.loads(content)
     assert data["fastMode"] is False
     assert data["other"] == "value"
 
 
-# =============================================================================
-# _setup_local_settings_json tests
-# =============================================================================
-
-
-def test_setup_local_settings_json_copies_when_no_overrides(tmp_path: Path) -> None:
-    """_setup_local_settings_json writes a copy (not a symlink) even with no overrides."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False)
-    _setup_local_settings_json(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    assert settings_path.exists()
-    assert not settings_path.is_symlink()
-
-
-def test_setup_local_settings_json_creates_file_with_model(tmp_path: Path) -> None:
-    """_setup_local_settings_json creates settings.json with model when none exists."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="opus[1m]")
-    _setup_local_settings_json(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    data = json.loads(settings_path.read_text())
+def test_build_settings_json_local_context_no_flags() -> None:
+    """Local (attended) context applies no extra flags."""
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False, settings_overrides={"model": "opus[1m]"})
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
     assert data["model"] == "opus[1m]"
-
-
-def test_setup_local_settings_json_creates_file_with_is_fast(tmp_path: Path) -> None:
-    """_setup_local_settings_json creates settings.json with fastMode when none exists."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, is_fast=True)
-    _setup_local_settings_json(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    data = json.loads(settings_path.read_text())
-    assert data["fastMode"] is True
-
-
-def test_setup_local_settings_json_applies_overrides(tmp_path: Path) -> None:
-    """_setup_local_settings_json writes a regular file with overrides applied."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-
-    host = cast(OnlineHostInterface, FakeHost())
-    config = ClaudeAgentConfig(check_installation=False, model="sonnet", is_fast=True)
-    _setup_local_settings_json(host, config_dir, config)
-
-    settings_path = config_dir / "settings.json"
-    data = json.loads(settings_path.read_text())
-    assert data["model"] == "sonnet"
-    assert data["fastMode"] is True
+    # _generate_claude_home_settings provides skipDangerousModePermissionPrompt
+    assert "skipDangerousModePermissionPrompt" in data
+    # Local (attended) context does not force fastMode
+    assert "fastMode" not in data

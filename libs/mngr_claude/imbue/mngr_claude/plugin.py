@@ -8,11 +8,11 @@ import json
 import os
 import random
 import shlex
+import tempfile
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Mapping
 from collections.abc import Sequence
-from concurrent.futures import Future
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -28,7 +28,6 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -212,19 +211,15 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "When set, installation uses this specific version and provisioning verifies the installed version matches. "
         "If None, uses the latest available version.",
     )
-    trust_working_directory: bool = Field(
+    auto_dismiss_dialogs: bool = Field(
         default=False,
-        description="Automatically add the agent's working directory to Claude's trusted directories "
-        "in ~/.claude.json before startup. This prevents the trust dialog from appearing. "
-        "Also dismisses the effort callout dialog.",
+        description="Automatically dismiss all Claude startup dialogs (trust, effort callout, onboarding) "
+        "before startup. When False, the interactive flow prompts.",
     )
-    model: str | None = Field(
-        default=None,
-        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
-    )
-    is_fast: bool = Field(
-        default=False,
-        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    settings_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Key-value overrides merged into settings.json at provisioning time. "
+        "Example: {'model': 'opus[1m]', 'fastMode': True}.",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -233,6 +228,50 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "events/claude/common_transcript/events.jsonl. The common format includes user messages, "
         "assistant messages, and tool call/result summaries.",
     )
+
+
+class ProvisioningContext(FrozenModel):
+    """Runtime context derived from host type and transfer mode."""
+
+    is_unattended: bool = Field(description="Agent runs without user interaction (remote/deploy)")
+    copy_project_config_from: Path | None = Field(
+        default=None, description="Source dir to copy project config from (worktree mode)"
+    )
+
+
+_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True}
+_UNATTENDED_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
+    "bypassPermissionsModeAccepted": True,
+    "effortCalloutDismissed": True,
+    "hasCompletedOnboarding": True,
+}
+_UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
+    "skipDangerousModePermissionPrompt": True,
+    # fastMode off by default in unattended mode (API limitation)
+    "fastMode": False,
+}
+
+
+@pure
+def compute_claude_json_flags(ctx: ProvisioningContext) -> Mapping[str, bool]:
+    """Compute .claude.json flags based on provisioning context."""
+    if ctx.is_unattended:
+        return {**_ALWAYS_CLAUDE_JSON_FLAGS, **_UNATTENDED_CLAUDE_JSON_FLAGS}
+    return dict(_ALWAYS_CLAUDE_JSON_FLAGS)
+
+
+@pure
+def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
+    """Compute settings.json flags based on provisioning context."""
+    if ctx.is_unattended:
+        return dict(_UNATTENDED_SETTINGS_FLAGS)
+    return {}
+
+
+@pure
+def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -> bool:
+    """Determine whether work_dir should be auto-trusted."""
+    return ctx.is_unattended or config.auto_dismiss_dialogs
 
 
 @pure
@@ -258,44 +297,47 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
-def _build_settings_json_content(
+def _build_settings_json(
+    source_claude_dir: Path,
+    config: ClaudeAgentConfig,
+    ctx: ProvisioningContext,
     sync_local: bool,
-    model: str | None = None,
-    is_fast: bool = False,
 ) -> str:
-    """Build settings.json content for remote/deploy per-agent config dirs.
-
-    Used for remote hosts and deploy only. Local hosts symlink settings.json
-    from ~/.claude/ instead, preserving the user's exact settings.
+    """Build settings.json content for per-agent config dirs.
 
     Uses the local file as a base when sync_local is True and the file exists,
-    otherwise uses generated defaults. Forces skipDangerousModePermissionPrompt=True
+    otherwise uses generated defaults. Applies context-dependent flags
+    (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
     """
-    local_path = Path.home() / ".claude" / "settings.json"
-    if sync_local and local_path.exists():
-        data: dict[str, Any] = json.loads(local_path.read_text())
+    source = source_claude_dir / "settings.json"
+    if sync_local and source.exists():
+        try:
+            data: dict[str, Any] = json.loads(source.read_text())
+        except json.JSONDecodeError:
+            data = _generate_claude_home_settings()
     else:
         data = _generate_claude_home_settings()
-    if model is not None:
-        data["model"] = model
-    if is_fast:
-        data["fastMode"] = True
-    else:
-        data["fastMode"] = False
-    data["skipDangerousModePermissionPrompt"] = True
+    data.update(compute_settings_json_flags(ctx))
+    data.update(config.settings_overrides)
     return json.dumps(data, indent=2) + "\n"
 
 
-def build_claude_json_for_agent(
-    sync_local: bool, work_dir: Path, version: str | None, current_time: datetime | None = None
+def _build_claude_json(
+    *,
+    work_dir: Path,
+    config: ClaudeAgentConfig,
+    ctx: ProvisioningContext,
+    sync_local: bool,
+    version: str | None,
+    current_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Build .claude.json data for the per-agent config dir.
 
-    Used for remote hosts and deploys where all dialogs must be suppressed
-    to prevent them from intercepting automated tmux input. Uses the local
-    file as a base when sync_local is True and the file exists, otherwise
-    uses generated defaults. Forces bypassPermissionsModeAccepted,
-    effortCalloutDismissed, and hasAcknowledgedCostThreshold.
+    Unified builder for local, remote, and deploy paths:
+    1. Reads base config (global ~/.claude.json if sync_local, else generated defaults)
+    2. Applies context-dependent flags (e.g. bypassPermissionsModeAccepted for unattended)
+    3. Trusts work_dir if should_trust_work_dir(config, ctx)
+    4. Copies source project config to work_dir if ctx.copy_project_config_from is set
 
     Returns the dict so callers can do further modifications (e.g. keychain merge)
     before serializing.
@@ -307,14 +349,42 @@ def build_claude_json_for_agent(
         )
     else:
         data = _generate_claude_json(version, current_time=current_time)
-    data["bypassPermissionsModeAccepted"] = True
-    data["effortCalloutDismissed"] = True
-    data["hasAcknowledgedCostThreshold"] = True
-    # Add trust for work_dir so Claude doesn't show the trust dialog
-    # (which would intercept tmux send-keys input):
+
+    data.update(compute_claude_json_flags(ctx))
+
     projects = data.setdefault("projects", {})
-    projects.setdefault(str(work_dir), {})["hasTrustDialogAccepted"] = True
+
+    # Copy project config from source (worktree mode)
+    if ctx.copy_project_config_from is not None:
+        source_path = ctx.copy_project_config_from.resolve()
+        global_projects = read_claude_config(get_claude_config_path()).get("projects", {}) if sync_local else {}
+        source_config = find_project_config(global_projects, source_path)
+        if source_config is not None:
+            projects[str(source_path)] = source_config
+            worktree_path_str = str(work_dir.resolve())
+            if worktree_path_str not in projects:
+                worktree_config = copy.deepcopy(source_config)
+                worktree_config["_mngrCreated"] = True
+                worktree_config["_mngrSourcePath"] = str(source_path)
+                projects[worktree_path_str] = worktree_config
+
+    # Trust work_dir if unattended or auto_dismiss_dialogs
+    if should_trust_work_dir(config, ctx):
+        projects.setdefault(str(work_dir), {})["hasTrustDialogAccepted"] = True
+
     return data
+
+
+def _generate_installed_plugins_content(source_claude_dir: Path, target_config_dir: Path) -> str | None:
+    """Read installed_plugins.json from source and rewrite paths to target.
+
+    Returns None if the file does not exist at source_claude_dir.
+    """
+    source_path = source_claude_dir / _INSTALLED_PLUGINS_RELATIVE_PATH
+    if not source_path.exists():
+        return None
+    content = source_path.read_text()
+    return _rewrite_installed_plugins_paths(content, source_claude_dir, target_config_dir)
 
 
 def _check_claude_installed(host: OnlineHostInterface) -> bool:
@@ -575,7 +645,7 @@ def _provision_keychain_credentials(config_dir: Path, concurrency_group: Concurr
             logger.debug("Copied OAuth credentials to per-agent keychain label {!r}", target)
 
 
-def _provision_file_credentials(host: OnlineHostInterface, config_dir: Path) -> None:
+def _symlink_credentials(host: OnlineHostInterface, config_dir: Path) -> None:
     """Linux/fallback: symlink .credentials.json to the per-agent config dir."""
     credentials_source = Path.home() / ".claude" / ".credentials.json"
     credentials_dest = config_dir / ".credentials.json"
@@ -588,37 +658,26 @@ def _provision_file_credentials(host: OnlineHostInterface, config_dir: Path) -> 
         logger.debug("No .credentials.json found to symlink")
 
 
-def _provision_remote_credentials(
-    host: OnlineHostInterface, config_dir: Path, concurrency_group: ConcurrencyGroup, convert_macos: bool
-) -> None:
-    """Remote hosts: read credentials locally (files or keychain), write flat files to the remote."""
-    credentials_path = Path.home() / ".claude" / ".credentials.json"
+def _read_credentials_content(
+    source_claude_dir: Path, config: ClaudeAgentConfig, concurrency_group: ConcurrencyGroup
+) -> str | None:
+    """Read credentials content from file or macOS keychain. Returns None if unavailable."""
+    credentials_path = source_claude_dir / ".credentials.json"
     if credentials_path.exists():
-        logger.info("Transferring .credentials.json to per-agent config dir...")
-        host.write_text_file(config_dir / ".credentials.json", credentials_path.read_text())
-    elif convert_macos and is_macos():
+        return credentials_path.read_text()
+    if config.convert_macos_credentials and is_macos():
         keychain_credentials = _read_macos_keychain_credential("Claude Code-credentials", concurrency_group)
         if keychain_credentials is not None:
-            logger.info("Writing macOS keychain OAuth credentials to per-agent config dir...")
-            host.write_text_file(config_dir / ".credentials.json", keychain_credentials)
-        else:
-            logger.debug("Skipped .credentials.json (file does not exist, no keychain credentials)")
-    else:
-        logger.debug("Skipped .credentials.json (file does not exist)")
+            return keychain_credentials
+    return None
 
 
-def _provision_remote_api_key(
-    host: OnlineHostInterface,
-    config_dir: Path,
+def _merge_keychain_api_key(
     claude_json_data: dict[str, Any],
-    config: "ClaudeAgentConfig",
+    config: ClaudeAgentConfig,
     concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Inject primaryApiKey from the macOS keychain into the remote .claude.json if needed.
-
-    Re-reads and rewrites .claude.json on the remote host if an API key is found
-    in the keychain but wasn't in the synced local config.
-    """
+    """Inject primaryApiKey from the macOS keychain into claude_json_data if not already present."""
     if claude_json_data.get("primaryApiKey"):
         return
     if not config.convert_macos_credentials or not is_macos():
@@ -626,19 +685,26 @@ def _provision_remote_api_key(
     keychain_api_key = _read_macos_keychain_credential("Claude Code", concurrency_group)
     if keychain_api_key is None:
         return
-    logger.info("Merging macOS keychain API key into remote per-agent .claude.json...")
+    logger.info("Merging macOS keychain API key into per-agent .claude.json...")
     claude_json_data["primaryApiKey"] = keychain_api_key
-    host.write_text_file(config_dir / ".claude.json", json.dumps(claude_json_data, indent=2) + "\n")
 
 
-def _sync_local_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
+def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
+    """Get the local host instance for file operations."""
+    local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
+    if not isinstance(local_host_ref, OnlineHostInterface):
+        raise MngrError("Local host is not online")
+    return local_host_ref
+
+
+def _symlink_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
     """Sync user resource directories from the claude home dir into the per-agent config dir.
 
     Symlinks or copies skills/, agents/, commands/, plugins/ depending on the
     ``symlink`` flag. In symlink mode, plugins/ uses child-level symlinks
     (not a dir-level symlink) so that installed_plugins.json can be rewritten
     in place without modifying the source. settings.json is handled separately
-    by _setup_local_settings_json.
+    by _build_settings_json.
     """
     home_claude = Path.home() / ".claude"
     for dir_name in _CLAUDE_HOME_SYNC_DIRS:
@@ -689,33 +755,6 @@ def _rsync_claude_home_directories(
         host.copy_directory(local_host, local_claude_dir, config_dir, extra_args=" ".join(include_args))
 
 
-def _fixup_installed_plugins_json(host: OnlineHostInterface, source_claude_dir: Path, config_dir: Path) -> None:
-    """Rewrite installPath values in installed_plugins.json from
-    source_claude_dir to config_dir.
-
-    installed_plugins.json contains absolute paths (e.g.
-    /home/user/.claude/plugins/cache/...) that won't resolve on a
-    different machine or in a different config dir. This rewrites them
-    to point to config_dir/plugins/cache/... so Claude Code can find
-    the plugin files.
-
-    Called after rsync (remote) or copy (local) has placed the file in
-    config_dir. Works transparently for local and remote hosts via
-    host.read_text_file / host.write_text_file.
-    """
-    installed_plugins_path = config_dir / _INSTALLED_PLUGINS_RELATIVE_PATH
-    try:
-        content = host.read_text_file(installed_plugins_path)
-    except FileNotFoundError:
-        return
-
-    rewritten = _rewrite_installed_plugins_paths(content, source_claude_dir, config_dir)
-    if rewritten == content:
-        return
-
-    host.write_text_file(installed_plugins_path, rewritten)
-
-
 def _resolve_installed_plugins_sentinel(host: OnlineHostInterface) -> None:
     """Resolve sentinel-prefixed installPaths in the claude home plugins directory.
 
@@ -735,36 +774,6 @@ def _resolve_installed_plugins_sentinel(host: OnlineHostInterface) -> None:
         return
     rewritten = _rewrite_installed_plugins_paths(content, Path(_INSTALLED_PLUGINS_SENTINEL_PREFIX), local_claude_dir)
     installed_plugins_path.write_text(rewritten)
-
-
-def _setup_local_settings_json(
-    host: OnlineHostInterface,
-    config_dir: Path,
-    config: ClaudeAgentConfig,
-) -> None:
-    """Set up settings.json in the per-agent config dir on a local host.
-
-    Reads the user's ~/.claude/settings.json as a base (or uses defaults),
-    applies any per-agent overrides (model, is_fast), and writes the result.
-    Always writes a copy rather than symlinking to avoid modifying the
-    user's global settings.
-    """
-    settings_path = config_dir / "settings.json"
-    source = Path.home() / ".claude" / "settings.json"
-
-    data: dict[str, Any] = {}
-    if source.exists():
-        try:
-            data = json.loads(source.read_text())
-        except json.JSONDecodeError:
-            logger.warning("Corrupt settings.json, using defaults")
-
-    if config.model is not None:
-        data["model"] = config.model
-    if config.is_fast:
-        data["fastMode"] = True
-
-    host.write_text_file(settings_path, json.dumps(data, indent=2) + "\n")
 
 
 def _load_claude_resource_script(filename: str) -> str:
@@ -1231,13 +1240,13 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         config = self.agent_config
 
         # Validate dialogs for non-interactive local runs so we fail early with
-        # a clear message. Skip when trust_working_directory is True because
+        # a clear message. Skip when auto_dismiss_dialogs is True because
         # provision() will auto-dismiss all dialogs in that case.
         if (
             host.is_local
             and not mngr_ctx.is_interactive
             and not mngr_ctx.is_auto_approve
-            and not config.trust_working_directory
+            and not config.auto_dismiss_dialogs
         ):
             transfer_mode = options.transfer_mode
             if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
@@ -1395,171 +1404,97 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
     ) -> None:
         """Create and populate the per-agent Claude config directory.
 
-        This directory is pointed to by CLAUDE_CONFIG_DIR so that Claude Code
-        uses per-agent config/sessions/state instead of the global ~/.claude/.
-
-        For local hosts:
-        - Copies .claude.json from global config (with per-agent trust entries)
-        - Symlinks .credentials.json (or copies keychain credentials on macOS)
-        - Symlinks settings.json, skills/, agents/, commands/, plugins/ from ~/.claude/
-
-        For remote hosts:
-        - Writes .claude.json, .credentials.json, settings.json directly
-        - Copies skills/, agents/, commands/, plugins/ from ~/.claude/
+        Unified flow for local and remote hosts:
+        1. Build runtime context (ProvisioningContext)
+        2. Generate all file contents (.claude.json, settings.json, installed_plugins.json)
+        3. Transfer directories (symlink/rsync) and set up credentials
+        4. Stage generated files to temp dir and copy to config_dir
         """
         config = self.agent_config
         config_dir = self.get_claude_config_dir()
+        source_claude_dir = Path.home() / ".claude"
+
+        # Build runtime context
+        copy_project_config_from: Path | None = None
+        if host.is_local and options.transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
+            copy_project_config_from = self._find_git_source_path(mngr_ctx.concurrency_group)
+        ctx = ProvisioningContext(is_unattended=not host.is_local, copy_project_config_from=copy_project_config_from)
 
         # Create the config directory (0700: contains credentials and session data)
         host.execute_idempotent_command(f"mkdir -p -m 0700 {shlex.quote(str(config_dir))}", timeout_seconds=5.0)
 
-        if host.is_local:
-            self._setup_local_config_dir(host, options, config, config_dir)
-        else:
-            self._setup_remote_config_dir(host, options, config, config_dir, mngr_ctx)
-
-    def _setup_local_config_dir(
-        self,
-        host: OnlineHostInterface,
-        options: CreateAgentOptions,
-        config: ClaudeAgentConfig,
-        config_dir: Path,
-    ) -> None:
-        """Set up the per-agent config dir on a local host."""
-        claude_json_data = self._build_per_agent_claude_json(options, config)
-        approve_api_key_for_claude(claude_json_data)
-        host.write_text_file(config_dir / ".claude.json", json.dumps(claude_json_data, indent=2) + "\n")
-
-        if config.convert_macos_credentials and is_macos():
-            _provision_keychain_credentials(config_dir, self.mngr_ctx.concurrency_group)
-        else:
-            _provision_file_credentials(host, config_dir)
-
-        if config.sync_home_settings:
-            _sync_local_user_resources(host, config_dir, symlink=config.symlink_user_resources)
-            # Rewrite installPath values from ~/.claude/ to config_dir so Claude Code
-            # finds plugins in the per-agent dir (plugins/ uses child-level symlinks
-            # in symlink mode, so this write doesn't modify the source)
-            _fixup_installed_plugins_json(host, Path.home() / ".claude", config_dir)
-
-        _setup_local_settings_json(host, config_dir, config)
-
-    def _setup_remote_config_dir(
-        self,
-        host: OnlineHostInterface,
-        options: CreateAgentOptions,
-        config: ClaudeAgentConfig,
-        config_dir: Path,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Set up the per-agent config dir on a remote host."""
-        # Warn about version consistency when syncing local files
-        if config.sync_home_settings or config.sync_claude_json or config.sync_claude_credentials:
+        # Warn about version consistency when syncing local files to remote
+        if not host.is_local and (
+            config.sync_home_settings or config.sync_claude_json or config.sync_claude_credentials
+        ):
             _warn_about_version_consistency(config, mngr_ctx.concurrency_group)
 
-        file_transfers: list[tuple[Path, bytes]] = []
-        local_claude_dir = Path.home() / ".claude"
+        local_host = _get_local_host(mngr_ctx)
 
-        # 1. Always ship settings.json (generated content, not a direct copy)
-        file_transfers.append(
-            (
-                config_dir / "settings.json",
-                _build_settings_json_content(
-                    config.sync_home_settings,
-                    model=config.model,
-                    is_fast=config.is_fast,
-                ).encode("utf-8"),
+        # Resolve work_dir on remote hosts (e.g. Modal symlinks /mngr/ -> /__modal/volumes/)
+        work_dir = self.work_dir
+        if not host.is_local:
+            realpath_result = host.execute_idempotent_command(
+                f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
             )
-        )
+            if realpath_result.success and realpath_result.stdout.strip():
+                work_dir = Path(realpath_result.stdout.strip())
 
-        # 2. Rsync directory items (skills, agents, commands, plugins) in bulk,
-        # then rewrite installPath values in installed_plugins.json from the
-        # local ~/.claude/ prefix to the remote config_dir prefix
-        if config.sync_home_settings:
-            logger.info("Transferring claude home directory settings to per-agent config dir...")
-            local_host_ref = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx).get_host(HostName("localhost"))
-            if not isinstance(local_host_ref, OnlineHostInterface):
-                raise MngrError("Local host is not online")
-            _rsync_claude_home_directories(host, local_host_ref, local_claude_dir, config_dir)
-            _fixup_installed_plugins_json(host, local_claude_dir, config_dir)
-
-        # 3. Always ship .claude.json (generated content, not a direct copy)
-        # Resolve the work_dir on the remote host so the trust entry matches
-        # the path Claude Code sees (e.g., Modal symlinks /mngr/... to /__modal/volumes/...)
-        resolved_work_dir = self.work_dir
-        realpath_result = host.execute_idempotent_command(
-            f"realpath {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        # 1. Generate all file contents
+        claude_json_data = _build_claude_json(
+            work_dir=work_dir,
+            config=config,
+            ctx=ctx,
+            sync_local=config.sync_claude_json,
+            version=config.version,
         )
-        if realpath_result.success and realpath_result.stdout.strip():
-            resolved_work_dir = Path(realpath_result.stdout.strip())
-        claude_json_data = build_claude_json_for_agent(config.sync_claude_json, resolved_work_dir, config.version)
         approve_api_key_for_claude(claude_json_data)
-        file_transfers.append(
-            (config_dir / ".claude.json", (json.dumps(claude_json_data, indent=2) + "\n").encode("utf-8"))
-        )
 
-        # Ship the generated files (settings.json, .claude.json):
-        _parallel_file_transfer(file_transfers, host, mngr_ctx)
+        settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
 
-        # 4. Ship credentials (API key via .claude.json, OAuth via .credentials.json)
-        _provision_remote_api_key(host, config_dir, claude_json_data, config, mngr_ctx.concurrency_group)
-        if config.sync_claude_credentials:
-            _provision_remote_credentials(
-                host, config_dir, mngr_ctx.concurrency_group, config.convert_macos_credentials
-            )
+        installed_plugins = _generate_installed_plugins_content(source_claude_dir, config_dir)
 
-    def _build_per_agent_claude_json(
-        self,
-        options: CreateAgentOptions,
-        config: ClaudeAgentConfig,
-    ) -> dict[str, Any]:
-        """Build the per-agent .claude.json for local hosts.
+        generated_files: dict[Path, str] = {
+            Path("settings.json"): settings_json,
+            Path(".claude.json"): json.dumps(claude_json_data, indent=2) + "\n",
+        }
+        if installed_plugins:
+            generated_files[_INSTALLED_PLUGINS_RELATIVE_PATH] = installed_plugins
 
-        Starts from the user's global ~/.claude.json to preserve all existing
-        dialog states (trust, effort callout, bypass permissions, onboarding).
-        Adds per-agent identity (worktree source project config, primaryApiKey)
-        and forces hasAcknowledgedCostThreshold to suppress the cost threshold
-        dialog. Falls back to generated defaults if no global config exists.
+        # Remote credentials: read locally, include in generated files for staging
+        if not host.is_local and config.sync_claude_credentials:
+            credentials = _read_credentials_content(source_claude_dir, config, mngr_ctx.concurrency_group)
+            if credentials:
+                generated_files[Path(".credentials.json")] = credentials
 
-        Trust for work_dir is added by extending from the source directory
-        (for git-worktree/git-mirror modes), by trust_working_directory config,
-        or inherited from the global config (for rsync/none modes where the
-        user was already prompted). Falls back to generated defaults if no global
-        config exists.
-        """
-        global_config = read_claude_config(get_claude_config_path())
-        if global_config:
-            data = global_config
-        else:
-            data = _generate_claude_json(config.version)
+        # Remote API key: merge from keychain if not already in .claude.json
+        if not host.is_local:
+            _merge_keychain_api_key(claude_json_data, config, mngr_ctx.concurrency_group)
+            # Re-serialize after potential keychain merge
+            generated_files[Path(".claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
 
-        projects = data.setdefault("projects", {})
-        transfer_mode = options.transfer_mode
+        # 2. Transfer directories and set up local credentials
+        if config.sync_home_settings:
+            if host.is_local and config.symlink_user_resources:
+                _symlink_user_resources(host, config_dir, symlink=True)
+            else:
+                if host.is_local:
+                    _symlink_user_resources(host, config_dir, symlink=False)
+                else:
+                    _rsync_claude_home_directories(host, local_host, source_claude_dir, config_dir)
+        if host.is_local:
+            if config.convert_macos_credentials and is_macos():
+                _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
+            else:
+                _symlink_credentials(host, config_dir)
 
-        # For worktree/mirror mode, extend trust from the source to the work_dir
-        if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
-            source_path = self._find_git_source_path(self.mngr_ctx.concurrency_group)
-            if source_path is not None:
-                source_path = source_path.resolve()
-                global_projects = global_config.get("projects", {})
-                source_config = find_project_config(global_projects, source_path)
-                if source_config is not None:
-                    projects[str(source_path)] = source_config
-                    worktree_path_str = str(self.work_dir.resolve())
-                    if worktree_path_str not in projects:
-                        worktree_config = copy.deepcopy(source_config)
-                        worktree_config["_mngrCreated"] = True
-                        worktree_config["_mngrSourcePath"] = str(source_path)
-                        projects[worktree_path_str] = worktree_config
-
-        # trust_working_directory: auto-add trust for work_dir
-        if config.trust_working_directory:
-            projects.setdefault(str(self.work_dir.resolve()), {})["hasTrustDialogAccepted"] = True
-
-        # Always suppress the cost threshold dialog (it blocks all input)
-        data["hasAcknowledgedCostThreshold"] = True
-
-        return data
+        # 3. Stage generated files to temp dir and copy to config_dir
+        with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
+            for relative, content in generated_files.items():
+                staged = Path(staging) / relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_text(content)
+            host.copy_directory(local_host, Path(staging), config_dir)
 
     def provision(
         self,
@@ -1574,7 +1509,7 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         depends on the transfer mode:
         - git-worktree/git-mirror: trust is extended from the source directory
         - rsync/none: trust is prompted for the work_dir
-        - trust_working_directory=True: trust is auto-added for work_dir
+        - auto_dismiss_dialogs=True: trust is auto-added for work_dir
         """
         # Resolve sentinel-prefixed installPaths in ~/.claude/ if present.
         # Deploy images have paths rewritten to a sentinel at build time
@@ -1598,8 +1533,8 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
                 if transfer_mode in (TransferMode.GIT_WORKTREE, TransferMode.GIT_MIRROR):
                     source_path = self._find_git_source_path(mngr_ctx.concurrency_group)
 
-                if config.trust_working_directory:
-                    # Auto-approve all dialogs for agents that opt into trust
+                if config.auto_dismiss_dialogs:
+                    # Auto-approve all dialogs for agents that opt into dismissal
                     ensure_claude_dialogs_dismissed(get_claude_config_path(), self.work_dir)
                 else:
                     # Check/prompt for all blocking dialogs
@@ -1815,39 +1750,6 @@ def _generate_claude_json(version: str | None, current_time: datetime | None = N
     }
 
 
-_MKDIR_BATCH_SIZE: Final[int] = 50
-
-
-def _parallel_file_transfer(transfers: Sequence[tuple[Path, bytes]], host, mngr_ctx):
-    # Deduplicate parent directories -- many files share the same parent, and
-    # sending all 1000+ paths in a single mkdir command can exceed the OS
-    # argument length limit ("/bin/bash: File name too long").
-    unique_dirs = sorted({str(dest_path.parent) for dest_path, _ in transfers})
-
-    # Batch mkdir calls so no single command exceeds OS argument limits.
-    for i in range(0, len(unique_dirs), _MKDIR_BATCH_SIZE):
-        batch = unique_dirs[i : i + _MKDIR_BATCH_SIZE]
-        args = " ".join(shlex.quote(d) for d in batch)
-        mkdir_result = host.execute_idempotent_command(f"mkdir -p {args}")
-        if not mkdir_result.success:
-            raise MngrError(f"Failed to create directories: {mkdir_result.stderr}")
-
-    # then upload them all in parallel
-    count = 0
-    futures: list[Future[None]] = []
-    with ConcurrencyGroupExecutor(
-        parent_cg=mngr_ctx.concurrency_group, name="upload_deploy_files", max_workers=16
-    ) as executor:
-        for dest_path, dest_contents in transfers:
-            futures.append(executor.submit(host.write_file, path=dest_path, content=dest_contents))
-            logger.trace("Uploaded deploy file: {} -> {}", dest_path, dest_path)
-            count += 1
-
-    # Re-raise any thread exceptions (e.g. abort-mode errors)
-    for future in futures:
-        future.result()
-
-
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the claude agent type."""
@@ -1950,15 +1852,25 @@ def get_files_for_deploy(
     files: dict[Path, Path | str] = {}
 
     local_claude_dir = Path.home() / ".claude"
+    deploy_ctx = ProvisioningContext(is_unattended=True, copy_project_config_from=None)
+    deploy_config = ClaudeAgentConfig()
 
     # settings.json always ships (generated, not a direct copy)
-    files[Path("~/.claude/settings.json")] = _build_settings_json_content(include_user_settings)
+    files[Path("~/.claude/settings.json")] = _build_settings_json(
+        local_claude_dir, deploy_config, deploy_ctx, sync_local=include_user_settings
+    )
 
     # Always ship .claude.json to $HOME/.claude/ in the deploy image.
     # we set the time to a constant for better caching:
     FIXED_TIME = datetime(2026, 2, 23, 3, 4, 7, tzinfo=timezone.utc)
-    # it's a little silly to pass in repo_root here, but whatever, it will also get reset when we're provisioning
-    claude_json_data = build_claude_json_for_agent(False, repo_root, None, current_time=FIXED_TIME)
+    claude_json_data = _build_claude_json(
+        work_dir=repo_root,
+        config=deploy_config,
+        ctx=deploy_ctx,
+        sync_local=False,
+        version=None,
+        current_time=FIXED_TIME,
+    )
     # also inject our API key here, since deployed versions need it
     approve_api_key_for_claude(claude_json_data)
     files[Path("~/.claude.json")] = json.dumps(claude_json_data, indent=2) + "\n"
@@ -2009,7 +1921,10 @@ def modify_env_vars_for_deploy(
     env_vars: dict[str, str],
 ) -> None:
     if "ANTHROPIC_API_KEY" not in env_vars:
-        user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
+        deploy_ctx = ProvisioningContext(is_unattended=True, copy_project_config_from=None)
+        user_claude_json_data = _build_claude_json(
+            work_dir=Path("."), config=ClaudeAgentConfig(), ctx=deploy_ctx, sync_local=True, version=None
+        )
         token = user_claude_json_data.get("primaryApiKey", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         if not token:
             raise UserInputError(
@@ -2021,9 +1936,9 @@ def modify_env_vars_for_deploy(
 
 
 def approve_api_key_for_claude(data: dict[str, Any]):
-    # approve the API key so that the agent doesnt get blocked
-    user_claude_json_data = build_claude_json_for_agent(True, Path("."), None)
-    conf_key = user_claude_json_data.get("primaryApiKey", "")
+    """Approve the API key so that the agent doesn't get blocked by the custom API key dialog."""
+    user_config = read_claude_config(get_claude_config_path())
+    conf_key = user_config.get("primaryApiKey", "")
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if api_key or conf_key:
         approved_section = data.setdefault("customApiKeyResponses", {})

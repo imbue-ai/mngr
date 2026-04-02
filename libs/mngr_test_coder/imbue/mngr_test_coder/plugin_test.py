@@ -29,7 +29,7 @@ def test_test_coder_config_defaults() -> None:
     config = TestCoderConfig()
     assert config.install_llm_matched_responses is True
     assert config.install_llm is True
-    assert config.trust_working_directory is True
+    assert config.auto_dismiss_dialogs is True
 
 
 # --- assemble_command tests ---

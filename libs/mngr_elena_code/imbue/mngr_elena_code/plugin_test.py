@@ -54,7 +54,7 @@ def _make_elena_agent(tmp_path: Path) -> tuple[ElenaCodeAgent, OnlineHostInterfa
 def test_elena_code_registers_with_claude_mind_config() -> None:
     """Verify that register_agent_type returns ClaudeMindConfig (not ClaudeAgentConfig).
 
-    This ensures elena-code inherits trust_working_directory=True so the
+    This ensures elena-code inherits auto_dismiss_dialogs=True so the
     Claude trust dialog does not appear when deploying with --transfer=none.
     """
     _agent_type_name, _agent_class, config_class = register_agent_type()
