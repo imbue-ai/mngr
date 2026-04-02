@@ -52,7 +52,7 @@ class AgentRestarter(MutableModel):
         now = time.monotonic()
 
         with self._lock:
-            last_attempt = self._last_attempt_by_agent.get(aid_str, 0.0)
+            last_attempt = self._last_attempt_by_agent.get(aid_str, float("-inf"))
             if now - last_attempt < self.cooldown_seconds:
                 return
             self._last_attempt_by_agent[aid_str] = now
