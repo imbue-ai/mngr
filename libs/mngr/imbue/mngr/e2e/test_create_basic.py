@@ -10,7 +10,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_default(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # running mngr create is strictly better than running claude! It's less letters to type :-D
@@ -33,7 +32,6 @@ def test_create_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
@@ -64,7 +62,6 @@ def test_create_in_place(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
@@ -93,7 +90,6 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)
@@ -124,7 +120,6 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
@@ -149,7 +144,6 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -170,7 +164,6 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
@@ -192,7 +185,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.

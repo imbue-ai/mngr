@@ -12,7 +12,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(
         e2e.run(
