@@ -304,6 +304,7 @@ def build_claude_json_for_agent(
     data["bypassPermissionsModeAccepted"] = True
     data["effortCalloutDismissed"] = True
     data["hasAcknowledgedCostThreshold"] = True
+    data["hasCompletedOnboarding"] = True
     # Add trust for work_dir so Claude doesn't show the trust dialog
     # (which would intercept tmux send-keys input):
     projects = data.setdefault("projects", {})
