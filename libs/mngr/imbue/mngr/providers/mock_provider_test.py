@@ -86,6 +86,7 @@ class MockProviderInstance(BaseProviderInstance):
                 host_id=h.id,
                 host_name=h.get_name(),
                 provider_name=self.name,
+                host_state=h.get_state(),
             )
             for h in self.mock_hosts
         ]
