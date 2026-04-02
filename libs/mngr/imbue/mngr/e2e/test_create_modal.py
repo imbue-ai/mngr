@@ -13,9 +13,10 @@ from imbue.skitwright.expect import expect
 
 _REMOTE_TIMEOUT = 120.0
 
-# Note: @pytest.mark.modal is NOT used here. The modal resource guard is an
-# SDK-level monkeypatch that only intercepts in-process Modal calls. E2e tests
-# run mngr as a subprocess, so the guard never fires; adding the mark would
+# Note: @pytest.mark.modal is NOT used here. In libs/mngr/conftest.py, the
+# modal resource guard is a PATH wrapper for the `modal` CLI binary. These
+# e2e tests run mngr as a subprocess, which uses the Modal Python SDK (not
+# the `modal` CLI), so the PATH wrapper never fires; adding the mark would
 # cause "Test marked with @pytest.mark.modal but never invoked modal" failures.
 # The @pytest.mark.rsync mark IS valid for tests that create Modal agents,
 # because the rsync guard uses a PATH wrapper script that subprocesses inherit.
