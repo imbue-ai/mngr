@@ -1,10 +1,12 @@
 """Tests for environment variables, config, and templates from the tutorial."""
 
 import json
+import uuid
 
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.utils.polling import wait_for
 from imbue.skitwright.expect import expect
 
 
@@ -16,18 +18,30 @@ def test_create_with_env(e2e: E2eSession) -> None:
     mngr create my-task --env DEBUG=true
     # (--env-file loads from a file, --pass-env forwards a variable from your current shell)
     """)
+    # Use a unique value so we can verify it appears in the tmux pane
+    env_value = uuid.uuid4().hex
     expect(
         e2e.run(
-            "mngr create my-task --env DEBUG=true --command 'sleep 99999' --no-ensure-clean",
+            f"mngr create my-task --env MNGR_TEST_VAR={env_value}"
+            " --command 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 99999'"
+            " --no-ensure-clean",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
 
-    # Verify agent was created (env vars are only available inside the agent's
-    # tmux session; mngr exec runs on the host and cannot see them)
-    list_result = e2e.run("mngr list", comment="Verify agent created with --env")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
+    # Verify the env var is visible in the agent's tmux pane.
+    # The command prints MNGR_TEST_VAR=<value> before sleeping, so it
+    # should appear in the captured pane content. The session name is
+    # {MNGR_PREFIX}{agent_name}, and tmux commands use the e2e fixture's
+    # TMUX_TMPDIR to find the right server.
+    def _env_var_visible() -> bool:
+        capture = e2e.run(
+            "tmux capture-pane -t $(tmux list-sessions -F '#{session_name}' | grep my-task) -p",
+            comment="Capture tmux pane to verify env var",
+        )
+        return env_value in capture.stdout
+
+    wait_for(_env_var_visible, timeout=10.0, error_message=f"Expected {env_value} in tmux pane")
 
 
 @pytest.mark.release
