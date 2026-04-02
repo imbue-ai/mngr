@@ -27,6 +27,8 @@ Run on any compute: local, Docker, Modal, or anything you can SSH into.
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.sh | bash
 ```
 
+For a quickstart, use `mngr ask` to learn the CLI interface.
+
 ## Overview
 
 `mngr` is a composable primitive for running parallel coding agents at any scale—locally, on Modal, in Docker, or anywhere you can SSH into. Works with Claude, Codex, any coding agent.
