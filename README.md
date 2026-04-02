@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 
 ## Overview
 
-`mngr` makes it easy to create and use any AI agent (ex: Claude Code, Codex), anywhere (locally, in Docker, on Modal, etc.).
+`mngr` makes it easy to create and use *any AI agent* (ex: Claude Code, Codex), *anywhere* (locally, in Docker, on Modal, etc.).
 
 Think of `mngr` as "git for agents": just like git allows you to `commit`/`push`/`pull`/`fork`/`clone` *versions of code*, `mngr` allows you to `create`/`destroy`/`list`/`clone`/`message` *agents*.
 
@@ -35,20 +35,40 @@ flowchart LR
     classDef user fill:#DBEAFE,stroke:#2563EB,stroke-width:2px,color:#1E3A5F,font-weight:bold
     classDef cli fill:#1E3A5F,stroke:#1E3A5F,stroke-width:2px,color:#FFFFFF,font-weight:bold
     classDef agent fill:#D1FAE5,stroke:#059669,stroke-width:2px,color:#064E3B
-    classDef host fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
-    classDef repo fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
 
     user([You]):::user
     cli[mngr CLI]:::cli
-    agent["Agent (Claude · Codex · OpenCode)"]:::agent
-    host["Isolated Host (local · Modal · Docker)"]:::host
-    codebase[(Your Codebase)]:::repo
 
-    user -->|"create / message / exec"| cli
-    cli -->|spawns| agent
-    agent -->|runs in| host
-    host <-->|"git · SSH · rsync"| codebase
-    cli <-->|"connect · transcript · pull"| host
+    subgraph host1["Local Host"]
+        style host1 fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+        agent1["Claude A"]:::agent
+        agent6["Claude F"]:::agent
+        subgraph docker1["Docker container 1"]
+            style docker1 fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
+            agent3["Claude C"]:::agent
+            agent4["Claude D"]:::agent
+        end
+        subgraph docker2["Docker container 2"]
+            style docker2 fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#4C1D95
+            agent5["Claude E"]:::agent
+        end
+    end
+
+    subgraph host2["Remote host 1"]
+        style host2 fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+        agent2["Claude B"]:::agent
+    end
+
+    subgraph host3["Remote host 2"]
+        style host3 fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
+        agent7["Claude G"]:::agent
+        agent8["Claude H"]:::agent
+    end
+
+    user -->|"create / list / destroy / snapshot / push / pull / message / etc"| cli
+    cli --> host1
+    cli --> host2
+    cli --> host3
 ```
 
 ## Why mngr
@@ -281,11 +301,11 @@ You can interact with `mngr` via the terminal (run `mngr --help` to learn more).
 `mngr` uses robust open source tools like SSH, git, and tmux to run and manage your agents:
 
 - **[agents](libs/mngr/docs/concepts/agents.md)** are simply processes that run in [tmux](https://github.com/tmux/tmux/wiki) sessions, each with their own `work_dir` (working folder) and configuration (ex: secrets, environment variables, etc)
-- [agents](libs/mngr/docs/concepts/agents.md) run on **[hosts](libs/mngr/docs/concepts/hosts.md)**--either locally (by default), or special environments like [Modal](https://modal.com) [Sandboxes](https://modal.com/docs/guide/sandboxes) (`--provider modal`) or [Docker](https://www.docker.com) [containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/) (`--provider docker`).  Use the `agent@host` address syntax to target an existing host.
-- multiple [agents](libs/mngr/docs/concepts/agents.md) can share a single [host](libs/mngr/docs/concepts/hosts.md).
-- [hosts](libs/mngr/docs/concepts/hosts.md) come from **[providers](libs/mngr/docs/concepts/providers.md)** (ex: Modal, AWS, docker, etc)
-- [hosts](libs/mngr/docs/concepts/hosts.md) help save money by automatically "pausing" when all of their [agents](libs/mngr/docs/concepts/agents.md) are "idle". See [idle detection](libs/mngr/docs/concepts/idle_detection.md) for more details.
-- [hosts](libs/mngr/docs/concepts/hosts.md) automatically "stop" when all of their [agents](libs/mngr/docs/concepts/agents.md) are "stopped"
+- agents run on **[hosts](libs/mngr/docs/concepts/hosts.md)**--either locally (by default), or special environments like [Modal](https://modal.com) [Sandboxes](https://modal.com/docs/guide/sandboxes) (`--provider modal`) or [Docker](https://www.docker.com) [containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/) (`--provider docker`).  Use the `agent@host` address syntax to target an existing host.
+- multiple agents can share a single host.
+- hosts come from **[providers](libs/mngr/docs/concepts/providers.md)** (ex: Modal, AWS, docker, etc)
+- hosts help save money by automatically "pausing" when all of their agents are "idle". See [idle detection](libs/mngr/docs/concepts/idle_detection.md) for more details.
+- hosts automatically "stop" when all of their agents are "stopped"
 - `mngr` is extensible via **[plugins](libs/mngr/docs/concepts/plugins.md)**--you can add new agent types, provider backends, CLI commands, and lifecycle hooks
 <!-- - `mngr` is absurdly extensible--there are existing **[plugins](libs/mngr/docs/concepts/plugins.md)** for almost everything, and `mngr` can even [dynamically generate new plugins](libs/mngr/docs/commands/secondary/plugin.md#mngr-plugin-generate) [future] -->
 
