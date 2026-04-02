@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-opencode"
-version = "0.2.0"
+version = "0.2.1"
 description = "OpenCode agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.0",
+    "imbue-mngr==0.2.1",
 ]
 
 [project.entry-points.mngr]
