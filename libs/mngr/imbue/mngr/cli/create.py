@@ -1371,6 +1371,11 @@ def _parse_target_host(
                 "Use NAME@HOST.PROVIDER --new-host or NAME@.PROVIDER."
             )
 
+        # The local provider has a single fixed host; skip the new-host path
+        # and use the existing localhost instead.
+        if address.provider_name.lower() == LOCAL_PROVIDER_NAME:
+            return None
+
         # Parse host-level labels
         host_labels_dict: dict[str, str] = {}
         for label_string in opts.host_label:

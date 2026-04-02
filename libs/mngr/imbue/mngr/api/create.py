@@ -1,3 +1,4 @@
+from typing import Final
 from typing import cast
 
 from loguru import logger
@@ -10,15 +11,22 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import HostNameConflictError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
+
+_MAX_HOST_NAME_GENERATION_ATTEMPTS: Final[int] = 100
+_MAX_HOST_NAME_CONFLICT_RETRIES: Final[int] = 3
 
 
 def _call_on_before_create_hooks(
@@ -214,6 +222,60 @@ def _write_host_env_vars(
             host.set_env_vars(env_vars)
 
 
+def _generate_unique_host_name(
+    provider: ProviderInstanceInterface,
+    target_host: NewHostOptions,
+    mngr_ctx: MngrContext,
+) -> HostName:
+    """Generate a host name that does not collide with existing hosts on the provider."""
+    with log_span("Discovering existing hosts for name uniqueness check"):
+        existing_hosts = provider.discover_hosts(cg=mngr_ctx.concurrency_group)
+    existing_names: set[HostName] = {h.host_name for h in existing_hosts}
+    for _ in range(_MAX_HOST_NAME_GENERATION_ATTEMPTS):
+        candidate = provider.get_host_name(target_host.name_style)
+        if candidate not in existing_names:
+            return candidate
+    raise MngrError(
+        f"Failed to generate a unique host name after {_MAX_HOST_NAME_GENERATION_ATTEMPTS} attempts. "
+        f"Use an explicit host name in the address (e.g. NAME@HOST.PROVIDER)."
+    )
+
+
+def _create_new_host(
+    provider: ProviderInstanceInterface,
+    host_name: HostName,
+    target_host: NewHostOptions,
+    mngr_ctx: MngrContext,
+) -> OnlineHostInterface:
+    """Create a new host and write its environment variables."""
+    with log_span("Calling on_before_host_create hooks"):
+        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider)
+    with log_span(
+        "Creating new host '{}' using provider '{}'",
+        host_name,
+        target_host.provider,
+        tags=target_host.tags,
+        build_args=target_host.build.build_args,
+        start_args=target_host.build.start_args,
+        lifecycle=target_host.lifecycle,
+        known_hosts_count=len(target_host.environment.known_hosts),
+        authorized_keys_count=len(target_host.environment.authorized_keys),
+    ):
+        new_host = provider.create_host(
+            name=host_name,
+            tags=target_host.tags,
+            build_args=target_host.build.build_args,
+            start_args=target_host.build.start_args,
+            lifecycle=target_host.lifecycle,
+            known_hosts=target_host.environment.known_hosts,
+            authorized_keys=target_host.environment.authorized_keys,
+            snapshot=target_host.build.snapshot,
+        )
+
+    _write_host_env_vars(new_host, target_host.environment)
+    return new_host
+
+
 def resolve_target_host(
     target_host: OnlineHostInterface | NewHostOptions,
     mngr_ctx: MngrContext,
@@ -222,40 +284,30 @@ def resolve_target_host(
     if target_host is not None and isinstance(target_host, NewHostOptions):
         # Create a new host using the specified provider
         provider = get_provider_instance(target_host.provider, mngr_ctx)
-        host_name = (
-            target_host.name if target_host.name is not None else provider.get_host_name(target_host.name_style)
-        )
+        is_auto_named = target_host.name is None
+        host_name = target_host.name
+        if host_name is None:
+            host_name = _generate_unique_host_name(provider, target_host, mngr_ctx)
 
-        with log_span("Calling on_before_host_create hooks"):
-            mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider)
-        with log_span(
-            "Creating new host '{}' using provider '{}'",
-            host_name,
-            target_host.provider,
-            tags=target_host.tags,
-            build_args=target_host.build.build_args,
-            start_args=target_host.build.start_args,
-            lifecycle=target_host.lifecycle,
-            known_hosts_count=len(target_host.environment.known_hosts),
-            authorized_keys_count=len(target_host.environment.authorized_keys),
-        ):
-            new_host = provider.create_host(
-                name=host_name,
-                tags=target_host.tags,
-                build_args=target_host.build.build_args,
-                start_args=target_host.build.start_args,
-                lifecycle=target_host.lifecycle,
-                known_hosts=target_host.environment.known_hosts,
-                authorized_keys=target_host.environment.authorized_keys,
-                snapshot=target_host.build.snapshot,
-            )
+        # When the name was auto-generated, retry on conflict (race with
+        # concurrent creation). User-specified names should not be retried.
+        max_attempts = _MAX_HOST_NAME_CONFLICT_RETRIES if is_auto_named else 1
+        for attempt in range(max_attempts):
+            try:
+                return _create_new_host(provider, host_name, target_host, mngr_ctx)
+            except HostNameConflictError:
+                if not is_auto_named or attempt == max_attempts - 1:
+                    raise
+                logger.warning(
+                    "Host name '{}' conflicted, regenerating (attempt {}/{})",
+                    host_name,
+                    attempt + 1,
+                    max_attempts,
+                )
+                host_name = _generate_unique_host_name(provider, target_host, mngr_ctx)
 
-        # Write host environment variables to the host env file (if creating a new host)
-        if isinstance(target_host, NewHostOptions):
-            _write_host_env_vars(new_host, target_host.environment)
-
-        # and return it
-        return new_host
+        # Unreachable, but satisfies the type checker
+        raise MngrError("Unexpected: exhausted host name conflict retries")
     else:
         # already have the host
         logger.debug("Used existing host id={}", target_host.id)

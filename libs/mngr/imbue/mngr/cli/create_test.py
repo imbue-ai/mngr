@@ -26,6 +26,7 @@ from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
 from imbue.mngr.cli.create import _parse_project_name
 from imbue.mngr.cli.create import _parse_source_string
+from imbue.mngr.cli.create import _parse_target_host
 from imbue.mngr.cli.create import _rescue_editor_content
 from imbue.mngr.cli.create import _resolve_source_location
 from imbue.mngr.cli.create import _resolve_target_host
@@ -36,7 +37,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -1097,6 +1100,62 @@ def test_is_creating_new_host() -> None:
     # No host component at all
     addr = parse_agent_address("foo")
     assert _is_creating_new_host(addr, new_host_flag=False) is False
+
+
+def test_parse_target_host_local_provider_uses_fixed_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None (use fixed localhost) when provider is local."""
+    address = parse_agent_address("foo@.local")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    # None means "use the local provider's default host" in _resolve_target_host
+    assert result is None
+
+
+def test_parse_target_host_local_provider_with_new_host_flag(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns None for local provider even with --new-host flag."""
+    address = parse_agent_address("foo@myhost.local")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(default_create_cli_opts.field_ref().new_host, True),
+    )
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert result is None
+
+
+def test_parse_target_host_non_local_provider_creates_new_host(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """_parse_target_host returns NewHostOptions for non-local providers."""
+    address = parse_agent_address("foo@.modal")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provider == ProviderInstanceName("modal")
 
 
 def test_parse_agent_address_rejects_multiple_dots() -> None:
