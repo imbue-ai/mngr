@@ -1121,8 +1121,12 @@ def _resolve_transfer_mode(
     elif is_same_path:
         # Target path is the same as source path: must be none
         transfer_mode = TransferMode.NONE
-    elif is_git_repo and not is_remote:
+    elif is_git_repo and not is_remote and not (opts.depth or opts.shallow_since):
         transfer_mode = TransferMode.GIT_WORKTREE
+    elif is_git_repo and not is_remote:
+        # Shallow clone options (--depth, --shallow-since) require git-mirror;
+        # worktrees share the parent repo's full history.
+        transfer_mode = TransferMode.GIT_MIRROR
     elif is_git_repo and is_remote:
         transfer_mode = TransferMode.GIT_MIRROR
     else:
