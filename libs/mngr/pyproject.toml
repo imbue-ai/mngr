@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.11"
 license = "MIT"
@@ -17,12 +17,12 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "imbue-common==0.1.9",
+    "imbue-common==0.1.10",
     "resource-guards==0.1.2",
     "cel-python>=0.1.5",
     "click>=8.0",
     "click-option-group>=0.5.6",
-    "concurrency-group==0.1.9",
+    "concurrency-group==0.1.10",
     "coolname>=3.0.0",
     "cryptography>=42.0",
     # pinning docker because the guard registration module

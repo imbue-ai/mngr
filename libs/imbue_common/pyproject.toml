@@ -1,6 +1,6 @@
 [project]
 name = "imbue-common"
-version = "0.1.9"
+version = "0.1.10"
 description = "Core libraries for Imbue projects"
 readme = "README.md"
 requires-python = ">=3.11"
