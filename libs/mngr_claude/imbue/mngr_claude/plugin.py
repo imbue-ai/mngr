@@ -704,6 +704,32 @@ def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
     return local_host_ref
 
 
+def _write_generated_files(
+    host: OnlineHostInterface,
+    config_dir: Path,
+    generated_files: dict[Path, str],
+    mngr_ctx: MngrContext,
+) -> None:
+    """Write generated config files to the per-agent config dir.
+
+    For local hosts, writes files directly. For remote hosts, stages
+    files to a local temp dir and rsyncs them in a single call.
+    """
+    if host.is_local:
+        for relative, content in generated_files.items():
+            dest = config_dir / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            host.write_text_file(dest, content)
+    else:
+        local_host = _get_local_host(mngr_ctx)
+        with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
+            for relative, content in generated_files.items():
+                staged = Path(staging) / relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_text(content)
+            host.copy_directory(local_host, Path(staging), config_dir)
+
+
 def _sync_user_resources(host: OnlineHostInterface, config_dir: Path, *, symlink: bool) -> None:
     """Sync user resource directories from the claude home dir into the per-agent config dir.
 
@@ -1436,8 +1462,6 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
         ):
             _warn_about_version_consistency(config, mngr_ctx.concurrency_group)
 
-        local_host = _get_local_host(mngr_ctx)
-
         # Resolve work_dir on remote hosts (e.g. Modal symlinks /mngr/ -> /__modal/volumes/)
         work_dir = self.work_dir
         if not host.is_local:
@@ -1482,26 +1506,18 @@ class ClaudeAgent(BaseAgent[ClaudeAgentConfig]):
 
         # 2. Transfer directories and set up local credentials
         if config.sync_home_settings:
-            if host.is_local and config.symlink_user_resources:
-                _sync_user_resources(host, config_dir, symlink=True)
+            if host.is_local:
+                _sync_user_resources(host, config_dir, symlink=config.symlink_user_resources)
             else:
-                if host.is_local:
-                    _sync_user_resources(host, config_dir, symlink=False)
-                else:
-                    _rsync_claude_home_directories(host, local_host, source_claude_dir, config_dir)
+                _rsync_claude_home_directories(host, _get_local_host(mngr_ctx), source_claude_dir, config_dir)
         if host.is_local:
             if config.convert_macos_credentials and is_macos():
                 _provision_keychain_credentials(config_dir, mngr_ctx.concurrency_group)
             else:
                 _symlink_credentials(host, config_dir)
 
-        # 3. Stage generated files to temp dir and copy to config_dir
-        with tempfile.TemporaryDirectory(prefix="mngr-claude-") as staging:
-            for relative, content in generated_files.items():
-                staged = Path(staging) / relative
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                staged.write_text(content)
-            host.copy_directory(local_host, Path(staging), config_dir)
+        # 3. Write generated files to config_dir
+        _write_generated_files(host, config_dir, generated_files, mngr_ctx)
 
     def provision(
         self,
