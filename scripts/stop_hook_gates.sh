@@ -18,7 +18,6 @@ set -euo pipefail
 # If COMMIT_HASH is omitted, uses the current HEAD.
 #
 # This script is used by:
-#   - main_claude_stop_hook.sh (the full mngr stop hook orchestrator)
 #   - The imbue-code-guardian Claude Code plugin (as a standalone Stop hook)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

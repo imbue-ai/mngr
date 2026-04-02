@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 Think of `mngr` as "git for agents": just like git allows you to `commit`/`push`/`pull`/`fork`/`clone` *versions of code*, `mngr` allows you to `create`/`destroy`/`list`/`clone`/`message` *agents*.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#EFF6FF', 'primaryTextColor': '#1E3A5F', 'primaryBorderColor': '#3B82F6', 'lineColor': '#64748B', 'edgeLabelBackground': '#FFFFFF', 'fontSize': '15px', 'wrap': false}, 'flowchart': {'curve': 'linear', 'markdownAutoWrap': false, 'wrappingWidth': 1800}}}%%
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#EFF6FF', 'primaryTextColor': '#1E3A5F', 'primaryBorderColor': '#3B82F6', 'lineColor': '#64748B', 'edgeLabelBackground': '#FFFFFF', 'fontSize': '15px', 'wrap': false}, 'flowchart': {'diagramPadding': 150, 'curve': 'linear', 'markdownAutoWrap': false, 'wrappingWidth': 1800}}}%%
 flowchart TB
     classDef user fill:#DBEAFE,stroke:#2563EB,stroke-width:2px,color:#1E3A5F,font-weight:bold
     classDef cli fill:#1E3A5F,stroke:#1E3A5F,stroke-width:2px,color:#FFFFFF,font-weight:bold
