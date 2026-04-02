@@ -70,7 +70,7 @@ the implementation should be fixed to avoid the warning.
 # Inspecting tutorial blocks
 
 Each of those tests are also associated with a tutorial block in
-libs/mngr/tutorials/mega_tutorial.sh; we divide the file into blocks by splitting
+libs/mngr/imbue/mngr/resources/mega_tutorial.sh; we divide the file into blocks by splitting
 around empty lines. You'll find a reproduction of a tutorial block using the API
 e2e.write_tutorial_block. When modifying the test, you should normally keep the
 tutorial block unchanged: they should match exactly with the block in the tutorial
@@ -81,7 +81,7 @@ a rare case - often the tutorial block is a bit too concise to be run as-is, and
 that may be intentional.
 
 If you do think that the tutorial block is wrong or outdated, update both the
-tutorial block in the mega_tutorial.sh file and the test code itself, and record
+tutorial block in the mega_tutorial.sh resource file and the test code itself, and record
 a change under the key "FIX_TUTORIAL".
 
 # Committing your changes

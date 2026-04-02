@@ -4,8 +4,6 @@ help:
 build target:
   @if [ "{{target}}" = "flexmux" ]; then \
     cd libs/flexmux/frontend && pnpm install && pnpm run build; \
-  elif [ "{{target}}" = "claude_web_view" ]; then \
-    cd apps/claude_web_view/frontend && pnpm install && pnpm run build; \
   elif [ -d "apps/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel apps/{{target}}; \
   elif [ -d "libs/{{target}}" ]; then \

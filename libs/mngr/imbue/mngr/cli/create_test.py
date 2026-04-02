@@ -17,6 +17,7 @@ from imbue.mngr.api.find import ResolvedSource
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
+from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
@@ -51,6 +52,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.logging import LoggingSuppressor
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -1148,6 +1150,27 @@ def test_create_rejects_positional_and_name_together(
     assert "Cannot specify both" in result.output
 
 
+def test_create_edit_message_error_not_swallowed(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Early errors with --edit-message must still be visible.
+
+    LoggingSuppressor is enabled early when --edit-message is set. If an error
+    occurs before the editor opens, the suppressor must be cleaned up so the
+    error message is not swallowed and stdout/stderr are restored.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+    assert not LoggingSuppressor.is_suppressed()
+
+
 @pytest.mark.tmux
 def test_create_accepts_name_flag_alone(
     cli_runner: CliRunner,
@@ -1347,3 +1370,77 @@ def test_editor_cleanup_scope_does_not_rescue_on_success(
 
     # Temp file should still be cleaned up
     assert not session.temp_file_path.exists()
+
+
+# =============================================================================
+# Tests for _check_source_does_not_contain_state_dir
+# =============================================================================
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_parent(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory is a parent of the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    parent_of_state_dir = state_dir.parent
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(parent_of_state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_raises_when_source_is_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Raises when the source directory IS the mngr state dir."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+
+    with pytest.raises(UserInputError, match="contains the mngr state directory"):
+        _check_source_does_not_contain_state_dir(state_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_sibling(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """Does not raise when the source directory is a sibling of the state dir."""
+    sibling_dir = tmp_path / "some-project"
+    sibling_dir.mkdir()
+
+    # Should not raise
+    _check_source_does_not_contain_state_dir(sibling_dir, temp_mngr_ctx)
+
+
+def test_check_source_does_not_contain_state_dir_passes_for_child_of_state_dir(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Does not raise when the source directory is inside the state dir (child)."""
+    state_dir = temp_mngr_ctx.config.default_host_dir.expanduser().resolve()
+    child_dir = state_dir / "agents" / "some-agent"
+    child_dir.mkdir(parents=True, exist_ok=True)
+
+    # Should not raise -- we only block the parent-contains-state-dir direction
+    _check_source_does_not_contain_state_dir(child_dir, temp_mngr_ctx)
+
+
+# =============================================================================
+# Tests for _resolve_source_location without git repo
+# =============================================================================
+
+
+def test_resolve_source_location_raises_outside_git_repo(
+    default_create_cli_opts: CreateCliOptions,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_source_location raises UserInputError when not in a git repo and no source specified."""
+    # tmp_path is not a git repo, change cwd to it
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(UserInputError, match="Not inside a git repository"):
+        _resolve_source_location(
+            default_create_cli_opts,
+            agent_and_host_loader=lambda: {},
+            mngr_ctx=temp_mngr_ctx,
+            is_start_desired=True,
+        )

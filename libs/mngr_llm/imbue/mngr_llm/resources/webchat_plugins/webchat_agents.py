@@ -18,6 +18,7 @@ from typing import Final
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from llm_webchat.hookspecs import hookimpl
 from loguru import logger
 from pydantic import Field
 
@@ -25,7 +26,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_recursive.watcher_common import MngrNotInstalledError
 from imbue.mngr_recursive.watcher_common import get_mngr_command
-from llm_webchat.hookspecs import hookimpl
 
 _FETCH_TIMEOUT_SECONDS: Final[float] = 60.0
 _FETCH_WARN_THRESHOLD_SECONDS: Final[float] = 15.0

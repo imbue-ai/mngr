@@ -152,24 +152,25 @@ Also consider whether `good first issue` applies (small, self-contained, well-de
 ```
 ## Problem
 
-<What is broken or missing, stated clearly and specifically. Include:
-- The exact behavior observed (or the gap)
-- The conceptual location in the code (name the relevant functions, classes, or modules -- but NOT file paths or line numbers, as those go stale during refactoring)
-- Why this matters (what goes wrong for the user)>
+<What is broken or missing. Include:
+- The behavior observed (or the gap)
+- The conceptual location in the code (name relevant functions, classes, or modules -- but NOT file paths or line numbers, as those go stale during refactoring)
+- Why this matters (what goes wrong for the user)
+- Frame with appropriate uncertainty -- acknowledge if the problem description is based on inference rather than direct observation>
 
 ## Solution
 
-<A single, concrete, fully-defined approach. Include:
-- What specifically needs to change (which functions, classes, or modules -- NOT file paths or line numbers)
-- How the fix works (not just "fix it" -- describe the mechanism)
-- Any edge cases or considerations the implementer should be aware of>
+<A single, concrete approach. Include:
+- The general direction of what needs to change (which areas of the code, which concepts)
+- How the fix works at a high level (not just "fix it" -- describe the mechanism)
+- Leave room for the implementer to adjust the approach based on what they find -- describe the intent and constraints, not every implementation detail>
 ```
 
 **CRITICAL: Do NOT include file paths or line numbers in issue bodies.** These go stale as soon as any refactoring happens. Instead, reference functions, classes, and modules by name. The implementer can find them with grep. Describe the problem and solution at the conceptual level.
 
 **CRITICAL: The Solution section must describe exactly ONE approach.** No "or" alternatives, no "either X or Y", no "Option A / Option B", no "we could do X, or alternatively Y". The implementer should be able to read the Solution and know exactly what to do without making any design decisions themselves. If you find yourself wanting to write "or", STOP -- you have not yet decided on the solution. Use the "investigate ambiguous entries" flow (Step 2a) to resolve the ambiguity with the user BEFORE drafting the ticket. This is the single most important rule for issue quality.
 
-Keep it concise but specific enough that someone could implement the fix without re-doing the investigation. The goal is that an implementer reads the ticket and knows exactly what to do.
+**Tone and length:** After drafting an issue, re-read it and look for ways to shorten it. Remove implementation details the implementer can figure out themselves. Remove over-specified steps that constrain the solution unnecessarily. Tickets are better when they convey the intent clearly but leave some room for the implementer to exercise judgment. Aim for brevity -- a shorter ticket that captures the right intent is better than a longer one that over-specifies.
 
 **Original text preservation:** The exact original text from the backlog file MUST appear at the bottom of the issue body in a blockquote. This is non-negotiable -- if the interpretation is wrong, the user needs to be able to see what they originally wrote.
 
@@ -178,13 +179,16 @@ Keep it concise but specific enough that someone could implement the fix without
 Present the preview and wait for the user to respond. Always present options as a multiple-choice list so the user can respond with a single character:
 
 > **a)** Approve -- create the issue as shown
+> **d)** Design question -- create as an open design question assigned to the user (label as `design`, NOT `autotriage`)
 > **e)** Edit -- modify the title, body, or labels before creating
 > **t)** Think harder -- launch a background agent to investigate this more deeply, then move to the next entry
 > **s)** Skip -- move on without creating an issue for this entry
 > **n)** Note and skip -- skip this entry but the user wants to leave a note (correction, context, etc.) that should be appended to the entry in the backlog file for next time
 > **x)** Stop -- end the triage session (remaining entries stay in the file)
 
-**If the user chooses Edit:** Incorporate their feedback, then show the full updated preview again and re-present the same `a/e/t/s/n/x` options. Do NOT create the issue until the user explicitly approves with `a`. This loop repeats until the user approves, skips, or stops.
+**If the user chooses Design question:** Reframe the ticket as an open design question for the user to think through. The Problem section should describe what needs to be figured out, and the Solution section should list the key questions or decisions to be made (not a prescriptive answer). Use the `design` label instead of `autotriage`. Assign to the user with `--assignee "@me"`. Show the reframed preview and wait for approval before creating.
+
+**If the user chooses Edit:** Incorporate their feedback, then show the full updated preview again and re-present the same `a/d/e/t/s/n/x` options. Do NOT create the issue until the user explicitly approves with `a` or `d`. This loop repeats until the user approves, skips, or stops.
 
 **If the user chooses Note and skip:** Ask the user for their note, then append it as an indented sub-line under the entry in the backlog file (preserving the entry for future triage). Move on to the next entry.
 
