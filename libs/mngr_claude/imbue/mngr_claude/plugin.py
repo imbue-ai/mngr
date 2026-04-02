@@ -665,11 +665,16 @@ def _read_credentials_content(
     """Read credentials content from file or macOS keychain. Returns None if unavailable."""
     credentials_path = source_claude_dir / ".credentials.json"
     if credentials_path.exists():
+        logger.info("Found .credentials.json at {}", credentials_path)
         return credentials_path.read_text()
     if config.convert_macos_credentials and is_macos():
         keychain_credentials = _read_macos_keychain_credential("Claude Code-credentials", concurrency_group)
         if keychain_credentials is not None:
+            logger.info("Found macOS keychain OAuth credentials")
             return keychain_credentials
+        logger.debug("No credentials found (file does not exist, no keychain credentials)")
+    else:
+        logger.debug("No credentials found (file does not exist at {})", credentials_path)
     return None
 
 
