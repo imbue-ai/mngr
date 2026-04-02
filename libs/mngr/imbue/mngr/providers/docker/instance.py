@@ -186,7 +186,6 @@ class DockerProviderInstance(BaseProviderInstance):
     # Instance-level caches
     _container_cache_by_id: dict[HostId, docker.models.containers.Container] = PrivateAttr(default_factory=dict)
     _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
-    _docker_client_error: ProviderUnavailableError | None = PrivateAttr(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -211,21 +210,13 @@ class DockerProviderInstance(BaseProviderInstance):
         Raises ProviderUnavailableError (a MngrError subclass) instead of
         DockerException when the daemon is unreachable, so callers that catch
         MngrError handle the failure gracefully.
-
-        The failure is cached in _docker_client_error so that repeated accesses
-        raise immediately without retrying the connection or emitting duplicate
-        warnings.
         """
-        if self._docker_client_error is not None:
-            raise self._docker_client_error
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
             return docker.from_env()
         except docker.errors.DockerException as e:
-            self._docker_client_error = ProviderUnavailableError(self.name, str(e))
-            self._docker_client_error.__cause__ = e
-            raise self._docker_client_error from e
+            raise ProviderUnavailableError(self.name, str(e)) from e
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
@@ -1234,11 +1225,6 @@ kill -TERM 1
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
         """Discover all Docker container hosts."""
-        # Fast path: if we already know Docker is unavailable, skip silently.
-        # The first failure already logged a warning.
-        if self._docker_client_error is not None:
-            return []
-
         hosts: list[HostInterface] = []
         processed_host_ids: set[HostId] = set()
 
@@ -1461,8 +1447,6 @@ kill -TERM 1
 
     def list_volumes(self) -> list[VolumeInfo]:
         """List logical volumes stored on the state volume."""
-        if self._docker_client_error is not None:
-            return []
         try:
             entries = self._state_volume.listdir("volumes")
         except (FileNotFoundError, OSError):
