@@ -7,6 +7,7 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
@@ -23,6 +24,7 @@ from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
+from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -346,3 +348,40 @@ def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None
     resources = provider.get_host_resources(offline_host)
     assert resources.cpu.count == 1
     assert resources.memory_gb == 1.0
+
+
+# =========================================================================
+# Docker Daemon Offline Behavior
+# =========================================================================
+
+
+@pytest.mark.docker_sdk
+def test_docker_client_raises_provider_unavailable_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """Accessing _docker_client when the daemon is unreachable raises ProviderUnavailableError."""
+    provider = make_offline_docker_provider(temp_mngr_ctx)
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        _ = provider._docker_client
+
+
+@pytest.mark.docker_sdk
+def test_docker_client_error_is_mngr_error_subclass(temp_mngr_ctx: MngrContext) -> None:
+    """ProviderUnavailableError is a MngrError, so existing except MngrError handlers catch it."""
+    provider = make_offline_docker_provider(temp_mngr_ctx)
+    with pytest.raises(MngrError):
+        _ = provider._docker_client
+
+
+@pytest.mark.docker_sdk
+def test_discover_hosts_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts gracefully returns [] when Docker is unreachable."""
+    provider = make_offline_docker_provider(temp_mngr_ctx)
+    result = provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+    assert result == []
+
+
+@pytest.mark.docker_sdk
+def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts_and_agents gracefully returns {} when Docker is unreachable."""
+    provider = make_offline_docker_provider(temp_mngr_ctx)
+    result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    assert result == {}

@@ -27,6 +27,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -204,10 +205,18 @@ class DockerProviderInstance(BaseProviderInstance):
 
     @cached_property
     def _docker_client(self) -> docker.DockerClient:
-        """Lazily create a Docker client."""
-        if self.config.host:
-            return docker.DockerClient(base_url=self.config.host)
-        return docker.from_env()
+        """Lazily create a Docker client.
+
+        Raises ProviderUnavailableError (a MngrError subclass) instead of
+        DockerException when the daemon is unreachable, so callers that catch
+        MngrError handle the failure gracefully.
+        """
+        try:
+            if self.config.host:
+                return docker.DockerClient(base_url=self.config.host)
+            return docker.from_env()
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, str(e)) from e
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
