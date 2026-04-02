@@ -336,8 +336,8 @@ def _build_claude_json(
     Unified builder for local, remote, and deploy paths:
     1. Reads base config (global ~/.claude.json if sync_local, else generated defaults)
     2. Applies context-dependent flags (e.g. bypassPermissionsModeAccepted for unattended)
-    3. Trusts work_dir if should_trust_work_dir(config, ctx)
-    4. Copies source project config to work_dir if ctx.copy_project_config_from is set
+    3. Copies source project config to work_dir if ctx.copy_project_config_from is set
+    4. Trusts work_dir if should_trust_work_dir(config, ctx)
 
     Returns the dict so callers can do further modifications (e.g. keychain merge)
     before serializing.
