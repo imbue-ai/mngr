@@ -429,44 +429,56 @@ def create(ctx: click.Context, **kwargs) -> None:
     )
     logging_config: LoggingConfig = ctx.meta["logging_config"]
 
-    # Parse agent address from the positional argument or --name flag.
-    # Both accept agent addresses; they are equivalent but mutually exclusive.
-    if opts.positional_name and opts.name:
-        raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
-    address = parse_agent_address(opts.positional_name or opts.name or "")
+    # Start capturing output early when --edit-message is set so that logs from
+    # address parsing, provider merging, and other pre-editor work are included
+    # in the replay after the editor closes (which clears the screen).
+    if opts.edit_message:
+        LoggingSuppressor.enable(logging_config.console_level)
 
-    # Merge --provider flag into the address (alternative to .PROVIDER in the address).
-    if opts.provider:
-        flag_provider = ProviderInstanceName(opts.provider)
-        if address.provider_name is not None and address.provider_name != flag_provider:
-            raise UserInputError(
-                f"Conflicting providers: address has '{address.provider_name}' "
-                f"but --provider is '{flag_provider}'. Use one or the other."
+    try:
+        # Parse agent address from the positional argument or --name flag.
+        # Both accept agent addresses; they are equivalent but mutually exclusive.
+        if opts.positional_name and opts.name:
+            raise UserInputError("Cannot specify both a positional agent address and --name. Use one or the other.")
+        address = parse_agent_address(opts.positional_name or opts.name or "")
+
+        # Merge --provider flag into the address (alternative to .PROVIDER in the address).
+        if opts.provider:
+            flag_provider = ProviderInstanceName(opts.provider)
+            if address.provider_name is not None and address.provider_name != flag_provider:
+                raise UserInputError(
+                    f"Conflicting providers: address has '{address.provider_name}' "
+                    f"but --provider is '{flag_provider}'. Use one or the other."
+                )
+            if address.provider_name is None:
+                address = address.model_copy_update(
+                    to_update(address.field_ref().provider_name, flag_provider),
+                )
+
+        # Apply --yes flag to auto-approve prompts (e.g., skill installation)
+        if opts.yes:
+            mngr_ctx = mngr_ctx.model_copy_update(
+                to_update(mngr_ctx.field_ref().is_auto_approve, True),
             )
-        if address.provider_name is None:
-            address = address.model_copy_update(
-                to_update(address.field_ref().provider_name, flag_provider),
-            )
 
-    # Apply --yes flag to auto-approve prompts (e.g., skill installation)
-    if opts.yes:
-        mngr_ctx = mngr_ctx.model_copy_update(
-            to_update(mngr_ctx.field_ref().is_auto_approve, True),
-        )
+        # Collect plugin-registered CLI params so they can be merged into plugin_data.
+        # Filter None (unset single options) and empty tuples (unset multiple options).
+        plugin_cli_params: dict[str, Any] = {
+            k: v for k, v in ctx.meta.get("plugin_cli_params", {}).items() if v is not None and v != ()
+        }
 
-    # Collect plugin-registered CLI params so they can be merged into plugin_data.
-    # Filter None (unset single options) and empty tuples (unset multiple options).
-    plugin_cli_params: dict[str, Any] = {
-        k: v for k, v in ctx.meta.get("plugin_cli_params", {}).items() if v is not None and v != ()
-    }
+        # Setup (validation, editor session, source resolution, etc.)
+        setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params)
 
-    # Setup (validation, editor session, source resolution, etc.)
-    setup = _setup_create(mngr_ctx, output_opts, opts, logging_config, address, plugin_cli_params)
-
-    # Create agent
-    create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
-    _post_create(create_result, connection_opts, opts, mngr_ctx)
-    _finish_create(create_result, setup, output_opts)
+        # Create agent
+        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
+        _post_create(create_result, connection_opts, opts, mngr_ctx)
+        _finish_create(create_result, setup, output_opts)
+    finally:
+        # Restore stdout/stderr if suppression is still active so that error
+        # messages from Click (or the user's shell) are not swallowed.
+        if LoggingSuppressor.is_suppressed():
+            LoggingSuppressor.disable_and_replay(clear_screen=False)
 
 
 class _AutoLabels(FrozenModel):
@@ -527,9 +539,6 @@ def _setup_create(
     editor_session: EditorSession | None = None
     if opts.edit_message:
         editor_session = EditorSession.create(initial_content=initial_message_content)
-        # Enable logging suppression before starting the editor so that
-        # log messages don't interfere with the editor's terminal output
-        LoggingSuppressor.enable(logging_config.console_level)
         # Start editor with callback that restores logging when it exits
         editor_session.start(on_exit=_on_editor_exit)
         # When using editor, don't pass message to api_create (we'll send it after editor finishes)

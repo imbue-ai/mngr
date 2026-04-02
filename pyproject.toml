@@ -71,12 +71,10 @@ addopts = [
   "--cov=imbue.mngr_llm",
   "--cov=imbue.mngr_mind",
   "--cov=imbue.mngr_claude_mind",
-  "--cov=imbue.mngr_elena_code",
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_recursive",
   "--cov=imbue.mngr_notifications",
   "--cov=imbue.mngr_mind_chat",
-  "--cov=imbue.mngr_test_coder",
   "--cov=imbue.mngr_file",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.skitwright",
@@ -135,7 +133,7 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "scripts/generate_verify_skills.py", "contrib/"]
+exclude = ["scripts/style_guide.py", "contrib/"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]

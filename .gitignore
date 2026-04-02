@@ -273,3 +273,6 @@
 
 # ignore coverage files generated within subprojects
 **/cov.xml
+
+# ignore demos
+recordings

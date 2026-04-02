@@ -52,6 +52,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.editor import EditorSession
+from imbue.mngr.utils.logging import LoggingSuppressor
 
 # =============================================================================
 # Tests for _CreateCommand.parse_args (-- passthrough arg handling)
@@ -1147,6 +1148,27 @@ def test_create_rejects_positional_and_name_together(
 
     assert result.exit_code != 0
     assert "Cannot specify both" in result.output
+
+
+def test_create_edit_message_error_not_swallowed(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Early errors with --edit-message must still be visible.
+
+    LoggingSuppressor is enabled early when --edit-message is set. If an error
+    occurs before the editor opens, the suppressor must be cleaned up so the
+    error message is not swallowed and stdout/stderr are restored.
+    """
+    result = cli_runner.invoke(
+        create,
+        ["my-agent", "--name", "other-agent", "--command", "true", "--no-connect", "--edit-message"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both" in result.output
+    assert not LoggingSuppressor.is_suppressed()
 
 
 @pytest.mark.tmux
