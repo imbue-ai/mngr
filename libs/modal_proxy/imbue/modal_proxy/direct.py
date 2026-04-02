@@ -393,10 +393,12 @@ class DirectModalInterface(ModalInterface):
                 text=True,
             )
         except FileNotFoundError as e:
-            raise ModalProxyError(
-                "The 'modal' CLI command was not found. Modal is enabled in your configuration"
-                " but the CLI is not available. Install it with: uv tool install modal"
-            ) from e
+            if e.filename == "modal":
+                raise ModalProxyError(
+                    "The 'modal' CLI command was not found. Modal is enabled in your configuration"
+                    " but the CLI is not available. Install it with: uv tool install modal"
+                ) from e
+            raise
         if result.returncode != 0:
             raise ModalProxyError(f"Failed to create Modal environment '{name}': {result.stderr or result.stdout}")
 
@@ -576,10 +578,12 @@ class DirectModalInterface(ModalInterface):
                     },
                 )
             except FileNotFoundError as e:
-                raise ModalProxyError(
-                    "The 'modal' CLI command was not found. Modal is enabled in your configuration"
-                    " but the CLI is not available. Install it with: uv tool install modal"
-                ) from e
+                if e.filename == "modal":
+                    raise ModalProxyError(
+                        "The 'modal' CLI command was not found. Modal is enabled in your configuration"
+                        " but the CLI is not available. Install it with: uv tool install modal"
+                    ) from e
+                raise
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
