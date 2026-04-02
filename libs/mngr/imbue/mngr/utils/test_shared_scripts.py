@@ -11,7 +11,7 @@ from urllib.request import urlopen
 
 import pytest
 
-_REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 
 _SHARED_SCRIPTS = [
     "config_utils.sh",
