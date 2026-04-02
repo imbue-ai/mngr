@@ -1292,7 +1292,10 @@ kill -TERM 1
         for h in hosts:
             self._host_by_id_cache[h.id] = h
 
-        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
+        return [
+            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=h.get_state())
+            for h in hosts
+        ]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Docker container.

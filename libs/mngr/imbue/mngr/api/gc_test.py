@@ -11,6 +11,7 @@ import pytest
 
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
+from imbue.mngr.api.gc import ProviderHosts
 from imbue.mngr.api.gc import _LOG_MAX_AGE_DAYS
 from imbue.mngr.api.gc import _handle_error
 from imbue.mngr.api.gc import _is_rotated_log_file
@@ -33,9 +34,15 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
+
+
+def _hosts_for(provider: BaseProviderInstance) -> ProviderHosts:
+    """Discover hosts from a provider and return as a ProviderHosts list."""
+    return [(provider, provider.discover_hosts(include_destroyed=True, cg=provider.mngr_ctx.concurrency_group))]
 
 
 def test_gc_machines_skips_local_hosts(local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext) -> None:
@@ -44,7 +51,7 @@ def test_gc_machines_skips_local_hosts(local_provider: LocalProviderInstance, te
 
     gc_machines(
         mngr_ctx=temp_mngr_ctx,
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -96,7 +103,7 @@ def _run_gc_machines(provider: MockProviderInstance, *, dry_run: bool = False) -
     result = GcResult()
     gc_machines(
         mngr_ctx=provider.mngr_ctx,
-        providers=[provider],
+        hosts_by_provider=_hosts_for(provider),
         dry_run=dry_run,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -673,7 +680,7 @@ def test_gc_work_dirs_no_orphans_on_fresh_provider(
     result = GcResult()
     gc_work_dirs(
         mngr_ctx=temp_mngr_ctx,
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -692,7 +699,7 @@ def test_gc_snapshots_skips_provider_without_snapshot_support(
     """gc_snapshots should skip providers that do not support snapshots."""
     result = GcResult()
     gc_snapshots(
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -725,7 +732,7 @@ def test_gc_snapshots_preserves_non_destroyed_host_snapshots(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -754,7 +761,7 @@ def test_gc_snapshots_preserves_paused_host_snapshots_snapshot_based_provider(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -787,7 +794,7 @@ def test_gc_snapshots_deletes_destroyed_host_snapshots(
 
     result = GcResult()
     gc_snapshots(
-        providers=[gc_mock_provider],
+        hosts_by_provider=_hosts_for(gc_mock_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
@@ -810,7 +817,7 @@ def test_gc_volumes_skips_provider_without_volume_support(
     """gc_volumes should skip providers that do not support volumes."""
     result = GcResult()
     gc_volumes(
-        providers=[local_provider],
+        hosts_by_provider=_hosts_for(local_provider),
         dry_run=False,
         error_behavior=ErrorBehavior.ABORT,
         result=result,
