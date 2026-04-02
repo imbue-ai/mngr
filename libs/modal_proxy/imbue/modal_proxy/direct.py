@@ -395,8 +395,7 @@ class DirectModalInterface(ModalInterface):
         except FileNotFoundError as e:
             if e.filename == "modal":
                 raise ModalProxyError(
-                    "The 'modal' CLI command was not found. Modal is enabled in your configuration"
-                    " but the CLI is not available. Install it with: uv tool install modal"
+                    "The 'modal' CLI command was not found. Install it with: uv tool install modal"
                 ) from e
             raise
         if result.returncode != 0:
