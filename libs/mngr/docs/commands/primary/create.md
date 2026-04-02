@@ -176,6 +176,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--message` | text | Initial message to send after the agent starts | None |
 | `--message-file` | path | File containing initial message to send | None |
 | `--edit-message` | boolean | Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content. | `False` |
+| `--ready-timeout` | text | Max time to wait for agent readiness before sending initial message (e.g., 30s, 2m) [default: 10s] | None |
 | `--retry` | integer | Number of connection retries | `3` |
 | `--retry-delay` | text | Delay between retries (e.g., 5s, 1m) | `5s` |
 | `--attach-command` | text | Command to run instead of attaching to main session | None |

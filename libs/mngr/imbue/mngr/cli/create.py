@@ -63,6 +63,7 @@ from imbue.mngr.interfaces.host import AgentLifecycleOptions
 from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.interfaces.host import FileModificationSpec
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import NamedCommand
@@ -401,6 +402,11 @@ class _CreateCommand(click.Command):
     "--edit-message",
     is_flag=True,
     help="Open an editor to compose the initial message (uses $EDITOR). Editor runs in parallel with agent creation. If --message or --message-file is provided, their content is used as initial editor content.",
+)
+@optgroup.option(
+    "--ready-timeout",
+    default=None,
+    help="Max time to wait for agent readiness before sending initial message (e.g., 30s, 2m) [default: 10s]",
 )
 @optgroup.option("--retry", type=int, default=3, show_default=True, help="Number of connection retries")
 @optgroup.option("--retry-delay", default="5s", show_default=True, help="Delay between retries (e.g., 5s, 1m)")
@@ -1279,6 +1285,9 @@ def _parse_agent_opts(
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
+    # Parse ready timeout if provided
+    parsed_ready_timeout = parse_duration_to_seconds(opts.ready_timeout) if opts.ready_timeout is not None else None
+
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
         agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
@@ -1290,6 +1299,9 @@ def _parse_agent_opts(
         worktree_base_folder=parsed_worktree_base_folder,
         transfer_mode=transfer_mode,
         initial_message=initial_message,
+        ready_timeout_seconds=parsed_ready_timeout
+        if parsed_ready_timeout is not None
+        else DEFAULT_AGENT_READY_TIMEOUT_SECONDS,
         data_options=data_options,
         git=git,
         environment=environment,
