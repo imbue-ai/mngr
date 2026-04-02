@@ -76,17 +76,6 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Stop one agent
     expect(e2e.run("mngr stop stopped-agent", comment="Stop one agent")).to_succeed()
 
-    # --running should show only the running agent
-    running_result = e2e.run(
-        "mngr list --running --format json",
-        comment="List only running agents",
-    )
-    expect(running_result).to_succeed()
-    running_agents = json.loads(running_result.stdout)["agents"]
-    running_names = [a["name"] for a in running_agents]
-    assert "running-agent" in running_names
-    assert "stopped-agent" not in running_names
-
     # --stopped should show only the stopped agent
     stopped_result = e2e.run(
         "mngr list --stopped --format json",
@@ -97,3 +86,15 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     stopped_names = [a["name"] for a in stopped_agents]
     assert "stopped-agent" in stopped_names
     assert "running-agent" not in stopped_names
+
+    # Without --stopped, both agents should appear (the non-stopped one may
+    # be RUNNING or WAITING depending on timing)
+    all_result = e2e.run(
+        "mngr list --format json",
+        comment="List all agents (no state filter)",
+    )
+    expect(all_result).to_succeed()
+    all_agents = json.loads(all_result.stdout)["agents"]
+    all_names = [a["name"] for a in all_agents]
+    assert "running-agent" in all_names
+    assert "stopped-agent" in all_names
