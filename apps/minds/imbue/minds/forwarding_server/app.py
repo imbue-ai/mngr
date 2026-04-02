@@ -28,6 +28,7 @@ from websockets import ClientConnection
 from imbue.minds.forwarding_server.agent_creator import AgentCreationStatus
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
 from imbue.minds.forwarding_server.agent_creator import LOG_SENTINEL
+from imbue.minds.forwarding_server.agent_restarter import AgentRestarter
 from imbue.minds.forwarding_server.auth import AuthStoreInterface
 from imbue.minds.forwarding_server.backend_resolver import BackendResolverInterface
 from imbue.minds.forwarding_server.cookie_manager import SESSION_COOKIE_NAME
@@ -103,8 +104,13 @@ def _get_backend_resolver(request: Request) -> BackendResolverInterface:
     return request.app.state.backend_resolver
 
 
+def _get_agent_restarter(request: Request) -> AgentRestarter | None:
+    return request.app.state.agent_restarter
+
+
 AuthStoreDep = Annotated[AuthStoreInterface, Depends(_get_auth_store)]
 BackendResolverDep = Annotated[BackendResolverInterface, Depends(_get_backend_resolver)]
+AgentRestarterDep = Annotated[AgentRestarter | None, Depends(_get_agent_restarter)]
 
 
 # -- Auth helpers --
@@ -445,6 +451,33 @@ def _build_proxy_response(
     return response
 
 
+def _handle_backend_unavailable(
+    request: Request,
+    agent_id: AgentId,
+    agent_restarter: AgentRestarter | None,
+) -> Response:
+    """Handle a request when the agent's backend is unreachable.
+
+    Triggers a restart attempt (via ``mngr start``) to restore a killed tmux
+    session, and returns a loading page for HTML requests so the browser
+    retries automatically once the session is restored.
+    """
+    if agent_restarter is not None:
+        agent_restarter.try_restart(agent_id)
+
+    # For HTML-accepting requests, return a loading page that retries
+    # client-side after a short delay. This avoids saturating the
+    # browser's per-origin connection pool (typically 6 for HTTP/1.1)
+    # when a stale tab is pointed at an unavailable backend.
+    request_accept = request.headers.get("accept", "")
+    if "text/html" in request_accept:
+        return HTMLResponse(content=generate_backend_loading_html())
+    return Response(
+        status_code=502,
+        content="Backend unavailable for agent {}".format(agent_id),
+    )
+
+
 async def _handle_proxy_http(
     agent_id: str,
     server_name: str,
@@ -452,6 +485,7 @@ async def _handle_proxy_http(
     request: Request,
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
+    agent_restarter: AgentRestarterDep,
 ) -> Response:
     parsed_id = AgentId(agent_id)
     parsed_server = ServerName(server_name)
@@ -468,20 +502,8 @@ async def _handle_proxy_http(
 
     backend_url = backend_resolver.get_backend_url(parsed_id, parsed_server)
     if backend_url is None:
-        # Return immediately instead of holding the connection open.
-        # For HTML-accepting requests, return a loading page that retries
-        # client-side after a short delay. This avoids saturating the
-        # browser's per-origin connection pool (typically 6 for HTTP/1.1)
-        # when a stale tab is pointed at an unavailable backend.
-        request_accept = request.headers.get("accept", "")
-        if "text/html" in request_accept:
-            return HTMLResponse(content=generate_backend_loading_html())
-        return Response(
-            status_code=502,
-            content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
-        )
+        return _handle_backend_unavailable(request, parsed_id, agent_restarter)
 
-    assert backend_url is not None
     resolved_backend_url = backend_url
 
     # Check if SW is installed via cookie (scoped per server)
@@ -509,7 +531,17 @@ async def _handle_proxy_http(
     is_likely_sse = "text/event-stream" in accept_header or (request.method == "POST" and "api/chat/send" in path)
 
     if is_likely_sse:
-        return await _forward_http_request_streaming(
+        result = await _forward_http_request_streaming(
+            request=request,
+            backend_url=resolved_backend_url,
+            path=path,
+            agent_id=agent_id,
+            server_name=server_name,
+            http_client=tunnel_client,
+        )
+    else:
+        # Forward request to backend
+        result = await _forward_http_request(
             request=request,
             backend_url=resolved_backend_url,
             path=path,
@@ -518,17 +550,12 @@ async def _handle_proxy_http(
             http_client=tunnel_client,
         )
 
-    # Forward request to backend
-    result = await _forward_http_request(
-        request=request,
-        backend_url=resolved_backend_url,
-        path=path,
-        agent_id=agent_id,
-        server_name=server_name,
-        http_client=tunnel_client,
-    )
+    # If the backend refused the connection, the agent's tmux session may have
+    # been killed. Trigger a restart and show the loading page so the browser
+    # retries automatically once the session is restored.
+    if isinstance(result, Response) and result.status_code == 502:
+        return _handle_backend_unavailable(request, parsed_id, agent_restarter)
 
-    # If forwarding returned an error Response directly, return it
     if isinstance(result, Response):
         return result
 
@@ -901,6 +928,7 @@ def create_forwarding_server(
     http_client: httpx.AsyncClient | None,
     tunnel_manager: SSHTunnelManager | None = None,
     agent_creator: AgentCreator | None = None,
+    agent_restarter: AgentRestarter | None = None,
 ) -> FastAPI:
     """Create the forwarding server FastAPI application.
 
@@ -909,6 +937,9 @@ def create_forwarding_server(
 
     When agent_creator is provided, the server can create new agents from git URLs
     via the /create form and /api/create-agent API.
+
+    When agent_restarter is provided, the server will automatically attempt to
+    restart agents whose backends are unavailable (e.g. killed tmux sessions).
     """
     is_externally_managed_client = http_client is not None
 
@@ -923,6 +954,7 @@ def create_forwarding_server(
     app.state.backend_resolver = backend_resolver
     app.state.tunnel_manager = tunnel_manager
     app.state.agent_creator = agent_creator
+    app.state.agent_restarter = agent_restarter
     if http_client is not None:
         app.state.http_client = http_client
 

@@ -10,6 +10,7 @@ from loguru import logger
 
 from imbue.minds.config.data_types import MindPaths
 from imbue.minds.forwarding_server.agent_creator import AgentCreator
+from imbue.minds.forwarding_server.agent_restarter import AgentRestarter
 from imbue.minds.forwarding_server.app import create_forwarding_server
 from imbue.minds.forwarding_server.auth import FileAuthStore
 from imbue.minds.forwarding_server.backend_resolver import MngrCliBackendResolver
@@ -37,6 +38,7 @@ def start_forwarding_server(
     stream_manager = MngrStreamManager(resolver=backend_resolver)
     tunnel_manager = SSHTunnelManager()
     agent_creator = AgentCreator(paths=paths)
+    agent_restarter = AgentRestarter()
 
     # Generate a one-time login URL for the user
     code = OneTimeCode(secrets.token_urlsafe(_ONE_TIME_CODE_LENGTH))
@@ -56,6 +58,7 @@ def start_forwarding_server(
         http_client=None,
         tunnel_manager=tunnel_manager,
         agent_creator=agent_creator,
+        agent_restarter=agent_restarter,
     )
 
     thread = Thread(target=_sleep_then_open, args=(login_url,))
