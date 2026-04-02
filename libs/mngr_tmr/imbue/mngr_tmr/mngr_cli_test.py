@@ -80,3 +80,9 @@ def test_parse_list_json_invalid_json() -> None:
 def test_parse_list_json_missing_agents_key() -> None:
     result = _parse_list_json('{"errors": []}')
     assert result.agents == []
+
+
+def test_parse_list_json_invalid_schema() -> None:
+    raw = json.dumps({"agents": [{"id": "not-a-valid-agent"}]})
+    with pytest.raises(CliError, match="unexpected schema"):
+        _parse_list_json(raw)
