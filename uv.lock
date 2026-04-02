@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -571,7 +571,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -1392,7 +1392,7 @@ dev = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -1422,7 +1422,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1477,7 +1477,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1540,7 +1540,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-kanpan"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_kanpan" }
 dependencies = [
     { name = "click" },
@@ -1616,7 +1616,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-modal"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
@@ -1650,7 +1650,7 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-opencode"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_opencode" }
 dependencies = [
     { name = "imbue-mngr" },
@@ -1661,7 +1661,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-pair"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_pair" }
 dependencies = [
     { name = "click-option-group" },
@@ -1753,7 +1753,7 @@ requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-tutor"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "libs/mngr_tutor" }
 dependencies = [
     { name = "click" },
@@ -2253,7 +2253,7 @@ wheels = [
 
 [[package]]
 name = "modal-proxy"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },
