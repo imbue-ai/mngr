@@ -12,7 +12,7 @@
           },
           {
             "type": "command",
-            "command": "./scripts/claude_ensure_plugin.sh"
+            "command": "./scripts/claude_update_plugin.sh"
           }
         ]
       }
@@ -39,15 +39,15 @@
     ]
   },
   "extraKnownMarketplaces": {
-    "imbue-mngr": {
+    "imbue-code-guardian": {
       "source": {
         "source": "github",
-        "repo": "imbue-ai/mngr"
+        "repo": "imbue-ai/code-guardian"
       }
     }
   },
   "enabledPlugins": {
-    "imbue-code-review@imbue-mngr": true
+    "imbue-code-guardian@imbue-code-guardian": true
   },
   "model": "opus[1m]",
   "effortLevel": "high",
