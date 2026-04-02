@@ -1957,6 +1957,8 @@ Never use `eval` or `exec` unless explicitly instructed to do so
 
 Never use dataclasses or named tuples
 
+Prefer context managers over try/finally blocks. If a resource or state change needs cleanup, make it a context manager rather than relying on callers to write try/finally. Context managers are harder to misuse and make the scope of the state change visually obvious
+
 # Compiling and verifying this style guide
 
 This style guide contains Python code examples that can be compiled into a single file to verify they are syntactically valid and work together correctly.
