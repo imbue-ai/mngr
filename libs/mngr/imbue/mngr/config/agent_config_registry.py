@@ -8,6 +8,7 @@ from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import merge_cli_args
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 
 # =============================================================================
@@ -112,8 +113,24 @@ def resolve_agent_type(
 
     For plugin-registered or direct command types, returns the registered
     class and config directly.
+
+    Raises MngrError if the agent type (or its parent type) belongs to a
+    disabled plugin.
     """
     custom_config = config.agent_types.get(agent_type)
+
+    # Determine which plugin this agent type depends on: custom types with a
+    # parent_type depend on the parent's plugin; otherwise the type name
+    # itself is the plugin identifier.
+    effective_plugin = str(agent_type)
+    if custom_config is not None and custom_config.parent_type is not None:
+        effective_plugin = str(custom_config.parent_type)
+    if effective_plugin in config.disabled_plugins:
+        raise MngrError(
+            f"Agent type '{agent_type}' cannot be used because plugin "
+            f"'{effective_plugin}' is disabled. Enable the plugin with: "
+            f"mngr plugin enable {effective_plugin}"
+        )
 
     if custom_config is not None and custom_config.parent_type is not None:
         parent_type = custom_config.parent_type
