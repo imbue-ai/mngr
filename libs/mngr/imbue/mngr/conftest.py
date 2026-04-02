@@ -19,6 +19,7 @@ import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -455,9 +456,10 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     # Reset the module-level plugin manager singleton before each test
     imbue.mngr.main.reset_plugin_manager()
 
-    # Clear the registries to ensure clean state
+    # Clear the registries and caches to ensure clean state
     reset_backend_registry()
     reset_agent_registry()
+    reset_provider_instances()
 
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
@@ -477,6 +479,7 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     imbue.mngr.main.reset_plugin_manager()
     reset_backend_registry()
     reset_agent_registry()
+    reset_provider_instances()
 
 
 # =============================================================================
