@@ -57,6 +57,13 @@ from imbue.modal_proxy.interface import VolumeInterface
 # ---------------------------------------------------------------------------
 
 
+def _raise_if_modal_cli_missing(e: FileNotFoundError) -> None:
+    """Re-raise as ModalProxyError if the missing file is the modal CLI binary, otherwise re-raise the original."""
+    if e.filename == "modal":
+        raise ModalProxyError("The 'modal' CLI command was not found. Install it with: uv tool install modal") from e
+    raise e
+
+
 def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
     """Convert a modal exception to the corresponding ModalProxy exception."""
     if isinstance(e, modal.exception.AuthError):
@@ -393,11 +400,7 @@ class DirectModalInterface(ModalInterface):
                 text=True,
             )
         except FileNotFoundError as e:
-            if e.filename == "modal":
-                raise ModalProxyError(
-                    "The 'modal' CLI command was not found. Install it with: uv tool install modal"
-                ) from e
-            raise
+            _raise_if_modal_cli_missing(e)
         if result.returncode != 0:
             raise ModalProxyError(f"Failed to create Modal environment '{name}': {result.stderr or result.stdout}")
 
@@ -577,12 +580,7 @@ class DirectModalInterface(ModalInterface):
                     },
                 )
             except FileNotFoundError as e:
-                if e.filename == "modal":
-                    raise ModalProxyError(
-                        "The 'modal' CLI command was not found. Modal is enabled in your configuration"
-                        " but the CLI is not available. Install it with: uv tool install modal"
-                    ) from e
-                raise
+                _raise_if_modal_cli_missing(e)
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
