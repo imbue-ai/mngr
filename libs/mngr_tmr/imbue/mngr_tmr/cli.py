@@ -46,7 +46,7 @@ from imbue.mngr_tmr.api import launch_all_test_agents
 from imbue.mngr_tmr.api import launch_and_poll_agents
 from imbue.mngr_tmr.api import launch_integrator_agent
 from imbue.mngr_tmr.api import pull_agent_branch
-from imbue.mngr_tmr.api import pull_test_outputs_by_id
+from imbue.mngr_tmr.api import pull_agent_outputs
 from imbue.mngr_tmr.api import read_integrator_result
 from imbue.mngr_tmr.api import should_pull_changes
 from imbue.mngr_tmr.api import try_list_agents
@@ -54,6 +54,7 @@ from imbue.mngr_tmr.api import wait_for_integrator
 from imbue.mngr_tmr.data_types import IntegratorResult
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
+from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.report import generate_html_report
 
@@ -67,6 +68,9 @@ class TmrCliOptions(CommonCliOptions):
     pytest_args: tuple[str, ...]
     testing_flags: tuple[str, ...]
     agent_type: str
+    integrator_type: str | None
+    agent_template: tuple[str, ...]
+    integrator_template: tuple[str, ...] | None
     provider: str
     integrator_provider: str
     env: tuple[str, ...]
@@ -75,6 +79,7 @@ class TmrCliOptions(CommonCliOptions):
     use_snapshot: bool
     snapshot: str | None
     max_parallel: int
+    agents_per_host: int
     max_agents: int
     launch_delay: float
     poll_interval: float
@@ -187,7 +192,7 @@ def _run_reintegrate(
         write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
         return
 
-    # Get local host for artifact pulling
+    # Get local host (needed for local agent host mapping and integrator config)
     local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
     local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
@@ -203,6 +208,7 @@ def _run_reintegrate(
             test_node_id=detail.labels.get("test_node_id", str(detail.name)),
             agent_id=detail.id,
             agent_name=detail.name,
+            work_dir=detail.work_dir,
             created_at=0.0,
         )
         agent_infos.append(info)
@@ -229,8 +235,17 @@ def _run_reintegrate(
         html_path = output_dir / "index.html"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Gather results from all agents (re-reads outcome files)
-    base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
+    # Pull outputs (artifacts + result.json) for each agent, then gather results
+    cached_results: dict[str, TestResult] = {}
+    cg = mngr_ctx.concurrency_group
+    for info in agent_infos:
+        agent_id_str = str(info.agent_id)
+        if agent_id_str in agent_hosts:
+            result = pull_agent_outputs(info.agent_id, info.agent_name, agent_hosts[agent_id_str], output_dir, cg)
+            if result is not None:
+                cached_results[agent_id_str] = result
+
+    base_commit = get_base_commit(source_dir, cg)
     is_remote_provider = any(
         d.host is not None and d.host.provider_name != LOCAL_PROVIDER_NAME for d in matching_agents
     )
@@ -240,15 +255,10 @@ def _run_reintegrate(
         timed_out_ids=set(),
         hosts=agent_hosts,
         source_dir=source_dir,
-        cg=mngr_ctx.concurrency_group,
+        cg=cg,
         base_commit=base_commit if is_remote_provider else None,
+        cached_results=cached_results,
     )
-
-    # Pull artifacts
-    for info in agent_infos:
-        agent_id_str = str(info.agent_id)
-        if agent_id_str in agent_hosts:
-            pull_test_outputs_by_id(info.agent_id, info.agent_name, agent_hosts[agent_id_str], source_host, output_dir)
 
     # Write pre-integrator report
     generate_html_report(
@@ -258,18 +268,25 @@ def _run_reintegrate(
         run_commands=_build_run_commands(run_name),
     )
 
-    # Run integrator
+    # Run integrator (include tmr_run_name so it can be discovered alongside test agents)
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
-    label_options = resolve_labels(opts.label)
+    run_labels = dict(resolve_labels(opts.label).labels)
+    run_labels["tmr_run_name"] = run_name
+    label_options = AgentLabelOptions(labels=run_labels)
+    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
+    integrator_templates = opts.integrator_template if opts.integrator_template is not None else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
-        agent_type=AgentTypeName(opts.agent_type),
+        agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
         label_options=label_options,
+        templates=integrator_templates,
     )
-    integrator_result = _run_integrator_phase(results, integrator_config, mngr_ctx, opts, base_commit=base_commit)
+    integrator_result = _run_integrator_phase(
+        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    )
     integrated_branch = integrator_result.branch_name if integrator_result is not None else None
     generate_html_report(
         results,
@@ -287,6 +304,7 @@ def _run_integrator_phase(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     opts: TmrCliOptions,
+    output_dir: Path,
     base_commit: str | None = None,
 ) -> IntegratorResult | None:
     """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
@@ -323,11 +341,15 @@ def _run_integrator_phase(
         list_result = try_list_agents(mngr_ctx)
         for agent_detail in list_result.agents if list_result is not None else []:
             if str(agent_detail.id) == str(integrator.agent_id):
-                integrator_result = read_integrator_result(agent_detail, integrator_host, integrator_branch)
+                integrator_result = read_integrator_result(
+                    agent_detail, integrator_host, integrator_branch, output_dir, mngr_ctx.concurrency_group
+                )
                 # Only pull branches from remote providers; local worktree branches already exist
                 if is_remote:
                     pull_agent_branch(
-                        agent_detail,
+                        agent_detail.id,
+                        agent_detail.name,
+                        agent_detail.initial_branch,
                         integrator_host,
                         config.source_dir,
                         mngr_ctx.concurrency_group,
@@ -351,6 +373,23 @@ def _run_integrator_phase(
     default="claude",
     show_default=True,
     help="Type of agent to launch for each test",
+)
+@click.option(
+    "--integrator-type",
+    default=None,
+    help="Type of agent for the integrator (defaults to --agent-type)",
+)
+@click.option(
+    "-t",
+    "--agent-template",
+    multiple=True,
+    help="Create template to apply for testing agents [repeatable, stacks in order]",
+)
+@click.option(
+    "--integrator-template",
+    multiple=True,
+    default=None,
+    help="Create template to apply for the integrator agent (defaults to --agent-template)",
 )
 @click.option(
     "--provider",
@@ -396,6 +435,13 @@ def _run_integrator_phase(
     show_default=True,
     type=int,
     help="Maximum number of agents to launch concurrently (launch-time parallelism)",
+)
+@click.option(
+    "--agents-per-host",
+    default=4,
+    show_default=True,
+    type=int,
+    help="Number of agents sharing each remote host (ignored for local provider)",
 )
 @click.option(
     "--max-agents",
@@ -520,6 +566,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         env_options=env_options,
         label_options=label_options,
         snapshot=provided_snapshot,
+        templates=opts.agent_template,
     )
 
     try:
@@ -593,10 +640,13 @@ def _run_tmr_pipeline(
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel,
             launch_delay_seconds=opts.launch_delay,
+            agents_per_host=opts.agents_per_host,
+            run_name=e2e_run_prefix,
         )
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
+    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
     final_details, timed_out_ids, cached_results = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
@@ -611,15 +661,15 @@ def _run_tmr_pipeline(
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         artifact_output_dir=output_dir,
-        local_host=source_host,
+        source_dir=source_dir,
+        base_commit=base_commit if is_remote_provider else None,
     )
 
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (read result.json, pull branches for fixes)
-    # Only pass base_commit for remote providers -- local worktree branches already exist
-    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
+    # Step 8: Gather final results (branches already pulled during polling for
+    # remote providers; gather_results re-attempts for any that were missed)
     results = gather_results(
         agents=agent_infos,
         final_details=final_details,
@@ -635,15 +685,20 @@ def _run_tmr_pipeline(
     generate_html_report(results, html_path, test_artifacts_dir=output_dir)
 
     # Step 10: Build integrator config (defaults to local provider) and integrate
+    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
+    integrator_templates = opts.integrator_template if opts.integrator_template is not None else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
-        agent_type=AgentTypeName(opts.agent_type),
+        agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
         label_options=label_options,
+        templates=integrator_templates,
     )
-    integrator_result = _run_integrator_phase(results, integrator_config, mngr_ctx, opts, base_commit=base_commit)
+    integrator_result = _run_integrator_phase(
+        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    )
     integrated_branch = integrator_result.branch_name if integrator_result is not None else None
     generate_html_report(
         results,
@@ -709,7 +764,7 @@ Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-agents to limit how many agents run simultaneously (0 = no limit).
 
-Each agent writes its result to $MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/result.json
+Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
 tests_passing_before/after booleans, and a markdown summary.""",
     examples=(

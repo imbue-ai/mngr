@@ -964,6 +964,7 @@ class Host(BaseHost, OnlineHostInterface):
                 # must write atomically, otherwise we can get in trouble
                 self.write_file,
                 kwargs=dict(path=data_path, content=serialized_data.encode("utf-8"), mode=None, is_atomic=True),
+                name="write_certified_data",
             )
             # Notify the provider so it can update any external storage (e.g., Modal volume)
             if self.on_updated_host_data:

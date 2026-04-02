@@ -10,13 +10,20 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.agent_addr import AgentAddress
 from imbue.mngr.api.agent_addr import parse_agent_address
 from imbue.mngr.cli.create import _create_agent
+from imbue.mngr.cli.create import _resolve_transfer_mode
 from imbue.mngr.cli.create import _setup_create
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
@@ -1188,3 +1195,22 @@ def test_transfer_none_with_different_target_path_rejected(
 
     assert result.exit_code != 0
     assert "incompatible" in result.output.lower()
+
+
+def test_transfer_defaults_to_git_mirror_for_existing_remote_host(
+    default_create_cli_opts: CreateCliOptions,
+    local_host: Host,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When targeting an existing host on a non-local provider, default should be git-mirror."""
+    address = AgentAddress(
+        agent_name=None,
+        host_name=HostName("myhost"),
+        provider_name=ProviderInstanceName("modal"),
+    )
+    source_location = HostLocation(host=local_host, path=temp_git_repo)
+
+    result = _resolve_transfer_mode(default_create_cli_opts, address, source_location, temp_mngr_ctx)
+
+    assert result == TransferMode.GIT_MIRROR

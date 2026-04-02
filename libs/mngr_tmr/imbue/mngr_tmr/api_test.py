@@ -21,13 +21,8 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.api import CollectTestsError
-from imbue.mngr_tmr.api import _build_agent_options
-from imbue.mngr_tmr.api import _sanitize_test_name_for_agent
-from imbue.mngr_tmr.api import _short_random_id
-from imbue.mngr_tmr.api import _transfer_mode_for_provider
 from imbue.mngr_tmr.api import build_current_results
 from imbue.mngr_tmr.api import collect_tests
-from imbue.mngr_tmr.api import read_agent_result
 from imbue.mngr_tmr.api import read_integrator_result
 from imbue.mngr_tmr.api import should_pull_changes
 from imbue.mngr_tmr.data_types import Change
@@ -36,67 +31,73 @@ from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import ReportSection
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.prompts import PLUGIN_NAME
+from imbue.mngr_tmr.launching import build_agent_options as _build_agent_options
+from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
+from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.pulling import read_local_result as _read_local_result
 from imbue.mngr_tmr.report import report_section_of
 from imbue.mngr_tmr.testing import BLOCKED_FIX
 from imbue.mngr_tmr.testing import FAILED_FIX
 from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.testing import make_test_result
+from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
+from imbue.mngr_tmr.utils import short_random_id
+from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
 def test_short_random_id_length() -> None:
-    rid = _short_random_id()
+    rid = short_random_id()
     assert len(rid) == 6
 
 
 def test_short_random_id_is_hex() -> None:
-    rid = _short_random_id()
+    rid = short_random_id()
     int(rid, 16)
 
 
 def test_short_random_id_is_unique() -> None:
-    ids = {_short_random_id() for _ in range(100)}
+    ids = {short_random_id() for _ in range(100)}
     assert len(ids) == 100
 
 
 def test_sanitize_simple_test_name() -> None:
-    assert _sanitize_test_name_for_agent("tests/test_foo.py::test_bar") == "test-bar"
+    assert sanitize_test_name_for_agent("tests/test_foo.py::test_bar") == "test-bar"
 
 
 def test_sanitize_nested_test_name() -> None:
-    assert _sanitize_test_name_for_agent("tests/test_foo.py::TestClass::test_method") == "test-method"
+    assert sanitize_test_name_for_agent("tests/test_foo.py::TestClass::test_method") == "test-method"
 
 
 def test_sanitize_parametrized_test_name() -> None:
-    result = _sanitize_test_name_for_agent("tests/test_foo.py::test_bar[param1-param2]")
+    result = sanitize_test_name_for_agent("tests/test_foo.py::test_bar[param1-param2]")
     assert result == "test-bar-param1-param2-"[:40].rstrip("-")
 
 
 def test_sanitize_truncates_long_names() -> None:
     long_name = "tests/test_foo.py::test_" + "a" * 100
-    result = _sanitize_test_name_for_agent(long_name)
+    result = sanitize_test_name_for_agent(long_name)
     assert len(result) <= 40
 
 
 def test_sanitize_special_characters() -> None:
-    result = _sanitize_test_name_for_agent("tests/test_foo.py::test_with spaces_and___underscores")
+    result = sanitize_test_name_for_agent("tests/test_foo.py::test_with spaces_and___underscores")
     assert " " not in result
     assert "--" not in result
 
 
 def test_sanitize_single_part() -> None:
-    result = _sanitize_test_name_for_agent("simple_test")
+    result = sanitize_test_name_for_agent("simple_test")
     assert result == "simple-test"
 
 
 def test_transfer_mode_local_provider_uses_git_worktree() -> None:
-    assert _transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
+    assert transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
 
 
 def test_transfer_mode_remote_provider_uses_git_mirror() -> None:
-    assert _transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
-    assert _transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
+    assert transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
+    assert transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
 
 
 def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:
@@ -169,18 +170,13 @@ def test_build_agent_options_sets_agent_name() -> None:
 def test_build_agent_prompt_contains_test_id() -> None:
     prompt = build_test_agent_prompt("tests/test_foo.py::test_bar", ())
     assert "tests/test_foo.py::test_bar" in prompt
-    assert "result.json" in prompt
+    assert TESTING_AGENT_OUTCOME_FILENAME in prompt
     assert "IMPROVE_TEST" in prompt
     assert "FIX_TEST" in prompt
     assert "FIX_IMPL" in prompt
     assert "tests_passing_before" in prompt
     assert "tests_passing_after" in prompt
     assert "summary_markdown" in prompt
-
-
-def test_build_agent_prompt_contains_plugin_name() -> None:
-    prompt = build_test_agent_prompt("tests/test_x.py::test_y", ())
-    assert PLUGIN_NAME in prompt
 
 
 def test_build_agent_prompt_includes_pytest_flags() -> None:
@@ -278,12 +274,14 @@ def test_build_current_results_pending_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-one-abc123"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
         TestAgentInfo(
             test_node_id="tests/test_b.py::test_two",
             agent_id=AgentId.generate(),
             agent_name=AgentName("tmr-test-two-def456"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
     ]
@@ -302,6 +300,7 @@ def test_build_current_results_timed_out_agents() -> None:
             test_node_id="tests/test_a.py::test_one",
             agent_id=agent_id,
             agent_name=AgentName("tmr-test-one-abc123"),
+            work_dir=Path("/tmp/work"),
             created_at=0.0,
         ),
     ]
@@ -311,14 +310,20 @@ def test_build_current_results_timed_out_agents() -> None:
     assert report_section_of(results[0]) == ReportSection.BLOCKED
 
 
-# --- read_agent_result / read_integrator_result tests ---
+# --- _read_local_result / read_integrator_result tests ---
 
 
-def _write_result_json(host_dir: Path, agent_id: AgentId, content: str) -> None:
-    """Write a result.json for an agent in the expected directory structure."""
-    result_dir = host_dir / "agents" / str(agent_id) / "plugin" / PLUGIN_NAME
+def _write_local_result(local_dir: Path, content: str) -> None:
+    """Write a testing_agent_outcome.json in a local agent output directory."""
+    local_dir.mkdir(parents=True, exist_ok=True)
+    (local_dir / TESTING_AGENT_OUTCOME_FILENAME).write_text(content)
+
+
+def _write_integrator_result_in_work_dir(work_dir: Path, content: str) -> None:
+    """Write an integrator_outcome.json in the agent's .test_output directory."""
+    result_dir = work_dir / ".test_output"
     result_dir.mkdir(parents=True, exist_ok=True)
-    (result_dir / "result.json").write_text(content)
+    (result_dir / INTEGRATOR_OUTCOME_FILENAME).write_text(content)
 
 
 def _make_agent_detail(agent_id: AgentId, host_dir: Path) -> AgentDetails:
@@ -341,17 +346,16 @@ def _make_agent_detail(agent_id: AgentId, host_dir: Path) -> AgentDetails:
     )
 
 
-def test_read_agent_result_parses_changes(localhost: OnlineHostInterface) -> None:
-    agent_id = AgentId.generate()
-    _write_result_json(
-        localhost.host_dir,
-        agent_id,
+def test_read_local_result_parses_changes(tmp_path: Path) -> None:
+    local_dir = tmp_path / "agent-output"
+    _write_local_result(
+        local_dir,
         '{"changes": {"FIX_TEST": {"status": "SUCCEEDED", "summary_markdown": "Fixed it"}},'
         ' "errored": false, "tests_passing_before": false, "tests_passing_after": true,'
         ' "summary_markdown": "All good"}',
     )
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_agent_result(detail, localhost)
+    result = _read_local_result(local_dir, AgentName("tmr-test"))
+    assert result is not None
     assert ChangeKind.FIX_TEST in result.changes
     assert result.changes[ChangeKind.FIX_TEST].status == ChangeStatus.SUCCEEDED
     assert result.tests_passing_before is False
@@ -359,46 +363,43 @@ def test_read_agent_result_parses_changes(localhost: OnlineHostInterface) -> Non
     assert result.summary_markdown == "All good"
 
 
-def test_read_agent_result_empty_changes(localhost: OnlineHostInterface) -> None:
-    agent_id = AgentId.generate()
-    _write_result_json(
-        localhost.host_dir,
-        agent_id,
+def test_read_local_result_empty_changes(tmp_path: Path) -> None:
+    local_dir = tmp_path / "agent-output"
+    _write_local_result(
+        local_dir,
         '{"changes": {}, "errored": false, "tests_passing_before": true,'
         ' "tests_passing_after": true, "summary_markdown": "Clean pass"}',
     )
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_agent_result(detail, localhost)
+    result = _read_local_result(local_dir, AgentName("tmr-test"))
+    assert result is not None
     assert result.changes == {}
     assert result.errored is False
 
 
-def test_read_agent_result_invalid_json(localhost: OnlineHostInterface) -> None:
-    agent_id = AgentId.generate()
-    _write_result_json(localhost.host_dir, agent_id, "not json")
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_agent_result(detail, localhost)
-    assert result.errored is True
-    assert "Failed to read" in result.summary_markdown
+def test_read_local_result_invalid_json(tmp_path: Path) -> None:
+    local_dir = tmp_path / "agent-output"
+    _write_local_result(local_dir, "not json")
+    result = _read_local_result(local_dir, AgentName("tmr-test"))
+    assert result is None
 
 
-def test_read_agent_result_missing_file(localhost: OnlineHostInterface) -> None:
-    agent_id = AgentId.generate()
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_agent_result(detail, localhost)
-    assert result.errored is True
+def test_read_local_result_missing_file(tmp_path: Path) -> None:
+    local_dir = tmp_path / "agent-output"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    result = _read_local_result(local_dir, AgentName("tmr-test"))
+    assert result is None
 
 
 def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterface) -> None:
     agent_id = AgentId.generate()
-    _write_result_json(
-        localhost.host_dir,
-        agent_id,
+    detail = _make_agent_detail(agent_id, localhost.host_dir)
+    _write_integrator_result_in_work_dir(
+        detail.work_dir,
         '{"squashed_branches": ["branch-a", "branch-b"], "squashed_commit_hash": "abc1234",'
         ' "impl_priority": ["branch-d"], "impl_commit_hashes": {"branch-d": "def5678"}, "failed": ["branch-c"]}',
     )
-    detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated")
+    cg = ConcurrencyGroup(name="test")
+    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated", destination_dir=None, cg=cg)
     assert result.squashed_branches == ("branch-a", "branch-b")
     assert result.squashed_commit_hash == "abc1234"
     assert result.impl_priority == ("branch-d",)
@@ -410,7 +411,8 @@ def test_read_integrator_result_parses_merged_failed(localhost: OnlineHostInterf
 def test_read_integrator_result_missing_file(localhost: OnlineHostInterface) -> None:
     agent_id = AgentId.generate()
     detail = _make_agent_detail(agent_id, localhost.host_dir)
-    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated")
+    cg = ConcurrencyGroup(name="test")
+    result = read_integrator_result(detail, localhost, "mngr-tmr/integrated", destination_dir=None, cg=cg)
     assert result.branch_name == "mngr-tmr/integrated"
     assert result.squashed_branches == ()
     assert result.impl_priority == ()
