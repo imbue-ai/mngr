@@ -2421,7 +2421,10 @@ log "=== Shutdown script completed ==="
         for host in hosts:
             self._host_by_id_cache[host.id] = host
 
-        return [DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name) for h in hosts]
+        return [
+            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=h.get_state())
+            for h in hosts
+        ]
 
     def _construct_host_from_record_for_discovery(
         self,
