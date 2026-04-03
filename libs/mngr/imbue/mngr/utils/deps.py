@@ -247,10 +247,12 @@ def _install_via_apt(packages: list[str]) -> bool:
     if shutil.which("apt-get") is None:
         return False
     try:
-        subprocess.run(
+        update = subprocess.run(
             ["sudo", "apt-get", "update", "-qq"],
             timeout=60,
         )
+        if update.returncode != 0:
+            return False
         result = subprocess.run(
             ["sudo", "apt-get", "install", "-y", "-qq", *packages],
             timeout=300,
