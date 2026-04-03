@@ -1,3 +1,4 @@
+import re
 import sys
 from collections.abc import Callable
 from types import TracebackType
@@ -5,6 +6,7 @@ from typing import Any
 from typing import Final
 from typing import Self
 
+from imbue.imbue_common.pure import pure
 from imbue.imbue_common.mutable_model import MutableModel
 
 ANSI_ERASE_LINE: Final[str] = "\r\x1b[K"
@@ -12,10 +14,35 @@ ANSI_ERASE_TO_END: Final[str] = "\x1b[J"
 ANSI_DIM_GRAY: Final[str] = "\x1b[38;5;245m"
 ANSI_RESET: Final[str] = "\x1b[0m"
 
+_ANSI_ESCAPE_RE: Final[re.Pattern[str]] = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
 
 def ansi_cursor_up(lines: int) -> str:
     """ANSI escape sequence to move the cursor up by the given number of lines."""
     return f"\x1b[{lines}A"
+
+
+@pure
+def visual_line_count(text: str, terminal_width: int) -> int:
+    """Count the number of visual terminal lines a text string occupies.
+
+    Accounts for ANSI escape sequences (which have zero visual width) and
+    terminal line wrapping when a line exceeds terminal_width.
+
+    The count represents how many lines the cursor moves down when the text
+    is written, which is the value needed for cursor-up to undo the write.
+    A trailing newline counts as a line break (the cursor moves to the next line).
+    """
+    stripped = _ANSI_ESCAPE_RE.sub("", text)
+    count = 0
+    for line in stripped.split("\n")[:-1]:
+        # Each segment between newlines takes at least 1 visual line,
+        # plus additional lines if it wraps past the terminal width.
+        if not line:
+            count += 1
+        else:
+            count += (len(line) + terminal_width - 1) // terminal_width
+    return count
 
 
 class StderrInterceptor(MutableModel):
