@@ -207,7 +207,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
             # Get pane state and pid in one command
             result = self.host.execute_idempotent_command(
-                f"tmux list-panes -t '{session_name}:0' "
+                f"tmux list-panes -t '{session_name}:agent' "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
                 timeout_seconds=5.0,
             )
@@ -282,13 +282,15 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     @property
     def tmux_target(self) -> str:
-        """Tmux target for the agent's primary window (window 0).
+        """Tmux target for the agent's primary window (named 'agent').
 
-        Agents always run in window 0 of their tmux session. Using the bare
-        session name as a tmux target selects the *currently active* window,
-        which is wrong when additional windows exist (e.g., watchers, ttyd).
+        The primary window is named 'agent' at session creation time. Using a
+        name instead of an index (`:0`) makes targeting independent of the
+        user's tmux `base-index` setting. Using the bare session name would
+        select the *currently active* window, which is wrong when additional
+        windows exist (e.g., watchers, ttyd).
         """
-        return f"{self.session_name}:0"
+        return f"{self.session_name}:agent"
 
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.

@@ -796,7 +796,7 @@ def test_unset_vars_applied_during_agent_start(
 
 
 @pytest.mark.tmux
-def test_start_agents_window_zero_addressable_with_user_base_index_1(
+def test_start_agents_agent_window_addressable_with_user_base_index_1(
     temp_host_dir: Path,
     per_host_dir: Path,
     temp_work_dir: Path,
@@ -806,8 +806,8 @@ def test_start_agents_window_zero_addressable_with_user_base_index_1(
     active_concurrency_group: ConcurrencyGroup,
     tmp_home_dir: Path,
 ) -> None:
-    """Regression: window :0 must work when ~/.tmux.conf sets base-index 1."""
-    # Simulate user config that would break hardcoded :0 window targets
+    """Regression: agent window must work when ~/.tmux.conf sets base-index 1."""
+    # Simulate user config that would break index-based window targets
     (tmp_home_dir / ".tmux.conf").write_text("set -g base-index 1\nset -g pane-base-index 1\n")
 
     config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
@@ -841,10 +841,10 @@ def test_start_agents_window_zero_addressable_with_user_base_index_1(
 
     try:
         wait_for(
-            lambda: host.execute_idempotent_command(f"tmux has-session -t '{session_name}:0'").success,
+            lambda: host.execute_idempotent_command(f"tmux has-session -t '{session_name}:agent'").success,
             timeout=30.0,
             poll_interval=0.5,
-            error_message=f"tmux window {session_name}:0 not addressable after start_agents",
+            error_message=f"tmux window {session_name}:agent not addressable after start_agents",
         )
     finally:
         host.stop_agents([agent.id])
