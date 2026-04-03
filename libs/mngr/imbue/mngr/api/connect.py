@@ -37,8 +37,8 @@ def build_post_attach_resize_script(session_name: str) -> str:
     """
     return (
         f"tmux list-windows -t '={session_name}' -F '#I' | "
-        f"xargs -I{{}} tmux resize-window -t '={session_name}':{{}} -A; "
-        f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' | "
+        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
+        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
         f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
     )
 
@@ -222,7 +222,7 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        os.execvpe("tmux", ["tmux", "attach", "-t", session_name], env)
+        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 
