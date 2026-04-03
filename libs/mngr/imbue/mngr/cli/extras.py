@@ -53,7 +53,7 @@ def _is_completion_configured(rc_path: Path) -> bool:
     return "_mngr_complete" in rc_path.read_text()
 
 
-def _generate_completion_script(shell_type: str) -> str | None:
+def _generate_completion_script(shell_type: str) -> str:
     """Generate the completion script using the existing complete module."""
     if shell_type == "zsh":
         return generate_zsh_script()
@@ -87,9 +87,6 @@ def _install_completion(auto: bool) -> bool:
             return False
 
     script = _generate_completion_script(shell_type)
-    if script is None:
-        write_human_line("WARNING: Could not generate completion script.")
-        return False
 
     with rc_path.open("a") as f:
         f.write(f"\n{script}\n")
