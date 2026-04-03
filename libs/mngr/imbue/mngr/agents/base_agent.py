@@ -207,7 +207,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
             # Get pane state and pid in one command
             result = self.host.execute_idempotent_command(
-                f"tmux list-panes -t '{session_name}:0' "
+                f"tmux list-panes -t '={session_name}:0' "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
                 timeout_seconds=5.0,
             )
@@ -379,7 +379,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the tmux "command too long" error.
         """
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
+            send_msg_cmd = f"tmux send-keys -t '={tmux_target}' -l {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
@@ -395,7 +395,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
-                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
+                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '={tmux_target}'"
                 result = self.host.execute_stateful_command(paste_cmd)
                 if not result.success:
                     raise SendMessageError(
@@ -410,7 +410,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Send a message directly without waiting for paste confirmation."""
         self._send_tmux_literal_keys(tmux_target, message)
 
-        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+        send_enter_cmd = f"tmux send-keys -t '={tmux_target}' Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
@@ -573,7 +573,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         cmd = (
             f"bash -c '"
-            f'( sleep 0.1 && tmux send-keys -t "$1" Enter ) & '
+            f'( sleep 0.1 && tmux send-keys -t "=$1" Enter ) & '
             f'timeout {timeout_secs} tmux wait-for "$0"'
             f"' {shlex.quote(wait_channel)} {shlex.quote(tmux_target)}"
         )

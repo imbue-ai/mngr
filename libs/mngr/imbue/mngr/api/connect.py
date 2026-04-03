@@ -36,9 +36,9 @@ def build_post_attach_resize_script(session_name: str) -> str:
     than "claude").
     """
     return (
-        f"tmux list-windows -t '{session_name}' -F '#I' | "
-        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
+        f"tmux list-windows -t '={session_name}' -F '#I' | "
+        f"xargs -I{{}} tmux resize-window -t '={session_name}':{{}} -A; "
+        f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' | "
         f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
     )
 
@@ -75,7 +75,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         # Force a terminal resize after attaching to trigger SIGWINCH delivery.
         f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
         # actually attach
-        f"tmux attach -t '{session_name}'; "
+        f"tmux attach -t '={session_name}'; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
