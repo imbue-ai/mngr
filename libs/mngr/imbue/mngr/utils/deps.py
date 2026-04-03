@@ -204,6 +204,8 @@ def describe_install_commands(deps: Sequence[SystemDependency], os_name: OsName)
             brew_packages.append(dep.install_method.brew_package)
         elif os_name == OsName.LINUX and dep.install_method.apt_package is not None:
             apt_packages.append(dep.install_method.apt_package)
+        else:
+            pass
 
     if brew_packages:
         commands.insert(0, f"brew install {' '.join(brew_packages)}")
@@ -233,6 +235,8 @@ def install_deps_batch(deps: Sequence[SystemDependency], os_name: OsName) -> lis
         elif os_name == OsName.LINUX and dep.install_method.apt_package is not None:
             apt_packages.append(dep.install_method.apt_package)
             apt_dep_map[dep.install_method.apt_package] = dep
+        else:
+            pass
 
     failed: list[SystemDependency] = []
 
