@@ -243,26 +243,6 @@ def _load_modal_credentials(env: dict[str, str]) -> None:
             break
 
 
-def _link_claude_config(temp_home: Path) -> None:
-    """Symlink the real ~/.claude/ into the test HOME so Claude can authenticate.
-
-    The e2e test environment overrides HOME to a temp directory for isolation.
-    Claude Code stores its config in ~/.claude/ and authenticates via the
-    macOS keychain (OAuth). Without the config dir, Claude reports "Not logged in".
-
-    We symlink rather than copy because:
-    - The keychain auth requires the config dir to exist but doesn't read
-      secrets from files (they're in the system keychain).
-    - A symlink avoids duplicating large files like history.jsonl.
-    """
-    real_claude_dir = _REAL_HOME / ".claude"
-    if not real_claude_dir.is_dir():
-        return
-    target = temp_home / ".claude"
-    if not target.exists():
-        target.symlink_to(real_claude_dir)
-
-
 @pytest.fixture
 def e2e(
     temp_host_dir: Path,
@@ -305,10 +285,6 @@ def e2e(
     # tests, but e2e subprocesses need the vars set explicitly.
     if "MODAL_TOKEN_ID" not in env:
         _load_modal_credentials(env)
-
-    # Make Claude's config available so headless claude (mngr ask) can authenticate.
-    # temp_host_dir is <tmp_path>/.mngr, so its parent is the fake HOME.
-    _link_claude_config(temp_host_dir.parent)
 
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
     env["TMUX_TMPDIR"] = str(tmux_tmpdir)
