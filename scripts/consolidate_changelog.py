@@ -1,7 +1,7 @@
-"""Consolidate individual changelog entry files into CHANGELOG.md.
+"""Consolidate individual changelog entry files into UNABRIDGED_CHANGELOG.md.
 
 Reads all .md files in the changelog/ directory (excluding .gitkeep),
-prepends a new date-headed section to CHANGELOG.md with their contents,
+prepends a new date-headed section to UNABRIDGED_CHANGELOG.md with their contents,
 and deletes the individual files.
 
 Exits with code 0 and no changes if there are no changelog entries to consolidate.
@@ -14,7 +14,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CHANGELOG_DIR = _REPO_ROOT / "changelog"
-_CHANGELOG_FILE = _REPO_ROOT / "CHANGELOG.md"
+_CHANGELOG_FILE = _REPO_ROOT / "UNABRIDGED_CHANGELOG.md"
 
 
 def _collect_entries(changelog_dir: Path) -> list[tuple[Path, str]]:

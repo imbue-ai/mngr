@@ -1,5 +1,5 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+A concise, human-friendly summary of changes. Updated nightly by the changelog consolidation agent.
 
-Entries are consolidated nightly from individual changelog files in the `changelog/` directory.
+For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).

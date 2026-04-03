@@ -43,12 +43,14 @@ fi
 echo "Creating schedule '${TRIGGER_NAME}'..."
 
 # The agent runs scripts/consolidate_changelog.py (a deterministic Python
-# script) then commits and lets the stop hook create the PR.
+# script) to consolidate entries into UNABRIDGED_CHANGELOG.md, then updates
+# CHANGELOG.md with a concise AI-generated summary, commits, and lets the
+# stop hook create the PR.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
     --provider "$PROVIDER" \
     --no-ensure-safe-commands \
-    --args '--type claude --branch :mngr/changelog-consolidation-{DATE} --message "Run the changelog consolidation script: uv run python scripts/consolidate_changelog.py. If it reports no entries to consolidate, exit without changes. Otherwise, commit the updated CHANGELOG.md and the deleted changelog files."'
+    --args '--type claude --branch :mngr/changelog-consolidation-{DATE} --message "Step 1: Run uv run python scripts/consolidate_changelog.py to consolidate changelog entries into UNABRIDGED_CHANGELOG.md. If it reports no entries, exit without changes. Step 2: Read the new section that was just added to UNABRIDGED_CHANGELOG.md (the topmost ## section). Then update CHANGELOG.md by adding a concise, human-friendly summary of these changes under the same date heading, inserted after the header text. Group related changes, use natural language, and keep it brief. Step 3: Commit all changed files."'
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
