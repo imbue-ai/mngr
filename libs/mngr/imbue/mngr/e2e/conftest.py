@@ -302,8 +302,8 @@ def e2e(
 
     # Configure connect_command for create/start.
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
-    # exercise the full discovery path. Note: @pytest.mark.modal is NOT
-    # used for e2e tests -- see the comment in test_create_modal.py.
+    # exercise the full discovery path. Tests that trigger Modal (via
+    # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
         "[commands.create]\n"
