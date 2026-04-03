@@ -46,11 +46,19 @@ uv tool install imbue-mngr
 
 if ! command -v mngr &>/dev/null; then
     TOOL_BIN="$(uv tool dir --bin)"
-    error "mngr was installed to $TOOL_BIN but that directory is not on your PATH. Add it with:
+    # Figure out which shell RC file to suggest
+    case "${SHELL:-}" in
+        */zsh)  SHELL_RC="~/.zshrc" ;;
+        */bash) SHELL_RC="~/.bashrc" ;;
+        *)      SHELL_RC="your shell's RC file" ;;
+    esac
+    error "mngr was installed to $TOOL_BIN but that directory is not on your PATH.
+
+To fix, add this line to $SHELL_RC:
 
   export PATH=\"$TOOL_BIN:\$PATH\"
 
-Then re-run this script."
+Then restart your shell and re-run this script."
 fi
 
 # ── Step 3: Check / install system dependencies ──────────────────────────────
