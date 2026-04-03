@@ -234,6 +234,15 @@ if ! command -v uv &>/dev/null; then
     fi
 fi
 
+# ── Check Python version ──────────────────────────────────────────────────────
+
+PYTHON_VERSION="$(uv python find 2>/dev/null | xargs -I{} {} -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+PYTHON_MINOR="${PYTHON_VERSION#*.}"
+
+if [ -n "$PYTHON_VERSION" ] && [ "${PYTHON_VERSION%%.*}" -eq 3 ] 2>/dev/null && [ "$PYTHON_MINOR" -lt 12 ] 2>/dev/null; then
+    error "mngr requires Python >= 3.12, but found Python $PYTHON_VERSION. Please install Python 3.12+ and re-run this script."
+fi
+
 # ── Install mngr ──────────────────────────────────────────────────────────────
 
 info "Installing mngr..."
