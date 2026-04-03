@@ -1633,7 +1633,8 @@ def _create_minimal_agent(host: Host, temp_dir: Path, work_dir: Path | None = No
 def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
     """Helper to initialize a git repo.
 
-    Requires the setup_git_config fixture to have created .gitconfig in the fake HOME.
+    Expects git user config to be available (provided by the autouse
+    setup_test_mngr_env fixture via GIT_CONFIG_GLOBAL).
     """
     subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
     subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
