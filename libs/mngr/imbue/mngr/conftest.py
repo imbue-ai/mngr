@@ -146,25 +146,23 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME for backward compatibility.
+def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git and provide user config for tests that run git commands.
 
-    Note: The autouse setup_test_mngr_env fixture now provides git user
-    config via GIT_CONFIG_GLOBAL, so this fixture is no longer required
-    for git operations. It is kept because temp_git_repo depends on it
-    and many tests request it transitively.
+    Sets GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT, and GIT_CONFIG_GLOBAL
+    via the shared isolate_git() helper. Tests that need git should request
+    this fixture (or temp_git_repo, which depends on it).
     """
-    gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n")
+    with isolate_git(monkeypatch):
+        yield
 
 
 @pytest.fixture
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit.
 
-    Git user config is provided by the autouse setup_test_mngr_env fixture
-    via GIT_CONFIG_GLOBAL. Creates a git repo with one tracked file and an
+    Git user config is provided by the setup_git_config fixture via
+    GIT_CONFIG_GLOBAL. Creates a git repo with one tracked file and an
     initial commit.
 
     Use this fixture for any test that needs a git repository.
@@ -329,7 +327,6 @@ def setup_test_mngr_env(
     - MNGR_PREFIX uses a unique test ID for isolation
     - MNGR_ROOT_NAME prevents loading project config (.mngr/settings.toml)
     - TMUX_TMPDIR gives each test its own tmux server (via _isolate_tmux_server)
-    - Git is fully isolated from system/global config
 
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
@@ -340,20 +337,19 @@ def setup_test_mngr_env(
     monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
     monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
 
-    with isolate_git(monkeypatch):
-        # Unison derives its config directory from $HOME. Since we override HOME
-        # above, unison tries to create its config dir inside tmp_path, which
-        # fails because the expected parent directories don't exist. The UNISON
-        # env var overrides this to a path we control.
-        unison_dir = tmp_home_dir / ".unison"
-        unison_dir.mkdir(exist_ok=True)
-        monkeypatch.setenv("UNISON", str(unison_dir))
+    # Unison derives its config directory from $HOME. Since we override HOME
+    # above, unison tries to create its config dir inside tmp_path, which
+    # fails because the expected parent directories don't exist. The UNISON
+    # env var overrides this to a path we control.
+    unison_dir = tmp_home_dir / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
 
-        # Safety check: verify Path.home() is in a temp directory.
-        # If this fails, tests could accidentally modify the real home directory.
-        assert_home_is_temp_directory()
+    # Safety check: verify Path.home() is in a temp directory.
+    # If this fails, tests could accidentally modify the real home directory.
+    assert_home_is_temp_directory()
 
-        yield
+    yield
 
 
 @pytest.fixture

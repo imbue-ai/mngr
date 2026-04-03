@@ -93,11 +93,7 @@ def setup_test_mngr_env(
     monkeypatch: pytest.MonkeyPatch,
     _isolate_tmux_server: None,
 ) -> Generator[None, None, None]:
-    """Set up environment variables for all tests.
-
-    Git is fully isolated from system/global config via GIT_CONFIG_NOSYSTEM,
-    GIT_TERMINAL_PROMPT, and a per-test GIT_CONFIG_GLOBAL.
-    """
+    """Set up environment variables for all tests."""
     mngr_test_id = uuid4().hex
     mngr_test_prefix = f"mngr_{mngr_test_id}-"
     mngr_test_root_name = f"mngr-test-{mngr_test_id}"
@@ -107,14 +103,13 @@ def setup_test_mngr_env(
     monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
 
-    with isolate_git(monkeypatch):
-        unison_dir = tmp_path / ".unison"
-        unison_dir.mkdir(exist_ok=True)
-        monkeypatch.setenv("UNISON", str(unison_dir))
+    unison_dir = tmp_path / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
 
-        assert_home_is_temp_directory()
+    assert_home_is_temp_directory()
 
-        yield
+    yield
 
 
 @pytest.fixture
@@ -125,17 +120,15 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 
 @pytest.fixture
-def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME for backward compatibility.
+def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Isolate git and provide user config for tests that run git commands.
 
-    Note: The autouse setup_test_mngr_env fixture now provides git user
-    config via GIT_CONFIG_GLOBAL, so this fixture is no longer required
-    for git operations. It is kept because temp_git_repo depends on it
-    and many tests request it transitively.
+    Sets GIT_CONFIG_NOSYSTEM, GIT_TERMINAL_PROMPT, and GIT_CONFIG_GLOBAL
+    via the shared isolate_git() helper. Tests that need git should request
+    this fixture (or temp_git_repo, which depends on it).
     """
-    gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n")
+    with isolate_git(monkeypatch):
+        yield
 
 
 @pytest.fixture

@@ -178,6 +178,26 @@ def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
+# Environment variables that isolate git from system-level config and
+# interactive prompts. Used by both isolate_git() (fixture path) and
+# _git_isolation_env() (subprocess path, for init_git_repo_with_config).
+_GIT_ISOLATION_ENV: Final[dict[str, str]] = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def _git_isolation_env() -> dict[str, str]:
+    """Return env dict for subprocess git calls with system config isolation.
+
+    Merges the current os.environ with GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT. Use this for git subprocesses that need isolation
+    but are not running inside an isolate_git() context manager (e.g.
+    init_git_repo_with_config).
+    """
+    return {**os.environ, **_GIT_ISOLATION_ENV}
+
+
 @contextmanager
 def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Fully isolate git from system-level config and interactive prompts.
@@ -192,8 +212,8 @@ def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     own copy because some tests (e.g. add_safe_directory_on_remote) write
     to the global config and other tests assert it is clean.
     """
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    for key, value in _GIT_ISOLATION_ENV.items():
+        monkeypatch.setenv(key, value)
 
     gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
     try:
@@ -682,7 +702,11 @@ def get_short_random_string() -> str:
 
 
 def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the given directory.
+    """Run a git command in the given directory with system config isolation.
+
+    Uses _git_isolation_env() to set GIT_CONFIG_NOSYSTEM and
+    GIT_TERMINAL_PROMPT, preventing reads of /etc/gitconfig and interactive
+    prompts that can cause flakes under parallel execution.
 
     Raises an exception if the command fails.
     """
@@ -691,6 +715,7 @@ def run_git_command(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=_git_isolation_env(),
     )
     if result.returncode != 0:
         raise MngrError(f"git {' '.join(args)} failed: {result.stderr}")
