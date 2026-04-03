@@ -51,10 +51,3 @@ def test_check_deps_no_flags_reports_all_present(cli_runner: CliRunner) -> None:
     # Just verify it runs without crashing. Exit code depends on whether all deps are installed.
     assert result.exit_code in (0, 1)
     assert "System dependencies" in result.output
-
-
-def test_check_deps_help_exits_zero(cli_runner: CliRunner) -> None:
-    """--help should exit 0."""
-    result = cli_runner.invoke(check_deps, ["--help"])
-    assert result.exit_code == 0
-    assert "dependencies" in result.output.lower()

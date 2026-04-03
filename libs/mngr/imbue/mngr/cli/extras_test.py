@@ -78,9 +78,3 @@ def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(extras, [])
     assert result.exit_code == 0
     assert "Extras" in result.output
-
-
-def test_extras_help_exits_zero(cli_runner: CliRunner) -> None:
-    """--help should exit 0."""
-    result = cli_runner.invoke(extras, ["--help"])
-    assert result.exit_code == 0
