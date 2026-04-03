@@ -38,7 +38,7 @@ def build_post_attach_resize_script(session_name: str) -> str:
     return (
         f"tmux list-windows -t '={session_name}' -F '#I' | "
         f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
+        f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' | "
         f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
     )
 
