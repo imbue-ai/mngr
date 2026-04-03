@@ -269,11 +269,12 @@ def test_check_agent_type_known_for_custom_type_with_unregistered_parent() -> No
 # =========================================================================
 
 
-def _get_safe_directories(tmp_path: Path) -> list[str]:
-    """Read safe.directory entries from the gitconfig in the test HOME."""
-    gitconfig = tmp_path / ".gitconfig"
-    if not gitconfig.exists():
-        return []
+def _get_safe_directories() -> list[str]:
+    """Read safe.directory entries from the global gitconfig.
+
+    Uses `git config --global` which respects the GIT_CONFIG_GLOBAL env var
+    set by the autouse fixture.
+    """
     result = subprocess.run(
         ["git", "config", "--global", "--get-all", "safe.directory"],
         capture_output=True,
@@ -291,7 +292,7 @@ def test_add_safe_directory_on_remote_adds_entry_for_non_local_host(tmp_path: Pa
 
     add_safe_directory_on_remote(host, target_path)
 
-    safe_dirs = _get_safe_directories(tmp_path)
+    safe_dirs = _get_safe_directories()
     assert str(target_path) in safe_dirs
 
 
@@ -302,5 +303,5 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(tmp_path: Path) -> 
 
     add_safe_directory_on_remote(host, target_path)
 
-    safe_dirs = _get_safe_directories(tmp_path)
+    safe_dirs = _get_safe_directories()
     assert str(target_path) not in safe_dirs

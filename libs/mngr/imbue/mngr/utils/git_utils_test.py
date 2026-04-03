@@ -271,19 +271,28 @@ def test_get_git_author_info_returns_configured_values(temp_git_repo: Path, cg: 
     assert email == "test@test.com"
 
 
-def test_get_git_author_info_returns_none_when_not_configured(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_get_git_author_info_returns_none_when_not_configured(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test that get_git_author_info returns (None, None) for a repo without author config."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    # HOME is already set to tmp_path by autouse fixture, and no .gitconfig exists
+    # Override the global gitconfig from the autouse fixture so this repo
+    # truly has no user config at all.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
     name, email = get_git_author_info(repo_dir, cg)
     assert name is None
     assert email is None
 
 
-def test_get_git_author_info_returns_none_for_non_git_dir(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_get_git_author_info_returns_none_for_non_git_dir(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test that get_git_author_info returns (None, None) for a non-git directory."""
+    # Override the global gitconfig from the autouse fixture so git config
+    # truly returns nothing outside a repo.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
     name, email = get_git_author_info(plain_dir, cg)

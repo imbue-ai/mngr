@@ -1,6 +1,8 @@
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -326,6 +328,7 @@ def setup_test_mngr_env(
     - MNGR_PREFIX uses a unique test ID for isolation
     - MNGR_ROOT_NAME prevents loading project config (.mngr/settings.toml)
     - TMUX_TMPDIR gives each test its own tmux server (via _isolate_tmux_server)
+    - Git is fully isolated from system/global config
 
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
@@ -335,6 +338,23 @@ def setup_test_mngr_env(
     monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
     monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+
+    # Fully isolate git from system-level config and interactive prompts.
+    # Without these, concurrent git processes under xdist may contend on
+    # /etc/gitconfig reads or hang waiting for terminal input.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+
+    # Provide a per-test global gitconfig so git operations always have user
+    # config available. The file must live OUTSIDE tmp_path because some tests
+    # init a git repo directly in tmp_path (= HOME) and any file there would
+    # appear as untracked in `git status --porcelain`. It must also be per-test
+    # (not shared) because tests like add_safe_directory_on_remote write to the
+    # global config and other tests assert it's clean.
+    gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
+    gitconfig = gitconfig_dir / "config"
+    gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside tmp_path, which
@@ -349,6 +369,9 @@ def setup_test_mngr_env(
     assert_home_is_temp_directory()
 
     yield
+
+    # Clean up the per-test gitconfig directory
+    shutil.rmtree(gitconfig_dir, ignore_errors=True)
 
 
 @pytest.fixture
