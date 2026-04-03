@@ -201,6 +201,42 @@ def assert_home_is_temp_directory() -> None:
         )
 
 
+def setup_mngr_test_environment(
+    home_dir: Path,
+    host_dir: Path,
+    prefix: str,
+    root_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Core environment setup shared by all setup_test_mngr_env fixtures.
+
+    This is the single source of truth for mngr test environment isolation.
+    All setup_test_mngr_env fixture definitions (in mngr/conftest.py,
+    plugin_testing.py, and plugin-specific overrides like mngr_modal/conftest.py)
+    should delegate to this function rather than duplicating the setup logic.
+
+    Callers that need additional env vars (e.g. Modal tokens) should set them
+    before calling this function, since isolate_home() overrides HOME.
+    """
+    isolate_home(home_dir, monkeypatch)
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+    monkeypatch.setenv("MNGR_PREFIX", prefix)
+    monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
+    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
+
+    # Unison derives its config directory from $HOME. Since we override HOME
+    # above, unison tries to create its config dir inside the temp home, which
+    # fails because the expected parent directories don't exist. The UNISON
+    # env var overrides this to a path we control.
+    unison_dir = home_dir / ".unison"
+    unison_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("UNISON", str(unison_dir))
+
+    # Safety check: verify Path.home() is in a temp directory.
+    # If this fails, tests could accidentally modify the real home directory.
+    assert_home_is_temp_directory()
+
+
 def get_subprocess_test_env(
     root_name: str = "mngr-test",
     prefix: str | None = None,

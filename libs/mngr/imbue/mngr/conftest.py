@@ -32,12 +32,11 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
-from imbue.mngr.utils.testing import assert_home_is_temp_directory
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import isolate_home
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr.utils.testing import worker_test_ids
 
 # The urwid import above triggers creation of deprecated module aliases.
@@ -330,23 +329,7 @@ def setup_test_mngr_env(
     By setting HOME to tmp_path, tests cannot accidentally read or modify
     files in the real home directory. This protects files like ~/.claude.json.
     """
-    isolate_home(tmp_home_dir, monkeypatch)
-    monkeypatch.setenv("MNGR_HOST_DIR", str(temp_host_dir))
-    monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
-    monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
-    monkeypatch.delenv("MNGR_PROJECT_DIR", raising=False)
-
-    # Unison derives its config directory from $HOME. Since we override HOME
-    # above, unison tries to create its config dir inside tmp_path, which
-    # fails because the expected parent directories don't exist. The UNISON
-    # env var overrides this to a path we control.
-    unison_dir = tmp_home_dir / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
-
-    # Safety check: verify Path.home() is in a temp directory.
-    # If this fails, tests could accidentally modify the real home directory.
-    assert_home_is_temp_directory()
+    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
 
     yield
 
