@@ -108,15 +108,17 @@ def _check_deps_impl(ctx: click.Context, interactive: bool, core: bool, install_
             write_human_line("Skipping dependency installation.")
             return
 
-    if not to_install:
+    need_bash = os_name == OsName.MACOS and not bash_ok
+
+    if not to_install and not need_bash:
         write_human_line("Nothing to install.")
         return
 
-    need_bash = os_name == OsName.MACOS and not bash_ok
-
     # Do the installation
-    write_human_line("Installing: {}", ", ".join(d.binary for d in to_install))
-    failed = install_deps_batch(to_install, os_name)
+    failed: list[SystemDependency] = []
+    if to_install:
+        write_human_line("Installing: {}", ", ".join(d.binary for d in to_install))
+        failed = install_deps_batch(to_install, os_name)
 
     # Install modern bash on macOS if needed
     if need_bash:
