@@ -12,6 +12,7 @@
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion, etc.)
 #
 # Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
+# Safe to re-run: skips anything already installed.
 # Source: https://github.com/imbue-ai/mngr
 #
 set -euo pipefail
