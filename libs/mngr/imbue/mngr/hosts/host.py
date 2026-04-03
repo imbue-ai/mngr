@@ -2772,8 +2772,6 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists (using ; so that a failed
-    # has-session check doesn't break the && chain that follows)
     # Bail out early if the session already exists. Use = prefix for exact
     # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
     # matching "mngr_foo-bar"). stderr is redirected so if = is not supported
