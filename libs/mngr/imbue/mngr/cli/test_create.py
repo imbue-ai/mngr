@@ -1188,3 +1188,30 @@ def test_transfer_none_with_different_target_path_rejected(
 
     assert result.exit_code != 0
     assert "incompatible" in result.output.lower()
+
+
+def test_create_with_invalid_provider_name(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """mngr create with an unknown provider name should fail with a clear error."""
+    result = cli_runner.invoke(
+        create,
+        [
+            "--name",
+            "test-invalid-provider",
+            "--provider",
+            "nonexistent",
+            "--source",
+            str(temp_work_dir),
+            "--transfer=none",
+            "--no-connect",
+            "--no-ensure-clean",
+        ],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+    assert result.exit_code != 0
+    assert "unknown provider" in result.output.lower()
+    assert "nonexistent" in result.output

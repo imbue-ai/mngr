@@ -1006,6 +1006,13 @@ def generate_ssh_keypair(base_path: Path) -> tuple[Path, Path]:
     return key_path, Path(f"{key_path}.pub")
 
 
+def _sftp_server_path() -> str:
+    """Return the platform-appropriate path to the SFTP server binary."""
+    if sys.platform == "darwin":
+        return "/usr/libexec/sftp-server"
+    return "/usr/lib/openssh/sftp-server"
+
+
 @contextmanager
 def local_sshd(
     authorized_keys_content: str,
@@ -1071,7 +1078,7 @@ UsePAM no
 PermitRootLogin yes
 PidFile {run_dir}/sshd.pid
 StrictModes no
-Subsystem sftp /usr/lib/openssh/sftp-server
+Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
 """
     sshd_config_path.write_text(sshd_config)

@@ -358,14 +358,33 @@ def _normalize_cli_args_for_construct(raw_config: dict[str, Any]) -> dict[str, A
     return {**raw_config, "cli_args": normalized}
 
 
+def _has_disabled_ancestor(
+    name: str,
+    raw_types: dict[str, dict[str, Any]],
+    disabled_plugins: frozenset[str],
+) -> bool:
+    """Check if an agent type or any ancestor in its parent chain is disabled."""
+    current: str | None = name
+    seen: set[str] = set()
+    while current is not None and current not in seen:
+        if current in disabled_plugins:
+            return True
+        seen.add(current)
+        raw = raw_types.get(current)
+        current = raw.get("parent_type") if raw is not None else None
+    return False
+
+
 def _parse_agent_types(
     raw_types: dict[str, dict[str, Any]],
+    disabled_plugins: frozenset[str],
     *,
     strict: bool = True,
 ) -> dict[AgentTypeName, AgentTypeConfig]:
     """Parse agent type configs using the registry.
 
     Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Agent type blocks whose plugin is disabled are silently skipped.
     """
     agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
 
@@ -375,6 +394,10 @@ def _parse_agent_types(
         # has trust_working_directory). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
         parent_type = raw_config.get("parent_type")
+        # Walk the parent chain through raw_types to check if this type or
+        # any ancestor depends on a disabled plugin.
+        if _has_disabled_ancestor(name, raw_types, disabled_plugins):
+            continue
         config_class = get_agent_config_class(parent_type if parent_type is not None else name)
         _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict)
         normalized_config = _normalize_cli_args_for_construct(raw_config)
@@ -553,7 +576,9 @@ def parse_config(
     kwargs["connect_command"] = raw.pop("connect_command", None)
     kwargs["is_remote_agent_installation_allowed"] = raw.pop("is_remote_agent_installation_allowed", None)
     kwargs["agent_types"] = (
-        _parse_agent_types(raw.pop("agent_types", {}), strict=strict) if "agent_types" in raw else {}
+        _parse_agent_types(raw.pop("agent_types", {}), disabled_plugins=disabled_plugins, strict=strict)
+        if "agent_types" in raw
+        else {}
     )
     kwargs["providers"] = (
         _parse_providers(raw.pop("providers", {}), disabled_plugins=disabled_plugins, strict=strict)
