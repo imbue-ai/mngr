@@ -5,6 +5,8 @@ Call register_plugin_test_fixtures(globals()) from a plugin's conftest.py
 to register the standard set of fixtures.
 """
 
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -92,7 +94,11 @@ def setup_test_mngr_env(
     monkeypatch: pytest.MonkeyPatch,
     _isolate_tmux_server: None,
 ) -> Generator[None, None, None]:
-    """Set up environment variables for all tests."""
+    """Set up environment variables for all tests.
+
+    Git is fully isolated from system/global config via GIT_CONFIG_NOSYSTEM,
+    GIT_TERMINAL_PROMPT, and a per-test GIT_CONFIG_GLOBAL.
+    """
     mngr_test_id = uuid4().hex
     mngr_test_prefix = f"mngr_{mngr_test_id}-"
     mngr_test_root_name = f"mngr-test-{mngr_test_id}"
@@ -102,13 +108,29 @@ def setup_test_mngr_env(
     monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
 
-    unison_dir = tmp_path / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
+    # Fully isolate git from system-level config and interactive prompts.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
 
-    assert_home_is_temp_directory()
+    # Provide a per-test global gitconfig so git operations always have user
+    # config available. The file must live OUTSIDE tmp_path because some tests
+    # init a git repo directly in tmp_path (= HOME) and any file there would
+    # appear as untracked in `git status --porcelain`.
+    gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
+    try:
+        gitconfig = gitconfig_dir / "config"
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
 
-    yield
+        unison_dir = tmp_path / ".unison"
+        unison_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("UNISON", str(unison_dir))
+
+        assert_home_is_temp_directory()
+
+        yield
+    finally:
+        shutil.rmtree(gitconfig_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -120,10 +142,12 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
 
 @pytest.fixture
 def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME so git commands work.
+    """Create a .gitconfig in the fake HOME for backward compatibility.
 
-    Use this fixture for any test that runs git commands.
-    The temp_git_repo fixture depends on this, so you don't need both.
+    Note: The autouse setup_test_mngr_env fixture now provides git user
+    config via GIT_CONFIG_GLOBAL, so this fixture is no longer required
+    for git operations. It is kept because temp_git_repo depends on it
+    and many tests request it transitively.
     """
     gitconfig = tmp_path / ".gitconfig"
     if not gitconfig.exists():
