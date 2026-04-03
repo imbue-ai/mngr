@@ -3,7 +3,6 @@
 import os
 import platform
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,22 +17,12 @@ from imbue.mngr.cli.complete import generate_zsh_script
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.cli.output_helpers import read_tty_choice
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard_impl
 from imbue.mngr.plugin_catalog import RECOMMENDED_PLUGINS
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
-
-
-def _read_tty_choice(prompt: str) -> str:
-    """Read a single line from /dev/tty (works even when stdin is piped)."""
-    try:
-        with open("/dev/tty") as tty:
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
-            return tty.readline().strip()
-    except OSError:
-        return ""
 
 
 def _detect_shell() -> str:
@@ -92,7 +81,7 @@ def _install_completion(auto: bool) -> bool:
 
     if not auto:
         write_human_line("Enable shell completion? This will add a line to {}", rc_path)
-        choice = _read_tty_choice("[y/n]: ")
+        choice = read_tty_choice("[y/n]: ")
         if choice.lower() not in ("y", ""):
             write_human_line("Skipping shell completion.")
             return False
@@ -142,7 +131,7 @@ def _install_claude_plugin(auto: bool) -> bool:
 
     if not auto:
         write_human_line("Install the Claude Code review plugin (imbue-code-guardian)?")
-        choice = _read_tty_choice("[y/n]: ")
+        choice = read_tty_choice("[y/n]: ")
         if choice.lower() not in ("y", ""):
             write_human_line("Skipping Claude Code plugin.")
             return False

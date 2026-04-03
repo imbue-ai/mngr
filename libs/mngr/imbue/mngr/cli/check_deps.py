@@ -1,6 +1,5 @@
 """Check and optionally install system dependencies for mngr."""
 
-import sys
 from typing import Any
 
 import click
@@ -12,6 +11,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.cli.output_helpers import read_tty_choice
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.utils.deps import ALL_DEPS
 from imbue.mngr.utils.deps import DependencyCategory
@@ -23,22 +23,11 @@ from imbue.mngr.utils.deps import install_deps_batch
 from imbue.mngr.utils.deps import install_modern_bash
 
 
-def _read_tty_choice(prompt: str) -> str:
-    """Read a single line from /dev/tty (works even when stdin is piped)."""
-    try:
-        with open("/dev/tty") as tty:
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
-            return tty.readline().strip()
-    except OSError:
-        return ""
-
-
 def _print_status_table(
     deps: tuple[SystemDependency, ...],
     missing: list[SystemDependency],
     bash_ok: bool,
-    os_name: str,
+    os_name: OsName,
 ) -> None:
     """Print a table showing each dependency and its status."""
     missing_set = {id(d) for d in missing}
@@ -67,8 +56,8 @@ def _print_status_table(
         )
 
 
-def _check_deps_impl(interactive: bool, core: bool, install_all: bool) -> None:
-    """Implementation of check-deps command."""
+def _check_deps_impl(ctx: click.Context, interactive: bool, core: bool, install_all: bool) -> None:
+    """Implementation of the dependencies command."""
     os_name = detect_os()
 
     # Check which deps are missing
@@ -93,7 +82,8 @@ def _check_deps_impl(interactive: bool, core: bool, install_all: bool) -> None:
     if not interactive and not core and not install_all:
         count = len(missing) + (0 if bash_ok else 1)
         write_human_line("{} missing dependency(ies). Use -i to install interactively.", count)
-        sys.exit(1)
+        ctx.exit(1)
+        return
 
     # Determine what to install
     to_install: list[SystemDependency] = []
@@ -109,7 +99,7 @@ def _check_deps_impl(interactive: bool, core: bool, install_all: bool) -> None:
         write_human_line("  [n] Skip -- I'll install them myself")
         write_human_line("")
 
-        choice = _read_tty_choice("Choice [a/c/n]: ")
+        choice = read_tty_choice("Choice [a/c/n]: ")
         if choice.lower() in ("a", "y", ""):
             to_install = missing
         elif choice.lower() == "c":
@@ -155,7 +145,7 @@ def _check_deps_impl(interactive: bool, core: bool, install_all: bool) -> None:
     # Exit code: 0 if all core deps present, 1 otherwise
     still_missing_core = [d for d in still_missing if d.category == DependencyCategory.CORE]
     if still_missing_core or (os_name == OsName.MACOS and not bash_ok_now):
-        sys.exit(1)
+        ctx.exit(1)
 
 
 @click.command(name="dependencies", hidden=True)
@@ -184,6 +174,7 @@ def _check_deps_impl(interactive: bool, core: bool, install_all: bool) -> None:
 def check_deps(ctx: click.Context, **kwargs: Any) -> None:
     try:
         _check_deps_impl(
+            ctx=ctx,
             interactive=kwargs["interactive"],
             core=kwargs["core"],
             install_all=kwargs["install_all"],
@@ -206,10 +197,10 @@ or -a to auto-install everything (core + optional).
 Core dependencies: ssh, git, tmux, jq
 Optional dependencies: claude (agent type), rsync (push/pull), unison (pair)""",
     examples=(
-        ("Check which dependencies are missing", "mngr check-deps"),
-        ("Interactively install missing dependencies", "mngr check-deps -i"),
-        ("Auto-install core dependencies", "mngr check-deps -c"),
-        ("Auto-install everything", "mngr check-deps -a"),
+        ("Check which dependencies are missing", "mngr dependencies"),
+        ("Interactively install missing dependencies", "mngr dependencies -i"),
+        ("Auto-install core dependencies", "mngr dependencies -c"),
+        ("Auto-install everything", "mngr dependencies -a"),
     ),
     see_also=(("extras", "Install optional extras (plugins, completion, etc.)"),),
 ).register()
