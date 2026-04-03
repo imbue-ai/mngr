@@ -38,6 +38,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -294,6 +295,7 @@ class LocalProviderInstance(BaseProviderInstance):
             host_id=self.host_id,
             host_name=HostName(LOCAL_HOST_NAME),
             provider_name=self.name,
+            host_state=HostState.RUNNING,
         )
         logger.trace("Discovered hosts for local provider {}", self.name)
         return [host_ref]
