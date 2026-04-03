@@ -5,8 +5,6 @@ Call register_plugin_test_fixtures(globals()) from a plugin's conftest.py
 to register the standard set of fixtures.
 """
 
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -30,6 +28,7 @@ from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.testing import assert_home_is_temp_directory
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_home
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -108,20 +107,7 @@ def setup_test_mngr_env(
     monkeypatch.setenv("MNGR_PREFIX", mngr_test_prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", mngr_test_root_name)
 
-    # Fully isolate git from system-level config and interactive prompts.
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
-
-    # Provide a per-test global gitconfig so git operations always have user
-    # config available. The file must live OUTSIDE tmp_path because some tests
-    # init a git repo directly in tmp_path (= HOME) and any file there would
-    # appear as untracked in `git status --porcelain`.
-    gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
-    try:
-        gitconfig = gitconfig_dir / "config"
-        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
-        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
-
+    with isolate_git(monkeypatch):
         unison_dir = tmp_path / ".unison"
         unison_dir.mkdir(exist_ok=True)
         monkeypatch.setenv("UNISON", str(unison_dir))
@@ -129,8 +115,6 @@ def setup_test_mngr_env(
         assert_home_is_temp_directory()
 
         yield
-    finally:
-        shutil.rmtree(gitconfig_dir, ignore_errors=True)
 
 
 @pytest.fixture

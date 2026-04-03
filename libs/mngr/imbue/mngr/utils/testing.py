@@ -178,6 +178,33 @@ def isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None
     shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
+@contextmanager
+def isolate_git(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Fully isolate git from system-level config and interactive prompts.
+
+    Sets GIT_CONFIG_NOSYSTEM to skip /etc/gitconfig, GIT_TERMINAL_PROMPT to
+    prevent interactive credential prompts, and GIT_CONFIG_GLOBAL to a
+    per-test gitconfig with default user info and ``init.defaultBranch``.
+
+    The gitconfig file lives in its own temp directory (outside pytest's
+    tmp_path) so it does not appear as untracked in repos that tests
+    initialise inside tmp_path (which is also HOME).  Each test gets its
+    own copy because some tests (e.g. add_safe_directory_on_remote) write
+    to the global config and other tests assert it is clean.
+    """
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+
+    gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
+    try:
+        gitconfig = gitconfig_dir / "config"
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+        yield
+    finally:
+        shutil.rmtree(gitconfig_dir, ignore_errors=True)
+
+
 def assert_home_is_temp_directory() -> None:
     """Assert that Path.home() is in a temp directory.
 
