@@ -27,12 +27,14 @@ if PR_INFO=$(gh pr view "$CURRENT_BRANCH" --json number,state 2>/dev/null); then
 fi
 
 if [[ -z "$EXISTING_PR" ]]; then
-    log_info "No PR found for branch $CURRENT_BRANCH, skipping CI polling"
-    _log_to_file "INFO" "No PR found, skipping CI polling"
+    log_error "No PR found for branch $CURRENT_BRANCH."
+    log_error "Please create a draft PR using: gh pr create --draft"
+    _log_to_file "INFO" "No PR found, blocking until agent creates one"
+    exit 2
 elif [[ "$PR_STATE" == "MERGED" ]]; then
-    log_info "PR #$EXISTING_PR is already merged, skipping CI polling"
-    _log_to_file "INFO" "PR #$EXISTING_PR already merged, skipping CI polling"
-    EXISTING_PR=""
+    log_error "PR #$EXISTING_PR is already merged. Please create a new draft PR for continued work: gh pr create --draft"
+    _log_to_file "INFO" "PR #$EXISTING_PR already merged, blocking until agent creates a new one"
+    exit 2
 elif [[ "$PR_STATE" == "CLOSED" ]]; then
     # PR was closed but not merged - reopen it
     log_info "PR #$EXISTING_PR is closed. Reopening..."
