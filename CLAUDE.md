@@ -132,7 +132,7 @@ Every PR must include a changelog entry file. CI will fail if it is missing.
   - Example: branch `mngr/add-feature` -> `changelog/mngr-add-feature.md`
 - The file should briefly describe the user-visible changes in the PR.
 - A nightly agent consolidates entries into `UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `CHANGELOG.md` (concise AI-generated summary).
-- The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
+- The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) and `dependabot/` PRs are exempt from this requirement.
 
 # Silly error workarounds
 
