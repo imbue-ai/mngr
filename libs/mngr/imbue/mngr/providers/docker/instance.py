@@ -1225,7 +1225,6 @@ kill -TERM 1
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
         """Discover all Docker container hosts."""
-        hosts: list[HostInterface] = []
         processed_host_ids: set[HostId] = set()
 
         try:
@@ -1246,12 +1245,14 @@ kill -TERM 1
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped container with invalid labels: {}", e)
 
+        # Track (host, state) pairs so we can populate DiscoveredHost.host_state
+        # without calling h.get_state() (which may SSH into the container).
+        hosts_with_state: list[tuple[HostInterface, HostState]] = []
+
         # Process host records
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
             processed_host_ids.add(host_id)
-
-            host_obj: HostInterface | None = None
 
             if host_id in container_by_host_id:
                 container = container_by_host_id[host_id]
@@ -1259,7 +1260,7 @@ kill -TERM 1
                     try:
                         host_obj = self._create_host_from_container(container)
                         if host_obj is not None:
-                            hosts.append(host_obj)
+                            hosts_with_state.append((host_obj, HostState.RUNNING))
                             continue
                     except (KeyError, ValueError, MngrError) as e:
                         logger.warning("Failed to create host from container {}: {}", host_id, e)
@@ -1273,7 +1274,16 @@ kill -TERM 1
             if should_include:
                 try:
                     host_obj = self._create_host_from_host_record(host_record)
-                    hosts.append(host_obj)
+                    # Derive state from the record data we already have
+                    if is_failed:
+                        state = HostState.FAILED
+                    elif has_snapshots:
+                        state = HostState.STOPPED
+                    elif has_container:
+                        state = HostState.STOPPED
+                    else:
+                        state = HostState.DESTROYED
+                    hosts_with_state.append((host_obj, state))
                 except (OSError, ValueError, KeyError) as e:
                     logger.warning("Failed to create host from record {}: {}", host_id, e)
 
@@ -1285,16 +1295,16 @@ kill -TERM 1
                 try:
                     host_obj = self._create_host_from_container(container)
                     if host_obj is not None:
-                        hosts.append(host_obj)
+                        hosts_with_state.append((host_obj, HostState.RUNNING))
                 except (KeyError, ValueError, MngrError) as e:
                     logger.warning("Failed to create host from container {}: {}", host_id, e)
 
-        for h in hosts:
+        for h, _ in hosts_with_state:
             self._host_by_id_cache[h.id] = h
 
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=h.get_state())
-            for h in hosts
+            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)
+            for h, state in hosts_with_state
         ]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
