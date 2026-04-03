@@ -48,23 +48,14 @@ def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> No
     else:
         existing = "# Changelog\n"
 
-    # Find the end of the header block (first blank line after the opening lines)
+    # Find where to insert: right before the first existing ## section.
+    # If there are no ## sections, append at the end.
     lines = existing.split("\n")
-    insert_index = 0
-    found_header = False
+    insert_index = len(lines)
     for i, line in enumerate(lines):
-        if line.startswith("# "):
-            found_header = True
-        elif found_header and line.strip() == "":
-            insert_index = i + 1
-            # Skip any additional blank lines or description text before first ## section
-            while insert_index < len(lines) and not lines[insert_index].startswith("## "):
-                insert_index += 1
+        if line.startswith("## "):
+            insert_index = i
             break
-
-    # If no header found, just prepend
-    if not found_header:
-        insert_index = 0
 
     before = "\n".join(lines[:insert_index])
     after = "\n".join(lines[insert_index:])

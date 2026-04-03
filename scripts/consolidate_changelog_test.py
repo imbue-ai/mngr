@@ -82,6 +82,15 @@ def test_insert_section_before_existing_section(tmp_path: Path) -> None:
     assert result.index("## 2026-04-02") < result.index("## 2026-04-01")
 
 
+def test_insert_section_no_blank_line_after_header(tmp_path: Path) -> None:
+    changelog_path = tmp_path / "CHANGELOG.md"
+    changelog_path.write_text("# Changelog\n## 2026-04-01\n\n- Old entry\n")
+    _insert_section_into_changelog(changelog_path, "## 2026-04-02\n\n- New entry\n")
+    result = changelog_path.read_text()
+    # New section should appear after the header and before the old section
+    assert result.index("# Changelog") < result.index("## 2026-04-02") < result.index("## 2026-04-01")
+
+
 def test_insert_section_preserves_multiple_existing_sections(tmp_path: Path) -> None:
     changelog_path = tmp_path / "CHANGELOG.md"
     changelog_path.write_text(
