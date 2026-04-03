@@ -236,7 +236,8 @@ fi
 
 # ── Check Python version ──────────────────────────────────────────────────────
 
-PYTHON_VERSION="$(uv python find 2>/dev/null | xargs -I{} {} -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"
+PYTHON_BIN="$(uv python find 2>/dev/null || echo python3)"
+PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
 PYTHON_MINOR="${PYTHON_VERSION#*.}"
 
 if [ -n "$PYTHON_VERSION" ] && [ "${PYTHON_VERSION%%.*}" -eq 3 ] 2>/dev/null && [ "$PYTHON_MINOR" -lt 12 ] 2>/dev/null; then
