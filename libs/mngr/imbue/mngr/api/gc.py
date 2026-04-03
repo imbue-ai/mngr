@@ -167,7 +167,11 @@ def _discover_hosts_for_gc(
             )
         except MngrError as e:
             logger.warning("Failed to discover hosts for provider {}: {}", provider.name, e)
-            hosts = []
+            # Skip the provider entirely when discovery fails.  This is
+            # critical for gc_volumes: if we recorded (provider, []) instead,
+            # gc_volumes would call list_volumes() and treat *every* volume as
+            # orphaned (no known hosts -> no active volumes -> delete all).
+            continue
         result.append((provider, hosts))
     return result
 
