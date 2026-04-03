@@ -175,7 +175,7 @@ def _plugins_status() -> str:
         if not available:
             return "all recommended plugins installed"
         return f"{len(available)} recommended plugin(s) available"
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, AbortError):
         return "status unknown"
 
 

@@ -73,11 +73,20 @@ fi
 # Redirect stdin from /dev/tty for interactive commands. When this script is
 # invoked via `curl ... | bash`, stdin is the pipe from curl, not the terminal.
 # Interactive prompts and the plugin install wizard's urwid TUI need a real TTY.
-"$MNGR_BIN" dependencies -i < /dev/tty || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+# If /dev/tty is not available (e.g. CI, cron), fall back to non-interactive mode.
+if [ -e /dev/tty ]; then
+    "$MNGR_BIN" dependencies -i < /dev/tty || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+else
+    "$MNGR_BIN" dependencies -a || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+fi
 
 # ── Optional extras (plugins, shell completion, Claude Code plugin) ───────────
 
-"$MNGR_BIN" extras -i < /dev/tty || warn "Some extras could not be installed. Run 'mngr extras' to see status."
+if [ -e /dev/tty ]; then
+    "$MNGR_BIN" extras -i < /dev/tty || warn "Some extras could not be installed. Run 'mngr extras' to see status."
+else
+    warn "No interactive terminal available. Run 'mngr extras -i' later to set up optional extras."
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
