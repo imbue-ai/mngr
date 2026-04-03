@@ -1250,11 +1250,17 @@ def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
     session_file = projects_dir / "abc123.jsonl"
     session_file.write_text('{"type":"assistant","uuid":"u1"}\n')
 
-    # Create the aggregated transcript
-    transcript_dir = agent_dir / "logs" / "claude_transcript"
-    transcript_dir.mkdir(parents=True, exist_ok=True)
-    transcript_file = transcript_dir / "events.jsonl"
-    transcript_file.write_text('{"type":"message"}\n')
+    # Create the raw transcript
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    raw_transcript_file = raw_transcript_dir / "events.jsonl"
+    raw_transcript_file.write_text('{"type":"message"}\n')
+
+    # Create the common transcript
+    common_transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
+    common_transcript_dir.mkdir(parents=True, exist_ok=True)
+    common_transcript_file = common_transcript_dir / "events.jsonl"
+    common_transcript_file.write_text('{"type":"user_message","text":"hello"}\n')
 
     # Create the session history
     history_file = agent_dir / "claude_session_id_history"
@@ -1262,7 +1268,8 @@ def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
 
     return {
         "session_file": session_file,
-        "transcript_file": transcript_file,
+        "raw_transcript_file": raw_transcript_file,
+        "common_transcript_file": common_transcript_file,
         "history_file": history_file,
     }
 
@@ -1287,10 +1294,15 @@ def test_on_destroy_archives_session_files(
     assert len(archived_session_files) == 1
     assert archived_session_files[0].read_text() == files["session_file"].read_text()
 
-    # Transcript should be archived
-    archived_transcript = archive_dir / "claude_transcript.jsonl"
-    assert archived_transcript.exists()
-    assert archived_transcript.read_text() == '{"type":"message"}\n'
+    # Raw transcript should be archived
+    archived_raw_transcript = archive_dir / "claude_transcript.jsonl"
+    assert archived_raw_transcript.exists()
+    assert archived_raw_transcript.read_text() == '{"type":"message"}\n'
+
+    # Common transcript should be archived
+    archived_common_transcript = archive_dir / "common_transcript.jsonl"
+    assert archived_common_transcript.exists()
+    assert archived_common_transcript.read_text() == '{"type":"user_message","text":"hello"}\n'
 
     # Session history should be archived
     archived_history = archive_dir / "claude_session_id_history"
@@ -1330,12 +1342,12 @@ def test_on_destroy_handles_no_session_data(
 def test_archive_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Archival should work when only some session data exists (e.g., only transcript)."""
+    """Archival should work when only some session data exists (e.g., only raw transcript)."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    # Only create the transcript, no projects or history
+    # Only create the raw transcript, no projects, common transcript, or history
     transcript_dir = agent_dir / "logs" / "claude_transcript"
     transcript_dir.mkdir(parents=True, exist_ok=True)
     (transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
@@ -1346,6 +1358,7 @@ def test_archive_session_files_partial_data(
     assert archive_dir.exists()
     assert (archive_dir / "claude_transcript.jsonl").exists()
     assert not (archive_dir / "projects").exists()
+    assert not (archive_dir / "common_transcript.jsonl").exists()
     assert not (archive_dir / "claude_session_id_history").exists()
 
 
