@@ -42,14 +42,22 @@ fi
 
 info "Installing mngr..."
 uv tool install imbue-mngr
-MNGR_BIN="$(uv tool dir --bin)/mngr"
+
+if ! command -v mngr &>/dev/null; then
+    TOOL_BIN="$(uv tool dir --bin)"
+    error "mngr was installed to $TOOL_BIN but that directory is not on your PATH. Add it with:
+
+  export PATH=\"$TOOL_BIN:\$PATH\"
+
+Then re-run this script."
+fi
 
 # ── Step 3: Check / install system dependencies ──────────────────────────────
 
 # When invoked via `curl | bash`, stdin is the pipe, not the terminal.
 # Redirect from /dev/tty so interactive prompts work.
 if [ -e /dev/tty ]; then
-    "$MNGR_BIN" dependencies -i < /dev/tty || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
+    mngr dependencies -i < /dev/tty || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 else
     warn "No interactive terminal. Run 'mngr dependencies -i' to install system dependencies."
 fi
@@ -57,7 +65,7 @@ fi
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin) ──
 
 if [ -e /dev/tty ]; then
-    "$MNGR_BIN" extras -i < /dev/tty || warn "Some extras could not be installed. Run 'mngr extras' to see status."
+    mngr extras -i < /dev/tty || warn "Some extras could not be installed. Run 'mngr extras' to see status."
 else
     warn "No interactive terminal. Run 'mngr extras -i' to set up optional extras."
 fi
@@ -65,8 +73,3 @@ fi
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 info "Get started with: mngr --help"
-
-if ! command -v mngr &>/dev/null; then
-    warn "mngr is not on PATH. You may need to add ~/.local/bin to your PATH:"
-    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
