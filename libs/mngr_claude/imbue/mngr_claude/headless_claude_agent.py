@@ -278,23 +278,48 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         return "".join(self.stream_output())
 
     def _raise_no_output_error(self) -> Never:
-        """Raise MngrError with pane content when claude produces no output."""
-        error_detail = self._get_pane_error_message()
+        """Raise MngrError with the best available error detail.
+
+        Checks stdout.jsonl first -- claude prints some errors (like auth
+        failures) to stdout, which the shell redirect captures into the file
+        as plain text instead of stream-json. Falls back to tmux pane content.
+        """
+        error_detail = self._get_stdout_error_message() or self._get_pane_error_message()
         if error_detail:
             raise MngrError(f"claude exited without producing output:\n{error_detail}")
         raise MngrError("claude exited without producing output (no details available)")
 
+    def _get_stdout_error_message(self) -> str | None:
+        """Check stdout.jsonl for non-JSON error text.
+
+        Claude prints some errors (e.g. 'Not logged in') to stdout rather
+        than stderr. Since stdout is redirected to a file, these end up in
+        stdout.jsonl as plain text instead of stream-json events. If the file
+        contains non-empty text that isn't valid JSON, it's likely an error.
+        """
+        stdout_path = self._get_stdout_path()
+        try:
+            content = self.host.read_text_file(stdout_path)
+        except FileNotFoundError:
+            return None
+        stripped = content.strip()
+        if not stripped:
+            return None
+        # If the first line is valid JSON, this is normal stream output, not an error
+        first_line = stripped.split("\n", 1)[0].strip()
+        if first_line.startswith("{"):
+            return None
+        return stripped
+
     def _get_pane_error_message(self) -> str | None:
         """Capture the tmux pane content to extract an error message.
 
-        When the headless claude process fails (e.g. auth error), its stderr
-        goes to the tmux pane. This captures that content so the error can be
-        surfaced to the user.
+        Fallback for when stderr content is visible in the pane (e.g. the
+        process crashed before writing anything to stdout).
         """
         content = self.capture_pane_content()
         if content is None:
             return None
-        # Strip empty lines and return the non-empty content
         stripped = content.strip()
         return stripped if stripped else None
 
