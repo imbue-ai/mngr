@@ -18,7 +18,7 @@ def build_tmux_capture_pane_command(session_name: str, include_scrollback: bool 
     scrollback buffer instead of just the visible pane.
     """
     scrollback_flag = " -S -" if include_scrollback else ""
-    return f"tmux capture-pane -t '={session_name}'{scrollback_flag} -p"
+    return f"tmux capture-pane -t '{session_name}'{scrollback_flag} -p"
 
 
 def capture_tmux_pane_content(

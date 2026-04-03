@@ -2774,6 +2774,10 @@ def _build_start_agent_shell_command(
     """
     # Bail out early if the session already exists (using ; so that a failed
     # has-session check doesn't break the && chain that follows)
+    # Bail out early if the session already exists. Use = prefix for exact
+    # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
+    # matching "mngr_foo-bar"). stderr is redirected so if = is not supported
+    # by this tmux version, the guard harmlessly falls through.
     guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
 
     steps: list[str] = []
@@ -2800,20 +2804,25 @@ def _build_start_agent_shell_command(
         f" {shlex.quote(env_shell_cmd)}"
     )
 
+    # NOTE: Commands below target a session that was just created above in the
+    # same && chain. The exact session definitely exists, so we do NOT use the
+    # = prefix here -- it's unnecessary and some tmux versions don't support it
+    # for target-pane/-window resolution (e.g. set-option's -t target-pane).
+
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
     # Because env_shell_cmd uses ${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-bash}, the
     # initial agent window (created above, before this variable exists) gets
     # bash, while user-created windows get the user's shell.
-    quoted_exact_session = shlex.quote("=" + session_name)
+    quoted_session = shlex.quote(session_name)
     save_user_shell_script = (
-        f"U=$(tmux show-option -t {quoted_exact_session} -Aqv default-command 2>/dev/null); "
-        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_exact_session} -Aqv default-shell 2>/dev/null) || true; '
+        f"U=$(tmux show-option -t {quoted_session} -Aqv default-command 2>/dev/null); "
+        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_session} -Aqv default-shell 2>/dev/null) || true; '
         '[ -z "$U" ] && U=bash; '
-        f'tmux set-environment -t {quoted_exact_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
+        f'tmux set-environment -t {quoted_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
-    steps.append(f"tmux set-option -t {quoted_exact_session} default-command {shlex.quote(env_shell_cmd)}")
+    steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
@@ -2833,9 +2842,9 @@ def _build_start_agent_shell_command(
         tmux_escaped = popup_shell_cmd.replace('"', '\\"')
         hook_value = (
             f'display-popup -w {popup_w} -h {popup_h} -E "{tmux_escaped}"'
-            f" ; set-hook -u -t ={session_name} client-attached[99]"
+            f" ; set-hook -u -t {session_name} client-attached[99]"
         )
-        steps.append(f"tmux set-hook -t {quoted_exact_session} client-attached[99] {shlex.quote(hook_value)}")
+        steps.append(f"tmux set-hook -t {quoted_session} client-attached[99] {shlex.quote(hook_value)}")
 
     # Create additional windows BEFORE sending the agent command. This
     # ensures all windows exist before the agent starts, preventing a race
@@ -2843,10 +2852,10 @@ def _build_start_agent_shell_command(
     # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
-        window_target = f"={session_name}:{window_name}"
+        window_target = f"{session_name}:{window_name}"
 
         steps.append(
-            f"tmux new-window -t {shlex.quote('=' + session_name)}"
+            f"tmux new-window -t {shlex.quote(session_name)}"
             f" -n {shlex.quote(window_name)}"
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
@@ -2857,12 +2866,12 @@ def _build_start_agent_shell_command(
     # If we created additional windows, select the first window (the main agent)
     # before sending the agent command
     if additional_commands:
-        steps.append(f"tmux select-window -t {shlex.quote('=' + session_name + ':0')}")
+        steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
 
     # Send the agent command as literal keys, then Enter to execute.
     # Target window :0 explicitly so this works even after additional windows
     # have been created (which changes the active window).
-    agent_window = shlex.quote("=" + session_name + ":0")
+    agent_window = shlex.quote(session_name + ":0")
     steps.append(f"tmux send-keys -t {agent_window} -l {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {agent_window} Enter")
 
@@ -2884,7 +2893,7 @@ def _build_start_agent_shell_command(
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote('=' + session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
+        f"tmux list-panes -t {shlex.quote(session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     )
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (
