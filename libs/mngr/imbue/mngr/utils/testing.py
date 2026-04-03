@@ -635,8 +635,8 @@ def init_git_repo(path: Path, initial_commit: bool = True) -> None:
     """Initialize a git repo at the given path.
 
     If initial_commit is True, creates a README.md and commits it.
-    Requires setup_git_config fixture to have created .gitconfig in the fake HOME
-    (or temp_git_repo fixture, which depends on it).
+    Expects git user config to be available (provided by the autouse
+    setup_test_mngr_env fixture via GIT_CONFIG_GLOBAL).
     """
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
     if initial_commit:
@@ -677,8 +677,9 @@ def init_git_repo_with_config(path: Path) -> None:
     user.email and user.name config, and creates an initial commit with a
     README.md file.
 
-    Use this variant when you don't have a global .gitconfig (e.g., in
-    subprocess tests without the setup_git_config fixture).
+    Use this variant when you need repo-local git config (e.g., in
+    subprocess tests where the child process may not inherit the test
+    environment's GIT_CONFIG_GLOBAL).
     """
     path.mkdir(parents=True, exist_ok=True)
     run_git_command(path, "init", "-b", "main")

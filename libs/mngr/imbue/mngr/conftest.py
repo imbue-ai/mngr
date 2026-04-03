@@ -148,10 +148,12 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 @pytest.fixture
 def setup_git_config(tmp_path: Path) -> None:
-    """Create a .gitconfig in the fake HOME so git commands work.
+    """Create a .gitconfig in the fake HOME for backward compatibility.
 
-    Use this fixture for any test that runs git commands.
-    The temp_git_repo fixture depends on this, so you don't need both.
+    Note: The autouse setup_test_mngr_env fixture now provides git user
+    config via GIT_CONFIG_GLOBAL, so this fixture is no longer required
+    for git operations. It is kept because temp_git_repo depends on it
+    and many tests request it transitively.
     """
     gitconfig = tmp_path / ".gitconfig"
     if not gitconfig.exists():
@@ -162,9 +164,9 @@ def setup_git_config(tmp_path: Path) -> None:
 def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
     """Create a temporary git repository with an initial commit.
 
-    This fixture:
-    1. Ensures .gitconfig exists in the fake HOME (via setup_git_config)
-    2. Creates a git repo with one tracked file and an initial commit
+    Git user config is provided by the autouse setup_test_mngr_env fixture
+    via GIT_CONFIG_GLOBAL. Creates a git repo with one tracked file and an
+    initial commit.
 
     Use this fixture for any test that needs a git repository.
     """
