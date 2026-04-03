@@ -1180,6 +1180,7 @@ def extra_context_env(
     module = _load_fresh_extra_context_tool()
     _setup_uv_not_found(tmp_path, monkeypatch)
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_USER_PATH", raising=False)
     return module, tmp_path
 
 
