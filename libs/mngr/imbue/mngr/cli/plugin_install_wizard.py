@@ -5,6 +5,7 @@ ones to install.  Selected plugins are installed in a single
 ``uv tool install`` invocation.
 """
 
+import sys
 from typing import Any
 from typing import Final
 
@@ -162,7 +163,7 @@ _RELAUNCH_HINT: Final[str] = (
 )
 
 
-def _install_wizard_impl() -> None:
+def install_wizard_impl() -> None:
     """Implementation of the install-wizard command.
 
     Deliberately avoids ``setup_command_context`` / ``MngrContext`` -- all
@@ -179,6 +180,13 @@ def _install_wizard_impl() -> None:
 
     if not available:
         write_human_line("All recommended plugins are already installed.")
+        return
+
+    # Guard against non-interactive contexts (CI, cron, curl|bash without /dev/tty redirect).
+    # urwid requires a real terminal on stdin; without one it raises RuntimeError.
+    if not sys.stdin.isatty():
+        write_human_line("No interactive terminal detected; skipping plugin install wizard.")
+        write_human_line(_RELAUNCH_HINT)
         return
 
     selected = _run_install_wizard(available)
@@ -208,7 +216,7 @@ def _install_wizard_impl() -> None:
 @click.pass_context
 def install_wizard(ctx: click.Context, **kwargs: Any) -> None:
     try:
-        _install_wizard_impl()
+        install_wizard_impl()
     except AbortError as e:
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
