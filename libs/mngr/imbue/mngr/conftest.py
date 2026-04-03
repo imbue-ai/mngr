@@ -354,26 +354,26 @@ def setup_test_mngr_env(
     # (not shared) because tests like add_safe_directory_on_remote write to the
     # global config and other tests assert it's clean.
     gitconfig_dir = Path(tempfile.mkdtemp(prefix="mngr_gitcfg_"))
-    gitconfig = gitconfig_dir / "config"
-    gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    try:
+        gitconfig = gitconfig_dir / "config"
+        gitconfig.write_text("[user]\n\tname = Test User\n\temail = test@test.com\n[init]\n\tdefaultBranch = main\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
 
-    # Unison derives its config directory from $HOME. Since we override HOME
-    # above, unison tries to create its config dir inside tmp_path, which
-    # fails because the expected parent directories don't exist. The UNISON
-    # env var overrides this to a path we control.
-    unison_dir = tmp_home_dir / ".unison"
-    unison_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("UNISON", str(unison_dir))
+        # Unison derives its config directory from $HOME. Since we override HOME
+        # above, unison tries to create its config dir inside tmp_path, which
+        # fails because the expected parent directories don't exist. The UNISON
+        # env var overrides this to a path we control.
+        unison_dir = tmp_home_dir / ".unison"
+        unison_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("UNISON", str(unison_dir))
 
-    # Safety check: verify Path.home() is in a temp directory.
-    # If this fails, tests could accidentally modify the real home directory.
-    assert_home_is_temp_directory()
+        # Safety check: verify Path.home() is in a temp directory.
+        # If this fails, tests could accidentally modify the real home directory.
+        assert_home_is_temp_directory()
 
-    yield
-
-    # Clean up the per-test gitconfig directory
-    shutil.rmtree(gitconfig_dir, ignore_errors=True)
+        yield
+    finally:
+        shutil.rmtree(gitconfig_dir, ignore_errors=True)
 
 
 @pytest.fixture
