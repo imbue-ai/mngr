@@ -390,7 +390,7 @@ def cleanup_tmux_session(session_name: str) -> None:
     # Use -s to list panes across ALL windows in the session, not just the current window.
     all_pids: list[str] = []
     result = subprocess.run(
-        ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
+        ["tmux", "list-panes", "-s", "-t", f"={session_name}", "-F", "#{pane_pid}"],
         capture_output=True,
         text=True,
     )
@@ -409,7 +409,7 @@ def cleanup_tmux_session(session_name: str) -> None:
 
     # Kill the tmux session (sends SIGHUP to remaining pane processes)
     subprocess.run(
-        ["tmux", "kill-session", "-t", session_name],
+        ["tmux", "kill-session", "-t", f"={session_name}"],
         capture_output=True,
     )
 
@@ -484,7 +484,7 @@ def wait_for_agent_session(session_name: str, timeout: float = 15.0) -> None:
 def tmux_session_exists(session_name: str) -> bool:
     """Check if a tmux session exists."""
     result = subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
+        ["tmux", "has-session", "-t", f"={session_name}"],
         capture_output=True,
     )
     return result.returncode == 0

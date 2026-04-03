@@ -162,7 +162,7 @@ def test_destroy_with_confirmation(
         )
 
         # Stop the tmux session so the agent is not running (lifecycle state: STOPPED)
-        subprocess.run(["tmux", "kill-session", "-t", session_name], check=True)
+        subprocess.run(["tmux", "kill-session", "-t", f"={session_name}"], check=True)
         wait_for(
             lambda: not tmux_session_exists(session_name),
             timeout=5.0,
