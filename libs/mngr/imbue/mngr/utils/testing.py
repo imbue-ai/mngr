@@ -142,6 +142,10 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    # Clear Claude config dir env vars so tests resolve config paths relative
+    # to the temp HOME, not an inherited agent config dir.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
 
 
 @contextmanager
