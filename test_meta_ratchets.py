@@ -1,5 +1,4 @@
 import ast
-import os
 import subprocess
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
+from imbue.imbue_common.test_profiles import detect_branch
 
 _REPO_ROOT = Path(__file__).parent
 
@@ -289,25 +289,6 @@ _CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _resolve_branch_name() -> str:
-    """Resolve the current git branch name.
-
-    On GitHub Actions PRs, uses GITHUB_HEAD_REF. Otherwise falls back to git.
-    Returns empty string if the branch cannot be determined (e.g. detached HEAD on push).
-    """
-    branch = os.environ.get("GITHUB_HEAD_REF", "")
-    if branch:
-        return branch
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=_REPO_ROOT,
-    )
-    return result.stdout.strip()
-
-
 def test_pr_has_changelog_entry() -> None:
     """Ensure every PR branch has a corresponding changelog entry file.
 
@@ -315,7 +296,7 @@ def test_pr_has_changelog_entry() -> None:
     in the branch name are replaced with dashes. This is enforced so that
     the nightly changelog consolidation agent has material to work with.
     """
-    branch = _resolve_branch_name()
+    branch = detect_branch()
 
     if not branch or branch in ("main", "release"):
         pytest.skip("Not a PR branch")

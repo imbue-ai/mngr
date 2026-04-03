@@ -7,9 +7,9 @@ set -euo pipefail
 # Safe to run multiple times: skips creation if the schedule already exists,
 # so there is never a risk of duplicate agents.
 #
-# The scheduled agent runs at midnight PST, reads all per-PR changelog files
-# from changelog/, consolidates them into CHANGELOG.md, deletes the individual
-# files, commits, and opens a PR.
+# The scheduled agent runs at midnight PST, executes the deterministic
+# consolidation script (scripts/consolidate_changelog.py), commits the
+# result, and opens a PR.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
@@ -42,14 +42,13 @@ fi
 
 echo "Creating schedule '${TRIGGER_NAME}'..."
 
-# Build the args string for mngr create. Using shlex-compatible quoting:
-# the outer single quotes protect the entire --args value from bash,
-# and inner double quotes delimit the --message value for shlex.split().
+# The agent runs scripts/consolidate_changelog.py (a deterministic Python
+# script) then commits and lets the stop hook create the PR.
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
     --provider "$PROVIDER" \
     --no-ensure-safe-commands \
-    --args '--type claude --branch :mngr/changelog-consolidation-{DATE} --message "Consolidate the changelog. Read all .md files in changelog/ (ignore .gitkeep). If there are none, exit without changes. Otherwise, prepend a new section to CHANGELOG.md with today'\''s date as heading (## YYYY-MM-DD), include the content of each changelog file, then delete the individual changelog .md files (keep .gitkeep). Commit the result."'
+    --args '--type claude --branch :mngr/changelog-consolidation-{DATE} --message "Run the changelog consolidation script: uv run python scripts/consolidate_changelog.py. If it reports no entries to consolidate, exit without changes. Otherwise, commit the updated CHANGELOG.md and the deleted changelog files."'
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
