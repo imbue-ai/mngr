@@ -9,11 +9,11 @@ from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
+from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
-from imbue.mngr_claude.claude_config import ensure_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import get_claude_config_backup_path
 from imbue.mngr_claude.claude_config import get_claude_config_path
@@ -543,7 +543,7 @@ def test_acknowledge_cost_threshold_handles_empty_config() -> None:
     assert config["hasAcknowledgedCostThreshold"] is True
 
 
-# Tests for check_claude_dialogs_dismissed / ensure_claude_dialogs_dismissed
+# Tests for check_claude_dialogs_dismissed / auto_dismiss_claude_dialogs
 
 
 def test_check_claude_dialogs_dismissed_checks_trust(tmp_path: Path) -> None:
@@ -597,8 +597,8 @@ def test_check_claude_dialogs_dismissed_passes_when_all_set(tmp_path: Path) -> N
     check_claude_dialogs_dismissed(config_file, source_path)
 
 
-def test_ensure_claude_dialogs_dismissed_sets_all(tmp_path: Path) -> None:
-    """Test that ensure_claude_dialogs_dismissed sets all dialog fields."""
+def test_auto_dismiss_claude_dialogs_sets_all(tmp_path: Path) -> None:
+    """Test that auto_dismiss_claude_dialogs sets all dialog fields."""
     config_file = get_claude_config_path()
     source_path = tmp_path / "source"
     source_path.mkdir()
@@ -606,7 +606,7 @@ def test_ensure_claude_dialogs_dismissed_sets_all(tmp_path: Path) -> None:
     config = {"projects": {}}
     config_file.write_text(json.dumps(config, indent=2))
 
-    ensure_claude_dialogs_dismissed(config_file, source_path)
+    auto_dismiss_claude_dialogs(config_file, source_path)
 
     updated = json.loads(config_file.read_text())
     assert updated["effortCalloutDismissed"] is True

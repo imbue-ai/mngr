@@ -71,14 +71,14 @@ OBSERVER_COMMAND: Final[str] = 'mngr observe -v --events-dir "$MNGR_AGENT_STATE_
 class ClaudeMindConfig(ClaudeAgentConfig):
     """Config for the claude-mind agent type.
 
-    Defaults trust_working_directory to True because minds run
+    Defaults auto_dismiss_dialogs to True because minds run
     --transfer=none in their own repo directory (e.g. ~/.minds/<name>/)
     and should not show the trust dialog on startup.
     """
 
-    trust_working_directory: bool = Field(
+    auto_dismiss_dialogs: bool = Field(
         default=True,
-        description="Automatically trust the agent's working directory in ~/.claude.json. "
+        description="Automatically dismiss all Claude startup dialogs. "
         "Enabled by default for minds since they run in-place in their own repo.",
     )
     sync_home_settings: bool = Field(
@@ -99,13 +99,9 @@ class ClaudeMindConfig(ClaudeAgentConfig):
         "into local per-agent config dirs. Symlinks avoid duplication and keep the "
         "per-agent dir lightweight; copies provide full isolation.",
     )
-    model: str | None = Field(
-        default="opus[1m]",
-        description="Model to use for this agent (e.g. 'opus[1m]'). Written to $CLAUDE_CONFIG_DIR/settings.json.",
-    )
-    is_fast: bool = Field(
-        default=True,
-        description="Whether to enable fast mode for this agent. Written to $CLAUDE_CONFIG_DIR/settings.json.",
+    settings_overrides: dict[str, Any] = Field(
+        default_factory=lambda: {"model": "opus[1m]", "fastMode": True},
+        description="Key-value overrides merged into settings.json at provisioning time.",
     )
     install_llm: bool = Field(
         default=True,
@@ -278,12 +274,6 @@ class ClaudeMindAgent(ClaudeAgent):
         create_first_daily_conversation(host, agent_state_dir, provisioning, chat_model, settings.chat.welcome_message)
 
         setup_memory_directory(host, self.work_dir, active_role, provisioning)
-
-    def _build_per_agent_claude_json(self, options: CreateAgentOptions, config: ClaudeAgentConfig) -> dict[str, Any]:
-        data = super()._build_per_agent_claude_json(options, config)
-        # FOLLOWUP: we can remove this eventually (once the agents are started inside VMs, it will be set properly anyway)
-        data["bypassPermissionsModeAccepted"] = True
-        return data
 
 
 def inject_supporting_services(params: dict[str, Any]) -> None:

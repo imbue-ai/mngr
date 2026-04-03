@@ -71,7 +71,7 @@ def _apply_custom_overrides_to_parent_config(
     (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
     concrete class with the base fields overridden. Iterates over all fields
     that were explicitly set in the custom config (including subclass-specific
-    fields like trust_working_directory).
+    fields like auto_dismiss_dialogs).
     """
     explicitly_set_fields = custom_config.model_fields_set
     if not explicitly_set_fields - {"parent_type"}:
@@ -122,7 +122,7 @@ def resolve_agent_type(
 
         # Start from the parent type's user-configured settings (if any),
         # falling back to defaults. This ensures that e.g. [agent_types.claude]
-        # is_fast = true is inherited by a child type with parent_type = "claude".
+        # auto_dismiss_dialogs = true is inherited by a child type with parent_type = "claude".
         parent_user_config = config.agent_types.get(parent_type)
         if parent_user_config is not None:
             parent_base_config = _apply_custom_overrides_to_parent_config(config_class(), parent_user_config)

@@ -180,7 +180,7 @@ class AgentTypeConfig(FrozenModel):
 
         Uses model_fields_set to determine which fields were explicitly set in
         the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        trust_working_directory) are correctly preserved during merges.
+        auto_dismiss_dialogs) are correctly preserved during merges.
 
         Scalar fields: override wins if explicitly set
         Tuples (cli_args): concatenate

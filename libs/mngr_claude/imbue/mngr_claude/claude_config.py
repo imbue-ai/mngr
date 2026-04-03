@@ -352,7 +352,7 @@ def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None
     # by skipDangerousModePermissionPrompt in settings.json instead.
 
 
-def ensure_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
+def auto_dismiss_claude_dialogs(config_path: Path, source_path: Path) -> None:
     """Ensure all known Claude startup dialogs are marked as dismissed.
 
     Sets the necessary fields in the config file so that Claude Code can start
