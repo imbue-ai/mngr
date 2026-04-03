@@ -3,7 +3,7 @@ name = "imbue-mngr-file"
 version = "0.1.0"
 description = "File command plugin for mngr - read, write, and list files on agents and hosts"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.1.7",
     "click-option-group>=0.5.6",
@@ -64,5 +64,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]
