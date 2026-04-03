@@ -921,11 +921,11 @@ def test_stop_agent_kills_multi_pane_processes(
     host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
-    host._run_shell_command(StringCommand(f"tmux split-window -t '{session_name}' 'sleep 2000'"))
-    host._run_shell_command(StringCommand(f"tmux split-window -t '{session_name}' 'sleep 3000'"))
+    host._run_shell_command(StringCommand(f"tmux split-window -t '={session_name}' 'sleep 2000'"))
+    host._run_shell_command(StringCommand(f"tmux split-window -t '={session_name}' 'sleep 3000'"))
 
     success, output = host._run_shell_command(
-        StringCommand(f"tmux list-panes -t '{session_name}' 2>/dev/null | wc -l")
+        StringCommand(f"tmux list-panes -t '={session_name}' 2>/dev/null | wc -l")
     )
     assert success
     pane_count = int(output.stdout.strip())
@@ -989,7 +989,7 @@ def test_start_agent_creates_process_group(
 
     try:
         success, output = host._run_shell_command(
-            StringCommand(f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null")
+            StringCommand(f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' 2>/dev/null")
         )
         assert success
         pane_pid = output.stdout.strip()
