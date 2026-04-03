@@ -190,6 +190,8 @@ def gc_work_dirs(
     ) as executor:
         for provider_instance, host_refs in hosts_by_provider:
             for host_ref in host_refs:
+                if host_ref.host_state == HostState.DESTROYED:
+                    continue
                 futures.append(
                     executor.submit(
                         _gc_single_host_work_dir, host_ref, provider_instance, error_behavior, dry_run, result
