@@ -34,6 +34,7 @@ def test_create_with_custom_command(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
@@ -61,6 +62,7 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # alternatively, you can simply add extra tmux windows that run alongside your agent:
@@ -82,6 +84,7 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -106,6 +109,7 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_connect_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -129,6 +133,7 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.modal
 def test_create_with_message(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can send a message when starting the agent (great for scripting):

@@ -99,3 +99,6 @@ def test_preexisting_agent_state_discovered(minimal_install_env: MinimalInstallE
     assert result.returncode == 0, (
         f"mngr list failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
+    assert "pre-existing-agent" in result.stdout, (
+        f"Expected 'pre-existing-agent' in mngr list output:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
