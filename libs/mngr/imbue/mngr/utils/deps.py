@@ -261,12 +261,25 @@ def _install_via_apt(packages: list[str]) -> bool:
 
 
 def _install_via_script(url: str) -> bool:
-    """Install via curl-pipe-bash. Returns True on success."""
+    """Install via curl-pipe-bash. Returns True on success.
+
+    Downloads the script with curl first, then pipes it to bash. This avoids
+    passing ``url`` through a shell interpreter (which would be a shell
+    injection risk).
+    """
     if shutil.which("curl") is None:
         return False
     try:
+        download = subprocess.run(
+            ["curl", "-fsSL", url],
+            capture_output=True,
+            timeout=60,
+        )
+        if download.returncode != 0:
+            return False
         result = subprocess.run(
-            ["bash", "-c", f"curl -fsSL {url} | bash"],
+            ["bash"],
+            input=download.stdout,
             timeout=120,
         )
         return result.returncode == 0
