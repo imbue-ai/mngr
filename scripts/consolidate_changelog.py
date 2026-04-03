@@ -59,15 +59,14 @@ def _insert_section_into_changelog(
             insert_index = i
             break
 
-    before = "\n".join(lines[:insert_index])
+    before = "\n".join(lines[:insert_index]).rstrip("\n")
     after = "\n".join(lines[insert_index:])
 
-    # Ensure clean spacing
-    if before and not before.endswith("\n"):
-        before += "\n"
-    if after and not after.startswith("\n"):
-        after = "\n" + after
-    result = before + "\n" + new_section + after
+    # Ensure exactly one blank line before the new section and before any
+    # existing sections that follow it.
+    result = before + "\n\n" + new_section
+    if after:
+        result += "\n" + after
 
     changelog_path.write_text(result)
 
