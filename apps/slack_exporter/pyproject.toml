@@ -3,7 +3,7 @@ name = "slack-exporter"
 version = "0.1.0"
 description = "Export Slack channel messages to JSONL using latchkey for authentication"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "concurrency-group",
     "imbue-common",
@@ -70,5 +70,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.12"
+pythonVersion = "3.11"
 strict = ["**/*.py"]

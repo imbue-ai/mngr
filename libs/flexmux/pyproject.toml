@@ -2,7 +2,7 @@
 name = "flexmux"
 version = "0.1.0"
 description = "Simple FlexLayout-based tab manager with Flask backend"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "flask>=3.0",
     "pydantic>=2.0",
@@ -21,5 +21,5 @@ packages = ["imbue"]
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.12"
+pythonVersion = "3.11"
 strict = ["**/*.py"]

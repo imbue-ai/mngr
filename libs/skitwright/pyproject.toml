@@ -2,7 +2,7 @@
 name = "skitwright"
 version = "0.1.0"
 description = "Lightweight end-to-end testing framework for CLI applications"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
     "imbue-common",
@@ -64,5 +64,5 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "../.."
 venv = ".venv"
-pythonVersion = "3.12"
+pythonVersion = "3.11"
 strict = ["**/*.py"]
