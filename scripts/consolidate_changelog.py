@@ -72,6 +72,8 @@ def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> No
     # Ensure clean spacing
     if before and not before.endswith("\n"):
         before += "\n"
+    if after and not after.startswith("\n"):
+        after = "\n" + after
     result = before + "\n" + new_section + after
 
     changelog_path.write_text(result)
