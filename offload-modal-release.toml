@@ -10,6 +10,9 @@ sandbox_init_cmd = "git apply /offload-upload/patch --allow-empty && uv sync --a
 type = "modal"
 dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile.release"
 
+[provider.env]
+PYTEST_MAX_DURATION_SECONDS = "900"
+
 [provider.experimental_options]
 enable_docker = true
 
@@ -20,8 +23,9 @@ command = "uv run pytest"
 run_args = "--no-cov -p no:xdist --timeout=900 -o addopts="
 
 [groups.all]
-retry_count = 0
-# Run all release+docker tests
+retry_count = 1
+# All release+docker tests get 1 retry because Docker-in-Docker on gVisor
+# has intermittent networking issues (apt-get can't reach debian mirrors).
 filters = "-m 'release and docker'"
 
 [report]
