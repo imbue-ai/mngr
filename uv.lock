@@ -16,6 +16,7 @@ members = [
     "imbue-mngr",
     "imbue-mngr-claude",
     "imbue-mngr-claude-mind",
+    "imbue-mngr-copilot",
     "imbue-mngr-file",
     "imbue-mngr-kanpan",
     "imbue-mngr-llm",
@@ -1520,6 +1521,17 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-copilot"
+version = "0.2.1"
+source = { editable = "libs/mngr_copilot" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-file"
