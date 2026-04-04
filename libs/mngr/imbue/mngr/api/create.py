@@ -117,7 +117,8 @@ def create(
         # is derived from the agent name, so two agents with the same name would
         # collide on the same tmux session. This check must be inside the lock to
         # prevent TOCTOU races between concurrent create calls.
-        if agent_options.name is not None:
+        # In update mode, the agent already exists so we skip this check.
+        if agent_options.name is not None and not agent_options.is_update:
             for existing_agent in host.get_agents():
                 if existing_agent.name == agent_options.name:
                     raise DuplicateAgentNameError(agent_options.name, existing_agent.id)

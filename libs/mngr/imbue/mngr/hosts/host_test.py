@@ -473,6 +473,69 @@ def test_create_agent_state_stores_none_created_branch_name(
     assert agent.get_created_branch_name() is None
 
 
+def test_create_agent_state_update_preserves_create_time(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """In update mode, create_agent_state preserves the original create_time."""
+    host = local_host
+
+    # First, create the agent normally
+    original_options = CreateAgentOptions(
+        name=AgentName("test-update-time"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    original_agent = host.create_agent_state(temp_work_dir, original_options)
+    original_create_time = original_agent.create_time
+
+    # Now update the agent with is_update=True
+    update_options = CreateAgentOptions(
+        agent_id=original_agent.id,
+        name=AgentName("test-update-time"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 2"),
+        is_update=True,
+    )
+    updated_agent = host.create_agent_state(temp_work_dir, update_options)
+
+    assert updated_agent.id == original_agent.id
+    assert updated_agent.create_time == original_create_time
+    assert str(updated_agent.get_command()) == "sleep 2"
+
+
+def test_create_agent_state_update_overwrites_data(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """In update mode, create_agent_state overwrites data.json with new values."""
+    host = local_host
+
+    # First, create the agent normally
+    original_options = CreateAgentOptions(
+        name=AgentName("test-update-data"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"project": "old-project"}),
+    )
+    original_agent = host.create_agent_state(temp_work_dir, original_options)
+
+    # Now update with different labels
+    update_options = CreateAgentOptions(
+        agent_id=original_agent.id,
+        name=AgentName("test-update-data"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        label_options=AgentLabelOptions(labels={"project": "new-project"}),
+        is_update=True,
+    )
+    updated_agent = host.create_agent_state(temp_work_dir, update_options)
+
+    assert updated_agent.get_labels() == {"project": "new-project"}
+
+
 def test_get_created_branch_name_returns_none_when_null(
     local_provider: LocalProviderInstance,
     temp_host_dir: Path,

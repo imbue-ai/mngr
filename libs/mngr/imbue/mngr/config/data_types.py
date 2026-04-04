@@ -832,4 +832,5 @@ class CreateCliOptions(CommonCliOptions):
     upload_file: tuple[str, ...]
     append_to_file: tuple[str, ...]
     prepend_to_file: tuple[str, ...]
+    update: bool
     yes: bool
