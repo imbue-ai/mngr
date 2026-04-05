@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import Field
 
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.errors import PluginMngrError
