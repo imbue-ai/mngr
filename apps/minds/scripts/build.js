@@ -38,10 +38,12 @@ function download(url) {
     const client = url.startsWith('https') ? https : http;
     client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // Drain the redirect response to free the connection
         download(res.headers.location).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
+        res.resume(); // Drain the error response to free the connection
         reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         return;
       }
