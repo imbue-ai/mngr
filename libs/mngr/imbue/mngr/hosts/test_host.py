@@ -60,6 +60,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
 from imbue.mngr.utils.testing import local_sshd
+from imbue.mngr.utils.testing import tmux_session_cleanup
 
 
 @pytest.fixture
@@ -884,6 +885,86 @@ def test_stop_agent_kills_single_pane_processes(
         return session_killed
 
     wait_for(check_cleanup, timeout=10, error_message="Agent session and processes not cleaned up after stop")
+
+
+@pytest.mark.tmux
+def test_stop_agent_does_not_kill_prefix_matched_session(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    tmp_path: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Test that stopping agent 'foo' does not kill agent 'foo-bar'.
+
+    tmux's -t flag does prefix matching when no exact match is found.
+    Without the = prefix for exact matching, killing session 'mngr_foo'
+    after it has already exited would prefix-match to 'mngr_foo-bar' and
+    kill the wrong agent.
+    """
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
+    mngr_ctx = MngrContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
+    provider = LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=per_host_dir,
+        mngr_ctx=mngr_ctx,
+    )
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    work_dir_short = tmp_path / "work_short"
+    work_dir_short.mkdir()
+    work_dir_long = tmp_path / "work_long"
+    work_dir_long.mkdir()
+
+    # Create two agents where one name is a prefix of the other
+    agent_short = host.create_agent_state(
+        work_dir_path=work_dir_short,
+        options=CreateAgentOptions(
+            name=AgentName("pfx"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 1000"),
+        ),
+    )
+    agent_long = host.create_agent_state(
+        work_dir_path=work_dir_long,
+        options=CreateAgentOptions(
+            name=AgentName("pfx-bar"),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 1000"),
+        ),
+    )
+
+    host.start_agents([agent_short.id])
+    host.start_agents([agent_long.id])
+
+    session_short = f"{mngr_test_prefix}{agent_short.name}"
+    session_long = f"{mngr_test_prefix}{agent_long.name}"
+
+    with tmux_session_cleanup(session_short), tmux_session_cleanup(session_long):
+        # Verify both sessions exist
+        success, output = host._run_shell_command(StringCommand("tmux list-sessions -F '#{session_name}' 2>/dev/null"))
+        assert success
+        assert session_short in output.stdout
+        assert session_long in output.stdout
+
+        # Kill the short-named session directly (simulating it being cleaned up
+        # before stop_agents runs, which is the exact race condition in the bug)
+        host._run_shell_command(StringCommand(f"tmux kill-session -t '={session_short}' 2>/dev/null"))
+
+        # Now stop the short agent -- it should NOT kill the long agent's session
+        host.stop_agents([agent_short.id], timeout_seconds=3.0)
+
+        # The long-named session must still be alive
+        success, _ = host._run_shell_command(StringCommand(f"tmux has-session -t '={session_long}' 2>/dev/null"))
+        assert success, (
+            f"Session '{session_long}' was killed by stop_agents targeting '{session_short}' -- "
+            f"tmux prefix matching is not being prevented"
+        )
 
 
 @pytest.mark.tmux

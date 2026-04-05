@@ -2557,10 +2557,20 @@ class Host(BaseHost, OnlineHostInterface):
 
         Uses -s flag to list panes across ALL windows in the session, not just the
         current window. This is important for sessions with additional command windows.
+
+        Guards with has-session first because list-panes -s does not support the =
+        prefix for exact session matching (it uses target-pane resolution internally).
+        Without this guard, list-panes -s would fall back to prefix matching and could
+        return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
         """
+        # has-session supports = for exact matching -- bail out if session doesn't exist
+        has_result = self.execute_idempotent_command(f"tmux has-session -t '={session_name}' 2>/dev/null")
+        if not has_result.success:
+            return []
+
         all_pids: list[str] = []
         result = self.execute_idempotent_command(
-            f"tmux list-panes -s -t '={session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
+            f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
         )
         if result.success and result.stdout.strip():
             for pane_pid in result.stdout.strip().split("\n"):

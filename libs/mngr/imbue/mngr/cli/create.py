@@ -591,6 +591,17 @@ def _create_agent(
         lifecycle=setup.host_lifecycle,
     )
 
+    # Reject lifecycle options on the local provider (idle timeout, idle mode).
+    # The local host cannot be stopped by mngr, so idle detection is meaningless.
+    _is_local = target_host is None or (
+        isinstance(target_host, DiscoveredHost) and target_host.provider_name == ProviderInstanceName("local")
+    )
+    if _is_local and setup.host_lifecycle != HostLifecycleOptions():
+        raise UserInputError(
+            "Idle timeout and idle mode are not supported for the local provider. "
+            "Use a remote provider (e.g. --provider modal) for idle detection."
+        )
+
     # Compute source agent state dir from the resolved agent ID
     source_agent_state_dir: Path | None = None
     if setup.resolved_source.agent is not None:

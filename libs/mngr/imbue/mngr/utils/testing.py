@@ -387,18 +387,26 @@ def cleanup_tmux_session(session_name: str) -> None:
     5. Kills any orphaned activity monitors for this session
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Use -s to list panes across ALL windows in the session, not just the current window.
-    all_pids: list[str] = []
-    result = subprocess.run(
-        ["tmux", "list-panes", "-s", "-t", f"={session_name}", "-F", "#{pane_pid}"],
+    # Guard with has-session first: list-panes -s does not support the = prefix for
+    # exact matching, so it would prefix-match a different session if this one is gone.
+    has_result = subprocess.run(
+        ["tmux", "has-session", "-t", f"={session_name}"],
         capture_output=True,
-        text=True,
     )
-    if result.returncode == 0 and result.stdout.strip():
-        for pane_pid in result.stdout.strip().split("\n"):
-            if pane_pid:
-                all_pids.append(pane_pid)
-                all_pids.extend(_get_descendant_pids(pane_pid))
+    all_pids: list[str] = []
+    if has_result.returncode == 0:
+        # Session exists -- safe to list panes (no risk of prefix-matching a different session).
+        # Use -s to list panes across ALL windows in the session, not just the current window.
+        result = subprocess.run(
+            ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for pane_pid in result.stdout.strip().split("\n"):
+                if pane_pid:
+                    all_pids.append(pane_pid)
+                    all_pids.extend(_get_descendant_pids(pane_pid))
 
     # SIGTERM all processes
     for pid in all_pids:
@@ -1006,6 +1014,13 @@ def generate_ssh_keypair(base_path: Path) -> tuple[Path, Path]:
     return key_path, Path(f"{key_path}.pub")
 
 
+def _sftp_server_path() -> str:
+    """Return the platform-appropriate path to the SFTP server binary."""
+    if sys.platform == "darwin":
+        return "/usr/libexec/sftp-server"
+    return "/usr/lib/openssh/sftp-server"
+
+
 @contextmanager
 def local_sshd(
     authorized_keys_content: str,
@@ -1071,7 +1086,7 @@ UsePAM no
 PermitRootLogin yes
 PidFile {run_dir}/sshd.pid
 StrictModes no
-Subsystem sftp /usr/lib/openssh/sftp-server
+Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
 """
     sshd_config_path.write_text(sshd_config)

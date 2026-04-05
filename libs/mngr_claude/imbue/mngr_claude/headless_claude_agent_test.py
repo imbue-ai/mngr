@@ -7,6 +7,7 @@ import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
@@ -55,6 +56,17 @@ def _make_headless_agent(
 def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch HeadlessClaude.get_lifecycle_state to return STOPPED so stream_output terminates."""
     monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
+
+
+def _setup_agent_output_dir(host: Host, agent: HeadlessClaude) -> Path:
+    """Create the agent state directory and return it.
+
+    The returned directory is where stdout.jsonl and stderr.log live.
+    Callers can write test fixtures to agent_dir / "stdout.jsonl" etc.
+    """
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    return agent_dir
 
 
 # =============================================================================
@@ -107,12 +119,14 @@ def test_assemble_command_includes_print_and_redirect(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    """assemble_command should include --print and redirect stdout to stdout.jsonl."""
+    """assemble_command should include --print and redirect stdout and stderr."""
     agent, host = _make_headless_agent(local_provider, tmp_path)
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)
     assert "--print" in cmd
     assert "$MNGR_AGENT_STATE_DIR/stdout.jsonl" in cmd
     assert ">" in cmd
+    assert "$MNGR_AGENT_STATE_DIR/stderr.log" in cmd
+    assert "2>" in cmd
 
 
 def test_assemble_command_includes_agent_args(
@@ -204,38 +218,38 @@ def test_stream_output_yields_text_deltas(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
+    agent_dir = _setup_agent_output_dir(host, agent)
     lines = [
         _make_stream_json_line("Hello "),
         _make_stream_json_line("world!"),
         json.dumps({"type": "result", "is_error": False}),
     ]
-    stdout_path.write_text("\n".join(lines) + "\n")
+    (agent_dir / "stdout.jsonl").write_text("\n".join(lines) + "\n")
 
     chunks = list(agent.stream_output())
 
     assert chunks == ["Hello ", "world!"]
 
 
-def test_stream_output_handles_empty_file(
+def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should handle an empty output file gracefully."""
+    """stream_output should raise MngrError when stdout file exists but is empty.
+
+    Creates both stdout.jsonl (empty) and stderr.log (empty) so the error
+    fallback chain stops before reaching tmux pane capture.
+    """
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-    stdout_path.write_text("")
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("")
+    (agent_dir / "stderr.log").write_text("")
 
-    chunks = list(agent.stream_output())
-
-    assert chunks == []
+    with pytest.raises(MngrError, match="no details available"):
+        list(agent.stream_output())
 
 
 def test_stream_output_handles_file_without_trailing_newline(
@@ -247,30 +261,87 @@ def test_stream_output_handles_file_without_trailing_newline(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-
+    agent_dir = _setup_agent_output_dir(host, agent)
     content = _make_stream_json_line("no trailing newline")
-    stdout_path.write_text(content)
+    (agent_dir / "stdout.jsonl").write_text(content)
 
     chunks = list(agent.stream_output())
 
     assert chunks == ["no trailing newline"]
 
 
-def test_stream_output_returns_when_agent_stopped_and_no_file(
+def test_stream_output_raises_with_stdout_error_text(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should return cleanly when agent is stopped and no file exists."""
+    """stream_output should surface non-JSON text from stdout as the error message."""
     _patch_agent_as_stopped(monkeypatch)
-    agent, _host = _make_headless_agent(local_provider, tmp_path)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    chunks = list(agent.stream_output())
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("Not logged in · Please run /login\n")
 
-    assert chunks == []
+    with pytest.raises(MngrError, match="Not logged in"):
+        list(agent.stream_output())
+
+
+def test_stream_output_raises_with_stream_json_error_result(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should surface error from stream-json result event with is_error=true."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text(
+        '{"type":"system","subtype":"init","session_id":"abc"}\n'
+        '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
+    )
+
+    with pytest.raises(MngrError, match="Not logged in"):
+        list(agent.stream_output())
+
+
+def test_stream_output_raises_with_stderr_content(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should surface stderr.log content in the error when stdout is empty."""
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("")
+    (agent_dir / "stderr.log").write_text("Error: authentication required\n")
+
+    with pytest.raises(MngrError, match="authentication required"):
+        list(agent.stream_output())
+
+
+@pytest.mark.tmux
+def test_stream_output_falls_back_to_pane_capture(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stream_output should fall back to pane capture when stderr and stdout are empty.
+
+    With no stderr.log on disk and empty stdout.jsonl, the fallback chain
+    reaches tmux pane capture. Since no tmux session exists for this test
+    agent, pane capture returns None and we get 'no details available'.
+    """
+    _patch_agent_as_stopped(monkeypatch)
+    agent, host = _make_headless_agent(local_provider, tmp_path)
+
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("")
+
+    with pytest.raises(MngrError, match="no details available"):
+        list(agent.stream_output())
 
 
 # =============================================================================

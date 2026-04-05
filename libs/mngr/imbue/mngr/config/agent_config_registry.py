@@ -8,6 +8,7 @@ from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import merge_cli_args
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentTypeName
 
 # =============================================================================
@@ -98,6 +99,35 @@ def _apply_custom_overrides_to_parent_config(
     return parent_config.model_copy_update(*updates)
 
 
+def _check_agent_type_not_disabled(
+    agent_type: AgentTypeName,
+    config: MngrConfig,
+) -> None:
+    """Raise MngrError if the agent type or any ancestor in its parent chain is disabled.
+
+    Walks the chain: agent_type -> parent_type -> parent's parent_type -> ...
+    until we hit a type with no parent_type or one that is not defined in
+    config.agent_types.
+    """
+    custom_config = config.agent_types.get(agent_type)
+    checked: str | None = str(agent_type)
+    current_cfg = custom_config
+    seen: set[str] = set()
+    while checked is not None and checked not in seen:
+        if checked in config.disabled_plugins:
+            raise MngrError(
+                f"Agent type '{agent_type}' cannot be used because plugin "
+                f"'{checked}' is disabled. Enable the plugin with: "
+                f"mngr plugin enable {checked}"
+            )
+        seen.add(checked)
+        if current_cfg is not None and current_cfg.parent_type is not None:
+            checked = str(current_cfg.parent_type)
+            current_cfg = config.agent_types.get(current_cfg.parent_type)
+        else:
+            checked = None
+
+
 def resolve_agent_type(
     agent_type: AgentTypeName,
     config: MngrConfig,
@@ -112,7 +142,12 @@ def resolve_agent_type(
 
     For plugin-registered or direct command types, returns the registered
     class and config directly.
+
+    Raises MngrError if the agent type (or its parent type) belongs to a
+    disabled plugin.
     """
+    _check_agent_type_not_disabled(agent_type, config)
+
     custom_config = config.agent_types.get(agent_type)
 
     if custom_config is not None and custom_config.parent_type is not None:

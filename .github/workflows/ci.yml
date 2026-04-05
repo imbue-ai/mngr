@@ -227,7 +227,7 @@ jobs:
   # Release tests - runs only on release branch pushes
   test-release:
     if: github.ref == 'refs/heads/release' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
@@ -235,6 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
@@ -245,15 +246,21 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y tmux git openssh-server unison
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux unison
 
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code@2.1.75
 
       - name: Configure Docker Hub mirror
+        if: runner.os == 'Linux'
         run: |
           echo '{"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
@@ -267,12 +274,19 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run release tests
-        run: export IS_RELEASE=1 && uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+        run: |
+          export IS_RELEASE=1
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # macOS runners don't have Docker; skip Docker-marked tests
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'release and not docker and not docker_sdk'
+          else
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration
+          fi
 
       - name: Upload test timing data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-durations-release-${{ matrix.group }}
+          name: test-durations-release-${{ matrix.os }}-${{ matrix.group }}
           path: .test_output/test_durations_*.json
           retention-days: 30
