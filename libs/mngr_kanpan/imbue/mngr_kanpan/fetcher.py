@@ -386,8 +386,9 @@ def _get_all_commits_ahead(
     if not work_dirs:
         return {}
 
+    unique_dirs = set(work_dirs)
     processes: list[tuple[Path, RunningProcess]] = []
-    for work_dir in work_dirs:
+    for work_dir in unique_dirs:
         proc = cg.run_process_in_background(
             ["git", "rev-list", "--count", "@{upstream}..HEAD"],
             cwd=work_dir,
