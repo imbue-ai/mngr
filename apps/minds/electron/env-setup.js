@@ -40,11 +40,11 @@ function runEnvSetup(onProgress) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let stderrOutput = '';
+    let processOutput = '';
 
     child.stderr.on('data', (data) => {
       const text = data.toString();
-      stderrOutput += text;
+      processOutput += text;
 
       // Parse progress from uv output
       const lines = text.split('\n');
@@ -65,11 +65,11 @@ function runEnvSetup(onProgress) {
     });
 
     child.stdout.on('data', (data) => {
-      stderrOutput += data.toString();
+      processOutput += data.toString();
     });
 
     child.on('error', (err) => {
-      reject(new Error(`Failed to start uv: ${err.message}\n\n${stderrOutput}`));
+      reject(new Error(`Failed to start uv: ${err.message}\n\n${processOutput}`));
     });
 
     child.on('exit', (code) => {
@@ -77,7 +77,7 @@ function runEnvSetup(onProgress) {
         resolve();
       } else {
         reject(new Error(
-          `uv sync failed with exit code ${code}\n\n${stderrOutput}`
+          `uv sync failed with exit code ${code}\n\n${processOutput}`
         ));
       }
     });
