@@ -126,19 +126,15 @@ def test_install_completion_no_tty() -> None:
     assert isinstance(result, bool)
 
 
-def test_install_claude_plugin_no_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_install_claude_plugin returns False when claude is not available."""
+def test_install_claude_plugin_status_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_install_claude_plugin returns correct values for different _claude_plugin_status results."""
+    # When claude is not available -> returns False
     monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (False, False))
     assert _install_claude_plugin(auto=True) is False
 
-
-def test_install_claude_plugin_returns_bool() -> None:
-    """_install_claude_plugin returns a boolean."""
-    # In test environment, this exercises the real _claude_plugin_status path.
-    # If claude is not installed, it returns False immediately.
-    # If claude is installed but no tty, interactive prompt is skipped.
-    result = _install_claude_plugin(auto=False)
-    assert isinstance(result, bool)
+    # When plugin is already installed -> returns True
+    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (True, True))
+    assert _install_claude_plugin(auto=True) is True
 
 
 def test_plugins_status_returns_string() -> None:
@@ -186,6 +182,18 @@ def test_extras_completion_subcommand(cli_runner: CliRunner) -> None:
 def test_extras_claude_plugin_subcommand(cli_runner: CliRunner) -> None:
     """The 'extras claude-plugin' subcommand should work."""
     result = cli_runner.invoke(extras, ["claude-plugin"])
+    assert result.exit_code == 0
+
+
+def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
+    """The 'extras completion -y' subcommand auto-installs."""
+    result = cli_runner.invoke(extras, ["completion", "-y"])
+    assert result.exit_code == 0
+
+
+def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner) -> None:
+    """The 'extras claude-plugin -y' subcommand auto-installs."""
+    result = cli_runner.invoke(extras, ["claude-plugin", "-y"])
     assert result.exit_code == 0
 
 

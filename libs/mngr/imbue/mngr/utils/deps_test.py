@@ -17,6 +17,7 @@ from imbue.mngr.utils.deps import describe_install_commands
 from imbue.mngr.utils.deps import detect_os
 from imbue.mngr.utils.deps import install_dep
 from imbue.mngr.utils.deps import install_deps_batch
+from imbue.mngr.utils.deps import install_modern_bash
 
 _EXISTING_BINARY = SystemDependency(
     binary="python3",
@@ -350,14 +351,52 @@ def test_install_deps_batch_reports_no_auto_install_as_failed() -> None:
 # -- _install_via_brew / _install_via_apt / _install_via_script --
 
 
-def test_install_dep_returns_false_for_custom_script_without_curl(monkeypatch: pytest.MonkeyPatch) -> None:
-    """install_dep returns False for custom_install_script when curl is absent."""
-    dep = SystemDependency(
+def test_install_functions_return_false_when_tools_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install functions return False when underlying package managers are absent.
+
+    Exercises _install_via_brew, _install_via_apt, _install_via_script, install_dep,
+    install_deps_batch, and install_modern_bash by making shutil.which return None.
+    """
+    monkeypatch.setattr(deps_mod.shutil, "which", lambda _name: None)
+
+    # install_dep: custom_install_script without curl
+    custom_dep = SystemDependency(
         binary="custom-tool",
         purpose="test",
         macos_hint="curl | bash",
         linux_hint="curl | bash",
         install_method=InstallMethod(custom_install_script="https://example.com/install.sh"),
     )
-    monkeypatch.setattr(deps_mod.shutil, "which", lambda _name: None)
-    assert install_dep(dep, OsName.LINUX) is False
+    assert install_dep(custom_dep, OsName.LINUX) is False
+
+    # install_dep: brew_package on macOS without brew
+    brew_dep = SystemDependency(
+        binary="tmux",
+        purpose="test",
+        macos_hint="brew install tmux",
+        linux_hint="apt-get install tmux",
+        install_method=InstallMethod(brew_package="tmux"),
+    )
+    assert install_dep(brew_dep, OsName.MACOS) is False
+
+    # install_dep: apt_package on Linux without apt-get
+    apt_dep = SystemDependency(
+        binary="tmux",
+        purpose="test",
+        macos_hint="brew install tmux",
+        linux_hint="apt-get install tmux",
+        install_method=InstallMethod(apt_package="tmux"),
+    )
+    assert install_dep(apt_dep, OsName.LINUX) is False
+
+    # install_deps_batch: brew packages fail when brew is missing
+    assert brew_dep in install_deps_batch([brew_dep], OsName.MACOS)
+
+    # install_deps_batch: apt packages fail when apt-get is missing
+    assert apt_dep in install_deps_batch([apt_dep], OsName.LINUX)
+
+    # install_deps_batch: custom script deps fail when curl is missing
+    assert custom_dep in install_deps_batch([custom_dep], OsName.LINUX)
+
+    # install_modern_bash: delegates to _install_via_brew
+    assert install_modern_bash() is False

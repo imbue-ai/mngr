@@ -1,7 +1,9 @@
 """Tests for the mngr dependencies command."""
 
+import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli import check_deps as check_deps_mod
 from imbue.mngr.cli.check_deps import _print_status_table
 from imbue.mngr.cli.check_deps import _prompt_install_choice
 from imbue.mngr.cli.check_deps import _report_post_install_status
@@ -180,3 +182,40 @@ def test_check_deps_help(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(check_deps, ["--help"])
     assert result.exit_code == 0
     assert "dependencies" in result.output.lower() or "install mode" in result.output.lower()
+
+
+def test_prompt_install_choice_interactive_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_prompt_install_choice returns correct lists for 'a', 'c', and 'n' choices."""
+    missing = [_MISSING_CORE, _MISSING_OPT]
+    missing_core = [_MISSING_CORE]
+
+    # User chooses 'a' (all) -> returns all missing deps
+    monkeypatch.setattr(check_deps_mod, "read_tty_choice", lambda _prompt: "a")
+    result = _prompt_install_choice(missing, missing_core, need_bash=False, os_name=OsName.LINUX)
+    assert result == missing
+
+    # User chooses 'c' (core) -> returns core-only deps
+    monkeypatch.setattr(check_deps_mod, "read_tty_choice", lambda _prompt: "c")
+    result = _prompt_install_choice(missing, missing_core, need_bash=False, os_name=OsName.LINUX)
+    assert result == missing_core
+
+    # User chooses 'n' (skip) -> returns None
+    monkeypatch.setattr(check_deps_mod, "read_tty_choice", lambda _prompt: "n")
+    result = _prompt_install_choice(missing, missing_core, need_bash=False, os_name=OsName.LINUX)
+    assert result is None
+
+
+def test_run_installation_with_deps_invokes_batch_install() -> None:
+    """_run_installation with deps that have no installer for the given OS returns them as failed."""
+    # Use a dep with only a brew installer but pass OsName.LINUX, so no installer matches
+    # and the dep ends up in the "no auto install" / failed list without touching any package manager.
+    brew_only = SystemDependency(
+        binary="no-such-xyz",
+        purpose="testing",
+        macos_hint="brew install no-such-xyz",
+        linux_hint="n/a",
+        category=DependencyCategory.CORE,
+        install_method=InstallMethod(brew_package="no-such-xyz"),
+    )
+    failed = _run_installation(to_install=[brew_only], need_bash=False, os_name=OsName.LINUX)
+    assert brew_only in failed
