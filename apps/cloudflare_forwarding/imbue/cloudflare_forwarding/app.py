@@ -1,5 +1,6 @@
 """Modal app exposing Cloudflare tunnel management via FastAPI endpoints."""
 
+import functools
 import os
 from typing import Annotated
 
@@ -30,8 +31,9 @@ modal_app = modal.App(name="cloudflare-forwarding", image=image)
 web_app = FastAPI()
 
 
+@functools.cache
 def _get_forwarding_service() -> ForwardingService:
-    """Create a ForwardingService from environment variables."""
+    """Return a cached ForwardingService, creating it on first call."""
     client = create_cloudflare_client(
         api_token=os.environ["CLOUDFLARE_API_TOKEN"],
         account_id=CloudflareAccountId(os.environ["CLOUDFLARE_ACCOUNT_ID"]),
