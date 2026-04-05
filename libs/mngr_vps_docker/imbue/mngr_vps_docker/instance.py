@@ -1,11 +1,11 @@
 import json
 import time
+from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
-from typing import Mapping
-from typing import Sequence
 
 from loguru import logger
 from pydantic import ConfigDict
