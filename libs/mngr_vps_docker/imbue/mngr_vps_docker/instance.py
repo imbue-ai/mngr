@@ -651,9 +651,9 @@ class VpsDockerProvider(BaseProviderInstance):
         """Create the shutdown script that stops the container on idle."""
         shutdown_script = "#!/bin/bash\nkill -TERM 1\n"
         commands_dir = host.host_dir / "commands"
-        host.execute_command(f"mkdir -p {commands_dir}")
-        host.write_file(commands_dir / "shutdown.sh", shutdown_script)
-        host.execute_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
+        host.execute_idempotent_command(f"mkdir -p {commands_dir}")
+        host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
+        host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
     def _parse_build_args(
         self, build_args: Sequence[str] | None
