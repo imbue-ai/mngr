@@ -1,10 +1,11 @@
-from collections.abc import Generator
+import json
 from typing import Any
 
 import pytest
 from loguru import logger
 
 from imbue.minds.utils.logging import ConsoleLogLevel
+from imbue.minds.utils.logging import LogFormat
 from imbue.minds.utils.logging import _format_user_message
 from imbue.minds.utils.logging import console_level_from_verbose_and_quiet
 from imbue.minds.utils.logging import setup_logging
@@ -85,14 +86,6 @@ def test_format_user_message_trace_includes_message_placeholder() -> None:
     assert "{message}" in result
 
 
-@pytest.fixture()
-def _isolated_logger() -> Generator[None, None, None]:
-    """Remove all loguru handlers before and after each test to isolate logger state."""
-    logger.remove()
-    yield
-    logger.remove()
-
-
 @pytest.mark.usefixtures("_isolated_logger")
 def test_setup_logging_none_suppresses_output(capfd: Any) -> None:
     setup_logging(ConsoleLogLevel.NONE)
@@ -127,3 +120,66 @@ def test_setup_logging_shows_messages_at_configured_level(
 
     captured = capfd.readouterr()
     assert marker in captured.err
+
+
+# -- JSONL format tests --
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_jsonl_emits_valid_json(capfd: Any) -> None:
+    setup_logging(ConsoleLogLevel.INFO, log_format=LogFormat.JSONL)
+
+    logger.info("jsonl-test-marker-93827")
+
+    captured = capfd.readouterr()
+    lines = [line for line in captured.err.strip().split("\n") if line.strip()]
+    assert len(lines) >= 1
+    event = json.loads(lines[-1])
+    assert event["message"] == "jsonl-test-marker-93827"
+    assert event["type"] == "minds"
+    assert event["level"] == "INFO"
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_jsonl_includes_extra_fields(capfd: Any) -> None:
+    setup_logging(ConsoleLogLevel.INFO, log_format=LogFormat.JSONL)
+
+    logger.info("login-url-test", login_url="http://127.0.0.1:1234/login?code=abc")
+
+    captured = capfd.readouterr()
+    lines = [line for line in captured.err.strip().split("\n") if line.strip()]
+    event = json.loads(lines[-1])
+    assert event["extra"]["login_url"] == "http://127.0.0.1:1234/login?code=abc"
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_jsonl_omits_extra_when_empty(capfd: Any) -> None:
+    setup_logging(ConsoleLogLevel.INFO, log_format=LogFormat.JSONL)
+
+    logger.info("no-extra-test")
+
+    captured = capfd.readouterr()
+    lines = [line for line in captured.err.strip().split("\n") if line.strip()]
+    event = json.loads(lines[-1])
+    assert "extra" not in event
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_jsonl_has_required_envelope_fields(capfd: Any) -> None:
+    setup_logging(ConsoleLogLevel.INFO, log_format=LogFormat.JSONL)
+
+    logger.info("envelope-test")
+
+    captured = capfd.readouterr()
+    lines = [line for line in captured.err.strip().split("\n") if line.strip()]
+    event = json.loads(lines[-1])
+    assert "timestamp" in event
+    assert "event_id" in event
+    assert event["source"] == "minds"
+    assert event["command"] == "unknown"
+    assert "pid" in event
+
+
+def test_log_format_text_is_default() -> None:
+    assert LogFormat.TEXT == LogFormat("TEXT")
+    assert LogFormat.JSONL == LogFormat("JSONL")
