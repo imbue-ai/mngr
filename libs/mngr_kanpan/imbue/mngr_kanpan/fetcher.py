@@ -115,11 +115,14 @@ def fetch_github_data(mngr_ctx: MngrContext, agents: list[AgentDetails]) -> GitH
         if repo_path is not None:
             all_repos.add(repo_path)
 
+    if not all_repos:
+        return GitHubData(repo_pr_loaded={})
+
     # Fetch PRs for all unique repos in parallel via gh --repo.
     pr_by_repo_branch: dict[str, dict[str, PrInfo]] = {}
     repo_pr_loaded: dict[str, bool] = {}
 
-    with ThreadPoolExecutor(max_workers=min(len(all_repos), 8) or 1) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(all_repos), 8)) as executor:
         for repo_path, pr_result in executor.map(lambda rp: _fetch_repo_prs(cg, rp), all_repos):
             if pr_result.error is None:
                 repo_index = _build_pr_branch_index(pr_result.prs)
