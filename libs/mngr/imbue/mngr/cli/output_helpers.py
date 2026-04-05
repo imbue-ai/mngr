@@ -55,6 +55,23 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024**4:.2f} TB"
 
 
+def read_tty_choice(prompt: str) -> str:
+    """Read a single line from /dev/tty (works even when stdin is piped).
+
+    When a script is invoked via ``curl ... | bash``, stdin is the pipe
+    from curl, not the terminal.  This function opens /dev/tty directly
+    so interactive prompts still work.  Returns an empty string if
+    /dev/tty is unavailable (e.g. in CI).
+    """
+    try:
+        with open("/dev/tty") as tty:
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            return tty.readline().strip()
+    except OSError:
+        return ""
+
+
 class AbortError(BaseException):
     """Exception raised when error behavior is ABORT.
 
