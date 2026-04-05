@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from scripts.consolidate_changelog import _build_new_section
 from scripts.consolidate_changelog import _collect_entries
 from scripts.consolidate_changelog import _insert_section_into_changelog
@@ -54,13 +56,10 @@ def test_build_new_section_multiple_entries() -> None:
     assert result == "## 2026-04-02\n\n- Feature A\n\n- Feature B\n"
 
 
-def test_insert_section_creates_file_when_missing(tmp_path: Path) -> None:
+def test_insert_section_errors_when_file_missing(tmp_path: Path) -> None:
     changelog_path = tmp_path / "CHANGELOG.md"
-    _insert_section_into_changelog(changelog_path, "## 2026-04-02\n\n- Entry\n")
-    result = changelog_path.read_text()
-    assert "# Changelog" in result
-    assert "## 2026-04-02" in result
-    assert "- Entry" in result
+    with pytest.raises(FileNotFoundError):
+        _insert_section_into_changelog(changelog_path, "## 2026-04-02\n\n- Entry\n")
 
 
 def test_insert_section_first_consolidation(tmp_path: Path) -> None:

@@ -283,10 +283,7 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 # --- Changelog entry enforcement ---
 
 # Branch prefixes that are exempt from the changelog requirement
-_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = (
-    "mngr/changelog-consolidation",
-    "dependabot/",
-)
+_CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
 
 
 def test_pr_has_changelog_entry() -> None:

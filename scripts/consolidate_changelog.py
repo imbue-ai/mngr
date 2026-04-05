@@ -41,14 +41,11 @@ def _build_new_section(date_str: str, entries: list[tuple[Path, str]]) -> str:
     return "\n".join(lines)
 
 
-def _insert_section_into_changelog(
-    changelog_path: Path, new_section: str, *, default_header: str = "# Changelog\n"
-) -> None:
+def _insert_section_into_changelog(changelog_path: Path, new_section: str) -> None:
     """Insert a new section after the header of the existing changelog file."""
-    if changelog_path.exists():
-        existing = changelog_path.read_text()
-    else:
-        existing = default_header
+    if not changelog_path.exists():
+        raise FileNotFoundError(f"Changelog file does not exist: {changelog_path}")
+    existing = changelog_path.read_text()
 
     # Find where to insert: right before the first existing ## section.
     # If there are no ## sections, append at the end.
@@ -83,7 +80,7 @@ def main() -> None:
 
     date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     new_section = _build_new_section(date_str, entries)
-    _insert_section_into_changelog(_CHANGELOG_FILE, new_section, default_header="# Unabridged Changelog\n")
+    _insert_section_into_changelog(_CHANGELOG_FILE, new_section)
 
     # Delete the individual entry files
     for path, _content in entries:
