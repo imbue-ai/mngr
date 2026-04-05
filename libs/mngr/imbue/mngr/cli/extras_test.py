@@ -11,8 +11,10 @@ from imbue.mngr.cli.extras import _detect_shell
 from imbue.mngr.cli.extras import _generate_completion_script
 from imbue.mngr.cli.extras import _get_shell_rc
 from imbue.mngr.cli.extras import _install_claude_plugin
+from imbue.mngr.cli.extras import _install_completion
 from imbue.mngr.cli.extras import _is_completion_configured
 from imbue.mngr.cli.extras import _plugins_status
+from imbue.mngr.cli.extras import _print_extras_status
 from imbue.mngr.cli.extras import extras
 
 
@@ -32,6 +34,14 @@ def test_detect_shell_returns_bash_for_bash_env(monkeypatch: pytest.MonkeyPatch)
     """_detect_shell returns 'bash' when SHELL env is set to bash."""
     monkeypatch.setenv("SHELL", "/bin/bash")
     assert _detect_shell() == "bash"
+
+
+def test_detect_shell_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_detect_shell falls back based on OS when SHELL is unrecognized."""
+    monkeypatch.setenv("SHELL", "/bin/fish")
+    # On the current platform, verify it returns a valid shell type
+    shell = _detect_shell()
+    assert shell in ("zsh", "bash")
 
 
 def test_get_shell_rc_zsh() -> None:
@@ -89,10 +99,46 @@ def test_completion_status_returns_tuple() -> None:
     assert isinstance(rc_path, Path)
 
 
+def test_install_completion_auto_writes_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_install_completion writes the script when auto=True; reports configured once present."""
+    rc = tmp_path / ".zshrc"
+    rc.write_text("# existing config\n")
+
+    # Helper that returns different status depending on whether the script was already written
+    def _status() -> tuple[bool, str, Path]:
+        return ("_mngr_complete" in rc.read_text(), "zsh", rc)
+
+    monkeypatch.setattr(extras_mod, "_completion_status", _status)
+
+    # First call: not configured yet -> writes the script
+    assert _install_completion(auto=True) is True
+    assert "_mngr_complete" in rc.read_text()
+
+    # Second call: now configured -> returns True without re-writing
+    assert _install_completion(auto=False) is True
+
+
+def test_install_completion_no_tty() -> None:
+    """_install_completion returns a boolean when no TTY is available."""
+    # In the test environment, read_tty_choice returns "" because /dev/tty is unavailable,
+    # so the function either skips (False) or reports already configured (True).
+    result = _install_completion(auto=False)
+    assert isinstance(result, bool)
+
+
 def test_install_claude_plugin_no_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     """_install_claude_plugin returns False when claude is not available."""
     monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (False, False))
     assert _install_claude_plugin(auto=True) is False
+
+
+def test_install_claude_plugin_returns_bool() -> None:
+    """_install_claude_plugin returns a boolean."""
+    # In test environment, this exercises the real _claude_plugin_status path.
+    # If claude is not installed, it returns False immediately.
+    # If claude is installed but no tty, interactive prompt is skipped.
+    result = _install_claude_plugin(auto=False)
+    assert isinstance(result, bool)
 
 
 def test_plugins_status_returns_string() -> None:
@@ -102,12 +148,27 @@ def test_plugins_status_returns_string() -> None:
     assert len(status) > 0
 
 
-def test_extras_no_args_shows_status(cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_print_extras_status_runs_without_error() -> None:
+    """_print_extras_status completes without error."""
+    # Exercises plugin status, completion status, and claude plugin status code paths
+    _print_extras_status()
+
+
+def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
     """Running 'mngr extras' with no flags shows status."""
-    monkeypatch.setattr(extras_mod, "_claude_plugin_status", lambda: (False, False))
     result = cli_runner.invoke(extras, [])
     assert result.exit_code == 0
     assert "Extras" in result.output
+
+
+def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
+    """Running 'mngr extras -i' walks through all extras interactively."""
+    # In test environment, read_tty_choice returns "" so all prompts are skipped
+    result = cli_runner.invoke(extras, ["-i"])
+    assert result.exit_code == 0
+    assert "Plugins" in result.output
+    assert "Shell Completion" in result.output
+    assert "Claude Code Plugin" in result.output
 
 
 def test_extras_help(cli_runner: CliRunner) -> None:
@@ -119,6 +180,12 @@ def test_extras_help(cli_runner: CliRunner) -> None:
 def test_extras_completion_subcommand(cli_runner: CliRunner) -> None:
     """The 'extras completion' subcommand should work."""
     result = cli_runner.invoke(extras, ["completion"])
+    assert result.exit_code == 0
+
+
+def test_extras_claude_plugin_subcommand(cli_runner: CliRunner) -> None:
+    """The 'extras claude-plugin' subcommand should work."""
+    result = cli_runner.invoke(extras, ["claude-plugin"])
     assert result.exit_code == 0
 
 

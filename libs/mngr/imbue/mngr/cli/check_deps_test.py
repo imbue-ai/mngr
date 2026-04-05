@@ -4,12 +4,21 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.check_deps import _print_status_table
 from imbue.mngr.cli.check_deps import _prompt_install_choice
+from imbue.mngr.cli.check_deps import _report_post_install_status
 from imbue.mngr.cli.check_deps import _run_installation
 from imbue.mngr.cli.check_deps import check_deps
 from imbue.mngr.utils.deps import DependencyCategory
 from imbue.mngr.utils.deps import InstallMethod
 from imbue.mngr.utils.deps import OsName
 from imbue.mngr.utils.deps import SystemDependency
+
+_EXISTING_DEP = SystemDependency(
+    binary="python3",
+    purpose="testing (exists on PATH)",
+    macos_hint="n/a",
+    linux_hint="n/a",
+    category=DependencyCategory.CORE,
+)
 
 _TEST_DEPS: tuple[SystemDependency, ...] = (
     SystemDependency(
@@ -62,10 +71,28 @@ def test_print_status_table_bash_missing_on_macos() -> None:
     _print_status_table(_TEST_DEPS, missing=[], bash_ok=False, os_name=OsName.MACOS)
 
 
-def test_check_deps_no_flags_reports_all_present(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies' with no flags when all deps are present should exit 0."""
+def test_check_deps_no_flags(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies' with no flags outputs a status table."""
     result = cli_runner.invoke(check_deps, [])
     assert result.exit_code in (0, 1)
+    assert "System dependencies" in result.output
+
+
+def test_check_deps_all_flag(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies --all' runs the full check/install flow."""
+    result = cli_runner.invoke(check_deps, ["--all"])
+    assert "System dependencies" in result.output
+
+
+def test_check_deps_core_flag(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies --core' runs the core check/install flow."""
+    result = cli_runner.invoke(check_deps, ["--core"])
+    assert "System dependencies" in result.output
+
+
+def test_check_deps_interactive_flag(cli_runner: CliRunner) -> None:
+    """Running 'mngr dependencies -i' runs the interactive flow (skipped without tty)."""
+    result = cli_runner.invoke(check_deps, ["-i"])
     assert "System dependencies" in result.output
 
 
@@ -87,10 +114,65 @@ def test_prompt_install_choice_with_need_bash_returns_none_when_no_tty() -> None
     assert result is None
 
 
+def test_prompt_install_choice_no_core_missing_but_need_bash_returns_none_when_no_tty() -> None:
+    """_prompt_install_choice with no core missing but need_bash=True also returns None."""
+    missing = [_MISSING_OPT]
+    result = _prompt_install_choice(missing, [], need_bash=True, os_name=OsName.MACOS)
+    assert result is None
+
+
 def test_run_installation_with_empty_list_and_no_bash() -> None:
     """_run_installation with nothing to install returns no failures."""
     failed = _run_installation(to_install=[], need_bash=False, os_name=OsName.LINUX)
     assert failed == []
+
+
+def test_report_post_install_status_all_present() -> None:
+    """_report_post_install_status returns True when all core deps are present and bash is ok."""
+    result = _report_post_install_status(
+        failed=[],
+        need_bash=False,
+        os_name=OsName.LINUX,
+        all_deps=(_EXISTING_DEP,),
+        bash_ok_now=True,
+    )
+    assert result is True
+
+
+def test_report_post_install_status_with_failed_deps() -> None:
+    """_report_post_install_status reports failed deps and returns False when core deps are missing."""
+    result = _report_post_install_status(
+        failed=[_MISSING_CORE],
+        need_bash=False,
+        os_name=OsName.LINUX,
+        all_deps=(_MISSING_CORE,),
+        bash_ok_now=True,
+    )
+    assert result is False
+
+
+def test_report_post_install_status_still_missing_optional_is_ok() -> None:
+    """_report_post_install_status returns True when only optional deps are still missing."""
+    result = _report_post_install_status(
+        failed=[],
+        need_bash=False,
+        os_name=OsName.LINUX,
+        all_deps=(_EXISTING_DEP, _MISSING_OPT),
+        bash_ok_now=True,
+    )
+    assert result is True
+
+
+def test_report_post_install_status_bash_still_old() -> None:
+    """_report_post_install_status returns False and warns when bash is still old on macOS."""
+    result = _report_post_install_status(
+        failed=[],
+        need_bash=True,
+        os_name=OsName.MACOS,
+        all_deps=(_EXISTING_DEP,),
+        bash_ok_now=False,
+    )
+    assert result is False
 
 
 def test_check_deps_help(cli_runner: CliRunner) -> None:

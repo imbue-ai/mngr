@@ -128,11 +128,12 @@ def _report_post_install_status(
     failed: list[SystemDependency],
     need_bash: bool,
     os_name: OsName,
+    all_deps: tuple[SystemDependency, ...],
+    bash_ok_now: bool,
 ) -> bool:
     """Print post-install status. Returns True if all core deps (and bash) are now present."""
     write_human_line("")
-    still_missing = [dep for dep in ALL_DEPS if not dep.is_available()]
-    bash_ok_now = check_bash_version() if os_name == OsName.MACOS else True
+    still_missing = [dep for dep in all_deps if not dep.is_available()]
 
     if failed:
         write_human_line("Failed to install: {}", ", ".join(d.binary for d in failed))
@@ -188,7 +189,8 @@ def _check_deps_impl(ctx: click.Context, interactive: bool, core: bool, install_
         return
 
     failed = _run_installation(to_install, need_bash, os_name)
-    all_core_ok = _report_post_install_status(failed, need_bash, os_name)
+    bash_ok_now = check_bash_version() if os_name == OsName.MACOS else True
+    all_core_ok = _report_post_install_status(failed, need_bash, os_name, ALL_DEPS, bash_ok_now)
     if not all_core_ok:
         ctx.exit(1)
 

@@ -63,21 +63,13 @@ fi
 
 # ── Step 3: Check / install system dependencies ──────────────────────────────
 
-# When invoked via `curl | bash`, stdin is the pipe, not the terminal.
-# Redirect from /dev/tty so interactive prompts work.
-if [ -e /dev/tty ]; then
-    mngr dependencies -i < /dev/tty || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
-else
-    mngr dependencies || warn "Run 'mngr dependencies -i' to install missing dependencies."
-fi
+# No stdin redirect needed: mngr commands read from /dev/tty directly
+# when they need interactive input, so they work even when stdin is piped.
+mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin) ──
 
-if [ -e /dev/tty ]; then
-    mngr extras -i < /dev/tty || warn "Some extras could not be installed. Run 'mngr extras' to see status."
-else
-    mngr extras || true
-fi
+mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
