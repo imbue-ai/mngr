@@ -286,6 +286,9 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 _CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
 
 
+# Marked as acceptance because this check should be done soon before merging,
+# not during iteration.
+@pytest.mark.acceptance
 def test_pr_has_changelog_entry() -> None:
     """Ensure every PR branch has a corresponding changelog entry file.
 
