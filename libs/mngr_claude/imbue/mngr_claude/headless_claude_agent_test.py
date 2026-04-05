@@ -328,17 +328,14 @@ def test_stream_output_falls_back_to_pane_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """stream_output should fall back to pane capture when stderr and stdout are empty.
+    """stream_output should fall back to pane capture when no redirect files exist.
 
-    With no stderr.log on disk and empty stdout.jsonl, the fallback chain
+    With neither stderr.log nor stdout.jsonl on disk, the fallback chain
     reaches tmux pane capture. Since no tmux session exists for this test
     agent, pane capture returns None and we get 'no details available'.
     """
     _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
-
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("")
+    agent, _host = _make_headless_agent(local_provider, tmp_path)
 
     with pytest.raises(MngrError, match="no details available"):
         list(agent.stream_output())
