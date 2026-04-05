@@ -576,14 +576,14 @@ def test_get_all_commits_ahead_returns_none_for_non_git_dir(tmp_path: Path) -> N
 
 def test_get_all_commits_ahead_with_upstream(tmp_path: Path) -> None:
     """A repo with an upstream returns the correct commits-ahead count."""
-    # Create a bare "remote" repo.
-    bare = tmp_path / "bare.git"
-    bare.mkdir()
-    init_git_repo_with_config(bare)
+    # Create a repo to act as the remote origin.
+    remote_repo = tmp_path / "remote.git"
+    remote_repo.mkdir()
+    init_git_repo_with_config(remote_repo)
 
     # Clone it to create a local repo with upstream tracking.
     local = tmp_path / "local"
-    run_git_command(tmp_path, "clone", str(bare), str(local))
+    run_git_command(tmp_path, "clone", str(remote_repo), str(local))
     run_git_command(local, "config", "user.email", "test@example.com")
     run_git_command(local, "config", "user.name", "Test User")
 
