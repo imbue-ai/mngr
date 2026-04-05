@@ -285,15 +285,15 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
     def _raise_no_output_error(self) -> Never:
         """Raise MngrError with the best available error detail.
 
-        Checks, in order: stderr.log, stdout.jsonl (for non-JSON text),
-        then tmux pane content as a last resort. Pane capture is only
-        attempted if neither file exists (the command never ran far enough
-        to create the redirects).
+        Checks, in order: stderr.log, stream-json error result in stdout.jsonl,
+        then tmux pane content as a last resort. Pane capture is only attempted
+        if neither redirect file exists (the command never ran far enough to
+        create them).
         """
         stderr_error = self._get_stderr_error_message()
         if stderr_error:
             raise MngrError(f"claude exited without producing output:\n{stderr_error}")
-        stdout_error = self._get_stdout_error_message()
+        stdout_error = self._get_stdout_stream_json_error()
         if stdout_error:
             raise MngrError(f"claude exited without producing output:\n{stdout_error}")
         # Only try pane capture if the redirect files don't exist at all,
@@ -316,24 +316,19 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
         stripped = content.strip()
         return stripped if stripped else None
 
-    def _get_stdout_error_message(self) -> str | None:
-        """Check stdout.jsonl for error content.
+    def _get_stdout_stream_json_error(self) -> str | None:
+        """Extract error message from a stream-json result event in stdout.jsonl.
 
-        Handles two cases:
-        1. Plain text errors (when claude prints without --output-format)
-        2. Stream-json result events with is_error=true (e.g. auth failures
-           with --output-format stream-json --verbose)
+        The headless command always uses --output-format stream-json --verbose,
+        so auth failures and similar errors appear as result events with
+        is_error=true rather than plain text.
         """
         stdout_path = self._get_stdout_path()
         try:
             content = self.host.read_text_file(stdout_path)
         except FileNotFoundError:
             return None
-        stripped = content.strip()
-        if not stripped:
-            return None
-        # Check each line for error result events or plain text
-        for line in stripped.split("\n"):
+        for line in content.split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -342,8 +337,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, StreamingHeadlessAgentMixin):
                 if parsed.get("type") == "result" and parsed.get("is_error"):
                     return parsed.get("result", "unknown error")
             except (json.JSONDecodeError, ValueError):
-                # Non-JSON line -- likely a plain text error message
-                return line
+                continue
         return None
 
     def _get_pane_error_message(self) -> str | None:

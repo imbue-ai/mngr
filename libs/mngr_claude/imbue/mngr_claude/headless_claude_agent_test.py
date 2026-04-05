@@ -270,22 +270,6 @@ def test_stream_output_handles_file_without_trailing_newline(
     assert chunks == ["no trailing newline"]
 
 
-def test_stream_output_raises_with_stdout_error_text(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """stream_output should surface non-JSON text from stdout as the error message."""
-    _patch_agent_as_stopped(monkeypatch)
-    agent, host = _make_headless_agent(local_provider, tmp_path)
-
-    agent_dir = _setup_agent_output_dir(host, agent)
-    (agent_dir / "stdout.jsonl").write_text("Not logged in · Please run /login\n")
-
-    with pytest.raises(MngrError, match="Not logged in"):
-        list(agent.stream_output())
-
-
 def test_stream_output_raises_with_stream_json_error_result(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
