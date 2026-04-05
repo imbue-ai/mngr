@@ -58,6 +58,17 @@ def _patch_agent_as_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(HeadlessClaude, "get_lifecycle_state", lambda self: AgentLifecycleState.STOPPED)
 
 
+def _setup_agent_output_dir(host: Host, agent: HeadlessClaude) -> Path:
+    """Create the agent state directory and return it.
+
+    The returned directory is where stdout.jsonl and stderr.log live.
+    Callers can write test fixtures to agent_dir / "stdout.jsonl" etc.
+    """
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    return agent_dir
+
+
 # =============================================================================
 # Tests for HeadlessClaude overrides
 # =============================================================================
@@ -207,15 +218,13 @@ def test_stream_output_yields_text_deltas(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
+    agent_dir = _setup_agent_output_dir(host, agent)
     lines = [
         _make_stream_json_line("Hello "),
         _make_stream_json_line("world!"),
         json.dumps({"type": "result", "is_error": False}),
     ]
-    stdout_path.write_text("\n".join(lines) + "\n")
+    (agent_dir / "stdout.jsonl").write_text("\n".join(lines) + "\n")
 
     chunks = list(agent.stream_output())
 
@@ -231,10 +240,8 @@ def test_stream_output_raises_when_empty_file(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-    stdout_path.write_text("")
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("")
 
     with pytest.raises(MngrError, match="claude exited without producing output"):
         list(agent.stream_output())
@@ -249,12 +256,9 @@ def test_stream_output_handles_file_without_trailing_newline(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-
+    agent_dir = _setup_agent_output_dir(host, agent)
     content = _make_stream_json_line("no trailing newline")
-    stdout_path.write_text(content)
+    (agent_dir / "stdout.jsonl").write_text(content)
 
     chunks = list(agent.stream_output())
 
@@ -270,10 +274,8 @@ def test_stream_output_raises_with_stdout_error_text(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-    stdout_path.write_text("Not logged in · Please run /login\n")
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("Not logged in · Please run /login\n")
 
     with pytest.raises(MngrError, match="Not logged in"):
         list(agent.stream_output())
@@ -288,10 +290,8 @@ def test_stream_output_raises_with_stream_json_error_result(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-    stdout_path.write_text(
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text(
         '{"type":"system","subtype":"init","session_id":"abc"}\n'
         '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}\n'
     )
@@ -309,12 +309,9 @@ def test_stream_output_raises_with_stderr_content(
     _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = agent_dir / "stdout.jsonl"
-    stdout_path.write_text("")
-    stderr_path = agent_dir / "stderr.log"
-    stderr_path.write_text("Error: authentication required\n")
+    agent_dir = _setup_agent_output_dir(host, agent)
+    (agent_dir / "stdout.jsonl").write_text("")
+    (agent_dir / "stderr.log").write_text("Error: authentication required\n")
 
     with pytest.raises(MngrError, match="authentication required"):
         list(agent.stream_output())
